@@ -105,6 +105,9 @@ case "$2" in
       cat "${FAKE_RUNS_JSON:?}"
     fi
     ;;
+  *"/actions/runs/"*"/jobs?"*)
+    cat "${FAKE_JOBS_JSON:?}"
+    ;;
   *"/actions/runs/"*"/artifacts?"*)
     run_id="${2#*/actions/runs/}"
     run_id="${run_id%%/artifacts*}"
@@ -478,6 +481,40 @@ out="$(FAKE_TREE=1111111111111111111111111111111111111111 FAKE_RECENT_RUNS_JSON=
     run_lookup 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found false 'a prebuild of a different tree is not adopted'
 
+# A platform is ready after its successful upload, before the sibling build
+# or cache housekeeping completes. Read the real Jobs API boundary.
+echo '{"workflow_runs":[{"id":111,"status":"in_progress","conclusion":null}]}' >"$tmp/runs.json"
+export FAKE_JOBS_JSON="$tmp/jobs.json"
+printf '%s' "$linux_only" >"$tmp/artifacts/111.json"
+for scenario in ready uploading failed failed-build duplicate expired; do
+    conclusion=success
+    [[ "$scenario" != uploading ]] || conclusion=null
+    [[ "$scenario" != failed ]] || conclusion=failure
+    jq -n --arg conclusion "$conclusion" '{jobs:[{name:"Prebuild Linux x86_64",status:"in_progress",conclusion:null,steps:[
+      {name:"Build",number:1,conclusion:"success"},
+      {name:"Upload artifact",number:2,conclusion:(if $conclusion == "null" then null else $conclusion end)}]}]}' >"$tmp/jobs.json"
+    printf '%s' "$linux_only" >"$tmp/artifacts/111.json"
+    if [[ "$scenario" == failed-build ]]; then
+        jq '.jobs[0].steps[0].conclusion = "failure"' "$tmp/jobs.json" >"$tmp/jobs.tmp"
+        mv "$tmp/jobs.tmp" "$tmp/jobs.json"
+    elif [[ "$scenario" == duplicate ]]; then
+        jq '.jobs += .jobs' "$tmp/jobs.json" >"$tmp/jobs.tmp"
+        mv "$tmp/jobs.tmp" "$tmp/jobs.json"
+    elif [[ "$scenario" == expired ]]; then
+        jq '.artifacts[0].expired = true' "$tmp/artifacts/111.json" >"$tmp/artifacts/111.tmp"
+        mv "$tmp/artifacts/111.tmp" "$tmp/artifacts/111.json"
+    fi
+    expected=false
+    [[ "$scenario" != ready ]] || expected=true
+    out="$(RELEASE_PREBUILD_PLATFORM=linux RELEASE_PREBUILD_WAIT_SECONDS=0 run_lookup deadbeef 2>/dev/null)"
+    expect_field "$out" found "$expected" "platform readiness: $scenario"
+done
+# Asking for both keeps the old whole-release requirement.
+printf '%s' "$linux_only" >"$tmp/artifacts/111.json"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=0 run_lookup deadbeef 2>/dev/null)"
+expect_field "$out" found false 'default lookup still requires the complete release'
+unset FAKE_JOBS_JSON
+
 # Every path exits 0.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 for scenario in 'deadbeef'; do
@@ -492,3 +529,6 @@ done
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0
+
+# The existing release-accelerator lane also owns dependency-cache identity.
+python3 "$script_dir/test-release-cache-key.py"

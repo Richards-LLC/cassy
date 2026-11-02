@@ -72,6 +72,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Find workers needing attention in Team** — Blocked tasks and stalled workers lead the team with named attention shortcuts and a stronger count. Task titles distinguish workers sharing the same state; merge waits follow behind reported trouble.
 
+## [3.98.2] - 2026-11-02
+
+### Fixed — CI reuse
+
+- **Queue proofs prevent duplicate main test compilation** — Test Compile Guard reuses the successful merge-queue receipt for the identical tree; Clippy still runs on main because the queue does not run it. A queue-proven main push checks its Darwin dependency cache without downloading or compiling on an exact hit; a miss restores the prior partial cache before seeding the new main cache for later queues. Suite fan-in reuses the shared diff decision, and unused stable-toolchain setup and cold-benchmark cache work are removed.
+
+### Changed — CI tooling
+
+- **Skip unchanged visual-QA tool fixtures** — Integration CI selects these tests from their registered inputs and keeps exhaustive assembly coverage. Codemap receipt fixtures use a tiny Git repository, scoped lanes share diff classification, and obsolete PR receipt recording is removed.
+
+### Fixed — Release builds
+
+- **Reuse release dependencies across queue entries** — Main seeds missing dependency caches, release builds keep sccache alive during long compiles, and each uploaded platform archive starts its audit before cache saving finishes. The publisher checks out only the release commit and builds only a missing platform.
+
+- **Save shared release caches only from main** — Manually dispatched prebuilds could save dependency and Zig caches in a branch-specific scope. Only automatic runs on main now save missing cache entries; manual probes can restore existing entries without publishing new ones.
+
+### Fixed — Commander CI
+
+- **Journey checks start only the servers they use** — Journey-only runs start the source-bound production server; fixture-only runs start Vite. CI uses its pinned full Chromium without downloading the unused headless shell, retains startup reports and hidden traces in one artifact per shard, and skips Rust compiler-cache startup for JavaScript snapshots.
+
+### Fixed — Factory process safety
+
+- **Factory agents cannot signal processes by search pattern** — Shell hooks refuse `pkill`, `killall`, and variable, substituted or piped `kill` operands combined with `pgrep` or filtered process listings, including loops, `eval` and assigned command names. This applies to every factory role and inherited supervisor subagent; literal PID signals and reads from an owned PID file remain available.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

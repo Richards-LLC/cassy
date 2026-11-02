@@ -1,5 +1,5 @@
 import { defineConfig } from "@playwright/test";
-import base from "./playwright.config";
+import base, { journeyWebServer } from "./playwright.config";
 
 // Run one variant at a time so each owns its journey receipts. This fixture
 // regression lane retains the original desktop tests and adds native phone goals.
@@ -12,7 +12,7 @@ const journey = base.projects!.find(project => project.name === "journeys")!;
 export default defineConfig({
   ...base,
   // Only the production bundle is needed, not the Vite component fixture site.
-  webServer: Array.isArray(base.webServer) ? base.webServer.slice(1) : base.webServer,
+  webServer: [journeyWebServer],
   grep: [
     /HUB-J1 first open and pair a machine with a code$/,
     /HUB-J2 pair a machine from a cas hub pair link$/,

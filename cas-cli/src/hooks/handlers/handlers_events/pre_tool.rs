@@ -568,6 +568,24 @@ fn handle_pre_tool_use_inner(
     }
 
     // ========================================================================
+    // FACTORY PROCESS SIGNAL GUARD (cas-a290)
+    // ========================================================================
+    // Native subagents inherit their parent's role. Pattern signals must be
+    // refused for every factory role before Bash auto-approval, including a
+    // supervisor's subagent: full argv can contain another worker's task text.
+    if is_factory_agent && tool_name == "Bash"
+        && input.tool_input.as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(worker_command_pattern_kill)
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            "FACTORY PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
+        ));
+    }
+
+    // ========================================================================
     // WORKER COMMAND-SCOPE GUARDS (cas-eb39, cas-852a0)
     //
     // A mutating `cargo fmt` selects Cargo targets rather than source paths,
@@ -585,12 +603,6 @@ fn handle_pre_tool_use_inner(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
-        if command.is_some_and(worker_command_pattern_kill) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                "WORKER PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
-            ));
-        }
         if command.is_some_and(worker_command_runs_dangerous_formatter) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -3210,90 +3222,72 @@ fn worker_command_pattern_kill(command: &str) -> bool {
     worker_command_pattern_kill_at_depth(command, 0)
 }
 
+/// Judge process searches and signal consumers over the whole shell command:
+/// loops, substitutions and pipelines can carry PIDs across statement boundaries.
+/// This is conservative composition, not general shell dataflow: a diagnostic
+/// `pgrep ...; kill 123` still has no dynamic or piped signal operand.
 fn worker_command_pattern_kill_at_depth(command: &str, depth: usize) -> bool {
     let command = shell_command_without_heredoc_bodies(command);
-    let mut group = Vec::new();
-    let mut words = Vec::new();
-    let mut piped = false;
-    for token in factory_shell_tokens(&command) {
-        match token {
-            ShellToken::Word(word) => words.push(word),
-            ShellToken::Operator(operator @ (';' | '&' | '|' | '(' | ')')) => {
-                if !words.is_empty() {
-                    group.push(std::mem::take(&mut words));
-                }
-                if matches!(operator, ';' | '&') {
-                    if worker_pattern_kill_group(&group, piped, depth) {
-                        return true;
-                    }
-                    group.clear();
-                    piped = false;
-                } else if operator == '|' {
-                    piped = true;
-                }
-            }
-            ShellToken::Operator(_) => {}
-        }
-    }
-    if !words.is_empty() {
-        group.push(words);
-    }
-    worker_pattern_kill_group(&group, piped, depth)
-}
-
-/// Keep a pipeline/substitution together, but separate independent commands:
-/// a diagnostic `pgrep ...; kill 123` does not derive the signal's PID.
-fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -> bool {
+    let tokens = factory_shell_tokens(&command);
+    let variables = factory_shell_variable_values(&tokens);
+    let statements = shell_statement_words(&command);
+    let piped = tokens.contains(&ShellToken::Operator('|'));
     let mut searches = false;
-    let mut signals = false;
+    let mut process_list = false;
+    let mut filters = false;
     let mut dynamic_signal = false;
-    for words in group {
-        // env -S's executable lives inside its split string; the ordinary
-        // wrapper resolver can legitimately return None for this statement.
+
+    for words in &statements {
         if depth < 4
             && let Some(script) = env_split_string_payload(words)
             && worker_command_pattern_kill_at_depth(&script, depth + 1)
         {
             return true;
         }
-        let Some(index) = unwrapped_command_index(words) else { continue };
-        let name = shell_word_basename(&words[index]);
-        let args = &words[index + 1..];
-        match name {
-            "pkill" | "killall" => return true,
-            "pgrep" => searches = true,
-            "kill" => {
-                signals = true;
-                dynamic_signal |= args.iter().any(|arg| arg.contains(['$', '`']));
-                for arg in args {
-                    // Quotes retain the whole substitution in one word;
-                    // unquoted substitutions are separate statements above.
-                    let substitutions = arg.split("$(").skip(1)
-                        .chain(arg.split('`').skip(1).step_by(2));
-                    for payload in substitutions {
-                        if shell_statement_words(payload).iter().any(|words| {
-                            unwrapped_command_index(words)
-                                .is_some_and(|i| shell_word_basename(&words[i]) == "pgrep")
-                        }) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            "sh" | "bash" | "dash" | "zsh" if depth < 4 => {
-                if let Some(flag) = args.iter().position(|arg| {
-                    arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
-                })
-                    && let Some(script) = args.get(flag + 1)
-                    && worker_command_pattern_kill_at_depth(script, depth + 1)
-                {
-                    return true;
-                }
-            }
-            _ => {}
+        // The invocation scanner unwraps xargs, so retain that input edge here.
+        if let Some(index) = unwrapped_command_index(words)
+            && words[..index].iter().any(|word| shell_word_basename(word) == "xargs")
+            && expand_factory_shell_word(&words[index], &variables).iter()
+                .any(|name| shell_word_basename(name) == "kill")
+        {
+            dynamic_signal = true;
         }
     }
-    searches && signals && (piped || dynamic_signal)
+
+    // The shared scanner sees executable substitutions, loop bodies, eval and
+    // shell payloads, while leaving echoed/quoted documentation as arguments.
+    for (name, args) in shell_invocations(&command) {
+        for resolved in expand_factory_shell_word(&name, &variables) {
+            match shell_word_basename(&resolved) {
+                "pkill" | "killall" => return true,
+                "pgrep" => searches = true,
+                "ps" => process_list = true,
+                "grep" | "egrep" | "fgrep" | "awk" => filters = true,
+                "kill" => {
+                    dynamic_signal |= args.iter().any(|arg| arg.contains(['$', '`']))
+                        || (piped && args.iter().all(|arg| arg.starts_with('-')));
+                }
+                "eval" if depth < 4 => {
+                    if worker_command_pattern_kill_at_depth(&args.join(" "), depth + 1) {
+                        return true;
+                    }
+                }
+                "sh" | "bash" | "dash" | "zsh" | "ksh" if depth < 4 => {
+                    if let Some(flag) = args.iter().position(|arg| {
+                        arg == "--command"
+                            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
+                    })
+                        && let Some(script) = args.get(flag + 1)
+                        && worker_command_pattern_kill_at_depth(script, depth + 1)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (searches || (process_list && filters)) && dynamic_signal
 }
 
 /// Split just enough shell syntax to distinguish command arguments from

@@ -25,7 +25,12 @@ The parser requires `pyyaml==6.0.3` from `requirements.txt`. Missing PyYAML is a
 hard failure, with an installation message. The CI tiers job reuses importable
 YAML; otherwise it creates a venv under `RUNNER_TEMP`, installs the pinned
 dependency there and puts that venv first on `PATH` before
-`make -C cas-cli test-ci-tiers`. It runs `npm ci` at the repository root for the
+`ci-script-tests-for-diff.py --all --scope-base <comparison-base>`. This runs
+the Makefile's other commands and scopes visual-QA tool fixtures to their
+registered tool, test, package and fixture inputs. Provisioning uses the same
+selection. An unknown base keeps every fixture; plain `--all` and
+`make -C cas-cli test-ci-tiers` remain exhaustive assembly paths.
+It runs `npm ci` at the repository root for the
 pinned markdownlint-cli2 that `scripts/markdownlint.py` resolves. System Python
 packages are never modified.
 

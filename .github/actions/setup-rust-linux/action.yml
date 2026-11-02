@@ -1,7 +1,7 @@
 name: Setup Rust (Linux)
 description: >-
   Shared toolchain setup for every ubuntu-latest CI job: apt deps aligned with
-  .cargo/config.toml, stable Rust, Zig (ghostty_vt_sys builds its native library
+  .cargo/config.toml, repository-pinned Rust, Zig (ghostty_vt_sys builds its native library
   with Zig even for cargo check), sccache, and the cargo cache.
 
 inputs:
@@ -31,14 +31,12 @@ runs:
         gcc --version
         mold --version
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
     - name: Install Zig
       shell: bash
       run: ./scripts/bootstrap-zig.sh
 
     - name: Setup sccache
+      if: env.RUSTC_WRAPPER != ''
       # v0.0.5 speaks GitHub's retired cache-service protocol and silently
       # fell back to a runner-local cache (0 hits across repeated CI runs).
       # v0.0.9+ uses ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN (cache v2).
@@ -49,6 +47,7 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.11
 
     - name: Probe sccache backend
+      if: env.RUSTC_WRAPPER != ''
       shell: bash
       run: |
         if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -62,5 +61,8 @@ runs:
       uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.cache-key }}
+        # Cold-build measurements immediately clean target; retain only the
+        # registry cache instead of restoring binaries with no consumer.
+        cache-targets: ${{ inputs.save-cache }}
         cache-on-failure: true
         save-if: ${{ inputs.save-cache == 'true' }}

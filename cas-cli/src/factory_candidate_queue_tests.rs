@@ -346,9 +346,47 @@ async fn refused_requests_name_why_and_queue_nothing() {
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
     assert!(reply.contains("no factory daemon"), "{reply}");
 
+    // The daemon's own context decides: a worker's `cas serve` is confined
+    // differently from the process that builds.
+    mark_runner_live(&fixture.cas_root).unwrap();
+    record_sandbox_state(
+        &fixture.cas_root,
+        sandbox_problem("macos", "bwrap", Path::new("true")).as_deref(),
+    )
+    .unwrap();
+    let reply = fixture.request(OWN_TASK, &fixture.head).await;
+    for part in ["refused", "macos", "cas qa candidate build"] {
+        assert!(reply.contains(part), "{part} in {reply}");
+    }
+
     let queued = fixture.runner(BUILT).queued();
     assert!(queued.is_empty(), "{queued:?}");
     assert!(fixture.checkout.is_dir());
+}
+
+#[test]
+fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
+    assert_eq!(
+        sandbox_problem("linux", "bwrap", Path::new("true")).is_none(),
+        namespaces_available()
+    );
+    let missing =
+        sandbox_problem("linux", "cas-test-no-such-bwrap", Path::new("true")).unwrap();
+    assert!(missing.contains("not installed"), "{missing}");
+}
+
+/// bwrap execs the program itself, so `/proc/self/exe` there names bwrap, which
+/// then re-enters with the build's arguments and fails to nest its namespace.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_sandbox_never_runs_a_proc_self_path() {
+    let command = sandboxed_builder_command(Path::new("/proc/self/exe")).unwrap();
+    let args: Vec<_> = command.get_args().collect();
+    let separator = args.iter().position(|arg| *arg == "--").unwrap();
+    assert_eq!(
+        Path::new(args[separator + 1]),
+        std::env::current_exe().unwrap()
+    );
 }
 
 #[tokio::test]

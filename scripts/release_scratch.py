@@ -760,6 +760,33 @@ def sweep(repo, base, clean=False, env=None):
             "retained_bytes": sum(row["retained_bytes"] for row in records)}
 
 
+def sweep_abandoned(repo, parent, prefix):
+    """Remove owned scratch whose builder died without unwinding, as SIGKILL does.
+
+    The lease decides, not the recorded PID: a sandboxed builder's PID belongs
+    to a namespace that is gone, and a live builder's lease is still held.
+    """
+    removed = []
+    for path in sorted(Path(parent).iterdir()):
+        if not path.name.startswith(prefix) or path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            owner = read_owner(path)
+            if not owner:
+                continue  # Unknown provenance is the age-bounded sweep's call.
+            with admitted(path, owner, clean=True):
+                checkout = path.resolve() / "checkout"
+                if checkout in worktrees(repo):
+                    git_output(repo, "worktree", "remove", "--force", str(checkout))
+                elif (checkout / ".git").exists():
+                    raise ValueError("checkout is registered with another repository")
+                shutil.rmtree(path)
+                removed.append(str(path))
+        except (OSError, ValueError, subprocess.CalledProcessError, KeyError, TypeError) as exc:
+            print(json.dumps({"scratch_retained": str(path), "reason": str(exc)}), file=sys.stderr)
+    return removed
+
+
 class BoundedCache:
     def __init__(self, path, env, repo=None):
         self.path = Path(path).absolute()

@@ -294,6 +294,18 @@ fn sandboxed_builder_command(program: &Path) -> Result<Command> {
     Ok(command)
 }
 
+/// Red-test seam, replaced by the implementation in the next commit.
+#[cfg(test)]
+fn sandbox_problem(_os: &str, _bwrap: &str, _program: &Path) -> Option<String> {
+    None
+}
+
+/// Red-test seam, replaced by the implementation in the next commit.
+#[cfg(test)]
+fn record_sandbox_state(_cas_root: &Path, _problem: Option<&str>) -> Result<()> {
+    Ok(())
+}
+
 /// Preparation can block in fetch or worktree setup. Its heartbeat must not
 /// depend on reaching the compiler's polling loop.
 struct RunnerHeartbeat {

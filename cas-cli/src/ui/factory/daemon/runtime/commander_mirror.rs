@@ -2335,7 +2335,7 @@ mod tests {
         let (temp, root, queue) = terminal_session(codex_turn_at(
             "turn-h",
             envelope,
-            "Noted.",
+            "The worker completed its delivery.",
             now + chrono::Duration::seconds(1),
         ));
         queue

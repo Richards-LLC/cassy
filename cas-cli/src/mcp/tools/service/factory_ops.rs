@@ -705,7 +705,7 @@ fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
     }
 }
 
-fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
+pub(crate) fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
     cas_mux::WorkerSpec {
         name: Some(agent.name.clone()),
         cli: recycle_worker_cli(agent),
@@ -12565,6 +12565,48 @@ fn format_context_usage(usage: ContextUsage) -> String {
         }
         _ => format!("\n    context input: ~{ktok}k tk (model window unavailable)"),
     }
+}
+
+/// A worker's own measured occupancy, delivered through its authenticated MCP
+/// response. Reuse worker_status accounting; never classify lifetime billing.
+/// Bucket notices to avoid adding the same warning to every tool result.
+pub(crate) fn worker_context_notice(
+    root: &std::path::Path,
+    agent: &cas_types::Agent,
+    transcript: Option<&std::path::Path>,
+) -> Option<String> {
+    if agent.role != cas_types::AgentRole::Worker { return None; }
+    let threshold = crate::config::Config::load(root).ok()?.factory()
+        .context_recycle_threshold_percent;
+    let usage = transcript.and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli_from_agent(agent)));
+    let (bucket, text) = match usage {
+        Some(ContextUsage { input_tokens, model_context_window: Some(window) }) if window > 0 => {
+            let percent = input_tokens.saturating_mul(100) / window;
+            if percent < u64::from(threshold) {
+                context_notice_buckets().lock().ok()?.remove(&context_notice_key(root, agent));
+                return None;
+            }
+            (percent / 5, format!("context used: {percent}% ({input_tokens}/{window} input tokens, harness accounting). Checkpoint at 80%; do not estimate context from cumulative tokens or tool output."))
+        }
+        Some(usage) => (u64::MAX, format!("context used: unknown ({} input tokens; harness window unavailable). Do not guess a percentage.", usage.input_tokens)),
+        None => (u64::MAX, "context used: unknown (harness usage unavailable). Do not guess a percentage.".into()),
+    };
+    let mut buckets = context_notice_buckets().lock().ok()?;
+    let key = context_notice_key(root, agent);
+    if buckets.get(&key) == Some(&bucket) { return None; }
+    // This map belongs to one MCP process; bound it even in long-lived facades.
+    if buckets.len() >= 128 { buckets.clear(); }
+    buckets.insert(key, bucket);
+    Some(text)
+}
+
+fn context_notice_key(root: &std::path::Path, agent: &cas_types::Agent) -> String {
+    format!("{}|{}|{}", root.display(), agent.id, agent.cc_session_id.as_deref().unwrap_or_default())
+}
+
+fn context_notice_buckets() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static BUCKETS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    BUCKETS.get_or_init(Default::default)
 }
 
 /// Recommend recycle only when the worker is genuinely idle. Context pressure

@@ -1881,7 +1881,7 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
 #[tokio::test]
 async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
-    for (park, pending_brief) in [(false, false), (true, false), (true, true)] {
+    for (park, pending_brief, cli) in [(false, false, "claude"), (true, false, "codex"), (true, true, "codex")] {
         let f = fixture(&mut env, "main");
         let config = f.cas_dir().join("config.toml");
         let mut body = std::fs::read_to_string(&config).unwrap();
@@ -1896,6 +1896,12 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             agent.factory_session = Some("queue-session".into());
             if agent.role == AgentRole::Worker {
                 agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+                agent.metadata.insert("worker_cli".into(), cli.into());
+                if cli == "codex" {
+                    agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+                    agent.metadata.insert("worker_effort".into(), "high".into());
+                    agent.metadata.insert("worker_account_dir".into(), "/fixture/codex-account".into());
+                }
             }
             agents.update(&agent).unwrap();
         }
@@ -1983,8 +1989,43 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             drop(queue_lock);
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "other-session").await.unwrap();
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
+            let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+            let stop = spawns.enqueue_shutdown(None, &[WORKER.into()], false, Some("queue-session")).unwrap();
+            crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+            assert_eq!(f.task("cas-8488b").status, TaskStatus::Open);
+            assert!(!spawns.peek(100).unwrap().iter().any(|r| r.action == cas_store::SpawnAction::Recycle),
+                "automatic handoff must not override a pending shutdown");
+            spawns.mark_processed(stop).unwrap();
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
+        // cas-7f57a: a successor must not enter the preceding conversation.
+        assert_eq!(f.task("cas-8488b").status, TaskStatus::Open,
+            "queued successor started before a fresh harness generation");
+        let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+        let resets = spawns.peek(100).unwrap();
+        assert_eq!(resets.iter().filter(|r| r.action == cas_store::SpawnAction::Recycle).count(), 1);
+        let recipe: cas_mux::WorkerSpec = serde_json::from_str(resets[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(recipe.name.as_deref(), Some(WORKER));
+        assert_eq!(recipe.cli.backend().name(), cli);
+        if cli == "codex" {
+            assert_eq!(recipe.model.as_deref(), Some("gpt-6.1-sol"));
+            assert_eq!(recipe.config_dir.as_deref(), Some("/fixture/codex-account"));
+            assert_eq!(recipe.effort, Some(cas_mux::Effort::High));
+        }
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!(spawns.peek(100).unwrap().len(), resets.len(), "retry duplicated recycle");
+        let premature = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"start", "id":"cas-8488b",
+        })).unwrap())).await.unwrap_err();
+        assert!(premature.message.contains("fresh context"), "{premature}");
+        let mut fresh = agents.get("nocode-worker-session").unwrap();
+        fresh.cc_session_id = Some("fresh-successor-conversation".into());
+        agents.update(&fresh).unwrap();
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!(f.task("cas-8488b").status, TaskStatus::Open, "a pending recycle must complete first");
+        spawns.mark_processed(resets[0].id).unwrap();
+        spawns.record_spawn_state(resets[0].id, cas_store::SpawnLifecycleState::Registered, Some(WORKER), None).unwrap();
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         let next = f.task("cas-8488b");
         assert_eq!(next.status, TaskStatus::InProgress, "{response}");
         assert_eq!(next.assignee.as_deref(), Some(WORKER));

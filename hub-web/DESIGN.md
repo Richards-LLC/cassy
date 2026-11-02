@@ -43,8 +43,10 @@ colors:
   warning-dark: "#E2B14D"
   danger: "#B3261E"
   danger-dark: "#EF7B72"
-  idle: "#6B7280"
-  idle-dark: "#9AA1AF"
+  idle: "#4F8A6A"
+  idle-dark: "#3E8A63"
+  disconnected: "#6B7280"
+  disconnected-dark: "#9AA1AF"
   supervisor: "rgba(255, 255, 255, 0.9)"
   supervisor-dark: "rgba(36, 33, 70, 0.92)"
   on-supervisor: "#1A1830"
@@ -146,6 +148,7 @@ components:
   status-warn: { backgroundColor: "{colors.warning}", rounded: "{rounded.full}" }
   status-crit: { backgroundColor: "{colors.danger}", rounded: "{rounded.full}" }
   status-idle: { backgroundColor: "{colors.idle}", rounded: "{rounded.full}" }
+  status-disconnected: { backgroundColor: "{colors.disconnected}", rounded: "{rounded.full}" }
   raw-output: { backgroundColor: "{colors.terminal}", typography: "{typography.terminal}" }
 maps:
   primary: "--color-action"
@@ -168,6 +171,7 @@ maps:
   warning: "--state-warn"
   danger: "--state-crit"
   idle: "--state-idle"
+  disconnected: "--state-off"
   supervisor: "--sup-bg"
   on-supervisor: "--sup-fg"
   you: "--you-bubble-bg"
@@ -210,7 +214,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 - **Cards.** `--bg-raised` is an opaque lavender-white (#F7F5FF) or deep indigo (#23203E): worker cards, the paired-machines row and dialog footers never read as grey slabs on glass. `--bg-hover` and `--bg-active` are violet washes, never grey.
 - **Ink.** `--ink`/`--text-hi` (#1A1830 / #EEEBFF) and `--ink-mid`/`--text-mid` (#4A4762 / #B8B3D9). There is no tertiary text step; timestamps and meta use `--ink-mid`.
 - **Violet is the one action colour.** `--color-action`, `--color-verdict` and `--color-focus` are the same violet (#5B3FE0 light; #A897FF and a lighter #B9ABFF focus in dark). Send, the compose button and every `.primary` carry the `--look-send` gradient (#7656FA → #5B3FE0 → #3E5BEA) with white text. Violet never marks status.
-- **Status.** `--state-ok`, `--state-warn`, `--state-crit` and `--state-idle` are the house values; Glass leaves them alone. A message known **not sent** is critical (`--crit-bg` outline, glyph and label); one only **not confirmed** is caution (`--warn-text`), in the thread and on the dismissed-messages chip; a settled record drops to `--ink-mid`.
+- **Status.** `--state-ok`, `--state-warn`, `--state-crit`, `--state-idle` and `--state-off` are the house values; Glass leaves them alone. A message known **not sent** is critical (`--crit-bg` outline, glyph and label); one only **not confirmed** is caution (`--warn-text`), in the thread and on the dismissed-messages chip; a settled record drops to `--ink-mid`.
 - **Ask and blocker.** An open question is `--look-ask` (light #FFD983 → #FFA184) in `--ask-fg` #2A1A05 over an ember `--look-ask-tray`, in both schemes; its answer chips are opaque and stay opaque on hover (`--tray-chip-hover`). A blocker is a `--crit-bg` flood in light and, in dark, a `--crit-tint` #3A1F1E card in ink with a 4px salmon `--crit-edge`.
 - **Bubbles.** Supervisor bubbles are `--sup-bg` (0.9 alpha, no blur). The operator's bubble is the `--look-you` gradient; under more contrast it is the flat `--you-bubble-bg`.
 - **Machine accents.** `.machine-accent-0…4` (indigo, green, violet, teal, rose; `hub-web/src/machine-accent.ts`, append only) colour only each machine's avatar. Glass resets their `--sup-bg`, `--accent-soft` and `--lift-sup`, so they never tint bubbles or the selected row.
@@ -269,7 +273,7 @@ Glass has no square-cornered rectangles. Anything with its own fill or edge take
 ## Components
 
 - **Shell.** `render()` in `hub-web/src/main.ts` builds the shell from `hub-web/src/conversation-shell.ts`; rows from `conversation-list.ts`, the thread from `conversation-view.ts` and `conversation-history.ts`.
-- **Project navigation** (`project-navigation.ts`). One outlined `--bg-raised` card per canonical project across machines, bounded with `--ink-mid` (at least 3:1). A full-width expanded-state toggle precedes clickable machine chips and known worker/merge-rate figures. Device-local collapse persists; search temporarily reveals matches. Needs you shortcuts lead the register and disappear when empty. All/Needs you/machine filter chips intersect search; the paired-machine footer opens the same filters beside machine management. Phone rows use `--space-1` vertical padding to keep six sessions visible while preserving 44px End controls.
+- **Project navigation** (`project-navigation.ts`). One outlined `--bg-raised` card per canonical project across machines, bounded with `--ink-mid` (at least 3:1). A full-width expanded-state toggle precedes clickable machine chips and known worker/merge-rate figures. Device-local collapse persists; search temporarily reveals matches. Dismissed ended sessions leave the cards but stay reachable: search finds them, and a list-end Show/Hide N dismissed sessions action pill reveals them with Restore in place of Dismiss. Needs you shortcuts lead the register and disappear when empty. All/Needs you/machine filter chips intersect search; the paired-machine footer opens the same filters beside machine management. Phone rows use `--space-1` vertical padding to keep six sessions visible while preserving 44px End controls.
 - **Conversation row** (`conversation-list.ts`). Optional harness marks, account email and a state dot identify supervisors inside project cards; absent metadata leaves a generic avatar without a blank line. Names and preview text stay available to assistive technology. Open: `--look-row-open` wash plus the 2px `--color-action` edge (5.7:1 light, 7.5:1 dark against the list). Hover is a faint `--bg-hover` wash with no edge, so hover can never look open.
 - **Primary button** (`styles.css`, `glass.css`). `--look-send` with `--look-send-glow`; hover deepens to `--look-send-hover` and never brightens.
 - **Dialog** (`glass.css`). Glass-strong sheet; its sticky action bar is a light `--look-glass-bar` frost with a hairline and a 12px gap; plain buttons (Close, Back) are outlined pills; a destructive Remove is a `--crit-bg` outlined pill.
@@ -297,7 +301,7 @@ One card pattern serves the project register, Needs you, Tasks & progress worker
 Three kinds, distinguishable without reading them:
 
 - **Status pill** (`.status-chip`). `--pill-status-height` 24px, `--radius-pill`, `--bg-panel` fill, 12px uppercase label in the state's text colour (`--state-ok`, `--state-warn` with `--tint-warn`, `--ink-mid` for idle/open). It states a fact and is never a button: no hover, no border, no pointer.
-- **Team Waiting and Offline.** Waiting is live-idle and uses `--state-ok` text; Offline uses gray `--state-idle`. In forced colours, Waiting is underlined `CanvasText` and Offline is `GrayText`, so the words and treatment distinguish them even when the system colours coincide.
+- **Team Waiting and Offline.** Waiting is live-idle and uses `--state-ok` text; Offline uses gray `--state-off`. In forced colours, Waiting is underlined `CanvasText` and Offline is `GrayText`, so the words and treatment distinguish them even when the system colours coincide.
 - **Action pill** (a `button` in a card header or row). `--pill-action-height` 32px, `--radius-pill`, `--look-glass-strong` fill with a 1px `--line-strong` edge, `--ink` text at `--fs-meta` 500; hover is `--bg-hover`, never brighter. On a phone its hit area reaches 44px with padding, not a taller face. Only one `.primary` (Send gradient) per surface; a destructive action is the `--crit-bg` outlined pill.
 - **Chip** (filters, machine chips, badges). `--radius-pill`, 28–32px tall, `--bg-raised` fill with a `--line-subtle` edge; pressed filters take `--bg-active` and the action edge. A **machine chip** is a pill: the connection dot, the machine name in `--font-ui`, then the runtime in quiet mono `--ink-mid`; it never uses `--radius-control`.
 - Default and Recommended are verdict-coloured text badges (`--color-verdict` on `--bg-active`), never status colours.
@@ -309,11 +313,12 @@ An avatar names who is working, and the model's provider is that identity.
 
 - **Provider mark.** Sessions and workers that report a harness show its provider's mark: Claude (Claude Code), OpenAI (Codex, including the Sol and Luna models) and Grok, as clean single-colour SVG on a `--bg-panel` disc. Sizes: `--avatar-size` 42px with a `--avatar-mark` 24px mark in conversation rows and project cards; `--avatar-lane-size` 32px with an 18px mark in Team lanes and worker cards. Marks are `aria-hidden`; the harness is spoken in the row's name.
 - **Fallback.** An unknown or unsupported harness shows its name's first two letters in `--font-ui` 600 (OpenCode → "OC"); a session with no harness shows the machine monogram on its machine accent. Never a single tiny glyph (✳, `>_`) in a dark circle.
-- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it. Every dot has a state name for assistive technology and hover; the row text or status pill also says the state.
+- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it. Its colour is the state, per the operator's ruling of 2026-11-01. Each dot clears 3:1 against `--bg-raised`, has a state name for assistive technology and hover, and is never the only carrier of the state: the row text or a status pill says it too.
   - **Working:** a solid `--state-ok` green circle; solid `CanvasText` in forced colours.
-  - **Idle:** a hollow green circle, `--bg-raised` fill and a 2px inset `--state-ok` outline; a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
-  - **Offline:** the hollow neutral circle, `--bg-raised` fill with a 1px inset `--ink-mid` outline. Gray is reserved for offline; in forced colours it retains its `Canvas` fill and `CanvasText` outline. Ended rows retain their hollow neutral dot.
+  - **Idle:** a solid muted green `--state-idle` circle (3.16:1 light, 3.67:1 dark); a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
+  - **Offline:** a solid gray `--state-off` circle (3.77:1 light, 5.91:1 dark), for a disconnected or ended session. Gray is reserved for offline; in forced colours it has a `Canvas` fill and `CanvasText` outline.
   - **Needs you:** solid `--state-warn`, with the existing worded reason.
+  - Neutral non-status marks (a cleared attention dot, the Team trail's unreported connector) use `--state-off`.
 
 ### Conversation header
 

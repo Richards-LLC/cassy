@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Cloud sync
+
+- **Keep other ledger events moving** — A rejected Turn now waits on its own cursor and capability cooldown while other quality events continue pushing and pulling. Unrelated validation errors remain visible, and pending Turns retry without losing local rows.
+
 ### Fixed — Worker context
 
 - **Start queued work with fresh context** — Workers restart in place between queued tasks, keeping their name, checkout and launch recipe. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.

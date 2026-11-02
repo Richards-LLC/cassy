@@ -1764,6 +1764,7 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
         "supervisor_override": true, "reason": "Reviewed integrated delivery and upkeep debt",
     })).await;
     assert!(!response.contains("UPKEEP WARNING") && !response.contains("UPKEEP ESCAPE"), "upkeep belongs in receipt details: {response}");
+    // pin: the immutable close receipt reference is a durable tool-response contract.
     let path = response.lines().find_map(|line| line.strip_prefix("Details: "))
         .and_then(|line| line.split(" (SHA-256 ").next()).expect("receipt reference");
     assert!(std::fs::read_to_string(path).unwrap().contains("UPKEEP WARNING"));

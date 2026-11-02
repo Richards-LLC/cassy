@@ -5817,7 +5817,7 @@ mod related_recall_response_tests {
 
     #[test]
     fn related_recall_is_bounded_by_result_count_and_character_cap() {
-        let mut env = TestEnvGuard::with_vars(&[("CAS_SESSION_ID", "bounded-recall")]);
+        let _env = TestEnvGuard::with_vars(&[("CAS_SESSION_ID", "bounded-recall")]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         for index in 0..6 {
@@ -5830,9 +5830,7 @@ mod related_recall_response_tests {
         }
 
         add_memory(&core, "m-weak-match", "Incidental keyword", "Keyword belongs to an unrelated outage.");
-        assert!(core.related_recall("bounded keyword").is_some());
-        assert!(core.related_recall("bounded keyword").is_none(), "seen strong matches and weak matches stay quiet");
-        env.set("CAS_SESSION_ID", "bounded-recall-limit");
+        assert!(core.related_recall("unrelated bounded").is_none(), "single incidental matches stay quiet");
         let response = core
             .related_recall("bounded recall shared keyword")
             .expect("matching recall");

@@ -412,7 +412,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       // stopped one filled gray, and neither carries the old hollow ring.
       if (mode !== "forced-colors") {
         expect((await look(offline))[0]).not.toBe((await look(idle))[0]);
-        expect((await look(idle))[2]).toBe("0px");
+        expect(await idle.evaluate(node => getComputedStyle(node).outlineStyle)).toBe("none");
       } else {
         expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
       }

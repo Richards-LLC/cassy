@@ -29,6 +29,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Friction ledger
 
+- **Keep legacy ejections single-counted** — Backfill recognizes the old live emitter's queue-exit keys before appending a canonical failed-run row, so release snapshots and reports count each task/PR/run once while preserving the original ledger row.
+
 - **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.
 
 ### Added — Friction ledger

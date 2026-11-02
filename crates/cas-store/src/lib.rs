@@ -187,7 +187,7 @@ pub use quality_event_store::{
     QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, ensure_quality_event_schema, import_quality_events,
     normalize_release_version, quality_events_after, quality_events_between,
     quality_events_for_task, quality_interventions_since, quality_release_events,
-    record_quality_event, sanitize_quality_link, sanitize_quality_title,
+    record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,
 };
 pub use rule_candidate_store::{
     RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,

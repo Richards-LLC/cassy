@@ -517,6 +517,25 @@ pub fn record_quality_event(cas_dir: &Path, event: &NewQualityEvent) -> Result<b
     })
 }
 
+/// Whether this local fact already exists under its canonical or a legacy
+/// natural key. Resolve identities with the writer's hash and project scope;
+/// old append-only rows need not retain links or carry new payload fields.
+pub fn quality_event_recorded(
+    cas_dir: &Path,
+    event: &NewQualityEvent,
+    aliases: &[String],
+) -> Result<bool> {
+    with_conn(cas_dir, |conn| {
+        let mut query = conn.prepare("SELECT EXISTS(SELECT 1 FROM quality_events WHERE project_id='' AND id=?1)")?;
+        for key in std::iter::once(&event.natural_key).chain(aliases) {
+            if query.query_row([event_id(&event.scope, event.payload.kind(), key)], |row| row.get::<_, bool>(0))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 /// Apply rows pulled from Cloud. `current_project` maps this project's rows back
 /// to the local namespace, so its own echo and a second machine's copy collapse.
 /// Returns (inserted, refused). Cloud rows are untrusted input: each one passes
@@ -720,6 +739,13 @@ mod tests {
         assert!(record_quality_event(dir.path(), &intervention("a")).unwrap());
         assert!(!record_quality_event(dir.path(), &intervention("a")).unwrap());
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 1);
+        assert!(!quality_event_recorded(dir.path(), &intervention("new-key"), &[]).unwrap());
+        assert!(quality_event_recorded(dir.path(), &intervention("new-key"), &["a".into()]).unwrap());
+        let mut other_scope = intervention("new-key");
+        other_scope.scope = "other-project".into();
+        assert!(!quality_event_recorded(dir.path(), &other_scope, &["a".into()]).unwrap());
+        assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 1,
+            "alias lookup must not append or modify the original event");
 
         let before = quality_events_after(dir.path(), 0, 10).unwrap();
         let conn = crate::shared_db::shared_connection(&dir.path().join("cas.db")).unwrap();

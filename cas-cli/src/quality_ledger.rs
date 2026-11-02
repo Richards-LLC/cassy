@@ -32,10 +32,18 @@ pub(crate) struct QueueEjection {
 /// Live relay and historical recovery share one identity, including the old
 /// queue-exit/merge-group-run aliases for the same failed run.
 pub(crate) fn queue_ejected(root: &Path, ejection: &QueueEjection, at: DateTime<Utc>) -> bool {
+    queue_ejected_with_aliases(root, ejection, at, &[queue_ejection_key(ejection, &ejection.occurrence)])
+}
+
+fn queue_ejection_key(ejection: &QueueEjection, occurrence: &str) -> String {
+    format!("merge_queue|{}|{}|{occurrence}", ejection.task_id, ejection.pr_number)
+}
+
+fn queue_ejected_with_aliases(root: &Path, ejection: &QueueEjection, at: DateTime<Utc>, aliases: &[String]) -> bool {
     let occurrence = ejection.failed_run_id.map(|run| format!("merge-group-run:{run}"))
         .unwrap_or_else(|| ejection.occurrence.clone());
     let mut event = NewQualityEvent::new(
-        format!("merge_queue|{}|{}|{occurrence}", ejection.task_id, ejection.pr_number),
+        queue_ejection_key(ejection, &occurrence),
         QualityPayload::CheckRun { check_id: MERGE_QUEUE_CHECK.into(), stage: CheckStage::Queue,
             outcome: CheckOutcome::Fail, sha: None, minutes: None },
     );
@@ -44,6 +52,15 @@ pub(crate) fn queue_ejected(root: &Path, ejection: &QueueEjection, at: DateTime<
     event.title = ejection.failing_job.clone();
     event.link = ejection.failed_run_id.and_then(|run| crate::github_issue_attach::default_repo_for(root)
         .map(|repo| format!("https://github.com/{repo}/actions/runs/{run}")));
+    event.scope = project_scope(root);
+    match cas_store::quality_event_recorded(root, &event, aliases) {
+        Ok(true) => return false,
+        Ok(false) => {},
+        Err(error) => {
+            tracing::warn!(%error, "cannot resolve historical queue-ejection identity");
+            return false;
+        }
+    }
     emit(root, &event)
 }
 /// A spawn this soon after a force shutdown is the replacement for that worker.
@@ -434,9 +451,23 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
     let mut inserted = 0usize;
     let queue = cas_store::SqliteSupervisorQueueStore::open(cas_root)?;
     queue.init()?;
-    for row in queue.event_history_since("merge_queue_ejected", since)? {
-        let Ok(ejection) = serde_json::from_str::<QueueEjection>(&row.payload) else { continue };
-        inserted += usize::from(queue_ejected(cas_root, &ejection, row.created_at));
+    // An alias can predate the requested window even when a later relay of
+    // the same failed run is inside it. Read retained identities once, but
+    // continue to emit only facts in the requested window.
+    let history: Vec<_> = queue.event_history_since("merge_queue_ejected", DateTime::<Utc>::UNIX_EPOCH)?
+        .into_iter().filter_map(|row| serde_json::from_str::<QueueEjection>(&row.payload).ok()
+            .map(|ejection| (row, ejection))).collect();
+    let mut aliases = HashMap::<(String, u64, u64), Vec<String>>::new();
+    for (_, ejection) in &history {
+        if let Some(run) = ejection.failed_run_id {
+            aliases.entry((ejection.task_id.clone(), ejection.pr_number, run)).or_default()
+                .push(queue_ejection_key(ejection, &ejection.occurrence));
+        }
+    }
+    for (row, ejection) in history.iter().filter(|(row, _)| row.created_at >= since) {
+        let keys = ejection.failed_run_id.and_then(|run| aliases.get(&(ejection.task_id.clone(), ejection.pr_number, run)))
+            .map(Vec::as_slice).unwrap_or(&[]);
+        inserted += usize::from(queue_ejected_with_aliases(cas_root, ejection, row.created_at, keys));
     }
     let tasks = open_task_store(cas_root)?.list(None)?;
     for task in &tasks {

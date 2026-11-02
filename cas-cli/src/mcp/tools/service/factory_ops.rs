@@ -3985,7 +3985,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
-        use cas_types::{AgentRole, AgentStatus};
+        use cas_types::AgentRole;
 
         let worker_name = req
             .target
@@ -4026,17 +4026,22 @@ impl CasService {
                 )
             })?
             .into_iter()
-            .find(|agent| {
+            .filter(|agent| {
                 agent.role == AgentRole::Worker
-                    && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
                     && agent.name == worker_name
                     && agent.visible_to_factory_session(factory_session.as_deref())
+            })
+            .max_by_key(|agent| {
+                (
+                    super::agent_liveness::evaluate_supervision_liveness(agent).is_live(),
+                    agent.registered_at,
+                )
             })
             .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Worker '{worker_name}' is not a live worker in this factory session; recycle refused"
+                        "Worker '{worker_name}' is not a worker in this factory session; recycle refused"
                     ),
                 )
             })?;
@@ -4065,9 +4070,15 @@ impl CasService {
         );
         // cas-a622: a recycle keeps the worktree and every task binding (the
         // daemon respawns the same name and re-delivers the in-progress
-        // brief), so holding work is no reason to refuse. Only work that
-        // exists nowhere but this checkout is, and no flag overrides that.
-        if snapshot.unsafe_worktree {
+        // brief), so holding work is no reason to refuse. For a live harness,
+        // work that exists only in this checkout still requires a checkpoint.
+        // A dead harness cannot checkpoint its unpublished work. Recovery
+        // retains the checkout and task bindings, so it must be able to resume
+        // that work. A stale heartbeat alone never grants this exception:
+        // process liveness still protects a running harness's unsaved work.
+        let recovering_dead_worker =
+            !super::agent_liveness::evaluate_supervision_liveness(&worker).is_live();
+        if snapshot.unsafe_worktree && !recovering_dead_worker {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(

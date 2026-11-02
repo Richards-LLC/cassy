@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker recovery
+
+- **Recover a dead worker in place** — Same-name spawns replace an exited worker pane, and recycle accepts dead workers while preserving their checkout, task bindings and unpushed commits. Live workers retain the existing unsaved-work safeguards.
+
 ## [3.99.0] - 2026-11-02
 
 ### Fixed — Isolated worker turn records

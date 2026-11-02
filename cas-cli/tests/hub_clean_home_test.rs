@@ -468,7 +468,8 @@ fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful(
     assert!(hub["failure"].is_null(), "{receipt}");
     let warning = hub["transport_warning"].as_str().unwrap();
     assert!(warning.contains("Tailscale Serve inactive"), "{warning}");
-    assert!(hub["remedy"].as_str().unwrap().contains("cas hub restart"));
+    assert!(hub["remedy"].as_str().unwrap().contains("automatically"),
+        "Auto update must describe background recovery: {receipt}");
 }
 
 #[cfg(target_os = "linux")]

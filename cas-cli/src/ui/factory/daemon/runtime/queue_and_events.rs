@@ -12819,6 +12819,16 @@ fn reconcile_task_reminder(
         cancel_task_reminder(reminders.as_ref(), reminder)?;
         return Ok(());
     }
+    if worker_owned && let Some(id) = reminder.task_id.as_deref() {
+        match tasks.get(id) {
+            Ok(task) if task.is_terminal() => {
+                cancel_task_reminder(reminders.as_ref(), reminder)?;
+                return Ok(());
+            }
+            Ok(_) | Err(cas_store::StoreError::TaskNotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let event = reminder.trigger_event.as_deref();
     let filtered_task = matches!(event, Some("task_completed" | "task_blocked"))
         .then(|| reminder.trigger_filter.as_ref().and_then(|filter| filter.get("task_id"))
@@ -12830,10 +12840,6 @@ fn reconcile_task_reminder(
         Some(Err(cas_store::StoreError::TaskNotFound(_))) | None => None,
         Some(Err(error)) => return Err(error.into()),
     };
-    if worker_owned && task.as_ref().is_some_and(|task| task.is_terminal()) {
-        cancel_task_reminder(reminders.as_ref(), reminder)?;
-        return Ok(());
-    }
     if reminder.status == cas_store::ReminderStatus::Suspended { return Ok(()); }
     if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
         if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
@@ -14502,7 +14508,11 @@ mod tests {
     #[test]
     fn worker_reminders_end_silently_on_shutdown_or_terminal_task() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        for (shutdown, terminal, suspended) in [(true, false, false), (true, false, true), (false, true, false), (false, true, true)] {
+        for (shutdown, terminal, suspended, watch_remote) in [
+            (true, false, false, false), (true, false, true, false),
+            (false, true, false, false), (false, true, true, false),
+            (false, true, false, true), (false, true, true, true),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let cas = root.path();
             let agents = crate::store::open_agent_store(cas).unwrap();
@@ -14518,8 +14528,12 @@ mod tests {
             if terminal { task.status = TaskStatus::Closed; }
             tasks.add(&task).unwrap();
             let reminders = crate::store::open_reminder_store(cas).unwrap();
-            reminders.create_with_scope(&owner.id, None, "retry task", cas_store::ReminderTriggerType::Time,
-                Some(chrono::Utc::now() - chrono::Duration::hours(2)), None, None, 60,
+            let filter = watch_remote.then(|| serde_json::json!({"task_id": "cas-watched"}));
+            if watch_remote { tasks.add(&Task::new("cas-watched".into(), "remote work".into())).unwrap(); }
+            reminders.create_with_scope(&owner.id, None, "retry task",
+                if watch_remote { cas_store::ReminderTriggerType::Event } else { cas_store::ReminderTriggerType::Time },
+                (!watch_remote).then(|| chrono::Utc::now() - chrono::Duration::hours(2)),
+                watch_remote.then_some("task_completed"), filter.as_ref(), 60,
                 Some("s"), Some(&task.id), true, None).unwrap();
             if suspended { reminders.suspend_pending_for_target(&owner.id).unwrap(); }
             for _ in 0..2 {

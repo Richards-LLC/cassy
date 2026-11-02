@@ -478,11 +478,9 @@ fn post_swap_starts_an_installed_stopped_service_with_default_serve_policy() {
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Allocate in the service itself; sampling and dropping a free listener
+    // lets unrelated parallel tests claim that port before post-swap starts it.
+    let port = 0;
     let binary = cas::test_paths::cas_binary();
     let unit = home.path().join(".config/systemd/user/cas-hub.service");
     fs::create_dir_all(unit.parent().unwrap()).unwrap();
@@ -546,21 +544,26 @@ esac
     let definition = fs::read_to_string(unit).unwrap();
     assert!(definition.contains("--tailscale-serve --tailscale-serve-port 443"));
     assert!(
-        definition.contains(&format!("--port {port}")),
-        "listener preserved"
+        definition.contains("--port 0"),
+        "the service must allocate its own listener, without reserving and releasing a port"
     );
     assert!(
         fs::read_to_string(home.path().join("manager-calls"))
             .unwrap()
             .contains("--user restart cas-hub.service")
     );
+    let record = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"))
+        .read_process_record()
+        .unwrap();
+    assert_eq!(record.launched_by.as_deref(), Some("service"));
+    assert_ne!(record.port, 0, "the service must publish its allocated port");
     assert_eq!(
-        cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"))
-            .read_process_record()
+        ureq::get(&format!("http://127.0.0.1:{}/v1/health", record.port))
+            .call()
             .unwrap()
-            .launched_by
-            .as_deref(),
-        Some("service")
+            .status(),
+        200,
+        "the allocated listener must serve the hub"
     );
     let stop = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "stop"])

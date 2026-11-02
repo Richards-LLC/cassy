@@ -11,6 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Count director wakes** — Supervisor director prompts now use the durable message queue with a director source label. They wait behind busy panes and protected drafts, and withdraw stale worker or delivery alerts before waking the supervisor.
 
+### Fixed — Hub test isolation
+
+- **Allocate service test ports at startup** — The Linux post-swap service fixture now binds port zero itself, removing the gap where a parallel test could claim a sampled free port and fail the release checks.
+
 ## [3.98.0] - 2026-11-02
 
 ### Fixed — Supervisor merges

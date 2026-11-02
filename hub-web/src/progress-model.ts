@@ -91,6 +91,7 @@ export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[])
   if (["dead", "offline"].includes(agent?.liveness ?? "")) return "Offline";
   const task = tasks.find(item => item.id === worker.currentTask);
   if (task?.delivery_state === "merged") return "Merged";
+  if (statusLabel(task?.status) === "Blocked") return "Blocked";
   if (statusLabel(task?.status) === "Awaiting merge") return "Parked for merge";
   const live: Record<string, string> = { executing: "Executing", waiting_for_input: "Waiting", awaiting_first_prompt: "Waiting", budget_aborted: "Budget stopped", stalled: "Stalled" };
   return live[agent?.liveness ?? ""] ?? statusLabel(agent?.status);

@@ -72,7 +72,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await expect(page.locator(".pinned-ask")).not.toContainText("**");
     await expect(page.locator("#status-view")).toContainText("Workers · 6");
     await expect(page.locator("#status-view")).not.toContainText("RAW INTERNAL");
-    await expect(page.locator("#status-view")).toContainText("In progress");
+    await expect(page.locator("#status-view")).toContainText("Tasks in progress");
     await expect(page.locator("#status-view")).toContainText("Awaiting merge");
     await expect(page.locator(".status-agent")).toHaveCount(6);
     await expect(page.locator(".status-agent").filter({ hasText: workers[0]! })).toContainText("Polish the conversation");

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise first-push classification against real Git epic and lane history."""
+"""Exercise delivery-range classification against real Git epic and lane history."""
 import os
 from pathlib import Path
 import shutil
@@ -56,7 +56,7 @@ class LaneBaseTests(unittest.TestCase):
         self.git('commit', '-qm', message)
 
     def classify(self, before='0' * 40, fallback='origin/main', ref='refs/heads/factory/worker'):
-        output = self.repo / 'outputs'
+        output = self.repo / '.git' / 'classification-outputs'
         output.write_text('')
         code = yaml.safe_load(ACTION.read_text())['runs']['steps'][0]['run']
         env = dict(os.environ, BASE_SHA=before, ZERO_BASE_REF=fallback,
@@ -72,13 +72,28 @@ class LaneBaseTests(unittest.TestCase):
         self.assertEqual(out['rust-unaffected'], 'true')
         self.assertEqual(out['changed-files'], '1')
 
-    def test_repair_push_uses_only_previous_push_delta(self):
-        previous = self.git('rev-parse', 'HEAD')
-        self.write('hub-web/src/conversation-view.test.ts', '// assertion repair\n')
-        self.commit('test-only repair')
-        out = self.classify(previous)
-        self.assertEqual(out['class'], 'hub-web-only')
-        self.assertEqual(out['changed-files'], '1')
+    def test_docs_followup_push_preserves_delivery_code_coverage(self):
+        for path, text, output in [
+            ('cas-cli/src/lib.rs', '// worker Rust change\n', 'rust-unaffected'),
+            ('hub-web/src/conversation-view.ts', 'export const fixed = true;\n', 'web-check-needed'),
+            ('slack-bridge/src/index.ts', 'export const fixed = true;\n', 'bridge-check-needed'),
+        ]:
+            with self.subTest(path=path):
+                self.git('reset', '--hard', self.epic)
+                self.write(path, text)
+                self.commit('worker code push')
+                previous = self.git('rev-parse', 'HEAD')
+                self.write('docs/task.md', '# Delivery notes\n')
+                self.commit('docs followup push')
+                out = self.classify(previous)
+                self.assertEqual(out['comparison-base'], self.epic)
+                self.assertEqual(out['class'], 'rust-touched')
+                self.assertEqual(out[output], 'false' if output == 'rust-unaffected' else 'true')
+                self.assertEqual(out['changed-files'], '2')
+                # Non-factory pushes still validate only their event delta.
+                direct = self.classify(previous, ref='refs/heads/main')
+                self.assertEqual(direct['class'], 'docs-only')
+                self.assertEqual(direct['changed-files'], '1')
 
     def test_unprovable_bases_fail_closed(self):
         for name, kwargs in {

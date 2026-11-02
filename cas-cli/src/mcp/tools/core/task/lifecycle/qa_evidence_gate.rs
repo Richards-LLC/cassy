@@ -749,8 +749,13 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
     }
     if let Some(receipt) = batch_receipt {
+        let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
+            "QA batch debt satisfied by release verdict"
+        } else {
+            "QA batch evidence PASS"
+        };
         pass.notes.push(format!(
-            "QA batch evidence PASS: receipt={} staging={} ledger={} task={} anchor={}",
+            "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
             receipt.id,
             receipt.staging_sha,
             receipt.ledger_artifact_id,

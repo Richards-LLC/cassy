@@ -1207,6 +1207,10 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
         if path.starts_with("src/") {
             let expected = if index < 2 { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
             assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, expected, "{recorded}");
+            if index < 2 {
+                let notes = open_task_store(&cas_dir).unwrap().get(id).unwrap().notes;
+                assert!(notes.contains("QA batch debt satisfied by release verdict"), "release review pays debt without claiming a QA walk: {notes}");
+            }
             // The superseded dispatch remains immutable audit history.
             assert!(dispatched(id), "{recorded}");
             continue;

@@ -1165,6 +1165,7 @@ mod supervisor_handoff_tests {
         assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        assert!(!again.contains("Integrated deliveries to adopt/close"), "recovery actions must surface once per successor");
         handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
         env.set("CAS_AGENT_NAME", "third-supervisor");
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();

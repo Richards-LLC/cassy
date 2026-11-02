@@ -164,8 +164,12 @@ impl CasService {
             let message = self.peer_body(message, attachment).await?;
             // cas-2a5a: a reply across projects is advisory too.
             let blocker = blocker && envelope.scope == peer_mailbox::PeerScope::Project;
+            // A substantive reply to an actionable message completes the
+            // asker's wait. Explicit receipts and wake=false remain quiet.
+            let kind = kind.or_else(|| envelope.wakes_idle().then_some("answer"));
             let (body, summary) = (
-                peer_mailbox::attach_message_intent(&message, kind, blocker),
+                peer_mailbox::attach_message_intent(&message, kind, blocker)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?,
                 summary.to_string(),
             );
             let (successor, note) = redirect.unzip();
@@ -339,7 +343,8 @@ impl CasService {
         let message = self.peer_body(message, attachment).await?;
         let (sender_id, body, summary) = (
             sender.id.clone(),
-            peer_mailbox::attach_message_intent(&message, kind, blocker),
+            peer_mailbox::attach_message_intent(&message, kind, blocker)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?,
             summary.to_string(),
         );
         let to = peer.clone();
@@ -510,7 +515,8 @@ impl CasService {
         };
         let (successor, redirect) = Self::slot_holder(&peers, &addressed, was_ended)?;
         let peer = successor.unwrap_or(addressed);
-        let body = peer_mailbox::attach_message_intent(message, kind, false);
+        let body = peer_mailbox::attach_message_intent(message, kind, false)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let (sender_id, summary_text, to) = (sender.id.clone(), summary.to_string(), peer.clone());
         let receipt = tokio::task::spawn_blocking(move || {
             peer_mailbox::send_to_user_peer(

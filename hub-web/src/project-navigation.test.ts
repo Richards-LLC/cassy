@@ -142,6 +142,12 @@ describe("project-first navigation", () => {
     const retry = vi.fn(async () => {});
     new ProjectNavigation().render(nav, [ended], vi.fn(), undefined, { dismissEnded: retry });
     expect(retry).toHaveBeenCalledWith(expect.objectContaining(ended));
+    // The key is only an unsynced marker: a hub receipt drops it.
+    await vi.waitFor(() => expect(localStorage.getItem("commander.dismissed-ended-sessions")).toBe("[]"));
+    // A key kept from before this rule goes once the hub reports its tombstone.
+    localStorage.setItem("commander.dismissed-ended-sessions", JSON.stringify([`${ended.machineId}\u0000${ended.session}\u0000${ended.startedAt}`]));
+    new ProjectNavigation().render(nav, [{ ...ended, dismissed: true }], vi.fn());
+    expect(localStorage.getItem("commander.dismissed-ended-sessions")).toBe("[]");
   });
 
   it("restores a hub-dismissed session through the hub, and keeps it dismissed when the hub refuses", async () => {

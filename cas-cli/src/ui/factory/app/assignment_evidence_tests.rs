@@ -113,6 +113,26 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
                 &Default::default(), &HashSet::from([held.to_string()]), now), None,
                 "a held worker cannot receive an assignment by either identity");
         }
+        // cas-f497: unreadable holds refuse an assignment, and only an assignment.
+        assert_eq!(app.supervisor_actionable_from_ownership(&app.unfiltered_director_data,
+            &Default::default(), None, now, &app.assignment_evidence), None);
+        let mut with_merge = app.unfiltered_director_data.clone();
+        let mut parked = with_merge.ready_tasks[0].clone();
+        parked.id = "cas-parked".into();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some("local".into());
+        parked.epic = Some("cas-epic".into());
+        with_merge.in_progress_tasks.push(parked);
+        let merge_ready = std::collections::HashMap::from([("cas-parked".to_string(), delivery_evidence::DeliveryEvidence {
+            worker: "local".into(),
+            delivery: ("factory/local".into(), Some("tip".into())),
+            hold: None,
+            merged_close_blocked: None,
+        })]);
+        assert!(matches!(
+            app.supervisor_actionable_from_ownership(&with_merge, &merge_ready, None, now, &app.assignment_evidence),
+            Some(super::super::director::SupervisorActionableState::MergeBranches { .. })
+        ));
         // A split accepted after detection must retract the old assignment at
         // delivery, even while the loop still has its earlier ownership evidence.
         let detected = app.supervisor_actionable_from_evidence(&app.unfiltered_director_data,

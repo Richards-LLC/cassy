@@ -11,11 +11,21 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-answer-and-timer-wakes:
+    title: Actionable peer replies wake the asking supervisor and deadlines and work retries remain valid timers
+    tasks: [cas-e4c7]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
   native-background-wait-bound:
     title: Native background jobs remain busy while CPU activity proves work after the stall window
     tasks: [cas-d8a9, cas-185e]
     invariants: [HUB-J26-BACKGROUND-BOUND]
     journeys: [HUB-J26]
+  restore-survives-dismissing-browser:
+    title: A restore on one paired browser is not undone by the browser that dismissed
+    tasks: [cas-07c3]
+    invariants: [HUB-J14-RESTORE-EVERY-DEVICE]
+    journeys: [HUB-J14]
   phone-warning-header:
     title: Warning badges preserve every phone conversation header action
     tasks: [cas-a929]
@@ -251,8 +261,8 @@ invariants:
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
     bug: {task: cas-fc10}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; peer FYIs do not wake and status polling timers are refused.
-    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify a direct answer, an actionable peer ask/status and an actual deadline still work.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; new untyped peer FYIs stay quiet, actionable replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
@@ -386,6 +396,10 @@ invariants:
     statement: A live idle supervisor has a hollow green dot; offline alone has the neutral dot. Working is solid green. State dots have accessible state names and remain distinguishable in light, dark and forced colors, with ended receipts retaining their neutral circle.
     check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses the online green and verify accessible state names. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
     bug: {task: cas-7389}
+  HUB-J14-RESTORE-EVERY-DEVICE:
+    statement: A browser's local dismissal is only an unsynced marker, dropped once the hub confirms it. A restore on any paired browser stays restored, and the browser that dismissed shows the row and never posts the dismissal again.
+    check: Run the "A restore on another browser survives the browser that dismissed" stage in HUB-J14 with two browser contexts; read back the hub's tombstone after the dismissing browser's next catalog reads and its reload. Run the project-navigation dismissal test and the connection-lifecycle overlapping-read case.
+    bug: {task: cas-07c3}
   HUB-J15-WARNING-HEADER-FITS:
     statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
     check: Extend the existing HUB-J15 phone attention stage; verify every header action and identity bounding box stays inside 390px, then open the unchanged Attention sheet. Prove strict real-build polish in both themes.
@@ -1694,6 +1708,7 @@ journeys:
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   - HUB-J14-PROJECT-DISPLAY-NAME
   - HUB-J14-IDLE-OFFLINE-DOT
+  - HUB-J14-RESTORE-EVERY-DEVICE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

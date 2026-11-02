@@ -20,6 +20,7 @@ pub fn execute(args: &ReleasePrecheckArgs, cli: &super::Cli) -> anyhow::Result<(
     // Ship the dispatcher with the binary; a fresh checkout needs no scripts,
     // Node dependencies, Playwright installation or Rust toolchain.
     command.args([
+        "-I",
         "-c",
         include_str!("../../../scripts/release-precheck.py"),
         &args.sha,
@@ -33,9 +34,16 @@ pub fn execute(args: &ReleasePrecheckArgs, cli: &super::Cli) -> anyhow::Result<(
     if let Some(path) = &args.receipt {
         command.arg("--receipt").arg(path);
     }
-    anyhow::ensure!(
-        command.status()?.success(),
-        "Hosted precheck did not pass; see the run receipt above"
-    );
-    Ok(())
+    // This command is a Python pass-through. Preserve its diagnostic, JSON
+    // document, exit code and signals instead of adding a second failure report.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec().into())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }

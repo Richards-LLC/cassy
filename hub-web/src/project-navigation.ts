@@ -93,7 +93,11 @@ export class ProjectNavigation {
     if (!latest) { this.pendingDismissals.delete(key); return; }
     this.render(latest.container, latest.rows, latest.open, latest.end, latest.options);
     try {
-      await latest.options.dismissEnded?.(row);
+      const save = latest.options.dismissEnded;
+      await save?.(row);
+      // The hub holds it now, so the key is no longer an unsynced marker. Kept,
+      // it would hide and re-post a session another device has since restored.
+      if (save) { this.dismissedEnded.delete(key); this.saveDismissedEnded(); }
     } catch {
       if (!keepHidden) this.dismissedEnded.delete(key);
       this.saveDismissedEnded();
@@ -185,6 +189,7 @@ export class ProjectNavigation {
       if (migrated) this.saveDismissedEnded();
       const key = endedSessionKey(row);
       if (!row.dismissed) this.restoredEnded.delete(key);
+      else if (!this.pendingDismissals.has(key) && this.dismissedEnded.delete(key)) this.saveDismissedEnded();
       if (row.ended && !row.dismissed && (migrated || this.dismissedEnded.has(key)) && !this.syncAttempted.has(key)) {
         // A tab can close between saving locally and the hub's receipt. Replay
         // that preference on reload, once per page, without resurrecting it.

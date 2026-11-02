@@ -63,7 +63,15 @@ fn is_delay_poll(message: &str) -> bool {
     if words.iter().any(|word| matches!(*word, "inbox_poll" | "poll" | "polling" | "recheck")) {
         return true;
     }
-    if words.contains(&"retry") && words.iter().any(|word| matches!(*word, "admission" | "capacity")) {
+    // Deadlines and retries perform work at a chosen time; they do not
+    // replace a completion signal. Explicit polls above remain refused.
+    if words.contains(&"deadline") {
+        return false;
+    }
+    if words.contains(&"retry")
+        && words.iter().any(|word| matches!(*word, "admission" | "capacity" | "capped" | "cargo" | "build"))
+        && !words.iter().any(|word| matches!(*word, "status" | "completion" | "log" | "logs" | "ci" | "inbox" | "messages" | "merge"))
+    {
         return false;
     }
     words.iter().any(|word| matches!(*word,
@@ -1014,28 +1022,28 @@ mod tests {
             1
         );
 
-        let self_request: crate::mcp::tools::service::FactoryRequest =
-            serde_json::from_value(serde_json::json!({
-                "action": "remind",
-                "remind_message": "Retry capped cargo check after build admission",
-                "remind_delay_secs": 60
-            }))
-            .expect("self reminder request");
-        service
-            .factory_remind(self_request)
-            .await
-            .expect("omitted target remains a self-reminder");
-        let self_reminders = reminders
-            .list_pending_for_target(&worker.id)
-            .expect("self-targeted reminder");
-        assert_eq!(self_reminders.len(), 1);
-        assert_eq!(self_reminders[0].target_id, worker.id);
+        for message in [
+            "Retry capped cargo check after build admission",
+            "Retry capped build check",
+            "Deadline: check task X before 5 PM",
+        ] {
+            let self_request = serde_json::from_value(serde_json::json!({
+                "action": "remind", "remind_message": message, "remind_delay_secs": 60
+            })).unwrap();
+            service.factory_remind(self_request).await
+                .unwrap_or_else(|error| panic!("legitimate timer {message:?} refused: {error}"));
+        }
+        let self_reminders = reminders.list_pending_for_target(&worker.id).unwrap();
+        assert_eq!(self_reminders.len(), 3);
+        assert!(self_reminders.iter().all(|row| row.target_id == worker.id));
 
         for message in [
             "Poll inbox_poll for operator messages in three minutes",
             "Check CI on the pushed SHA",
             "Recheck whether the delivery has merged",
             "Poll detached build log for completion",
+            "Deadline: poll inbox for messages",
+            "Retry build status check",
         ] {
             let request = serde_json::from_value(serde_json::json!({
                 "action": "remind", "remind_message": message, "remind_delay_secs": 180
@@ -1047,7 +1055,7 @@ mod tests {
                 assert!(error.contains(pointer), "missing {pointer}: {error}");
             }
         }
-        assert_eq!(reminders.list_pending_for_target(&worker.id).unwrap().len(), 1,
+        assert_eq!(reminders.list_pending_for_target(&worker.id).unwrap().len(), 3,
             "refused polls leave no pending timer");
         let event_request = serde_json::from_value(serde_json::json!({
             "action": "remind", "remind_message": "Check CI on the pushed SHA",
@@ -1056,7 +1064,7 @@ mod tests {
         })).unwrap();
         service.factory_remind(event_request).await.expect("the suggested event form is accepted");
         let pending = reminders.list_pending_for_target(&worker.id).unwrap();
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 4);
         assert!(pending.iter().any(|row| row.trigger_type == cas_store::ReminderTriggerType::Event));
 
 

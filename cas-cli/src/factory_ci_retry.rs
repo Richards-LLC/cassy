@@ -26,6 +26,10 @@ pub(crate) struct Retry {
     pub force: bool,
     pub allow_trunk: bool,
     pub cleanup: Option<bool>,
+    /// Older intents have no known start time and must be reviewed, not wait
+    /// forever or acquire a new lease every time the daemon reads them.
+    #[serde(default)]
+    pub armed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn directory(root: &Path) -> PathBuf {
@@ -56,6 +60,7 @@ pub(crate) enum CiStatus {
     Green,
     Red,
     Pending,
+    Stopped(String),
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -150,11 +155,31 @@ pub async fn retry_pending(root: &Path, session: &str) -> Result<()> {
         return Ok(());
     }
     for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                tracing::warn!(%error, "cannot read CI retry directory entry");
+                continue;
+            }
+        };
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let request: Retry = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let request: Retry = match std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+        {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(path=%path.display(), %error, "quarantining unreadable CI merge retry");
+                // Preserve the evidence, but don't let one old-schema or
+                // damaged file abort every healthy request or warn each pass.
+                if let Err(error) = std::fs::rename(&path, path.with_extension("invalid")) {
+                    tracing::warn!(path=%path.display(), %error, "cannot quarantine CI merge retry");
+                }
+                continue;
+            }
+        };
         if request.session != session {
             continue;
         }
@@ -163,9 +188,13 @@ pub async fn retry_pending(root: &Path, session: &str) -> Result<()> {
             Ok(true) => {
                 // A newer supervisor request may have replaced this file while
                 // the merge was running. Never consume that new intent.
-                let current: Retry = serde_json::from_slice(&std::fs::read(&path)?)?;
-                if current == request {
-                    std::fs::remove_file(&path)?;
+                let current = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Retry>(&bytes).ok());
+                if current.as_ref() == Some(&request)
+                    && let Err(error) = std::fs::remove_file(&path)
+                {
+                    tracing::warn!(path=%path.display(), %error, "cannot retire CI merge retry");
                 }
             }
             Err(error) => {
@@ -180,7 +209,19 @@ pub async fn retry_pending(root: &Path, session: &str) -> Result<()> {
 
 async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
     let agents = crate::store::open_agent_store(root)?;
-    let supervisor = agents.get(&request.supervisor)?;
+    let supervisor = match agents.get(&request.supervisor) {
+        Ok(supervisor) => supervisor,
+        Err(cas_store::StoreError::NotFound(_)) => {
+            notice(
+                root,
+                request,
+                "the authorizing supervisor no longer exists",
+                false,
+            )?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.into()),
+    };
     if supervisor.role != cas_types::AgentRole::Supervisor
         || !supervisor.is_alive()
         || supervisor.factory_session.as_deref() != Some(&request.session)
@@ -194,7 +235,14 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         return Ok(true);
     }
     let tasks = crate::store::open_task_store(root)?;
-    let task = tasks.get(&request.task)?;
+    let task = match tasks.get(&request.task) {
+        Ok(task) => task,
+        Err(cas_store::StoreError::NotFound(_)) => {
+            notice(root, request, "the parked task no longer exists", false)?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.into()),
+    };
     if task.is_terminal() {
         return Ok(true);
     }
@@ -208,6 +256,18 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
                 | cas_types::WorkerDeliveryState::Delivered
         )
     {
+        return Ok(true);
+    }
+    if request
+        .armed_at
+        .is_none_or(|start| chrono::Utc::now() - start >= chrono::Duration::hours(2))
+    {
+        notice(
+            root,
+            request,
+            "the two-hour CI wait expired (or its start time is unknown); inspect CI and request the exact merge again",
+            false,
+        )?;
         return Ok(true);
     }
     if task.status != cas_types::TaskStatus::AwaitingMerge
@@ -230,6 +290,10 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         &request.ci_sha,
     ) {
         CiStatus::Pending => return Ok(false),
+        CiStatus::Stopped(detail) => {
+            notice(root, request, &detail, false)?;
+            return Ok(true);
+        }
         CiStatus::Red => {
             notice(root, request, "CI completed red", true)?;
             return Ok(true);
@@ -271,18 +335,39 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
             notice(
                 root,
                 request,
-                &format!("merge handler refused: {:?}", result.content),
+                &format!(
+                    "merge handler refused: {}",
+                    result
+                        .content
+                        .iter()
+                        .filter_map(|content| {
+                            match &content.raw {
+                                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
                 false,
             )?;
             Ok(true)
         }
-        Ok(_) => {
+        Ok(result) => {
+            let close_held = result.content.iter().any(|content| matches!(&content.raw,
+                rmcp::model::RawContent::Text(text) if text.text.contains("Merge landed; close held")));
             tasks
                 .append_note(
                     &request.task,
                     &format!(
-                        "Automatic CI merge retry completed for {} on {}.",
-                        request.sha, request.branch
+                        "Automatic CI merge retry completed for {} on {}.{}",
+                        request.sha,
+                        request.branch,
+                        if close_held {
+                            " Merge landed; close held by the recorded task gate."
+                        } else {
+                            ""
+                        }
                     ),
                 )
                 .context("record automatic retry outcome")?;

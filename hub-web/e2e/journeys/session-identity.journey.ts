@@ -512,6 +512,38 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(otter(demo())).toHaveCount(1);
   });
 
+  await journey.stage("A restore on another browser survives the browser that dismissed", async () => {
+    const demo = () => list.getByRole("group", { name: /^old-demo ·/ });
+    const otterRow = demo().locator(".conversation-row").filter({ hasText: "quiet-otter-12" });
+    const tombstone = () => machine.sessions.find(row => row.name === "quiet-otter-12")?.dismissed;
+    await demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true }).click();
+    await expect.poll(tombstone).toBe(true);
+    await expect(demo()).toHaveCount(0);
+    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
+    try {
+      const second = await context.newPage();
+      await second.clock.install({ time: journeyNow() });
+      const secondHub = new HubDouble(second, { machines: [machine, other], paired: ["atlas", "borealis"] });
+      await secondHub.install();
+      await second.goto(page.url());
+      await secondHub.seedPaired();
+      await second.reload();
+      const secondList = second.getByRole("navigation", { name: "Choose a supervisor" });
+      await secondList.getByRole("button", { name: /^Show \d+ dismissed sessions?$/ }).click();
+      await second.getByRole("button", { name: "Restore dismissed session quiet-otter-12", exact: true }).click();
+      await expect.poll(tombstone).toBe(false);
+    } finally { await context.close(); }
+    // The first browser's next reads show the restored row and post nothing.
+    for (let read = 0; read < 2; read++) {
+      await hub.announceCatalog("atlas");
+      await expect(otterRow).toHaveCount(1);
+      expect(tombstone()).toBe(false);
+    }
+    await page.reload();
+    await expect(otterRow).toHaveCount(1);
+    expect(tombstone()).toBe(false);
+  });
+
   await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
     await filters.getByRole("button", { name: "Needs you", exact: true }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(1);

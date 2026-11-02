@@ -176,6 +176,8 @@ pub(crate) fn implementation_lineage(
     let id = &task.id;
     let mut actors = cas_store::qa_task_implementation_actors(root, id).map_err(|e| e.to_string())?;
     actors.extend(task.assignee.clone());
+    // cas-f497: the recorded start still names the implementer once the assignee is cleared.
+    actors.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.assignee.clone()));
     for branch in task
         .deliverables
         .parked_branch
@@ -303,11 +305,11 @@ pub(crate) fn prepare_receipt(
                 "task {id} belongs to another project or has no project binding"
             ));
         }
-        if task.assignee.is_none() {
-            return Err(format!("task {id} has no implementer"));
-        }
         let (repo, target) = task_context(root, &task)?;
         let actors = implementation_lineage(root, &task, &repo)?;
+        if actors.is_empty() {
+            return Err(format!("task {id} has no implementer"));
+        }
         if in_lineage(agents.as_ref(), &actors, &recorder.id) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
@@ -373,6 +375,36 @@ pub(crate) fn satisfying_release_verdict(
     head: &str,
 ) -> Result<Option<QaBatchReceipt>, String> {
     covering_receipt(root, task, repo, target, head, cas_store::release_verdicts_for_task)
+}
+
+/// cas-f497: whether the close gate would answer WAITING FOR RELEASE VERDICT for
+/// this delivery. Anything unreadable is `false`, so the delivery keeps its usual
+/// stall prompt rather than going quiet. Runs Git; call it off the factory loop.
+pub(crate) fn awaits_release_verdict(root: &Path, task: &Task) -> bool {
+    use crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns;
+    use cas_types::VerificationDispatchState::{Invalidated, Resolved};
+    let (Some(_), Some(anchor)) = (
+        task.deliverables.factory_branch_start.as_ref(),
+        task.deliverables.factory_branch_anchor.as_deref(),
+    ) else {
+        return false;
+    };
+    if task.depth == cas_types::TaskDepth::Light
+        || !crate::config::Config::load(root).is_ok_and(|config| config.verification_enabled())
+    {
+        return false;
+    }
+    let Ok((repo, target)) = task_context(root, task) else {
+        return false;
+    };
+    let no_verifier_on_record = matches!(
+        cas_store::get_latest_verification_dispatch(root, &task.id),
+        Ok(None) | Ok(Some(cas_types::VerificationDispatch { state: Resolved | Invalidated, .. }))
+    ) && crate::store::open_verification_store(root)
+        .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
+    no_verifier_on_record
+        && release_verdict_owns(root, task, &repo)
+        && matches!(satisfying_release_verdict(root, task, &repo, &target, anchor), Ok(None))
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.

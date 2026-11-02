@@ -1097,8 +1097,10 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
 }
 
 /// cas-ce5e: in release QA mode Tier 1 merged deliveries open no verifier and
-/// close on one verdict naming them. A Tier 2 delivery named in that same verdict
-/// still owes its adversarial probe and its own verifier.
+/// close on one verdict naming them, with no close call after it: one merged by
+/// `worktree_merge`, one merged outside it whose assignee was later cleared. A
+/// Tier 2 delivery named in that same verdict still owes its adversarial probe
+/// and its own verifier.
 #[tokio::test]
 async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_ce5e() {
     let mut env = TestEnvGuard::temp_home();
@@ -1136,6 +1138,9 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
         let mut parked = tasks.get(id).unwrap();
         parked.status = TaskStatus::AwaitingMerge;
         tasks.update(&parked).unwrap();
+        if index == 0 {
+            assert!(tasks.record_merge_admission(id, &tip, cas_types::MergeCiAdmission::Green).unwrap());
+        }
         let waiting = close(id, &tip).await;
         tips.push(tip);
         if path.starts_with("src/") {
@@ -1145,6 +1150,11 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
             assert!(waiting.contains("no adversarial probe"), "{waiting}");
         }
     }
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut unassigned = tasks.get(&deliveries[1].0).unwrap();
+    unassigned.assignee = None;
+    tasks.update(&unassigned).unwrap();
 
     let report = temp.path().join("RELEASE-REVIEW.md");
     let named: Vec<&str> = deliveries.iter().map(|(id, _)| id.as_str()).collect();
@@ -1171,14 +1181,17 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     .unwrap();
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
     assert!(recorded.contains("Release verdict"), "{recorded}");
+    assert!(recorded.contains("Closed 2: "), "{recorded}");
+    assert!(recorded.contains(&format!("Keeps its own review: {}", named[2])), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
-        let closed = close(id, &tips[index]).await;
         if path.starts_with("src/") {
-            assert!(closed.contains("Closed task:"), "{closed}");
-            assert!(!dispatched(id), "{closed}");
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed, "{recorded}");
+            assert!(!dispatched(id), "{recorded}");
             continue;
         }
+        assert!(!dispatched(id), "the verdict opens no verifier for Tier 2: {recorded}");
+        let closed = close(id, &tips[index]).await;
         // Named in the verdict, the Tier 2 delivery still owes its probe...
         assert!(closed.contains("no adversarial probe"), "{closed}");
         let ledger = closed.split(" if ").nth(1).and_then(|rest| rest.split(" is missing").next()).unwrap();

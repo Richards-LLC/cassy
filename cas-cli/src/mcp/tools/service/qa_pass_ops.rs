@@ -24,9 +24,9 @@ impl CasService {
         // cas-ce5e: `verification_type=release` records the one code-review verdict
         // for the assembled tip, in the shape of a QA receipt but never as one.
         let (schema, check_id, stage, label) = match req.verification_type.as_deref() {
-            None => (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa_batch", cas_store::CheckStage::Qa, "Batch QA receipt"),
+            None | Some("task") => (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa_batch", cas_store::CheckStage::Qa, "Batch QA receipt"),
             Some("release") => (cas_store::RELEASE_VERDICT_SCHEMA, "release_verdict", cas_store::CheckStage::Verifier, "Release verdict"),
-            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'release'"))),
+            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'task' or 'release'"))),
         };
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
             required(req.ledger_author.as_deref(), "ledger_author")?,
@@ -66,7 +66,8 @@ impl CasService {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
         }
-        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+        let closes = self.inner.close_release_covered_deliveries(&receipt).await;
+        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path)))
     }

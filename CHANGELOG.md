@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.98.2] - 2026-11-02
+
 ### Fixed — CI reuse
 
 - **Queue proofs prevent duplicate main test compilation** — Test Compile Guard reuses the successful merge-queue receipt for the identical tree; Clippy still runs on main because the queue does not run it. A queue-proven main push checks its Darwin dependency cache without downloading or compiling on an exact hit; a miss restores the prior partial cache before seeding the new main cache for later queues. Suite fan-in reuses the shared diff decision, and unused stable-toolchain setup and cold-benchmark cache work are removed.

@@ -37,10 +37,10 @@ gh run list --branch "main" --limit 3
 ```
 
 > [!WARNING]
-> **Blocked:** the queue is red on two Commander journeys, so nothing reaches main until they pass.
+> **Blocked:** the queue is red on two Commander browser checks, so nothing reaches main until they pass.
 
 | Gate | Runs | Blocks main |
 |---|---|---|
 | Worker check | capped check and named tests | no |
-| Merge queue | full suite and journeys | yes |
+| Merge queue | full suite and browser checks | yes |
 ````

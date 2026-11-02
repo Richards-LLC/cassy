@@ -97,7 +97,7 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 - Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error. `EPIC CLOSE CHECK INCOMPLETE` is resumable: retry the same close until it completes.
 - Confirm task deliverables exist on the epic branch
-- Run the closeout once, in order: freeze scope; one full review and the queue precheck together; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
+- Run the closeout once, in order: freeze scope; one full review and the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck) together; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
 - Require the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
 ## Session End

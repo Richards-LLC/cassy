@@ -17,6 +17,13 @@ pub(super) fn park_reply(mut refusals: Vec<String>) -> String {
     )
 }
 
+/// A prerequisite failure stops dependent checks, retaining every refusal
+/// already measured. With no earlier failure the existing message is unchanged.
+pub(super) fn refusal_reply(mut refusals: Vec<String>, refusal: impl Into<String>) -> String {
+    refusals.push(refusal.into());
+    park_reply(refusals)
+}
+
 pub(super) fn is_merge_handoff(refusal: &str) -> bool {
     refusal.trim_start_matches("⚠️").trim_start().starts_with("MERGE REQUIRED")
 }

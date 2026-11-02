@@ -40,13 +40,14 @@ with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
    after lane CI and the lane compile, open the epic PR and let the queue run
    the full workspace suite, doctests, archive mode and macOS Check on the exact
-   merged tree. Do not run a local full suite first. When a queue run fails, use
-   the queue precheck at the fix tip. When it needs local reproduction, run a direct suite
-   (add `cargo test -p cas --doc` when the epic touches doctests):
-
-   ```bash
-   cargo nextest run -p cas
-   ```
+   merged tree. The diagnostic before enqueue and after a failed queue run is
+   the [interim queue precheck](../../cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md#interim-queue-precheck):
+   a clean checkout at the SHA, root and hub-web `npm ci`, resolvable Playwright
+   and Chromium, then `cargo nextest run --workspace --no-fail-fast` and
+   `make -C cas-cli test-ci-tiers`. Follow that section's runnable commands;
+   cas-298f replaces them with the hosted precheck. Do not substitute
+   `assembly-proof.py`: its scrubbed environment cannot resolve Playwright or
+   browsers outside `/home` on soundwave. The queue remains the final proof.
 
 Step 5. After the fix lands, re-enqueue the PR. For a local diagnostic run,
    capture the real exit code and record a fresh `ASSEMBLY_PROOF` for it:

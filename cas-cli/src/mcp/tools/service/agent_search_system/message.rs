@@ -2945,7 +2945,11 @@ impl CasService {
                     agent_id: agent.id.clone(),
                 });
         // Local cap/spill and reply framing must not discard the sender's opt-out.
-        if (req.wake == Some(false) || req.kind.as_deref()==Some("receipt"))
+        let peer_fyi = role == "supervisor"
+            && resolved_target_agent.as_ref().is_some_and(|agent| agent.role == AgentRole::Supervisor)
+            && req.kind.is_none() && !req.blocker.unwrap_or(false)
+            && !req.urgent.unwrap_or(false) && !req.merge_request.unwrap_or(false);
+        if (quiet_message || peer_fyi)
             && !crate::supervisor_message_wakes::quiet(&message) {
             message=format!("{}\n{message}",crate::supervisor_message_wakes::QUIET);
         }

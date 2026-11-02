@@ -95,6 +95,21 @@ fn bounded_reply(text: &str) -> String {
     format!("{cut}\n…")
 }
 
+/// Only suppress complete, content-free updates. A real answer, or a status
+/// containing another sentence, still belongs in the operator's history.
+fn no_action_reply(text: &str) -> bool {
+    if crate::supervisor_message_wakes::pure_ack(text) {
+        return true;
+    }
+    let text = text.to_ascii_lowercase();
+    let sentences: Vec<_> = text.split(['.', '!', '\n']).map(str::trim)
+        .filter(|sentence| !sentence.is_empty()).collect();
+    !sentences.is_empty() && sentences.iter().all(|sentence| matches!(*sentence,
+        "no new messages" | "no new messages from you" | "no unread messages"
+        | "no action needed" | "no action required" | "nothing to do"
+        | "still waiting" | "waiting for work" | "standing by" | "staying idle"))
+}
+
 fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
     let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
@@ -798,7 +813,8 @@ pub(super) fn scan_supervisor_replies(
                 )
                 .0,
             );
-            if text.is_empty() {
+            if text.is_empty()
+                || (prior.is_none() && terminal_question.is_none() && no_action_reply(&text)) {
                 continue;
             }
             let summary: String = text
@@ -2210,6 +2226,14 @@ mod tests {
                 now + chrono::Duration::seconds(20 + index as i64 * 10),
             ));
         }
+        turns.extend(codex_turn_at(
+            "mixed-status", "[cas #79 agent-authored 0s first] worker update",
+            "No new messages. CI failed.", now + chrono::Duration::seconds(60),
+        ));
+        turns.extend(codex_turn_at(
+            "direct-answer", "Did any new messages arrive?",
+            "No new messages from you.", now + chrono::Duration::seconds(70),
+        ));
         let (temp, root, queue) = terminal_session(turns);
         let terminal = queue
             .record_terminal_operator_turn("factory-1", question)
@@ -2221,7 +2245,7 @@ mod tests {
         let replies = operator_replies(&queue);
         assert_eq!(
             replies.len(),
-            2,
+            4,
             "one row per completed turn, no duplicates: {replies:?}"
         );
         let answer = replies
@@ -2237,6 +2261,12 @@ mod tests {
             .unwrap();
         assert_eq!(status.kind, crate::ui::factory::OperatorTurnKind::Status);
         assert_eq!(status.reply_to, None);
+
+        let direct = replies.iter().find(|reply| reply.message == "No new messages from you.").unwrap();
+        assert_eq!(direct.kind, crate::ui::factory::OperatorTurnKind::Answer);
+        assert!(direct.reply_to.is_some(), "a no-change answer still answers its operator");
+        assert!(replies.iter().any(|reply| reply.message == "No new messages. CI failed."),
+            "a substantive status must not be hidden by its opening sentence");
 
         // The conversation reads question, then answer (pages are newest
         // first; clients order by time), and never carries the

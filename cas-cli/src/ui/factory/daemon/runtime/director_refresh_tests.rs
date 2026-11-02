@@ -776,6 +776,7 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
         if scenario.starts_with("superseded") {
             // pin: a withdrawn delivery must be labelled superseded and must never ask for a merge.
             assert!(prompt.text.contains("Superseded delivery"));
+            // pin: a withdrawn delivery must never instruct a supervisor to merge it.
             assert!(!prompt.text.contains("MERGE REQUIRED"));
         }
         if scenario == "merged_fallback" {

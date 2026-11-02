@@ -585,10 +585,11 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
     assert!(parse_envelope(&replies[0].prompt).unwrap().wakes_idle(),
         "an untyped answer must wake the supervisor that asked");
-    coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"answer", "message":"I will take it", "kind":"answer", "in_reply_to":rows[0].id})).await.unwrap();
+    let answer_body = "I will take it";
+    coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"answer", "message":answer_body, "kind":"answer", "in_reply_to":rows[0].id})).await.unwrap();
     let aa = a.clone();
     let answers = tokio::task::spawn_blocking(move || { tick(&aa, "a"); inbox(&aa) }).await.unwrap();
-    let answer = answers.iter().find(|row| row.prompt.ends_with("I will take it")).unwrap();
+    let answer = answers.iter().find(|row| row.prompt.ends_with(answer_body)).unwrap();
     assert!(parse_envelope(&answer.prompt).unwrap().wakes_idle());
     let invalid = coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"invalid", "message":"unknown kind", "kind":"answr", "in_reply_to":rows[0].id})).await.unwrap_err();
     // pin: an unsupported kind must return an actionable validation error.

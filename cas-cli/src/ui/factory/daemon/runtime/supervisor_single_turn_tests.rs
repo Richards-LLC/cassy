@@ -869,6 +869,111 @@ async fn non_claude_commander_send_waits_through_dialogs() {
     }
 }
 
+/// cas-aa152: exercise queue dispatch and physical PTY admission, rather than
+/// only the wake classifier. A running Codex tool is not a message boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle() {
+    if !fixture_child("cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle") { return; }
+    use cas_store::QueueOrigin;
+    use cas_types::AgentRole;
+    for sender in ["standard", "unattributed", "unstamped", "unresolvable", "daemon",
+        "worker", "director", "supervisor", "operator"]
+    {
+        for busy in [true, false] {
+            for oversized in [false, true] {
+                let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+                let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+                let cas = daemon.app.cas_dir().to_path_buf();
+                let name = daemon.app.supervisor_name().to_string();
+                let agents = crate::store::open_agent_store(&cas).unwrap();
+                let mut supervisor = agents.get("single-sup").unwrap();
+                let account = root.path().join("codex-account");
+                supervisor.metadata.insert("worker_cli".into(), "codex".into());
+                supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
+                supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
+                agents.register(&supervisor).unwrap();
+                let path = account.join("sessions/2026/11/02/rollout-aa152.jsonl");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let now = chrono::Utc::now();
+                let at = (now - chrono::Duration::seconds(60)).to_rfc3339();
+                let records = [
+                    serde_json::json!({"timestamp":at,"type":"session_meta","payload":{
+                        "session_id":"019f84af-3121-7950-ba14-b01db2daa152","cwd":root.path(),
+                        "originator":"codex-tui","source":"cli","thread_source":"user"}}),
+                    serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_started","turn_id":"aa152"}}),
+                    serde_json::json!({"timestamp":at,"type":"response_item","payload":{
+                        "type":"function_call","name":"exec_command","call_id":"tool-aa152","arguments":"{\"cmd\":\"sleep 15\"}"}}),
+                ];
+                let mut transcript = records.iter().map(|row| format!("{row}\n")).collect::<String>();
+                if !busy {
+                    transcript.push_str(&format!("{}\n{}\n",
+                        serde_json::json!({"timestamp":at,"type":"response_item","payload":{
+                            "type":"function_call_output","call_id":"tool-aa152","output":"Process exited with code 0"}}),
+                        serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_complete","turn_id":"aa152"}})));
+                }
+                std::fs::write(&path, transcript).unwrap();
+                assert_eq!(crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(&cas, &supervisor), Some(path));
+                daemon.app.refresh_data().unwrap();
+                // Silence alone must not turn an unresolved native tool into idle.
+                let body = if oversized { BODY.replace("review the lane.", &"x".repeat(6000)) } else { BODY.into() };
+                let origin = match sender {
+                    "standard" | "worker" | "director" | "supervisor" => {
+                        let role = match sender {
+                            "worker" => AgentRole::Worker,
+                            "director" => AgentRole::Director,
+                            "supervisor" => AgentRole::Supervisor,
+                            _ => AgentRole::Standard,
+                        };
+                        let mut agent = cas_types::Agent::new_with_role("sender-id".into(), "sender".into(), role);
+                        agent.factory_session = Some(daemon.session_name.clone());
+                        agents.register(&agent).unwrap();
+                        Some(QueueOrigin::RegisteredAgent { agent_id: agent.id })
+                    }
+                    "unattributed" => Some(QueueOrigin::Unattributed),
+                    "unresolvable" => Some(QueueOrigin::RegisteredAgent { agent_id: "absent".into() }),
+                    "daemon" => Some(QueueOrigin::Daemon),
+                    _ => None,
+                };
+                let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+                if sender == "operator" {
+                    // The actual Commander ingress stamps authenticated device input.
+                    let attribution = crate::ui::factory::protocol::MessageAttribution {
+                        device_id: Some("paired".into()), operator_verified: true,
+                        ..Default::default()
+                    };
+                    daemon.enqueue_attributed_message(&name, &body, None, false, None, None, &attribution).unwrap();
+                } else {
+                    // An explicit pane name and an operator-looking source must
+                    // confer no authority on unattributed/ordinary senders.
+                    queue.enqueue_idempotent("lifecycle-wake:ci-red-run:aa152", &name, &body,
+                        Some(&daemon.session_name), None, None, "aa152", origin.as_ref()).unwrap();
+                }
+                let id = queue.peek_all(10).unwrap().into_iter().find(|row| row.prompt == body).unwrap().id;
+                rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+                    "UPDATE prompt_queue SET created_at=?1 WHERE id=?2",
+                    rusqlite::params![(now - chrono::Duration::seconds(21)).to_rfc3339(), id]).unwrap();
+                daemon.process_prompt_queue().await.unwrap();
+                settle_injected_writes(&mut daemon).await;
+                let expected = sender == "operator" || (!busy && matches!(sender, "worker" | "director" | "supervisor" | "daemon"));
+                let context = format!("{sender}/busy={busy}/oversized={oversized}");
+                if expected {
+                    typed_once(&root, &mut daemon, &body).await;
+                    assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some(), "{context}");
+                } else {
+                    assert!(!daemon.app.mux.has_pending_injects(), "{context}: denied wake must not admit PTY bytes");
+                    nothing_typed_or_relayed(&root, &daemon);
+                    let row = queue.queued_prompt(id).unwrap().unwrap();
+                    assert!(row.processed_at.is_none(), "{context}: retain gated row");
+                    assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_none(), "{context}");
+                    let readable = queue.poll_named_for_recipient(&name, Some(&daemon.session_name), &[id]).unwrap();
+                    assert_eq!(readable.len(), 1, "{context}: explicit inbox read stays available");
+                    assert_eq!(readable[0].prompt, body, "{context}");
+                }
+            }
+        }
+    }
+}
+
 
 #[tokio::test(flavor = "current_thread")]
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {

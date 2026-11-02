@@ -46,6 +46,17 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Synthetic Codex supervisors bind only to a rollout carrying their own queue
+input, including an ownership envelope older than the 4 MiB reply tail. A miss
+retries after 30 seconds; a changed harness/account/session or startup envelope
+invalidates that wait. Finalized sends without delivery proof retain Queued and
+use a 30-second receipt watch; active pending sends keep the one-second watch.
+A later actual receipt still publishes Delivered.
+
+Commander text waits at confirmation/trust dialogs and at non-Claude in-flight
+tool calls. Claude's visible native composer remains eligible during working
+turns. Held text and its submit are delivered together after that boundary clears.
+
 Pending Commander replies retry after one second, doubling to a sixty-second
 cap while a paired-device receipt is missing. A valid receipt, a new daemon
 WebSocket connection, or a device's first history-page request resets that retry
@@ -80,7 +91,9 @@ label and the durable reply reference.
 Factory registrations belong to their live harness process. A nested review
 that inherits `CAS_SESSION_ID`, name and role cannot re-register that identity
 from a different process, publish a socket mapping for it, or apply lifecycle
-hooks to its owner. Replacement MCP servers under the same fingerprinted harness
+hooks to its owner. Read-only guidance and receipt identity lookups apply the
+same owner check before caching an identity or authorizing later tools.
+Replacement MCP servers under the same fingerprinted harness
 remain valid. The authenticated cached owner repairs an exited PID left by older
 nested registrations before its next heartbeat, preserving its durable session.
 Tool permission hooks always retain their policy checks, even for a nested

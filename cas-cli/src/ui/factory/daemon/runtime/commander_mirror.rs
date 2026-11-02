@@ -477,26 +477,26 @@ fn codex_rollout_owns_recipient(
         .filter(|line| line.contains("[cas #"))
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
         .any(|value| {
-        if value.get("type").and_then(Value::as_str) != Some("response_item")
-            || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
-            || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
-            return false;
-        }
-        let Some(text) = text_blocks(&value, "/payload/content", "input_text") else { return false };
-        let first = text.lines().next().unwrap_or("").trim();
-        let marker = first.strip_prefix("[cas #").or_else(|| {
-            first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
-        });
-        let Some(id) = marker.and_then(|marker| marker.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<i64>().ok()) else { return false };
-        // A restart can reuse the name and factory. Older inputs must not
-        // bind the replacement to the previous generation's rollout.
-        if startup_id.is_some_and(|floor| id < floor) { return false; }
-        if startup_id == Some(id) { return true; }
-        queue.queued_prompt(id).ok().flatten().is_some_and(|row| {
-            row.factory_session.as_deref() == Some(session)
-                && (row.target == recipient || row.target == "supervisor")
+            if value.get("type").and_then(Value::as_str) != Some("response_item")
+                || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+                || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
+                return false;
+            }
+            let Some(text) = text_blocks(&value, "/payload/content", "input_text") else { return false };
+            let first = text.lines().next().unwrap_or("").trim();
+            let marker = first.strip_prefix("[cas #").or_else(|| {
+                first.strip_prefix("Message from ")?.split_once(": [cas #").map(|(_, marker)| marker)
+            });
+            let Some(id) = marker.and_then(|marker| marker.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<i64>().ok()) else { return false };
+            // A restart can reuse the name and factory. Older inputs must not
+            // bind the replacement to the previous generation's rollout.
+            if startup_id.is_some_and(|floor| id < floor) { return false; }
+            if startup_id == Some(id) { return true; }
+            queue.queued_prompt(id).ok().flatten().is_some_and(|row| {
+                row.factory_session.as_deref() == Some(session)
+                    && (row.target == recipient || row.target == "supervisor")
+            })
         })
-    })
 }
 
 pub(super) fn scan_supervisor_replies(
@@ -608,7 +608,7 @@ pub(super) fn scan_supervisor_replies(
         let cached = state
             .cursors
             .get(&agent.id)
-            .filter(|cursor| cursor.source == source);
+            .filter(|cursor| cursor.source == source && cursor.path.is_file());
         let unbound_codex = cli == cas_mux::SupervisorCli::Codex && session_id.starts_with("codex-");
         let startup_id = if unbound_codex && cached.is_none() {
             queue.latest_from_source_to_targets(
@@ -620,7 +620,6 @@ pub(super) fn scan_supervisor_replies(
             prior == &source && *floor == startup_id && now < *next
         });
         let path = cached
-            .filter(|cursor| cursor.path.is_file())
             .map(|cursor| cursor.path.clone())
             .or_else(|| {
                 if miss_held { return None; }

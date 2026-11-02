@@ -18,6 +18,7 @@ pub enum MachineEventKind {
     SessionAdded,
     SessionRemoved,
     SessionDismissed,
+    SessionRestored,
     PaneAdded,
     PaneExited,
     PaneRemoved,
@@ -344,6 +345,10 @@ impl MachineEventBus {
 
     pub(crate) fn session_dismissed(&self, session: &str) {
         self.emit(MachineEventKind::SessionDismissed, Some(session.to_owned()), None, None, None);
+    }
+
+    pub(crate) fn session_restored(&self, session: &str) {
+        self.emit(MachineEventKind::SessionRestored, Some(session.to_owned()), None, None, None);
     }
 
     pub(crate) fn controller_changed(&self, session: &str) {

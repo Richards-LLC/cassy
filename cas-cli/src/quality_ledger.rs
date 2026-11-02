@@ -36,11 +36,15 @@ fn project_scope(cas_root: &Path) -> String {
         .clone()
 }
 
-pub(crate) fn emit(cas_root: &Path, event: &NewQualityEvent) -> bool {
+/// The turn scanner keeps its cursor behind failed writes and retries later.
+pub(crate) fn emit_checked(cas_root: &Path, event: &NewQualityEvent) -> cas_store::Result<bool> {
     let mut event = event.clone();
     event.scope = project_scope(cas_root);
-    let event = &event;
-    match cas_store::record_quality_event(cas_root, event) {
+    cas_store::record_quality_event(cas_root, &event)
+}
+
+pub(crate) fn emit(cas_root: &Path, event: &NewQualityEvent) -> bool {
+    match emit_checked(cas_root, event) {
         Ok(inserted) => inserted,
         Err(error) => {
             tracing::warn!(kind = event.payload.kind(), %error, "friction ledger write failed");

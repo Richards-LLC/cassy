@@ -507,6 +507,7 @@ pub(super) fn codex_rollout_owns_recipient(
     session: &str,
     recipient: &str,
     startup_id: Option<i64>,
+    supervisor_alias: bool,
     cache: &RefCell<HashMap<PathBuf, RolloutOwnership>>,
 ) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else { return false };
@@ -554,7 +555,7 @@ pub(super) fn codex_rollout_owns_recipient(
         if startup_id == Some(*id) { return true; }
         queue.queued_prompt(*id).ok().flatten().is_some_and(|row| {
             row.factory_session.as_deref() == Some(session)
-                && (row.target == recipient || row.target == "supervisor")
+                && (row.target == recipient || (supervisor_alias && row.target == "supervisor"))
         })
     })
 }
@@ -691,7 +692,7 @@ pub(super) fn scan_supervisor_replies(
                 if unbound_codex {
                     return crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
                         project_path.to_str()?, account.as_deref(),
-                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, &state.codex_ownership),
+                        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, true, &state.codex_ownership),
                     );
                 }
                 crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
@@ -1057,7 +1058,7 @@ mod tests {
             "sessionId":"grok-native","update":body,"_meta":{"promptId":"prompt-1","turnStartMs":1793617200000i64,"agentTimestampMs":at * 1000i64}}});
         let rows = [
             update(1793617200i64, serde_json::json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":format!("Message from director: [cas #{id} agent-authored 0s first] review")}})),
-            update(1793617201, serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","rawInput":{"action":"update","id":"cas-test"},"_meta":{"x.ai/tool":{"name":"cas__task"}}})),
+            update(1793617201, serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","rawInput":{"tool_name":"cas__task","tool_input":{"action":"update","id":"cas-test"}},"_meta":{"x.ai/tool":{"name":"use_tool"}}})),
             update(1793617202, serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"success":true}})),
             update(1793617203, serde_json::json!({"sessionUpdate":"turn_completed","prompt_id":"prompt-1","usage":{"inputTokens":30,"outputTokens":5},"elapsed_ms":3000})),
         ];

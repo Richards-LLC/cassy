@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Friction ledger
+
+- **Measure factory turn costs** — Each completed Claude, Codex and Grok supervisor or worker turn records its verified wake channel, successful observed actions, no-op flag and measured tokens/minutes. `cas ledger report --release vX.Y.Z --offline` totals those rows by channel and discloses missing usage. Older Cloud endpoints retain unsupported Turn rows locally and retry after a cooldown.
+- **Known limitation** — OpenCode turns are not recorded yet.
+
 ### Added — Factory communication
 
 - **Count director wakes** — Supervisor director prompts now use the durable message queue with a director source label. They wait behind busy panes and protected drafts, and withdraw stale worker or delivery alerts before waking the supervisor.

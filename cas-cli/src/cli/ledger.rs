@@ -487,8 +487,11 @@ fn render(report: &LedgerReport) -> String {
     let _ = writeln!(out, "  missing usage: {} turn(s) without tokens, {} without minutes",
         report.turns.missing_tokens, report.turns.missing_minutes);
     for (channel, row) in &report.turns_by_channel {
-        let _ = writeln!(out, "  {channel}: {} wakes, {} no-op, {} input tokens, {} output tokens, {:.2} minutes (missing tokens {}, minutes {})",
-            row.wakes, row.no_op_wakes, row.input_tokens, row.output_tokens, row.minutes, row.missing_tokens, row.missing_minutes);
+        let _ = writeln!(out, "  {channel}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+        let _ = writeln!(out, "    {} input, {} output tokens; {:.2} minutes", row.input_tokens, row.output_tokens, row.minutes);
+        if row.missing_tokens > 0 || row.missing_minutes > 0 {
+            let _ = writeln!(out, "    missing tokens: {}; missing minutes: {}", row.missing_tokens, row.missing_minutes);
+        }
     }
 
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);

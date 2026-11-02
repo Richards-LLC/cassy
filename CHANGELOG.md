@@ -111,6 +111,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   revision lives in `<task>/candidates/<revision>/` and `candidate` points at the
   newest; asking again for a published revision reuses it without compiling.
 
+### Fixed — Close refusal details
+
+- **Keep earlier failures visible** — Close now includes collected proof refusals
+  beside later metadata, checkout, receipt and verification failures. Refused
+  attempts skip speculative delivery-anchor advancement.
+- **Runnable interim queue precheck** — The closeout guides name a clean-checkout
+  diagnostic with both npm installs, resolvable Playwright and Chromium, workspace
+  nextest and CI-tier tests until the hosted precheck replaces it.
+
 ## [3.95.0] - 2026-11-01
 
 ### Fixed — Verification

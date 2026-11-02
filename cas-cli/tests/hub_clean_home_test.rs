@@ -544,8 +544,8 @@ esac
     let definition = fs::read_to_string(unit).unwrap();
     assert!(definition.contains("--tailscale-serve --tailscale-serve-port 443"));
     assert!(
-        definition.contains(&format!("--port {port}")),
-        "listener preserved"
+        definition.contains("--port 0"),
+        "the service must allocate its own listener, without reserving and releasing a port"
     );
     assert!(
         fs::read_to_string(home.path().join("manager-calls"))
@@ -557,11 +557,12 @@ esac
         .unwrap();
     assert_eq!(record.launched_by.as_deref(), Some("service"));
     assert_ne!(record.port, 0, "the service must publish its allocated port");
-    assert!(
+    assert_eq!(
         ureq::get(&format!("http://127.0.0.1:{}/v1/health", record.port))
             .call()
             .unwrap()
-            .status() == 200,
+            .status(),
+        200,
         "the allocated listener must serve the hub"
     );
     let stop = cas_command(home.path(), bin.as_os_str())

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Hub test isolation
+
+- **Allocate service test ports at startup** — The Linux post-swap service fixture now binds port zero itself, removing the gap where a parallel test could claim a sampled free port and fail the release checks.
+
 ## [3.98.0] - 2026-11-02
 
 ### Fixed — Supervisor merges

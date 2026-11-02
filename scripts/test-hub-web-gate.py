@@ -92,17 +92,24 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         # Execute the actual workflow bodies, refusing any npm package download.
         # npm ci has already installed hub-web's locked CLI before these steps.
         self.write('bin/npm', '''#!/usr/bin/env python3
-import sys
+import os,sys
 assert '--package' not in ' '.join(sys.argv), 'browser install must use the locked local CLI'
-assert sys.argv[1:] in (['exec', '--', 'playwright', 'install', 'chromium'],
-                        ['exec', '--', 'playwright', 'install', '--with-deps', 'chromium'],
+assert sys.argv[1:] in (['exec', '--', 'playwright', 'install', '--no-shell', 'chromium'],
+                        ['exec', '--', 'playwright', 'install', '--with-deps', '--no-shell', 'chromium'],
                         ['ci'], ['run', 'visual-qa'],
                         ['run', 'journeys', '--', '--workers=2', '--shard=1/6']), sys.argv
+if sys.argv[1:] == ['run', 'visual-qa']:
+    assert os.environ.get('CHROME_PATH') == '/locked/chromium', 'visual QA must launch the installed full browser'
 ''')
         self.write('bin/npx', '''#!/usr/bin/env python3
 import sys
-assert sys.argv[1:] in (['playwright', 'install', 'chromium'],
-                        ['playwright', 'install', '--with-deps', 'chromium']), sys.argv
+assert sys.argv[1:] in (['playwright', 'install', '--no-shell', 'chromium'],
+                        ['playwright', 'install', '--with-deps', '--no-shell', 'chromium']), sys.argv
+''')
+        self.write('bin/node', '''#!/usr/bin/env python3
+import sys
+assert sys.argv[1:] == ['-p', 'require("@playwright/test").chromium.executablePath()'], sys.argv
+print('/locked/chromium')
 ''')
         # The journey step hands the shard to the real queue-flake runner,
         # which needs a clean tracked tree; outside the queue it runs the
@@ -114,7 +121,7 @@ assert sys.argv[1:] in (['playwright', 'install', 'chromium'],
         self.assertTrue(bodies, 'no browser install steps found')
         for sudo in (0, 1):
             self.write('bin/sudo', f'#!/bin/sh\nexit {sudo}\n')
-            for name in ('npm', 'npx', 'sudo'):
+            for name in ('npm', 'npx', 'node', 'sudo'):
                 (self.repo / 'bin' / name).chmod(0o755)
             self.commit()
             for body in bodies:

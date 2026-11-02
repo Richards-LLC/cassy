@@ -148,16 +148,12 @@ pub(crate) fn upkeep_message(
     title: &str,
     detail: &str,
     escape_token: &str,
-    warnings: &[String],
+    _warnings: &[String],
     caller_prefix: &str,
 ) -> String {
-    let warnings = if warnings.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", warnings.join("\n"))
-    };
+    // Non-blocking findings are retained by the upkeep note/receipt writer.
     format!(
-        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
+        "⚠️ {title}\n\n{detail}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
 }
 

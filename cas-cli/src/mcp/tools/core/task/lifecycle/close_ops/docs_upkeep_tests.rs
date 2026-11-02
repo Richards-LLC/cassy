@@ -119,6 +119,8 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
     write(f.repo.path(), "src/payments/start.ts", "new directory");
     let head = commit(f.repo.path());
     let error = f.run(&head).unwrap_err();
+    // pin: non-blocking upkeep advisories stay in notes/receipts even when a separate finding refuses close.
+    assert!(!error.contains("UPKEEP ADVISORY G5"), "{error}");
     assert!(
         error.contains("CODEMAP DRIFT") && error.contains("src/payments"),
         "{error}"

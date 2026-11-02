@@ -5204,7 +5204,7 @@ mod tests {
             metadata.held_workers.is_empty(),
             "worker removal must clear durable state so a reused name cannot inherit it"
         );
-        assert_eq!(reminders.list_pending_for_target("worker-id").unwrap().len(), 1);
+        assert!(reminders.list_pending_for_target("worker-id").unwrap().is_empty());
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
     }
 

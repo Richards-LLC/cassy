@@ -2284,6 +2284,13 @@ impl CasCore {
         }
         let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
             queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        if let (Some(queue), Some(worker)) = (worker_queue.as_ref(), worker.as_ref())
+            && queue.current_task.as_deref() == Some(req.id.as_str())
+            && queue.context_reset_from.as_deref() == Some(crate::worker_task_queue::conversation_generation(worker).as_str())
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task"));
+        }
         if !queued_start && let Some(queue) = worker_queue.as_ref() {
             if queue.starting && queue.current_task.as_deref() == Some(req.id.as_str()) {
                 queued_start = true;

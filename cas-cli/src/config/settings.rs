@@ -1027,9 +1027,9 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
-    /// Context-window occupancy percentage at which an idle worker status row
-    /// recommends in-place recycling. Codex reports the actual model window;
-    /// no recommendation is emitted when that window is unavailable.
+    /// Context occupancy threshold for worker MCP notices and idle status
+    /// recycle recommendations. Only harness-reported windows yield a percent;
+    /// unavailable accounting is explicitly unknown.
     #[serde(default = "default_context_recycle_threshold_percent")]
     pub context_recycle_threshold_percent: u8,
 

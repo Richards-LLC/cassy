@@ -38,6 +38,11 @@ pub struct WorkerTaskQueue {
     pub starting: bool,
     #[serde(default)]
     pub dispatch_revision: u64,
+    /// A queued successor cannot start in this predecessor conversation.
+    #[serde(default)]
+    pub context_reset_from: Option<String>,
+    #[serde(default)]
+    pub context_reset_request: Option<i64>,
     pub notes: Vec<String>,
 }
 

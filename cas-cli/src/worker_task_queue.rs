@@ -8,6 +8,10 @@ use rmcp::{ErrorData as McpError, model::ErrorCode};
 
 use crate::{mcp::CasCore, mcp::tools::TaskStartRequest};
 
+pub(crate) fn conversation_generation(worker: &Agent) -> String {
+    format!("{}|{}", worker.id, worker.cc_session_id.as_deref().unwrap_or_default())
+}
+
 fn error(message: impl std::fmt::Display) -> McpError {
     CasCore::error(ErrorCode::INVALID_PARAMS, message.to_string())
 }
@@ -421,6 +425,8 @@ impl CasCore {
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
+            queue.context_reset_from = predecessor.map(|_| conversation_generation(&worker));
+            queue.context_reset_request = None;
             queues
                 .save(session, &worker.name, &mut queue)
                 .map_err(error)?;
@@ -461,6 +467,21 @@ impl CasCore {
             drop(start_fence);
             drop(_lock);
             return Box::pin(self.advance_queue_for_worker(worker, predecessor)).await;
+        }
+        // Task boundaries are conversation boundaries. Persist the old
+        // generation before requesting the existing daemon recycle lifecycle;
+        // never enqueue B's assignment or switch its branch in A's context.
+        if queue.context_reset_from.as_deref() == Some(conversation_generation(&worker).as_str()) {
+            let spawns = crate::store::open_spawn_queue_store(&self.cas_root).map_err(error)?;
+            if queue.context_reset_request.is_none() && !spawns.has_pending_spawn(&worker.name, Some(session)).map_err(error)? {
+                let spec = crate::mcp::tools::service::factory_ops::worker_spec_from_agent(&worker);
+                cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default()).map_err(error)?;
+                let recipe = serde_json::to_string(&spec).map_err(error)?;
+                queue.context_reset_request = Some(spawns.enqueue_recycle(&worker.name, Some(&recipe), Some(session)).map_err(error)?);
+                queues.save(session, &worker.name, &mut queue).map_err(error)?;
+                let _ = cas_factory::notify_daemon(&self.cas_root);
+            }
+            return Ok(Some(format!("Task queue waiting for fresh context before {id} for {}", worker.name)));
         }
         let mut reserved_epoch = None;
         let result = async {

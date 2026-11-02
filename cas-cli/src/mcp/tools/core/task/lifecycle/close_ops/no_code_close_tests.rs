@@ -1993,6 +1993,10 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         assert_eq!(resets.iter().filter(|r| r.action == cas_store::SpawnAction::Recycle).count(), 1);
         crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         assert_eq!(spawns.peek(100).unwrap().len(), resets.len(), "retry duplicated recycle");
+        let premature = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"start", "id":"cas-8488b",
+        })).unwrap())).await.unwrap_err();
+        assert!(premature.message.contains("fresh context"), "{premature}");
         let mut fresh = agents.get("nocode-worker-session").unwrap();
         fresh.cc_session_id = Some("fresh-successor-conversation".into());
         agents.update(&fresh).unwrap();

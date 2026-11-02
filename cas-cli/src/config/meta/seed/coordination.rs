@@ -20,7 +20,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          "Seconds without observable worker activity before reporting a stall despite a fresh heartbeat.",
          ConfigType::Int, "300", Constraint::Min(0)),
         ("factory.context_recycle_threshold_percent", "Worker Context Recycle Threshold",
-         "Context occupancy percentage at which idle worker status recommends recycling; requires a known context window.",
+         "Context occupancy percentage at which workers receive measured-usage MCP notices and idle status recommends recycling; requires a harness-reported context window. Unknown accounting is labeled unknown.",
          ConfigType::Int, "80", Constraint::Range(0, 100)),
         ("factory.stall_after_secs", "Supervisor Silence Threshold",
          "Seconds of supervisor MCP silence before actionable focused-epic state produces a forward-motion wake.",

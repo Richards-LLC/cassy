@@ -723,7 +723,15 @@ impl CasService {
                         .map(|path| path.to_string_lossy().into_owned()),
                     ..Default::default()
                 };
-                crate::hooks::turn_context::fallback_context(&this.inner.cas_root, &input)
+                let notice = super::factory_ops::worker_context_notice(
+                    &this.inner.cas_root, &agent, input.transcript_path.as_deref().map(std::path::Path::new),
+                );
+                let fallback = crate::hooks::turn_context::fallback_context(&this.inner.cas_root, &input);
+                match (notice, fallback) {
+                    (Some(notice), Some(mail)) => Some(format!("{notice}\n{mail}")),
+                    (Some(context), None) | (None, Some(context)) => Some(context),
+                    (None, None) => None,
+                }
             }));
         }
         let context = match tokio::time::timeout(budget, pending.as_mut().unwrap()).await {

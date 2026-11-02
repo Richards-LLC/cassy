@@ -591,6 +591,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     let answer = answers.iter().find(|row| row.prompt.ends_with("I will take it")).unwrap();
     assert!(parse_envelope(&answer.prompt).unwrap().wakes_idle());
     let invalid = coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"invalid", "message":"unknown kind", "kind":"answr", "in_reply_to":rows[0].id})).await.unwrap_err();
+    // pin: an unsupported kind must return an actionable validation error.
     assert!(invalid.contains("unknown peer message kind"), "{invalid}");
     // Untyped peer reports retain compatibility; explicit receipts stay quiet.
     for (kind, blocker, wakes) in [

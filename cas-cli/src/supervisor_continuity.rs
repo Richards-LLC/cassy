@@ -24,7 +24,6 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
     let mut skipped = Vec::new();
     for task in parked {
         if !task_owned_by_project(&task, root, Some(&project))
-            || task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override
             || task.deliverables.merge_conflicted
         {
             continue;
@@ -61,17 +60,18 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
         }
         let review = match review_tier::tier_for_delivery(&task, &repo).map(|decision| decision.tier) {
             Some(review_tier::VerificationTier::Mechanical) => "mechanical close gates",
-            Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe required",
-            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt required",
-            _ => "dedicated verifier required",
+            Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe",
+            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt",
+            _ => "dedicated verifier",
         };
         let hold = match dispatch.as_ref().map(|dispatch| dispatch.state) {
+            _ if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override => "CI override; independent QA must be rechecked",
             Some(cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut) => "expired verification request",
             _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Error) => "verification error",
             _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
             _ => "close gates pending",
         };
-        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
     }
     if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
     Ok(format!(

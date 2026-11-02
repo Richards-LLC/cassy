@@ -1106,6 +1106,12 @@ impl CasCore {
         query: &str,
         exclude_id: Option<&str>,
     ) -> Option<String> {
+        self.related_recall_context(query, exclude_id, true)
+    }
+
+    /// Durable start instructions retain matching context even if this session
+    /// has already seen it. Only the response path claims session markers.
+    fn related_recall_context(&self, query: &str, exclude_id: Option<&str>, dedupe: bool) -> Option<String> {
         use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
@@ -1127,6 +1133,17 @@ impl CasCore {
         let rules = self.open_rule_store().ok();
         let tasks = self.open_task_store().ok();
         let mut lines = Vec::new();
+        let query_terms = recall_terms::content_terms(query);
+        let session = self.get_registered_agent_id_read_only().ok().and_then(|id| {
+            self.open_agent_store().ok()?.get(&id).ok().map(|agent| agent.cc_session_id.unwrap_or(id))
+        }).or_else(|| std::env::var("CAS_SESSION_ID").ok())
+            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok()).unwrap_or_default();
+        let relevant = |text: &str| {
+            let terms = recall_terms::content_terms(text);
+            // BM25 ranks even incidental single-word matches. Require two
+            // content terms (or the complete query when it has one term).
+            query_terms.iter().filter(|term| terms.contains(term)).count() >= query_terms.len().min(2).max(1)
+        };
 
         for hit in results {
             if lines.len() == RELATED_RECALL_LIMIT {
@@ -1137,7 +1154,7 @@ impl CasCore {
             }
             let line = match hit.doc_type {
                 DocType::Entry => store.as_ref().and_then(|store| {
-                    store.get(&hit.id).ok().map(|entry| {
+                    store.get(&hit.id).ok().filter(|entry| !entry.archived && relevant(&format!("{} {}", entry.title.as_deref().unwrap_or_default(), entry.content))).map(|entry| {
                         let title = entry.title.as_deref().unwrap_or("untitled memory");
                         format!(
                             "- Memory [{}]: {} — {}",
@@ -1149,7 +1166,7 @@ impl CasCore {
                 }),
                 DocType::Rule => rules.as_ref().and_then(|rules| {
                     rules.get(&hit.id).ok().and_then(|rule| {
-                        (!matches!(
+                        (relevant(&rule.content) && !matches!(
                             rule.status,
                             cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
                         ))
@@ -1161,7 +1178,7 @@ impl CasCore {
                 }),
                 DocType::Task => tasks.as_ref().and_then(|tasks| {
                     tasks.get(&hit.id).ok().and_then(|task| {
-                        (task.task_type == crate::types::TaskType::Epic).then(|| {
+                        (task.task_type == crate::types::TaskType::Epic && relevant(&format!("{} {}", task.title, task.description))).then(|| {
                             let detail = task.description.lines().next().unwrap_or_default();
                             format!(
                                 "- Past epic [{}]: {} — {}",
@@ -1177,6 +1194,7 @@ impl CasCore {
             if let Some(line) = line
                 && lines.iter().map(String::len).sum::<usize>() + line.len()
                     <= RELATED_RECALL_CHAR_CAP
+                && (!dedupe || crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id))
             {
                 lines.push(line);
             }
@@ -3572,7 +3590,10 @@ impl CasCore {
                 wt_info,
                 start_guidance,
             );
-            let context = format!("{advisory}{related_context}{cited_issues}");
+            let durable_recall = self.related_recall_context(
+                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
+            ).unwrap_or_default();
+            let context = format!("{advisory}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -5392,6 +5413,10 @@ mod related_recall_response_tests {
             .expect("create epic"),
         );
 
+        let repeated = text(core.cas_task_create_with_target(epic_request(
+            "Timeline import follow-up again", "Plan timeline import work for the next release."
+        ), None, None, true).await.expect("repeat create"));
+        assert!(!repeated.contains("m-recall-memory"), "repeated memory: {repeated}");
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
         assert!(
@@ -5401,8 +5426,8 @@ mod related_recall_response_tests {
     }
 
     /// cas-3e41 (GH #993): a qa-labelled task's create receipt and its
-    /// worker's first context (the start response) both carry the standing
-    /// golden-set memory, not only an epic's create receipt.
+    /// worker's durable start notes carry the standing golden-set memory.
+    /// A response in the same session does not repeat the create receipt.
     #[tokio::test]
     async fn qa_task_create_and_start_carry_the_golden_set_memory_cas_3e41() {
         let _env = TestEnvGuard::with_optional_vars(&[
@@ -5443,8 +5468,7 @@ mod related_recall_response_tests {
                 .await
                 .expect("start qa task"),
         );
-        assert!(started.contains("m-golden-set"), "{started}");
-        assert!(started.contains("QA golden test data"), "{started}");
+        assert!(!started.contains("m-golden-set"), "the same session already saw this memory: {started}");
         let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
         assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }
@@ -5807,6 +5831,7 @@ mod related_recall_response_tests {
 
     #[test]
     fn related_recall_is_bounded_by_result_count_and_character_cap() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_SESSION_ID", "bounded-recall")]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         for index in 0..6 {
@@ -5818,6 +5843,8 @@ mod related_recall_response_tests {
             );
         }
 
+        add_memory(&core, "m-weak-match", "Incidental keyword", "Keyword belongs to an unrelated outage.");
+        assert!(core.related_recall("unrelated bounded").is_none(), "single incidental matches stay quiet");
         let response = core
             .related_recall("bounded recall shared keyword")
             .expect("matching recall");

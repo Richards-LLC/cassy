@@ -108,6 +108,11 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         });
         assert_eq!(classify(&mut app), expected(&["cas-expired", "cas-free", "cas-own"]),
             "binding peer split and live peer claim cannot be assigned here; expired/local claims stay available");
+        for held in ["local", "id-local"] {
+            assert_eq!(app.supervisor_actionable_from_evidence(&app.unfiltered_director_data,
+                &Default::default(), &HashSet::from([held.to_string()]), now), None,
+                "a held worker cannot receive an assignment by either identity");
+        }
         // A split accepted after detection must retract the old assignment at
         // delivery, even while the loop still has its earlier ownership evidence.
         let detected = app.supervisor_actionable_from_evidence(&app.unfiltered_director_data,
@@ -147,6 +152,11 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         app.current_epic_id = None;
         assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
             "without focus, production evidence must still cover ready tasks and filter the live peer claim");
+        let request = assignment_evidence::AssignmentRequest::new(cas.clone(), &app.unfiltered_director_data).unwrap();
+        let mut closed = stores.task_store.get("cas-loose-free").unwrap();
+        closed.status = TaskStatus::Closed;
+        stores.task_store.update(&closed).unwrap();
+        assert!(!request.read().allows("cas-loose-free"), "live terminal state must override a stale ready snapshot");
 
     }).await.unwrap();
 }

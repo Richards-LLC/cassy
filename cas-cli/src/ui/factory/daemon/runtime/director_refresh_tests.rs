@@ -45,6 +45,11 @@ async fn r1_verification_wait_wakes(release: &str) {
         .unwrap()
         .register(&lead)
         .unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = tasks.get("cas-9efb-test").unwrap();
+    // This wait exercises a repository-independent proof, not the merge fixture's selector.
+    task.deliverables.work_target = None;
+    tasks.update(&task).unwrap();
     let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
     let dispatch = cas_store::create_verification_dispatch(
         &root,
@@ -54,8 +59,6 @@ async fn r1_verification_wait_wakes(release: &str) {
         deadline,
     )
     .unwrap();
-    let tasks = crate::store::open_task_store_local(&root).unwrap();
-    let mut task = tasks.get("cas-9efb-test").unwrap();
     task.status = TaskStatus::Blocked;
     task.notes = format!(
         "[{}] 🚫 BLOCKER {}",
@@ -166,7 +169,7 @@ async fn r1_verification_wait_wakes(release: &str) {
     }
     let rows = queue.peek_all(20).unwrap();
     assert_eq!(
-        rows.iter().filter(|row| row.target == lead.name
+        rows.iter().filter(|row| row.target != "merge-w"
             && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(),
         if release == "deadline" { 2 } else { 1 },
         "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"

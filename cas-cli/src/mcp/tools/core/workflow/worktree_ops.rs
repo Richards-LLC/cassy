@@ -152,8 +152,8 @@ impl BranchCiState {
 pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
     match lookup_branch_ci(sha, target, cwd).state {
-        BranchCiState::Green { sha, .. } if sha == ci_sha => CiStatus::Green,
-        BranchCiState::Red { sha, .. } if sha == ci_sha => CiStatus::Red,
+        BranchCiState::Green { sha: checked, .. } if checked == ci_sha || checked == sha => CiStatus::Green,
+        BranchCiState::Red { sha: checked, .. } if checked == ci_sha || checked == sha => CiStatus::Red,
         _ => CiStatus::Pending,
     }
 }
@@ -4772,6 +4772,26 @@ impl CasCore {
             }
         }
 
+        // Validate the retry's immutable identity before authorizing a new
+        // transaction. A moved delivery must not acquire MergeAuthorized.
+        let parked_source_tip = transactional_delivery.as_ref()
+            .map(|(receipt, _)| receipt.commit_sha.clone())
+            .or_else(|| scoped_task.as_deref()
+                .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
+            .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
+        if let Some(expected) = expected_delivery
+            && (parked_source_tip.as_deref() != Some(expected.sha.as_str())
+                || worktree.branch != expected.branch
+                || worktree.parent_branch != expected.target
+                || cwd != expected.repo)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("CI RETRY SOURCE MOVED: parked delivery changed after authorization; no merge was attempted."),
+                data: None,
+            });
+        }
+
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
         if let (Some((receipt, transaction)), Some(authority)) =
@@ -4945,23 +4965,6 @@ impl CasCore {
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
-        let parked_source_tip = transactional_delivery.as_ref()
-            .map(|(receipt, _)| receipt.commit_sha.clone())
-            .or_else(|| scoped_task.as_deref()
-                .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
-            .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
-        if let Some(expected) = expected_delivery
-            && (parked_source_tip.as_deref() != Some(expected.sha.as_str())
-                || worktree.branch != expected.branch
-                || worktree.parent_branch != expected.target
-                || cwd != expected.repo)
-        {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("CI RETRY SOURCE MOVED: parked delivery changed after authorization; no merge was attempted."),
-                data: None,
-            });
-        }
         let ci_source = remote_source.as_ref()
             .map(|source| source.anchor.as_str())
             .or(parked_source_tip.as_deref())

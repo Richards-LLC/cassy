@@ -45,6 +45,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **DESIGN.md first** - every report, page, chart, note, UI, terminal output, drawing or image an agent produces wears the target project's `DESIGN.md`; a project without one gets one through `design-spec`, and the task records which file and revision it used.
 - **Knowledge page** - a distilled, source-linked page about the current repository; the code index connects symbols to that context.
 
+- **Hosted queue precheck** - `cas release precheck <sha>` validates an exact commit on hosted CI and records its run; `--status` reports results and elapsed time. A supervisor's parked merge refused for pending CI resumes automatically on green for the authorized source, repository and target. Red CI or a moved lane sends one notice.
+
 ## Primary Journeys
 
 Commander labels each machine's reported Cassy version in its project chip and paired-machine card. A newer published stable release adds a quiet update note; an hourly cached lookup retains its last known release while offline. The Web footer separately identifies the client release and build. Each online supervisor with a known MCP version also shows its own version badge; an upgrade arrow marks a supervisor running an older Cassy than its machine has installed, with reconnect guidance. Unknown versions stay unreported.

@@ -3621,6 +3621,9 @@ mod tests {
     async fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
         use std::os::unix::fs::PermissionsExt;
 
+        let project = tempfile::tempdir().unwrap();
+        let worktree = project.path().canonicalize().unwrap();
+
         for (command, args, backend) in [
             (
                 "codex",
@@ -3654,6 +3657,7 @@ mod tests {
             let mut config = PtyConfig {
                 command: command.into(),
                 args: args.into_iter().map(str::to_owned).collect(),
+                cwd: Some(worktree.clone()),
                 env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
                 ..PtyConfig::default()
             };
@@ -3745,6 +3749,8 @@ mod tests {
                     "{argv}"
                 );
                 assert!(argv.contains(path.to_str().unwrap()), "{argv}");
+                assert!(path.starts_with(&worktree),
+                    "{backend} brief must stay inside its worktree for external_directory=deny: {}", path.display());
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
                 drop(pty);
                 assert!(!path.exists(), "worker teardown must remove the brief");

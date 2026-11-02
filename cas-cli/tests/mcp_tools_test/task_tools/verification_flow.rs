@@ -1162,7 +1162,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
         cas_store::defer_qa_batch_evidence(&cas_dir, id, &tips[index]).unwrap();
         if index == 3 {
             let mut rejected = Verification::new("ver-rejected".into(), id.clone());
-            rejected.status = VerificationStatus::Rejected;
+            rejected.status = cas::types::VerificationStatus::Rejected;
             add_exact_supervisor_fixture_verdict(&cas_dir, rejected, None);
         }
         cas_store::create_verification_dispatch(

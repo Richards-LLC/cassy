@@ -52,8 +52,6 @@ pub(crate) fn compact_receipt(
     ))
 }
 
-/// What the timed-out verification cycle was bound to.
-#[derive(Debug, Clone, Copy)]
 /// Keep advisory upkeep in the existing receipt channel. Failure to write the
 /// file leaves the task's durable upkeep notes as the fallback, never a nag.
 pub(crate) fn upkeep_receipt(
@@ -73,6 +71,8 @@ pub(crate) fn upkeep_receipt(
         })
 }
 
+/// What the timed-out verification cycle was bound to.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum VerificationTimeout<'a> {
     /// A typed dispatch exists and has been marked `timed_out`.
     Dispatch {

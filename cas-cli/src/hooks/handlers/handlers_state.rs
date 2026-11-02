@@ -1153,17 +1153,19 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable"] {
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable", "cas-override"] {
             assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
         }
         let tier_two_row = context.lines().find(|line| line.starts_with("- cas-tier-two:")).unwrap();
         assert!(tier_two_row.contains("expired") && tier_two_row.contains("dedicated verifier") && tier_two_row.contains("adversarial probe"), "Tier 2 must show its hold and required review: {tier_two_row}");
+        let override_row = context.lines().find(|line| line.starts_with("- cas-override:")).unwrap();
+        assert!(override_row.contains("CI override"), "discovery must name the independent-QA hold: {override_row}");
         let tier_zero_row = context.lines().find(|line| line.starts_with("- cas-tier-zero:")).unwrap();
         assert!(tier_zero_row.contains("mechanical"), "Tier 0 keeps mechanical close gates: {tier_zero_row}");
         assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
         assert!(!context.contains("task action=close id=cas-unmerged"), "unmerged work stays outside recovery: {context}");
-        for id in ["cas-override", "cas-live-review", "cas-dropped", "cas-rejected"] {
+        for id in ["cas-live-review", "cas-dropped", "cas-rejected"] {
             assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
         }
         assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");

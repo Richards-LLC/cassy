@@ -33,7 +33,7 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionsPath } from "./worker-visibility";
+import { sessionRunning, sessionStopped, sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
@@ -93,7 +93,7 @@ export interface HubCallbacks {
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
-  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number): void;
+  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number, stoppedSessions?: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
   /** `scrollback` is a pre-v3 daemon's raw pane bytes; a v3 daemon sends pane_bootstrap instead (cas-f285). */
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
@@ -242,6 +242,7 @@ export class HubConnectionSupervisor {
   private attempt = 0;
   private eventAbort?: AbortController;
   private catalogRequest?: Promise<HubSession[]>;
+  private readonly sessionBirths = new Map<string, string>();
   /** SSE and multiplexed events share this lane; event delivery never waits. */
   private readonly eventCatalog = new CoalescedRefresh(async () => {
     if (!this.desired || this.lifecycle.phase !== "live") return;
@@ -507,11 +508,25 @@ export class HubConnectionSupervisor {
       }
       this.transition("attaching", "attaching");
       const response = await this.withStageTimeout("attaching", (signal) => this.openEventStream(signal));
+      const recovering = this.connectionLost;
+      if (recovering) {
+        // After a machine outage it may have rebooted. Check the authoritative
+        // catalog before replaying any session demand or waiting messages.
+        try {
+          await this.refreshSessions(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+        } catch (error) {
+          // Missing catalog data is unknown. Health, auth and events already
+          // succeeded; only an authentication refusal invalidates that proof.
+          if (error instanceof AuthenticationError || this.eventAbort?.signal.aborted) {
+            this.eventAbort?.abort();
+            throw error;
+          }
+        }
+      }
       liveSince = Date.now();
       this.resumeStage = "resolving";
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
-      const recovering = this.connectionLost;
       this.connectionLost = false;
       this.transition("live", "live");
       // Catalog freshness is independent of authentication and transport.
@@ -519,7 +534,7 @@ export class HubConnectionSupervisor {
       this.startHeartbeat();
       // Event-stream loss alone does not condemn terminal transports that
       // still answer. A proved machine outage already abandoned them.
-      if (recovering) this.reattachDesired("Reconnected after the network changed");
+      if (recovering) this.reattachDesired("Reconnected");
       else this.ensureAttachesPending();
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after
@@ -724,9 +739,20 @@ export class HubConnectionSupervisor {
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
     signal.throwIfAborted();
     if (!this.catalogRequest) this.catalogRequest = (async () => {
-      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
+      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number; stopped_sessions?: HubSession[] }>("GET", sessionsPath(revealDormant()), undefined, signal);
       signal.throwIfAborted();
-      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+      const stopped = (response.stopped_sessions ?? []).filter(sessionStopped);
+      for (const session of [...stopped, ...response.sessions]) {
+        const previous = this.sessionBirths.get(session.name);
+        if (sessionStopped(session) || (previous && session.started_at && previous !== session.started_at)) this.setSessionEnded(session.name, true);
+      }
+      // Let the owner archive the old birth's words before any attach can
+      // announce Live and flush. Missing rows never retire stream demand.
+      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs, stopped);
+      for (const session of response.sessions.filter(sessionRunning)) {
+        if (session.started_at) this.sessionBirths.set(session.name, session.started_at);
+        this.setSessionEnded(session.name, false);
+      }
       return response.sessions;
     })().finally(() => { this.catalogRequest = undefined; });
     const request = this.catalogRequest;
@@ -980,6 +1006,7 @@ export class HubConnectionSupervisor {
     void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
   }
 
+  /** Stop the daemon through the hub; requires factory-manage. */
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }
@@ -1347,7 +1374,7 @@ export class HubConnectionSupervisor {
     else await installationLock(this.machine.id, rotate);
   }
 
-  /** A durable end receipt stops retries; transport closure alone does not. */
+  /** A confirmed stop or catalog removal fences retries; transport closure alone does not. */
   setSessionEnded(session: string, ended: boolean): void {
     if (!ended) {
       if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
@@ -1355,6 +1382,7 @@ export class HubConnectionSupervisor {
       }
       return;
     }
+    if (this.endedSessions.has(session)) return;
     this.endedSessions.add(session);
     // A daemon replacement can be preceded by the old daemon's end receipt.
     // Keep the requested stream separate from active demand: ended sessions
@@ -1368,6 +1396,7 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (socket) this.retireLegacySocket(socket);
     this.sockets.delete(session);
+    this.transitionAttach(session, "idle", "idle");
   }
 
   async attach(session: string): Promise<void> {

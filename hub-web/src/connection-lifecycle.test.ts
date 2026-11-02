@@ -64,7 +64,10 @@ function transport(multiplex = false) {
         init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
       });
       clock += 17;
-      return Response.json({ sessions: catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}` }] });
+      return Response.json({ sessions: [
+        ...(catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}`, supervisor: "supervisor", liveness: "live" }]),
+        ...["session-a", "session-b", "healthy", "a", "b", "c", "d"].map(name => ({ name, supervisor: "supervisor", workers: [], liveness: "live" })),
+      ] });
     }
     if (path === "/v1/events") {
       const signal = init!.signal as AbortSignal;
@@ -1298,6 +1301,62 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(subscriptions()).toHaveLength(2);
     expect(TransportSocket.instances).toHaveLength(1);
+  });
+
+  it("retains omitted sessions until explicit stop evidence, then resumes a running replacement", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("catalog-removal"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    const fetchNow = globalThis.fetch;
+    let listed = false;
+    let stopped = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(Response.json({ sessions: listed ? [{ name: "session-a", supervisor: "supervisor", workers: [], liveness: "live" }] : [],
+          stopped_sessions: stopped ? [{ name: "session-a", supervisor: "supervisor", workers: [], liveness: "stale_metadata" }] : [] }))
+        : fetchNow(input, init)));
+    await connection.refreshSessions();
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    stopped = true;
+    await connection.refreshSessions();
+    expect(connection.hasLiveAttach("session-a")).toBe(false);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Gone" } })).toBe(false);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+    await connection.attach("session-a");
+    expect(subscriptions()).toHaveLength(1);
+    listed = true;
+    await connection.refreshSessions();
+    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+  });
+
+  it("recovers transport after offline even when the catalog fails", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    const connection = supervisor(await storedMachine("catalog-recovery"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hints.dispatchEvent(new Event("offline"));
+    await waitFor(() => expect(connection.snapshot().phase).not.toBe("live"));
+    const original = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(new Response("catalog busy", { status: 503 })) : original(input, init)));
+    hints.dispatchEvent(new Event("online"));
+    await waitFor(() => expect(hub.streams.length).toBeGreaterThan(1));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(hub.streams.at(-1)!.signal.aborted).toBe(false);
   });
 
   it("keeps a responsive machine live when the session catalog fails under load", async () => {

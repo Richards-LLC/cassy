@@ -1,6 +1,174 @@
 import { test, expect, journeyPart } from "./journey";
-import { journeyDay, journeyNow, journeyStamp } from "./clock";
-import { HubDouble, SCOPES, type Machine } from "./hub-double";
+import { journeyDay, journeyStamp } from "./clock";
+import { SCOPES, type Machine } from "./hub-double";
+import { showConversationList } from "./responsive-goals";
+
+for (const identity of ["resume", "replacement", "unknown"] as const) {
+  test(`HUB-J14 held messages and drafts respect ${identity} session identity`, journeyPart, async ({ page, journey }) => {
+    const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "birth-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+    const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+    if (identity === "unknown") delete machine.sessions[0]!.started_at;
+    await journey.open(); await showConversationList(page);
+    await page.locator(".conversation-row").click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    if (identity === "unknown") {
+      await page.locator("#message-text").fill("Explicit send to the current live attach");
+      await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
+      await expect.poll(() => hub.sends.length).toBe(1);
+    }
+    await hub.down(machine.id, { sockets: "close" });
+    await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+    await page.locator("#message-text").fill("Held for the original session");
+    await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
+    await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+    await page.locator("#message-text").fill("Draft for the original session");
+    if (identity === "replacement") machine.sessions[0]!.started_at = journeyStamp();
+    await hub.up(machine.id);
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await journey.stage("Only the same session birth can keep its words", async () => {
+      if (identity === "replacement") {
+        await expect(page.locator("#message-text")).toHaveValue("");
+        expect(hub.sends).toHaveLength(0);
+        await showConversationList(page);
+        const saved = page.getByRole("region", { name: "Saved messages" });
+        await expect(saved).toContainText("Draft not sent");
+        await expect(saved).toContainText("Waiting message not sent");
+        for (const summary of await saved.locator("summary").all()) await summary.click();
+        await expect(saved).toContainText("Held for the original session");
+        await expect(saved).toContainText("Draft for the original session");
+      } else if (identity === "resume") {
+        await expect.poll(() => hub.sends.map(send => send.text)).toEqual(["Held for the original session"]);
+        await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
+      } else {
+        expect(hub.sends.map(send => send.text)).toEqual(["Explicit send to the current live attach"]);
+        await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+        await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
+      }
+    });
+  });
+}
+
+test("HUB-J14 a stopped catalog before journal restoration still exposes the saved message", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "restore-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await hub.down(machine.id, { sockets: "close" });
+  await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+  await page.locator("#message-text").fill("Restore before retiring my words");
+  await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
+  await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+  machine.sessions[0]!.liveness = "stale_metadata";
+  await page.addInitScript(() => {
+    const original = IDBFactory.prototype.open;
+    const pending: (() => void)[] = [];
+    let released = false;
+    (window as unknown as { releaseDelivery: () => void }).releaseDelivery = () => { released = true; pending.splice(0).forEach(run => run()); };
+    IDBFactory.prototype.open = function(...args: Parameters<IDBFactory["open"]>) {
+      const request = original.apply(this, args);
+      if (args[0] === "cas-commander-delivery-v1") {
+        const setter = Object.getOwnPropertyDescriptor(IDBRequest.prototype, "onsuccess")!.set!;
+        Object.defineProperty(request, "onsuccess", { set(callback) {
+          setter.call(request, (event: Event) => { const run = () => callback.call(request, event); if (released) run(); else pending.push(run); });
+        } });
+      }
+      return request;
+    };
+  });
+  await hub.up(machine.id); await page.reload();
+  await expect(page.locator(".conversation-row")).toHaveCount(0);
+  // Later polls fail: the first positive stopped response must be enough.
+  await page.route("https://atlas.test/v1/sessions", route => route.abort("failed"));
+  await page.evaluate(() => (window as unknown as { releaseDelivery: () => void }).releaseDelivery());
+  await journey.stage("Journal restoration applies the already confirmed stop", async () => {
+    const saved = page.getByRole("region", { name: "Saved messages" });
+    await expect(saved).toContainText("Waiting message not sent");
+    await saved.locator("summary").click();
+    await expect(saved).toContainText("Restore before retiring my words");
+    expect(hub.sends).toHaveLength(0);
+  });
+});
+
+test("HUB-J14 a live explicit send does not depend on a catalog read", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "live-send", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.route("https://atlas.test/v1/sessions", route => route.abort("failed"));
+  await page.locator("#message-text").fill("Send through the current live attach");
+  await page.locator("#message-send").click();
+  await journey.stage("A catalog failure cannot block this explicit send", async () => {
+    await expect.poll(() => hub.sends.map(send => send.text)).toEqual(["Send through the current live attach"]);
+  });
+});
+
+test("HUB-J14 upgrading a running session preserves a legacy draft", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "legacy", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.locator("#message-text").fill("Words written before birth tracking");
+  await page.addInitScript(() => {
+    const key = "cas-commander-conversation:drafts:v1";
+    const drafts = JSON.parse(localStorage.getItem(key) ?? "{}");
+    for (const row of Object.values(drafts) as { value: { id?: string; sessionStartedAt?: string } }[]) { delete row.value.sessionStartedAt; delete row.value.id; }
+    localStorage.setItem(key, JSON.stringify(drafts));
+  });
+  await page.reload();
+  await journey.stage("Missing birth is unknown, not evidence of a stopped session", async () => {
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#message-text")).toHaveValue("Words written before birth tracking");
+    await expect(page.getByText("Draft not sent", { exact: true })).toHaveCount(0);
+    expect(hub.sends).toHaveLength(0);
+  });
+});
+
+test("HUB-J14 an old rejected send cannot settle the replacement's in-flight message", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "replacement", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await hub.down(machine.id, { sockets: "close" });
+  await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+  await page.locator("#message-text").fill("Old held words"); await page.locator("#message-send").click();
+  await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+  machine.sessions[0]!.started_at = journeyStamp(); await hub.up(machine.id);
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await expect(page.getByRole("log").locator('.bub[data-state="error"]')).toContainText("Old held words");
+  await page.locator("#message-text").fill("New send A"); await page.locator("#message-send").click();
+  await expect.poll(() => hub.sends.length).toBe(1);
+  await page.locator("#message-text").fill("New send B"); await page.locator("#message-send").click();
+  await journey.stage("New sends keep their own receipt state", async () => {
+    await expect.poll(() => hub.sends.length).toBe(2);
+    await expect(page.getByRole("log").locator('.bub[data-state="sending"]')).toHaveCount(2);
+    await expect(page.getByRole("log").locator('.bub[data-state="unconfirmed"]')).toHaveCount(0);
+  });
+});
+
+test("HUB-J14 a failed stopped-draft archive retains its durable words", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "archive", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
+  const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
+  await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  await page.locator("#message-text").fill("Keep these words if storage fails");
+  await page.evaluate(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function(...args: Parameters<IDBObjectStore["put"]>) {
+      if (this.name === "attention") throw new DOMException("controlled archive failure", "QuotaExceededError");
+      return put.apply(this, args);
+    };
+  });
+  machine.sessions[0]!.started_at = journeyStamp(); await hub.announceCatalog(machine.id);
+  await expect(page.getByRole("region", { name: "Saved messages" })).toContainText("Browser storage could not save this draft");
+  await journey.stage("Failed archival leaves the original durable draft available after reload", async () => {
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("cas-commander-conversation:drafts:v1"))).toContain("Keep these words if storage fails");
+    await page.reload();
+    const saved = page.getByRole("region", { name: "Saved messages" });
+    await expect(saved).toContainText("Draft not sent"); await saved.locator("summary").click();
+    await expect(saved).toContainText("Keep these words if storage fails");
+    expect(hub.sends).toHaveLength(0);
+  });
+});
 
 // cas-55a4: three live gabber-studio sessions on one machine, as the
 // operator's Pixel saw them on 2026-09-30. noble-cheetah-84 wrote to Commander
@@ -330,9 +498,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
   };
   machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
     name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
-  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000),
-  // QA cas-51f6 F02: a project whose only session has ended.
-  { ...endedSession("quiet-otter-12", -4 * 3_600_000), project: "old-demo", project_dir: "/projects/old-demo" }];
+  }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000)];
   const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
     [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
@@ -365,110 +531,64 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(pulseMachine).toBeVisible();
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
     const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
-    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
-    // Operator ruling 2026-11-01: green is active, muted green is idle, gray is
-    // disconnected. The live idle supervisor reads muted green, never gray.
-    const dots = await page.evaluate(([live, gone]) => {
-      const fill = (value: string) => { const probe = document.body.appendChild(document.createElement("span")); probe.style.background = value; const rgb = getComputedStyle(probe).backgroundColor; probe.remove(); return rgb; };
-      return { live: getComputedStyle(live!).backgroundColor, gone: getComputedStyle(gone!).backgroundColor, active: fill("var(--state-ok)"), idle: fill("var(--state-idle)"), off: fill("var(--state-off)") };
-    }, [await liveSupervisor.locator(".supervisor-state").elementHandle(), await ended.locator(".supervisor-state").elementHandle()] as const);
-    const [red, green, blue] = dots.live.match(/\d+/g)!.map(Number);
-    expect(green).toBeGreaterThan(Math.max(red!, blue!));
-    expect(dots.live).toBe(dots.idle);
-    expect(dots.live).not.toBe(dots.active);
-    expect(dots.gone).toBe(dots.off);
-    await expect(ended.locator(".conversation-preview")).toHaveText("Ended");
-    await expect(ended.locator(".conversation-when")).toBeVisible();
-    await expect(ended.locator(".supervisor-state")).toHaveClass(/offline/);
-    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
-    const clearEnded = old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true });
-    await clearEnded.scrollIntoViewIfNeeded();
-    await expect(clearEnded).toBeInViewport();
-  });
-
-  await journey.stage("An ended row offers Dismiss, while the live row stays protected", async () => {
-    const old = list.getByRole("group", { name: /^pulse-card ·/ });
-    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
-    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
-    await ended.scrollIntoViewIfNeeded();
-    await expect(old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true })).toBeVisible();
-    await expect(old.getByRole("button", { name: "Dismiss ended session golden-jaguar-44", exact: true })).toHaveCount(0);
-    await expect(liveSupervisor).toBeVisible();
+    await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
+    await expect(old.locator(".conversation-row")).toHaveCount(1);
+    await expect(old.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
   });
 
   for (const mode of ["light", "dark", "forced-colors"] as const) {
-    await journey.stage(`Live idle stays distinct from offline in ${mode}`, async () => {
+    await journey.stage(`Running idle stays green in ${mode}`, async () => {
       await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
       const card = list.getByRole("group", { name: /^pulse-card ·/ });
       const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
-      const offline = card.locator(".conversation-row").filter({ hasText: "watchful-heron-16" }).getByRole("img", { name: "Offline", exact: true });
       await card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).click();
       await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
       await expect(idle).toHaveAttribute("title", "Idle");
-      await expect(offline).toHaveAttribute("title", "Offline");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
-      expect(await look(idle)).not.toEqual(await look(offline));
-      // Operator ruling 2026-11-01: a live idle dot is filled muted green, a
-      // stopped one filled gray, and neither carries the old hollow ring.
+      const idleLook = await look(idle);
       if (mode !== "forced-colors") {
-        expect((await look(offline))[0]).not.toBe((await look(idle))[0]);
-        expect(await idle.evaluate(node => getComputedStyle(node).outlineStyle)).toBe("none");
-      } else {
-        expect((await look(idle))[3]).not.toBe((await look(offline))[3]);
+        const idleFill = await idle.evaluate(node => {
+          const probe = document.body.appendChild(document.createElement("span"));
+          probe.style.background = "var(--state-idle)";
+          const fill = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return fill;
+        });
+        expect(idleLook[0]).toBe(idleFill);
       }
+      // Gray belongs to an unreachable machine's last-known running row.
+      await hub.down("atlas", { sockets: "close" });
+      const offline = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Offline", exact: true });
+      await expect(offline).toHaveAttribute("title", "Offline");
+      expect(await look(offline)).not.toEqual(idleLook);
+      await hub.up("atlas");
+      await expect(idle).toHaveAttribute("title", "Idle");
     });
   }
   await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
 
-  await journey.stage("Dismiss on the phone and keep ended sessions hidden on the desktop", async () => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await back();
+  await journey.stage("Stopped sessions stay hidden on phone and desktop, and a running replacement returns (cas-f8ab)", async () => {
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
-    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
-    const ended = old.locator(".conversation-row").filter({ hasText: "watchful-heron-16" });
-    await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
-    await expect(ended).toHaveCount(0);
-    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(1);
-    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(4);
-    await old.getByRole("button", { name: "Clear ended sessions in pulse-card", exact: true }).click();
-    await expect(old.locator(".conversation-row")).toHaveCount(1);
-    await expect(old.locator(".conversation-topline .conversation-action")).toBeHidden();
-    await expect(liveSupervisor).toBeVisible();
-    expect(hub.machine("atlas").sessions.filter((session) => session.ended)).toHaveLength(4);
-    // The hub keeps the preference; a fresh browser has no local dismissal keys.
-    await expect.poll(() => hub.machine("atlas").sessions.filter(row => row.dismissed).length).toBe(3);
-    for (let tick = 0; tick < 3; tick++) {
-      for (const row of hub.machine("atlas").sessions) if (row.ended) row.ended.at = journeyStamp(tick * 1000);
-      await hub.announceCatalog("atlas");
+    for (const width of [390, 1280]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await back();
       await expect(old.locator(".conversation-row")).toHaveCount(1);
+      await expect(list.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
     }
-    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
-    try {
-      const desktop = await context.newPage();
-      await desktop.clock.install({ time: journeyNow() });
-      const otherDevice = new HubDouble(desktop, { machines: [machine, other], paired: ["atlas", "borealis"] });
-      await otherDevice.install();
-      await desktop.goto(page.url());
-      await otherDevice.seedPaired();
-      await desktop.reload();
-      const desktopRows = desktop.locator("#conversation-list .project-card").filter({ hasText: "pulse-card" }).locator(".conversation-row");
-      await expect(desktopRows).toHaveCount(1);
-      await desktop.reload();
-      await expect(desktopRows).toHaveCount(1);
-      // Reusing a supervisor name with a new birth must appear when it ends.
-      const replacement = { ...endedSession("watchful-heron-16", 60_000), started_at: journeyStamp(30_000) };
-      machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
-      await hub.announceCatalog("atlas");
-      await expect(old.locator(".conversation-row")).toHaveCount(2);
-      await old.getByRole("button", { name: "Dismiss ended session watchful-heron-16", exact: true }).click();
-      await expect.poll(() => machine.sessions.find(row => row.name === replacement.name)?.dismissed).toBe(true);
-      await desktop.reload();
-      await expect(desktopRows).toHaveCount(1);
-    } finally { await context.close(); }
+    // The metadata and history are retained; navigation is strictly running sessions.
+    expect(hub.machine("atlas").sessions.filter(session => session.ended)).toHaveLength(3);
+    const replacement = { ...endedSession("watchful-heron-16", 60_000), liveness: "live" as const, ended: undefined, machine_online: true };
+    machine.sessions = machine.sessions.map(row => row.name === replacement.name ? replacement : row);
+    await hub.announceCatalog("atlas");
+    await expect(old.locator(".conversation-row")).toHaveCount(2);
+    machine.sessions = machine.sessions.map(row => row.project === "pulse-card" ? { ...row, liveness: "stale_metadata" as const } : row);
+    await hub.announceCatalog("atlas");
+    await expect(old).toHaveCount(0);
+    machine.sessions = machine.sessions.map(row => row.name === "golden-jaguar-44" ? { ...row, liveness: "live" as const } : row);
+    await hub.announceCatalog("atlas");
+    await expect(old.locator(".conversation-row")).toHaveCount(1);
     await page.reload();
     await expect(old.locator(".conversation-row")).toHaveCount(1);
-    await expect(old.locator(".conversation-row").filter({ hasText: "solid-parrot-40" })).toHaveCount(0);
-    await expect(list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toContainText("calm-puma-34");
     const capture = process.env.FULL_NAV_CAPTURE_DIR;
     const widths = capture ? [1280, 390] : [390];
     const schemes = capture ? ["light", "dark", "forced-colors"] as const : ["forced-colors"] as const;
@@ -486,62 +606,6 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     if (process.env.FULL_NAV_CAPTURE_DIR) await page.screenshot({ path: `${process.env.FULL_NAV_CAPTURE_DIR}/a11y-contrast-more.png` });
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "no-preference" });
-  });
-
-  await journey.stage("A dismissed session in an ended-only project stays reachable", async () => {
-    const demo = () => list.getByRole("group", { name: /^old-demo ·/ });
-    const otter = (scope: ReturnType<typeof demo>) => scope.locator(".conversation-row").filter({ hasText: "quiet-otter-12" });
-    await demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true }).click();
-    await expect(demo()).toHaveCount(0);
-    const search = page.getByRole("searchbox", { name: "Search conversations" });
-    await search.fill("quiet-otter");
-    await expect(otter(demo())).toHaveCount(1);
-    await search.fill("");
-    await expect(demo()).toHaveCount(0);
-    const reveal = list.getByRole("button", { name: "Show 4 dismissed sessions", exact: true });
-    await reveal.click();
-    await expect(otter(demo())).toHaveCount(1);
-    await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(4);
-    await demo().getByRole("button", { name: "Restore dismissed session quiet-otter-12", exact: true }).click();
-    // The hub lifts the shared tombstone, so a reload cannot hide it again.
-    await expect.poll(() => hub.machine("atlas").sessions.find(row => row.name === "quiet-otter-12")?.dismissed).toBe(false);
-    await list.getByRole("button", { name: "Hide 3 dismissed sessions", exact: true }).click();
-    await expect(list.getByRole("group", { name: /^pulse-card ·/ }).locator(".conversation-row")).toHaveCount(1);
-    await expect(demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true })).toBeVisible();
-    await page.reload();
-    await expect(otter(demo())).toHaveCount(1);
-  });
-
-  await journey.stage("A restore on another browser survives the browser that dismissed", async () => {
-    const demo = () => list.getByRole("group", { name: /^old-demo ·/ });
-    const otterRow = demo().locator(".conversation-row").filter({ hasText: "quiet-otter-12" });
-    const tombstone = () => machine.sessions.find(row => row.name === "quiet-otter-12")?.dismissed;
-    await demo().getByRole("button", { name: "Dismiss ended session quiet-otter-12", exact: true }).click();
-    await expect.poll(tombstone).toBe(true);
-    await expect(demo()).toHaveCount(0);
-    const context = await page.context().browser()!.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
-    try {
-      const second = await context.newPage();
-      await second.clock.install({ time: journeyNow() });
-      const secondHub = new HubDouble(second, { machines: [machine, other], paired: ["atlas", "borealis"] });
-      await secondHub.install();
-      await second.goto(page.url());
-      await secondHub.seedPaired();
-      await second.reload();
-      const secondList = second.getByRole("navigation", { name: "Choose a supervisor" });
-      await secondList.getByRole("button", { name: /^Show \d+ dismissed sessions?$/ }).click();
-      await second.getByRole("button", { name: "Restore dismissed session quiet-otter-12", exact: true }).click();
-      await expect.poll(tombstone).toBe(false);
-    } finally { await context.close(); }
-    // The first browser's next reads show the restored row and post nothing.
-    for (let read = 0; read < 2; read++) {
-      await hub.announceCatalog("atlas");
-      await expect(otterRow).toHaveCount(1);
-      expect(tombstone()).toBe(false);
-    }
-    await page.reload();
-    await expect(otterRow).toHaveCount(1);
-    expect(tombstone()).toBe(false);
   });
 
   await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
@@ -580,8 +644,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
     await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
     await filters.getByRole("button", { name: "All", exact: true }).click();
-    // Studio's two rows, pulse-card's live row and the restored old-demo row.
-    await expect(list.locator(".conversation-row")).toHaveCount(4);
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     // A kept catalog's positive online bit must yield to a lost connection.
     await hub.down("atlas", { sockets: "close" });
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, offline", exact: true })).toBeVisible();

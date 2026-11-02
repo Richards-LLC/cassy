@@ -21,6 +21,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Bounded verification and background waits** — Was: an approved verdict could leave a task blocked forever, a close retry after the expiry relay could wake the supervisor twice, and a missing background completion kept a worker busy indefinitely. → Now: an unretried approval escalates once after five minutes, pending and timed-out dispatches share one expiry relay, and silent native background jobs become stalled after the configured stall window.
 
+### Fixed — Factory coordination
+
+- **Quiet idle turns and peer FYIs** — Refuse delay reminders that poll inbox or external status, with event/completion guidance; omit content-free supervisor status bubbles in Commander and keep untyped peer FYIs quiet while retaining explicit actions.
+
+
 ## [3.97.0] - 2026-11-02
 
 ### Fixed — Candidate build queue

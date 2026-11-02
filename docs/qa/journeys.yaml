@@ -246,6 +246,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-NO-ACTION-WAKES:
+    statement: Idle supervisor acknowledgements produce no Commander bubble; peer FYIs do not wake and status polling timers are refused.
+    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify a direct answer, an actionable peer ask/status and an actual deadline still work.'
+    bug: {task: cas-1791}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
     check: 'Run hub::server::upstream_unavailable_tests and the HUB-J5 message-only/Send again journey parts;

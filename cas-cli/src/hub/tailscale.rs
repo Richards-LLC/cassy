@@ -225,7 +225,7 @@ impl TailscaleServeManager {
                         && handlers == vec![("/".to_owned(), previous.local_target.clone())])
                         || self.dead_recorded_mapping(https_port, &handlers).is_some()
                         || dead_known_target(prior_target.as_ref(), https_port, &handlers),
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                    "{}", self.mapping_conflict(https_port)
                 );
                 self.run(&[
                     "serve".into(),
@@ -253,7 +253,7 @@ impl TailscaleServeManager {
                 true
             } else {
                 anyhow::bail!(
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                    "{}", self.mapping_conflict(https_port)
                 )
             }
         };
@@ -499,6 +499,20 @@ impl TailscaleServeManager {
     /// changing the user's Tailscale configuration.
     pub fn serve_handlers(&self, https_port: u16) -> Result<Vec<(String, String)>> {
         Ok(handlers_on_port(&self.serve_status()?, https_port))
+    }
+
+    fn mapping_conflict(&self, https_port: u16) -> String {
+        let mut cli = shell_words::quote(&self.executable_display()).into_owned();
+        if let Some(socket) = &self.socket {
+            cli.push(' ');
+            cli.push_str(&shell_words::quote(&format!("--socket={}", socket.to_string_lossy())));
+        }
+        format!(
+            "tailscale Serve HTTPS port {https_port} is already owned by another mapping\n\
+             Inspect: {cli} serve status\n\
+             Only if safe to remove: {cli} serve --https={https_port} off\n\
+             Then run `cas hub restart --tailscale-serve`."
+        )
     }
 
     fn status(&self) -> Result<Value> {

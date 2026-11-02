@@ -491,7 +491,9 @@ fn render(report: &LedgerReport) -> String {
         );
     }
     if report.features.is_empty() {
-        let _ = writeln!(out, "  none with known scope");
+        let _ = writeln!(out, "  {}", if report.excluded_unscoped_measurements == 0 {
+            "none recorded"
+        } else { "none with known scope" });
     }
     for (feature, row) in &report.features {
         let mut parts = Vec::new();

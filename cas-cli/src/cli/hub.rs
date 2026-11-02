@@ -2224,11 +2224,13 @@ fn serve_foreground_logged(
             (None, None, None)
         };
         record.public_url = tailscale.as_ref().map(|receipt| receipt.public_url.clone());
-        record.tailscale_serve_port = tailscale.as_ref().map(|receipt| receipt.https_port);
-        // Keep the requested transport as durable lifecycle intent even when
-        // optional publication falls back to loopback with a warning.
-        record.tailscale_serve_target =
-            tailscale.as_ref().map(|receipt| receipt.local_target.clone());
+        // Auto fallback can be a successful local start while the old Serve
+        // route still points at a dead shim. Keep exact legacy ownership for
+        // the later signed-in restart; public_url never advertises it as ready.
+        if let Some(receipt) = &tailscale {
+            record.tailscale_serve_port = Some(receipt.https_port);
+            record.tailscale_serve_target = Some(receipt.local_target.clone());
+        }
         record.transport_warning = transport_warning;
         paths.write_process_record(&record)?;
 
@@ -3821,8 +3823,7 @@ pub(crate) fn hub_transport_report(
     }
     let Some(receipt) = receipt else {
         if record.is_some_and(|record| {
-            record.tailscale_serve_target.is_some()
-                || (tailscale_enabled(record) && record.transport_warning.is_none())
+            tailscale_enabled(record) && record.transport_warning.is_none()
         }) {
             return HubTransportReport::fail(
                 "the hub record advertises Tailscale Serve but its CAS ownership receipt is missing",

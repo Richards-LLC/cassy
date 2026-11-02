@@ -1041,11 +1041,19 @@ fn auto_service_without_tailscale_keeps_healthy_loopback() {
             install_tailscale_mock(home.path(), &bin.join("tailscale"),
                 &format!("#!/bin/sh\nprintf '%s' '{{\"BackendState\":\"{cause}\",\"Self\":{{}}}}'\n"));
         }
+        let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let (dead_port, _reservation) = reserve_refused_loopback_port();
+        let old_target = format!("http://127.0.0.1:{dead_port}");
+        let old_record = serde_json::from_value(serde_json::json!({
+            "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "old",
+            "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+            "tailscale_serve_target": old_target
+        })).unwrap();
+        paths.write_process_record(&old_record).unwrap();
         let mut child = cas_process_command(home.path(), bin.as_os_str())
             .args(["hub", "serve", "--port", "0", "--launched-by", "service", "--tailscale-serve"])
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let _cleanup = LegacyHubCleanup(vec![child.id()]);
-        let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
         let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
         loop {
             if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
@@ -1056,6 +1064,8 @@ fn auto_service_without_tailscale_keeps_healthy_loopback() {
         let record = paths.read_process_record().unwrap();
         assert!(record.public_url.is_none());
         assert!(record.transport_warning.is_some(), "fallback must explain {cause}");
+        assert_eq!(record.tailscale_serve_target.as_deref(), Some(old_target.as_str()),
+            "loopback fallback must retain exact legacy ownership for recovery");
         assert!(ureq::get(&format!("http://127.0.0.1:{}/v1/health", record.port))
             .timeout(Duration::from_secs(1)).call().is_ok());
         let output = cas_command(home.path(), bin.as_os_str())

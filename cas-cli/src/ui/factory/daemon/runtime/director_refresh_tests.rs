@@ -774,6 +774,7 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
             super::super::delivery::parse_director_prompt(&row.target, &row.prompt).unwrap();
         assert_eq!(prompt.retract_task.as_deref(), Some("cas-9efb-test"));
         if scenario.starts_with("superseded") {
+            // pin: a withdrawn delivery must be labelled superseded and must never ask for a merge.
             assert!(prompt.text.contains("Superseded delivery"));
             assert!(!prompt.text.contains("MERGE REQUIRED"));
         }

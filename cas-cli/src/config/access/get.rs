@@ -162,6 +162,7 @@ impl Config {
             "factory.block_stale_assignment" => Some(factory.block_stale_assignment.to_string()),
             "factory.stale_threshold_commits" => Some(factory.stale_threshold_commits.to_string()),
             "factory.stall_threshold_secs" => Some(factory.stall_threshold_secs.to_string()),
+            "factory.restart_worker_between_tasks" => Some(factory.restart_worker_between_tasks.to_string()),
             "factory.context_recycle_threshold_percent" => Some(factory.context_recycle_threshold_percent.to_string()),
             "factory.stall_after_secs" => Some(factory.stall_after_secs.to_string()),
             "factory.delivery_stalled_priority_secs" => Some(factory.delivery_stalled_priority_secs.to_string()),

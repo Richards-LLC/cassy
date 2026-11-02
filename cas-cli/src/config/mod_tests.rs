@@ -1113,6 +1113,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.block_stale_assignment", "false", "false"),
         ("factory.stale_threshold_commits", "3", "3"),
         ("factory.stall_threshold_secs", "420", "420"),
+        ("factory.restart_worker_between_tasks", "true", "true"),
         ("factory.context_recycle_threshold_percent", "85", "85"),
         ("factory.stall_after_secs", "900", "900"),
         ("factory.delivery_stalled_priority_secs", "120", "120"),

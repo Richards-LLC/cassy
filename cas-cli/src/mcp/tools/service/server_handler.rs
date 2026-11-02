@@ -1714,22 +1714,25 @@ mod tests {
         store.update(&worker).unwrap();
         let mut config = crate::config::Config::load(&root).unwrap();
         config.factory.get_or_insert_with(Default::default).context_recycle_threshold_percent = 50;
-        config.save(&root).unwrap();
-        for (input, window, expected) in [(226000, Some(475000), None),
-            (268000, Some(475000), Some("context used: 56%")),
-            (268000, Some(475000), None), // Same occupancy bucket is not repeated.
-            (28000, Some(475000), None), (268000, None, Some("context used: unknown"))] {
-            let row = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count",
-                "info":{"total_token_usage":{"input_tokens":9000000},
-                "last_token_usage":{"input_tokens":input}, "model_context_window":window}}});
-            std::fs::write(&rollout, format!("{row}\n")).unwrap();
-            let output = service.append_factory_context(Ok(CasCore::success("original result"))).await.unwrap();
-            let text = serde_json::to_string(&output).unwrap();
-            assert!(text.contains("original result"));
-            if let Some(expected) = expected {
-                assert!(text.contains(expected), "{text}");
-            } else {
-                assert!(!text.contains("context used:"), "{text}");
+        for restart in [false, true] {
+            config.factory.as_mut().unwrap().restart_worker_between_tasks = restart;
+            config.save(&root).unwrap();
+            for (input, window, expected) in [(226000, Some(475000), None),
+                (268000, Some(475000), Some("context used: 56%")),
+                (268000, Some(475000), None), // Same occupancy bucket is not repeated.
+                (28000, Some(475000), None), (268000, None, Some("context used: unknown"))] {
+                let row = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count",
+                    "info":{"total_token_usage":{"input_tokens":9000000},
+                    "last_token_usage":{"input_tokens":input}, "model_context_window":window}}});
+                std::fs::write(&rollout, format!("{row}\n")).unwrap();
+                let output = service.append_factory_context(Ok(CasCore::success("original result"))).await.unwrap();
+                let text = serde_json::to_string(&output).unwrap();
+                assert!(text.contains("original result"));
+                if let Some(expected) = expected {
+                    assert!(text.contains(expected), "{text}");
+                } else {
+                    assert!(!text.contains("context used:"), "{text}");
+                }
             }
         }
     }

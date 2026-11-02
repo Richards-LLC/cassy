@@ -245,6 +245,12 @@ impl Config {
                     MemError::Parse(format!("Invalid integer value for factory.stall_threshold_secs: {value}"))
                 })?;
             }
+            "factory.restart_worker_between_tasks" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.restart_worker_between_tasks = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.restart_worker_between_tasks: {value}"))
+                })?;
+            }
             "factory.context_recycle_threshold_percent" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.context_recycle_threshold_percent = value.parse().map_err(|_| {

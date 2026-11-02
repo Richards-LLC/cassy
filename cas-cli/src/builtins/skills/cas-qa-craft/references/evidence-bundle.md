@@ -24,8 +24,11 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use this bundle with `@playwright/test` **1.64+**.
-Older Playwright means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
+Rendered web/hub cells use this bundle with `@playwright/test` **^1.63**.
+Playwright below 1.63 means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
+The 1.64 recording and agent features are optional: use them only when the
+project's installed version supports them. Valid 1.63 captures remain acceptable;
+missing optional 1.64 features do not make a cell NOT EXERCISED.
 
 ## Layout
 
@@ -262,11 +265,11 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
-Use 10 fps for QA screencasts to reduce the encoder backlog.
-Playwright 1.64 encodes VP9 automatically and exposes `fps` on `use.video`,
-`recordVideo` and `screencast.start`; keep this cap until a measured shard
-supports changing it. Firefox/WebKit capture at most 25 fps. Action decoration
-uses `showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
+The example keeps 1.63-compatible recording options. On 1.64, optionally use
+10 fps to reduce encoder backlog: it encodes VP9 automatically and exposes `fps`
+on `use.video`, `recordVideo` and `screencast.start`. Omit `fps` on 1.63.
+Firefox/WebKit capture at most 25 fps. Optional 1.64 action styling uses
+`showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
 `fontSize`; `style.point` and `style.highlight` also accept CSS declarations.
 Use the project's type tokens when styling; see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
 The worked example below is self-contained for other projects. Its chapter
@@ -321,7 +324,7 @@ const visualChange = true; // match bundle.json visual_change for this delivery
 
 test('cas-1234 demo: filter to no matches', async ({ page }) => {
   if (visualChange) {
-    await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()!, fps: 10 });
+    await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()! });
     await page.screencast.showActions({ position: 'top-right' });
   }
   await page.goto('/');

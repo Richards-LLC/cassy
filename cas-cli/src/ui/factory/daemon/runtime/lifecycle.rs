@@ -5270,6 +5270,7 @@ mod stall_nudge_routing_rework_tests {
             let rows = queue.peek_all(10).unwrap();
             assert_eq!(rows.len(), 1, "every director wake needs a durable row, including ready panes");
             let row = &rows[0];
+            // pin: the persisted director channel is the turn ledger's attribution contract.
             assert_eq!(row.source, "director");
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
             assert_eq!(row.factory_session.as_deref(), Some(daemon.session_name.as_str()));

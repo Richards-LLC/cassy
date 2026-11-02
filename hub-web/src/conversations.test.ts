@@ -584,21 +584,12 @@ describe('conversation evidence', () => {
     expect(preview.endsWith('…')).toBe(true);
     expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: longReply, selected: false })).toContain(`>${preview}</span>`);
   });
-  it('names an unreachable session with a pending instruction on its row, over the last turn (cas-7294)', () => {
-    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Unreachable · message pending', attention: 0, preview: 'You: Keep this instruction visible.', selected: false };
-    expect(conversationRowMarkup({ ...row, unreachable: true })).toContain('<span class="conversation-preview unreachable">Unreachable · message pending</span>');
-    const dormant = visibleCatalog([{ name: 's', supervisor: 'sup', workers: [], liveness: 'live', dormant: true }], () => true)[0];
-    const connection = pendingSessionLabel(dormant, true)!;
-    // pin: a Connected machine must not be called unreachable when its supervisor has not taken the message.
-    expect(connection).toBe('Waiting for supervisor');
-    expect(conversationRowMarkup({ ...row, unreachable: dormant.unreachable, connection })).toContain('<span class="conversation-preview unreachable">Waiting for supervisor</span>');
-    expect(pendingSessionLabel(dormant, false)).toBe(row.connection);
-    for (const state of ['Connecting', 'Reconnecting']) {
-      expect(pendingSessionLabel(dormant, false, state)).toBe(`${state} · message pending`);
-    }
-    // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
-    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
-    expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
+  it('does not repeat a machine outage or retain a stopped supervisor for a pending instruction (cas-f8ab)', () => {
+    const dormant = { name: 's', supervisor: 'sup', workers: [], liveness: 'stale_metadata' as const, dormant: true, unreachable: true };
+    expect(visibleCatalog([dormant])).toEqual([]);
+    expect(pendingSessionLabel(dormant, false)).toBeUndefined();
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', attention: 0, preview: 'Keep this instruction visible.', selected: false };
+    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Keep this instruction visible.</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };

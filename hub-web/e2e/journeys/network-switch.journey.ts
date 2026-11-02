@@ -89,7 +89,7 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     await expect(held).toHaveCount(2);
     // cas-a6f0 (journey F8): the composer names the outage the banner names.
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
-    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
     hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
     await clock.advance(1_000);
@@ -148,22 +148,22 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
         await expect(page.getByText("All clear").filter({ visible: true })).toHaveCount(0);
         await expect(page.getByText(/degraded|connection dropped/i).filter({ visible: true })).toHaveCount(0);
         await sendNow(page, "While unsteady");
-        await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-        await expect(page.locator("#message-status")).toHaveText("Connection to Atlas · Linux unsteady — checking… Your message will go out by itself when it's back.");
+        await expect(held).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
+        await expect(page.locator("#message-status")).toHaveText("Connection to Atlas · Linux unsteady — checking… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
         expect(sentTimes(hub, "While unsteady")).toBe(0);
       }
       if (beat === 3) await expect(header).toHaveText(" · Unsteady");
     }
     await expect(header).toHaveText(" · Reconnecting");
-    await expect(row).toHaveText("Reconnecting");
+    await expect(row).toHaveText("You: While unsteady");
     await expect(footer).toHaveText("Reconnecting");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // The composer's line follows the outage from unsteady to lost.
-    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
     await sendNow(page, "While Tailscale is off");
     await expect(held).toHaveCount(2);
-    await expect(held.last()).toHaveText("Waiting for the connection — sends when it's back");
-    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+    await expect(held.last()).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
     // Negative window: a held message must survive a failed reconnect unsent.
     await clock.advance(5_000);
     expect(sentTimes(hub, "While unsteady")).toBe(0);
@@ -298,7 +298,7 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
     await expect(banner.locator(".banner-text")).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
     await expect(banner).toHaveAttribute("data-scope", "session");
     await expect(footer).toHaveText("Connected");
-    await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself when it's back.");
+    await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
     expect(hub.sends).toHaveLength(0);
     hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
@@ -368,6 +368,10 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
     await sendNow(page, "While the daemon stays down");
     await expect(held).toHaveCount(1);
     await firstRefusal;
+    // cas-1c0e: initial copy discloses the finite wait; Cancel stays available.
+    await expect(held).toContainText("2 minutes");
+    await expect(page.locator("#message-status")).toContainText("2 minutes after Send. After that, use Edit or Retry.");
+    await expect(page.getByRole("button", { name: "Cancel waiting message" })).toBeVisible();
     // Exercise reholding, which must preserve the ORIGINAL expiry.
     for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
     await clock.advance(112_999);
@@ -386,7 +390,10 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).not.toContainText("go out by itself");
     expect(hub.sends).toHaveLength(0);
+    await expect(log.getByRole("button", { name: "Edit message", exact: true })).toBeVisible();
     hub.upstreamBack(PELICAN);
+    await clock.advance(8_000);
+    expect(hub.sends).toHaveLength(0); // Later recovery cannot revive an expired auto-send.
     const next = hub.nextSend();
     await log.getByRole("button", { name: "Retry" }).click();
     await clock.advance(8_000);
@@ -715,7 +722,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await expect(bubble("Did this one land?")).toContainText("Not confirmed");
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Send this when it's back");
-    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(held).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
     await expect.poll(waitingSendState, { message: "the waiting send is persisted before the tab reloads" }).toBe("held");
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
@@ -725,7 +732,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await page.reload();
     await chooseConversation(page);
     await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
-    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(held).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
     await expect(bubble("Send this when it's back")).not.toContainText(/Sending…|Delivered/);
     await expect(bubble("Did this one land?")).toContainText("Not confirmed");
     await expect(bubble("Did this one land?")).not.toContainText(/Sending…|Delivered/);
@@ -806,8 +813,8 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
 // cas-6c7a: a machine down past its catalog's freshness (30 s in the double)
 // can't send a fresh one. Whether the network is gone or the hub answers its
 // retryable 503, the list keeps its supervisors as last known, agreeing with
-// the open conversation and the footer; only a catalog the machine sends
-// empties the list. cas-c552: when only one of two machines is past its
+// the open conversation and the footer; only positive stopped-process
+// evidence empties the list. cas-c552: when only one of two machines is past its
 // freshness, the footer counts only its conversations as last known.
 test("HUB-J12 network switch: an outage past the catalog's freshness keeps the list, footer and conversation in agreement (cas-6c7a)", journeyPart, async ({ page, journey }) => {
   const atlas = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
@@ -832,9 +839,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       await expect(header).toHaveText(" · Reconnecting");
       for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
       await expect(header).toHaveText(" · Reconnecting");
-      await expect(row).toContainText("Reconnecting · last known");
-      if (down.length === 1) await expect(studioRow).not.toContainText("last known");
-      else await expect(studioRow).toContainText("last known");
+      await expect(row).toContainText("Last known");
+      await expect(row).not.toContainText(/retry|Reconnecting|message pending/i);
+      if (down.length === 1) await expect(studioRow).not.toContainText(/last known/i);
+      else await expect(studioRow).toContainText("Last known");
       await expect(empty).toHaveCount(0);
       await expectFooter(count);
     });
@@ -844,14 +852,23 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       for (const id of down) await hub.up(id);
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");
-      await expect(list).not.toContainText("last known");
+      await expect(list).not.toContainText(/last known/i);
       await expectFooter("2 conversations");
     });
   }
-  await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
+  const atlasSessions = [...atlas.sessions], studioSessions = [...studio.sessions];
+  await journey.stage("Missing catalog entries are unknown and keep both running rows", async () => {
     atlas.sessions.length = 0;
     studio.sessions.length = 0;
     await clock.advance(30_000);
+    await expect(row).toHaveCount(1);
+    await expect(studioRow).toHaveCount(1);
+    await expect(empty).toHaveCount(0);
+  });
+  await journey.stage("The machines positively confirm both daemons stopped: the list is empty", async () => {
+    atlas.sessions = atlasSessions.map(session => ({ ...session, liveness: "stale_metadata" }));
+    studio.sessions = studioSessions.map(session => ({ ...session, liveness: "stale_metadata" }));
+    await clock.advance(5_000);
     await expect(row).toHaveCount(0);
     await expect(studioRow).toHaveCount(0);
     await expect(empty).toBeVisible();
@@ -1114,7 +1131,7 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
     const releaseAttach = hub.holdAttach(PELICAN);
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Kept while the session is away");
-    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(held).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
     const persistedState = async () => (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.state;
     const sendId = (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.id;
     expect(sendId).toBeTruthy();
@@ -1130,7 +1147,7 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
     await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
     await expect(page.locator(".conversation-thread-slot")).toHaveCount(0);
     await expect.poll(persistedState, { message: "the saved waiting message remains held while Welcome is withheld" }).toBe("held");
-    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(held).toHaveText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
     await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
     expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
     // A keyboard reader is in the thread when the session comes back.

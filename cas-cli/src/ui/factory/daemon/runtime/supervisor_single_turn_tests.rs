@@ -912,6 +912,8 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                         serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_complete","turn_id":"aa152"}})));
                 }
                 std::fs::write(&path, transcript).unwrap();
+                assert_eq!(crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                    &path, cas_mux::SupervisorCli::Codex), busy);
                 assert_eq!(crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(&cas, &supervisor), Some(path));
                 daemon.app.refresh_data().unwrap();
                 // Silence alone must not turn an unresolved native tool into idle.
@@ -938,12 +940,13 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 if sender == "operator" {
                     // The actual Commander ingress stamps authenticated device input.
                     let attribution = crate::ui::factory::protocol::MessageAttribution {
-                        device_id: Some("paired".into()), operator_verified: true,
+                        device_id: Some("paired".into()), credential_id: Some("credential".into()),
+                        operator_verified: true,
                         ..Default::default()
                     };
                     daemon.enqueue_attributed_message(&name, &body, None, false, None, None, &attribution).unwrap();
                 } else {
-                    // An explicit pane name and an operator-looking source must
+                    // An explicit pane name and a caller-selected wake source must
                     // confer no authority on unattributed/ordinary senders.
                     queue.enqueue_idempotent("lifecycle-wake:ci-red-run:aa152", &name, &body,
                         Some(&daemon.session_name), None, None, "aa152", origin.as_ref()).unwrap();

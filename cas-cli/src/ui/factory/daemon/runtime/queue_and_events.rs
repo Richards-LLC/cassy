@@ -9576,6 +9576,13 @@ impl FactoryDaemon {
                 && (wake_sender == WakeSender::Operator || cas_store::fits_hook_surface(&batch_body))
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
+            // cas-aa152: a PTY body starts/submits harness input even when it
+            // has no registered sender or exceeds the inline budget. Both
+            // quiet-row and busy-turn gates must protect that delivery too.
+            let supervisor_pty_delivery = pane_target == self.app.supervisor_name()
+                && super::delivery::choose_channel(
+                    self.app.harness_for(pane_target), self.teams.is_some(),
+                ) == super::delivery::DeliveryChannel::Pty;
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
             let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
@@ -10055,7 +10062,7 @@ impl FactoryDaemon {
                     .insert(queued.source.clone(), now);
             }
 
-            if inline_supervisor_body && !queued.urgent
+            if (inline_supervisor_body || supervisor_pty_delivery) && !queued.urgent
                 && !Self::row_is_supervisor_wake(
                     &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
                 )
@@ -10487,7 +10494,8 @@ impl FactoryDaemon {
                     let worker_is_idle = wake_decision.allowed;
                     Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
                 } else { None };
-                if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
+                if (inline_supervisor_body || supervisor_pty_delivery)
+                    && let Some((_, _, wake_decision, false)) = normal_wake {
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });

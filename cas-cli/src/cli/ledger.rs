@@ -19,7 +19,7 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print interventions, speed, escapes and feature verdicts for a release
+    /// Print wakes, usage, interventions, speed, escapes and feature verdicts for a release
     Report {
         /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
@@ -233,6 +233,30 @@ struct CheckRow {
     error: u32,
 }
 
+/// Sums of measured usage, with explicit counts for missing measurements.
+#[derive(Debug, Default, Serialize)]
+struct TurnTotals {
+    wakes: u64,
+    no_op_wakes: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    minutes: f64,
+    missing_tokens: u64,
+    missing_minutes: u64,
+}
+
+impl TurnTotals {
+    fn add(&mut self, no_op: bool, input: Option<u64>, output: Option<u64>, minutes: Option<f64>) {
+        self.wakes += 1;
+        self.no_op_wakes += u64::from(no_op);
+        self.input_tokens = self.input_tokens.saturating_add(input.unwrap_or(0));
+        self.output_tokens = self.output_tokens.saturating_add(output.unwrap_or(0));
+        self.minutes += minutes.unwrap_or(0.0);
+        self.missing_tokens += u64::from(input.is_none() || output.is_none());
+        self.missing_minutes += u64::from(minutes.is_none());
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct LedgerReport {
     release: String,
@@ -241,6 +265,8 @@ struct LedgerReport {
     to: Option<DateTime<Utc>>,
     events: usize,
     projects: Vec<String>,
+    turns: TurnTotals,
+    turns_by_channel: BTreeMap<&'static str, TurnTotals>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -332,6 +358,8 @@ fn aggregate(
         to,
         events: events.len(),
         projects: Vec::new(),
+        turns: TurnTotals::default(),
+        turns_by_channel: BTreeMap::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -348,6 +376,11 @@ fn aggregate(
             report.projects.push(project.clone());
         }
         match &event.payload {
+            QualityPayload::Turn { woken_by, no_op, input_tokens, output_tokens, minutes, .. } => {
+                report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
+                report.turns_by_channel.entry(woken_by.as_str()).or_default()
+                    .add(*no_op, *input_tokens, *output_tokens, *minutes);
+            }
             QualityPayload::Intervention { intervention, .. } => {
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
@@ -407,6 +440,12 @@ fn aggregate(
             }
         }
     }
+    // Recovered facts can arrive after an immutable release snapshot. Keep
+    // snapshot counts as a floor when older relay history has been pruned.
+    let observed_ejections = events.iter().filter(|event| event.project_id.is_empty()
+        && matches!(&event.payload, QualityPayload::CheckRun { check_id, stage: cas_store::CheckStage::Queue,
+            outcome: CheckOutcome::Fail, .. } if check_id == crate::quality_ledger::MERGE_QUEUE_CHECK)).count() as u32;
+    report.ejections = report.ejections.max(observed_ejections);
     report
 }
 
@@ -447,6 +486,19 @@ fn render(report: &LedgerReport) -> String {
         report.events,
         report.projects.len()
     );
+
+    let _ = writeln!(out, "\nModel turns: {} wakes, {} no-op wakes", report.turns.wakes, report.turns.no_op_wakes);
+    let _ = writeln!(out, "  measured usage: {} input tokens, {} output tokens, {:.2} minutes",
+        report.turns.input_tokens, report.turns.output_tokens, report.turns.minutes);
+    let _ = writeln!(out, "  missing usage: {} turn(s) without tokens, {} without minutes",
+        report.turns.missing_tokens, report.turns.missing_minutes);
+    for (channel, row) in &report.turns_by_channel {
+        let _ = writeln!(out, "  {channel}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+        let _ = writeln!(out, "    {} input, {} output tokens; {:.2} minutes", row.input_tokens, row.output_tokens, row.minutes);
+        if row.missing_tokens > 0 || row.missing_minutes > 0 {
+            let _ = writeln!(out, "    missing tokens: {}; missing minutes: {}", row.missing_tokens, row.missing_minutes);
+        }
+    }
 
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);
     for (kind, count) in &report.interventions {
@@ -539,6 +591,7 @@ mod tests {
     /// release shows its speed, the window's interventions and the fleet's rows.
     #[test]
     fn receipt_becomes_a_release_and_the_report_reads_the_window() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let cas_root = repo.join(".cas");
@@ -577,6 +630,19 @@ mod tests {
         intervention("before the window", at(1, 6));
         intervention("in the window", at(2, 6));
         intervention("after the window", at(3, 6));
+        for (key, occurred_at, channel, no_op, usage) in [
+            ("old turn", at(1, 6), cas_store::WakeChannel::Director, false, Some(900)),
+            ("acted turn", at(2, 6), cas_store::WakeChannel::Director, false, Some(30)),
+            ("no-op turn", at(2, 7), cas_store::WakeChannel::Worker, true, None),
+            ("future turn", at(3, 6), cas_store::WakeChannel::Director, false, Some(900)),
+        ] {
+            let mut event = NewQualityEvent::new(key, QualityPayload::Turn {
+                woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
+                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
+            });
+            event.occurred_at = occurred_at;
+            crate::quality_ledger::emit(&cas_root, &event);
+        }
         // Found two days after the release, it still counts against that release.
         let mut escape = NewQualityEvent::new(
             "late escape",
@@ -638,6 +704,50 @@ mod tests {
         assert_eq!(record_release(&cas_root, repo, &receipt).unwrap(), "v1.1.0");
         record_release(&cas_root, repo, &receipt).unwrap();
 
+        // cas-c28c: an already-consumed ejection relay predates the ledger.
+        // Backfill must recover its original time, then the report must count
+        // it even though the immutable release snapshot recorded zero.
+        git_in(repo, &["remote", "add", "origin", "https://github.com/example/project.git"]);
+        // cas-df19: v3.94-3.98 already emitted this fact under its queue-exit
+        // alias. The append-only ledger retains that row across the upgrade.
+        let mut old_ejection = NewQualityEvent::new(
+            "merge_queue|cas-legacy|1447|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
+            QualityPayload::CheckRun { check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
+                stage: cas_store::CheckStage::Queue, outcome: CheckOutcome::Fail,
+                sha: None, minutes: None },
+        );
+        old_ejection.task_id = Some("cas-legacy".into());
+        old_ejection.occurred_at = at(2, 5);
+        // The old emitter stored no run link; identity must use its hashed key.
+        assert!(crate::quality_ledger::emit(&cas_root, &old_ejection));
+        let queue = crate::store::open_supervisor_queue_store(&cas_root).unwrap();
+        for (task, pr) in [("cas-release", 1446), ("cas-legacy", 1447)] {
+        for occurrence in ["queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444", "merge-group-run:41246801444"] {
+        let relay = queue.notify("old-supervisor", "merge_queue_ejected", &serde_json::json!({
+            "task_id":task, "pr_number":pr, "failed_run_id":41246801444_u64,
+            "occurrence":occurrence, "failing_job":"Rust tests shard 1"
+        }).to_string(), cas_store::NotificationPriority::High).unwrap();
+        queue.mark_prompt_delivered(relay).unwrap();
+        queue.ack(relay).unwrap();
+        rusqlite::Connection::open(cas_root.join("cas.db")).unwrap().execute(
+            "UPDATE supervisor_queue SET created_at=?1 WHERE id=?2",
+            rusqlite::params![at(2, 5).to_rfc3339(), relay]).unwrap();
+        }
+        }
+        crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap();
+        assert_eq!(build_report(&cas_root, repo, Some("v1.1.0")).unwrap().ejections, 2,
+            "historical queue ejection must survive a zero release snapshot");
+        assert_eq!(crate::quality_ledger::backfill(&cas_root, at(1, 12)).unwrap(), 0,
+            "replaying consumed relay history must not add another ejection");
+        let recovered = cas_store::quality_events_for_task(&cas_root, "cas-release").unwrap();
+        assert_eq!(recovered.len(), 1, "one ejection across both historical relay aliases");
+        assert_eq!(recovered[0].occurred_at, at(2, 5));
+        assert_eq!(recovered[0].title.as_deref(), Some("Rust tests shard 1"));
+        assert_eq!(recovered[0].link.as_deref(), Some("https://github.com/example/project/actions/runs/41246801444"));
+        let legacy = cas_store::quality_events_for_task(&cas_root, "cas-legacy").unwrap();
+        assert_eq!(legacy.len(), 1, "backfill must preserve the old emitter's fact without adding another");
+        assert!(legacy[0].link.is_none(), "append-only history must not be rewritten");
+
         let report = build_report(&cas_root, repo, Some("v1.1.0")).unwrap();
         assert_eq!(report.interventions.get("rebind"), Some(&1), "{report:?}");
         assert_eq!(report.main_to_published_minutes, Some(9.0));
@@ -650,10 +760,20 @@ mod tests {
         assert_eq!(report.features["handoff"].supervisors.get("helped"), Some(&1));
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["excluded_unscoped_measurements"], 2);
+        assert_eq!(json["turns"]["wakes"], 2);
+        assert_eq!(json["turns"]["no_op_wakes"], 1);
+        assert_eq!(json["turns"]["input_tokens"], 30);
+        assert_eq!(json["turns"]["output_tokens"], 5);
+        assert_eq!(json["turns"]["minutes"], 0.5);
+        assert_eq!(json["turns"]["missing_tokens"], 1);
+        assert_eq!(json["turns_by_channel"]["director"]["wakes"], 1);
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",
             "Interventions: 1",
+            "Model turns: 2 wakes, 1 no-op wakes",
+            "measured usage: 30 input tokens, 5 output tokens, 0.50 minutes",
+            "missing usage: 1 turn(s) without tokens, 1 without minutes",
             "main to publish 9 min",
             "ambient_recall: measured noise 1 (283 injected, 1 opened, 0 used)",
             "Excluded 2 unscoped measurement(s); may include lifetime totals.",
@@ -673,5 +793,15 @@ mod tests {
                 "Feature feedback\n  none recorded"
             } else { "none with known scope" }), "{text}");
         }
+
+        // A fresh immutable release snapshot must also count the legacy run
+        // once, independently of the report's observed-ejection floor above.
+        git_in(repo, &["tag", "v1.1.1", "v1.1.0"]);
+        std::fs::write(&receipt, "TAG=v1.1.1\nPUBLISHED_AT=2026-10-02T12:10:00Z\n").unwrap();
+        record_release(&cas_root, repo, &receipt).unwrap();
+        let release = cas_store::quality_release_events(&cas_root).unwrap().into_iter()
+            .find(|event| event.release_version.as_deref() == Some("v1.1.1")).unwrap();
+        assert!(matches!(release.payload, QualityPayload::Release { ejections: 2, .. }),
+            "release snapshot double-counted the old emitter and recovered alias: {release:?}");
     }
 }

@@ -248,6 +248,10 @@ impl Config {
                 factory.stall_threshold_secs.to_string(),
             ),
             (
+                "factory.restart_worker_between_tasks".to_string(),
+                factory.restart_worker_between_tasks.to_string(),
+            ),
+            (
                 "factory.context_recycle_threshold_percent".to_string(),
                 factory.context_recycle_threshold_percent.to_string(),
             ),

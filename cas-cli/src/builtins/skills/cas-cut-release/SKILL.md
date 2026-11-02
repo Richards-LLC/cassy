@@ -12,6 +12,14 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
+Release prep checklist: compare the locked `@playwright/test` version in
+`hub-web/package-lock.json` with `npm view @playwright/test version` (run from
+the checkout). Flag **more than one minor behind** in the prep notes; a major
+gap also needs review. Upgrade and refresh Playwright guidance before the cut,
+or record the supervisor's explicit deferral. After an upgrade, regenerate
+agents in scratch with `npx playwright init-agents --loop=<harness>` and review
+them against `cas-playwright-debug`'s healer guard before adopting any changes.
+
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` holds the
    release entries. `scripts/release.sh --next-version` prints the version and

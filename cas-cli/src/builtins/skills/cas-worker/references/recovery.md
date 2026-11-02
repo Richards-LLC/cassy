@@ -119,8 +119,16 @@ fails, report that error rather than repeating schema lookup.
 
 - Reassignment or stand-down: checkpoint authorized WIP, push unless local_merge,
   note completed/remaining work and send its SHA; stop edits on that task.
-- Low context: at about 80% context used, commit and push unless local_merge,
-  then write `HANDOFF.md` in the task artifact directory: done work with SHAs,
+- Low context: at 80% measured context used, commit and push unless local_merge,
+  using Cassy's `context used: N%` notice from harness accounting. Never infer
+  occupancy from cumulative billing tokens, tool-output size or a guessed
+  model window; `context used: unknown` is not evidence of exhaustion.
+  Queued tasks keep their context by default. Only an explicit
+  `factory.restart_worker_between_tasks=true` opts in to fresh conversations
+  between tasks; automatic task-boundary restarts default off. Context-used
+  notices work either way. Do not request an early
+  recycle just because a prior task was long. Then
+  write `HANDOFF.md` in the task artifact directory: done work with SHAs,
   remaining steps, the next command and open questions. Cite it in a progress
   note and request respawn; the respawned worker resumes from it. Do not keep
   working into compaction.

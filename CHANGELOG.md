@@ -11,6 +11,67 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep task briefs out of process listings** — Workers read their assignment from a private launch file instead of carrying its text in command-line arguments, preventing process-name cleanup commands from matching and killing workers because their brief mentions the same command. The file stays available through startup and resume and is removed when the worker pane is torn down.
 
+### Fixed — Director delivery
+
+- **Preserve queued delivery decisions** — Non-green director alerts retain their original delivery tip while waiting for the supervisor, so declined deliveries arrive as superseded notices and a completed merge withdraws the pending alert.
+
+### Fixed — Factory turn records
+
+- **Keep wake and no-op counts honest** — Claude Teams messages and pointer wakes retain their queue source; Codex launch context no longer hides the first real wake. Routine internal prose stays a no-op unless a typed action occurred, while authenticated operator answers and questions still count. Appends consumed during a scan no longer trigger a full replay, and a new native turn replaces an unfinished prior turn without inheriting its duration.
+
+### Fixed — Cloud sync
+
+- **Keep other ledger events moving** — A rejected Turn now waits on its own cursor and capability cooldown while other quality events continue pushing and pulling. Unrelated validation errors remain visible, and pending Turns retry without losing local rows.
+
+### Fixed — Worker context
+
+- **Opt in to fresh context between queued tasks** — Set `factory.restart_worker_between_tasks=true` to restart workers between queued tasks, keeping their name, checkout and launch recipe. By default, the successor uses the current context. MCP results surface actual harness context use at the configured threshold, so checkpoints use measured occupancy instead of cumulative token totals or tool-output size.
+
+### Known limitations — Factory
+
+- **Sibling-worker termination incident** — The incident tracked in cas-a290 was traced to a supervisor subagent's `pkill -f`, rather than recycle itself. Per-task restarts currently require explicit opt-in; measured context notices stay enabled.
+
+### Fixed — QA evidence
+
+- **Keep Playwright 1.63 evidence valid** — Rendered evidence retains the `^1.63` floor. The 1.64 recording and agent features are optional, so projects on 1.63 can still submit their captures.
+
+### Fixed — Delivery recovery
+
+- **Recover every review tier** — Successor startup includes merged Tier 0 and Tier 2 work with its current hold and next action. One unreadable verification row is reported without hiding other deliveries or the inherited handoff. Dedicated review and adversarial probes still apply.
+
+- **Carry merged work across supervisor sessions** — Startup lists every project delivery eligible for receipt recovery with a close action. A later exact release verdict clears expired Tier 1 dispatches and deferred batch debt, while live or newer reviews, rejected verdicts, Tier 2 probes and lost-content guards still hold the delivery.
+
+### Fixed — Friction ledger
+
+- **Keep legacy ejections single-counted** — Backfill recognizes the old live emitter's queue-exit keys before appending a canonical failed-run row, so release snapshots and reports count each task/PR/run once while preserving the original ledger row.
+
+- **Recover queue ejection costs** — Backfill now reads consumed merge-queue relay history and counts each failed run once. Release reports include recovered ejections even when their original release receipt recorded zero, with the failing job title and run link retained.
+
+### Added — Friction ledger
+
+- **Measure factory turn costs** — Each completed Claude, Codex and Grok supervisor or worker turn records its verified wake channel, successful observed actions, no-op flag and measured tokens/minutes. `cas ledger report --release vX.Y.Z --offline` totals those rows by channel and discloses missing usage. Older Cloud endpoints retain unsupported Turn rows locally and retry after a cooldown.
+- **Known limitation** — OpenCode turns are not recorded yet.
+
+### Changed — Browser QA
+
+- **Refresh Playwright agent guidance** — Document 1.64 VP9 recording, frame-rate controls and action styles, default coding agents to the browser CLI, constrain healer trials to reviewed locator fixes, and flag Playwright more than one minor behind during release prep.
+
+### Fixed — Supervisor input
+
+- **Keep ordinary messages out of running Codex turns** — Standard, unattributed and other nonoperator messages now obey the supervisor wake gate before PTY delivery, including oversized bodies. Verified Commander input can still steer a running turn; gated messages remain available through the inbox.
+
+### Added — Factory communication
+
+- **Count director wakes** — Supervisor director prompts now use the durable message queue with a director source label. They wait behind busy panes and protected drafts, and withdraw stale worker or delivery alerts before waking the supervisor.
+
+### Fixed — Hub test isolation
+
+- **Allocate service test ports at startup** — The Linux post-swap service fixture now binds port zero itself, removing the gap where a parallel test could claim a sampled free port and fail the release checks.
+
+### Fixed — Commander
+
+- **Find workers needing attention in Team** — Blocked tasks and stalled workers lead the team with named attention shortcuts and a stronger count. Task titles distinguish workers sharing the same state; merge waits follow behind reported trouble.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

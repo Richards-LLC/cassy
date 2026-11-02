@@ -440,6 +440,57 @@ pub(crate) fn enqueue_director_prompt(
     Ok(id)
 }
 
+/// Retraction identity must survive a queued director wake's wait for input.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DirectorPromptContext {
+    retract_worker: Option<String>,
+    retract_task: Option<String>,
+    retract_epic: Option<String>,
+    drop_if_worker_assigned: Option<String>,
+}
+
+/// Persist director wakes with daemon provenance. The source is also the
+/// stable channel used by per-turn ledger attribution; it grants no authority
+/// without the daemon stamp. Keep these rows non-urgent so normal pane/tool
+/// and activity gates apply.
+fn enqueue_director_event(
+    cas_dir: &Path,
+    factory_session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+) -> anyhow::Result<i64> {
+    let context = DirectorPromptContext {
+        retract_worker: prompt.retract_worker.clone(),
+        retract_task: prompt.retract_task.clone(),
+        retract_epic: prompt.retract_epic.clone(),
+        drop_if_worker_assigned: prompt.drop_if_worker_assigned.clone(),
+    };
+    let text = format!("{}\n\n<cas-director-prompt>{}</cas-director-prompt>",
+        prompt.text, serde_json::to_string(&context)?);
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_urgent_with_outcome(
+        super::teams::DIRECTOR_AGENT_NAME, &prompt.target, &text, Some(factory_session),
+        Some("Director prompt"), None, false, Some(&cas_store::QueueOrigin::Daemon),
+    )?.id();
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Only a daemon-stamped queue row may use this context for wake authority.
+pub(crate) fn parse_director_prompt(
+    target: &str,
+    text: &str,
+) -> Option<crate::ui::factory::director::Prompt> {
+    let (body, json) = text.rsplit_once("\n\n<cas-director-prompt>")?;
+    let context: DirectorPromptContext =
+        serde_json::from_str(json.strip_suffix("</cas-director-prompt>")?).ok()?;
+    Some(crate::ui::factory::director::Prompt {
+        target: target.into(), text: body.into(),
+        retract_worker: context.retract_worker, retract_task: context.retract_task,
+        retract_epic: context.retract_epic, drop_if_worker_assigned: context.drop_if_worker_assigned,
+        merge_ready: false, merge_alert: None, stall_nudge_task: None, durable_retry: true,
+    })
+}
+
 /// Green director readiness uses the same durable episode as park/manual mail.
 pub(crate) fn enqueue_merge_ready_prompt(
     cas_dir: &Path,
@@ -1325,9 +1376,9 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let target = prompt.target.clone();
-        let text = prompt.text.clone();
+        let prompt = prompt.clone();
         store_worker.submit("director prompt enqueue", move || {
-            match enqueue_director_prompt(&cas_dir, &session, &target, &text) {
+            match enqueue_director_event(&cas_dir, &session, &prompt) {
                 Ok(id) => tracing::info!(
                     target: "cas::coordination",
                     stage,

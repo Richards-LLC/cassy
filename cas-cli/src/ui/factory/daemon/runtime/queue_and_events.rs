@@ -2199,6 +2199,8 @@ pub enum SupervisorWakeClass {
     /// cas-cd3f: the startup brief CAS queues when it launches a supervisor,
     /// which must begin that session's first turn. Daemon-stamped only.
     Startup,
+    /// A director event persisted by the daemon, subject to normal wake gates.
+    Director,
     /// cas-bf20: the operator's own message from a hub-verified paired device.
     /// Only the hub's device-session stamp can raise it.
     Operator,
@@ -2798,6 +2800,22 @@ pub(crate) fn read_row_facts(
         },
         ..RowFacts::default()
     };
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && row.source == super::teams::DIRECTOR_AGENT_NAME
+        && let Some(prompt) = super::delivery::parse_director_prompt(&row.target, &row.prompt)
+    {
+        facts.director_ready = Some(if crate::ui::factory::app::prompt_needs_inject_read(&prompt) {
+            crate::ui::factory::director::DirectorData::load_with_stores_for_project(
+                cas_dir, None, false, None, None,
+            ).map_err(|error| error.to_string()).map(|data| {
+                crate::ui::factory::director::prompt_is_still_deliverable(
+                    &prompt, &data, cas_dir.parent().unwrap_or(cas_dir),
+                ).then_some(prompt)
+            })
+        } else {
+            Ok(Some(prompt))
+        });
+    }
     if row.origin == Some(cas_store::QueueOrigin::Daemon)
         && let Some(mut prompt) = super::delivery::parse_merge_ready_prompt(&row.target, &row.prompt)
     {
@@ -6849,6 +6867,11 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if source == super::teams::DIRECTOR_AGENT_NAME
+                    && super::delivery::parse_director_prompt(supervisor_name, prompt).is_some()
+                {
+                    return Some(SupervisorWakeClass::Director);
+                }
                 if super::delivery::parse_merge_ready_prompt(supervisor_name, prompt).is_some() {
                     return Some(SupervisorWakeClass::MergeRequest);
                 }
@@ -7171,6 +7194,7 @@ impl FactoryDaemon {
                 "supervisor pane is quiet and the row is a reminder the daemon fired"
             }
             SupervisorWakeClass::Startup => "startup brief for a newly launched supervisor",
+            SupervisorWakeClass::Director => "supervisor pane is quiet and the row is a daemon director prompt",
             SupervisorWakeClass::Operator => {
                 "supervisor pane is quiet and the row is the operator's verified Commander message"
             }
@@ -9122,7 +9146,7 @@ impl FactoryDaemon {
                 if let Err(error) = ready {
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::ParkBusy {
-                            detail: format!("director readiness read unavailable: {error}"),
+                            detail: format!("director prompt state unavailable: {error}"),
                             recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
                         });
                     continue;
@@ -9130,7 +9154,7 @@ impl FactoryDaemon {
                 let Ok(Some(ready)) = ready else {
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::Superseded {
-                            detail: "director readiness withdrawn by live delivery check".into(),
+                            detail: "director prompt withdrawn by live delivery check".into(),
                         });
                     self.forget_row_delivery_state(queued.id);
                     continue;

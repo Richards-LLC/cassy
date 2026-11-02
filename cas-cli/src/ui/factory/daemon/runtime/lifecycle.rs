@@ -5049,8 +5049,8 @@ impl FactoryDaemon {
 
     /// Route one revalidated director prompt to its recipient: a stall nudge
     /// to the durable queue, an assignment through the assignment row, an
-    /// unready pane through the queue, and everything else straight to the
-    /// recipient's inbox or PTY.
+    /// supervisor wake through the queue, an unready worker pane through the
+    /// queue, and other worker messages to the recipient's inbox or PTY.
     ///
     /// `assignment` is the assignment state read off the loop with the
     /// prompt's re-check (cas-4491f). `None` reads it here: only the paths
@@ -5158,7 +5158,10 @@ impl FactoryDaemon {
             }
             AssignmentRead::NotAssignment | AssignmentRead::Unavailable | AssignmentRead::Unread => {}
         }
-        // cas-ae6d (GH #100): a loss-intolerant prompt (today:
+        // Every supervisor director wake needs one attributed row, including
+        // a ready Claude inbox. The queue owns normal busy/draft gating and
+        // re-checks retraction context after any delivery delay.
+        // cas-ae6d (GH #100): a loss-intolerant worker prompt (today:
         // the assignment wake-up) bound for a PTY pane that is
         // not ready for injection goes to the durable
         // prompt_queue instead of being written into a pane
@@ -5173,7 +5176,8 @@ impl FactoryDaemon {
         // cas-4491f: the queue write runs on the store worker. A write that
         // fails there is logged; injecting into a pane that is not ready
         // would only be swallowed by its startup input buffer.
-        if crate::supervisor_message_wakes::quiet(&prompt.text)
+        if prompt.target == "supervisor" || prompt.target == self.app.supervisor_name()
+            || crate::supervisor_message_wakes::quiet(&prompt.text)
             || self.route_director_prompt_to_queue(&prompt)
         {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
@@ -5264,7 +5268,7 @@ mod stall_nudge_routing_rework_tests {
                 drop_if_worker_assigned: None, durable_retry: false,
             };
             let store_worker = super::super::store_worker::global();
-            daemon.inject_director_prompt(prompt, &[], Instant::now(), store_worker, None).await;
+            daemon.inject_director_prompt(prompt.clone(), &[], Instant::now(), store_worker, None).await;
             assert!(store_worker.wait_idle(Duration::from_secs(5)));
             let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
             let rows = queue.peek_all(10).unwrap();
@@ -5288,6 +5292,25 @@ mod stall_nudge_routing_rework_tests {
             let typed = typed_once(&root, &mut daemon, "Director: review the waiting worker").await;
             assert!(typed.contains(&row.id.to_string()), "turn carries the queue id for attribution: {typed}");
             assert!(queue.message_delivery_report(row.id).unwrap().unwrap().delivered_at.is_some());
+
+            // A delay may outlive an idle-worker premise. The same queue
+            // selection must withdraw it rather than waking on stale state.
+            let mut stale = prompt;
+            stale.text = "Director: taskless worker needs an assignment".into();
+            stale.drop_if_worker_assigned = Some("assigned-worker".into());
+            daemon.inject_director_prompt(stale, &[], Instant::now(), store_worker, None).await;
+            assert!(store_worker.wait_idle(Duration::from_secs(5)));
+            let pending = queue.peek_all(10).unwrap();
+            assert_eq!(pending.len(), 1);
+            let mut task = cas_types::Task::new("cas-9fb4-test".into(), "assigned during queue delay".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            task.assignee = Some("assigned-worker".into());
+            crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap().add(&task).unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+            let report = queue.message_delivery_report(pending[0].id).unwrap().unwrap();
+            assert_eq!(report.pending_reason, Some(cas_store::PendingReason::SupersededStale));
+            assert!(report.delivered_at.is_none());
         }
     }
 

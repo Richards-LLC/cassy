@@ -52,7 +52,7 @@ for (const arg of process.argv.slice(2)) {
   if (arg === "--project") projectOption = true;
   else if (arg.startsWith("--project=")) {
     projectFilters.push(arg.slice("--project=".length));
-    projectOption = true;
+    projectOption = false;
   } else if (arg.startsWith("-")) projectOption = false;
   else if (projectOption) projectFilters.push(arg);
 }

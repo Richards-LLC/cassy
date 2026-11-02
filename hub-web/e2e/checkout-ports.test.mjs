@@ -36,7 +36,7 @@ test('project selection starts only the servers consumed by the selected tests',
     console.log('selected-server-ready');
     setInterval(() => {}, 1000);
   `);
-  await writeFile(join(root, 'probe.spec.mjs'), `
+  await writeFile(join(root, 'chromium.spec.mjs'), `
     import { test } from ${JSON.stringify(playwrightModule)};
     test('selected project runs', async () => {});
   `);
@@ -46,7 +46,7 @@ test('project selection starts only the servers consumed by the selected tests',
     export default {
       ...base, reporter: 'dot', workers: 1,
       projects: base.projects.map(project => ({
-        ...project, testDir: ${JSON.stringify(root)}, testMatch: 'probe.spec.mjs', testIgnore: [],
+        ...project, testDir: ${JSON.stringify(root)}, testMatch: 'chromium.spec.mjs', testIgnore: [],
       })),
       webServer: base.webServer.map(server => ({
         ...server,
@@ -58,6 +58,9 @@ test('project selection starts only the servers consumed by the selected tests',
   `);
   for (const [args, expected] of [
     [['--project=journeys'], ['journeys']],
+    // An equals-form option consumes one value; this positional spec filter
+    // must not also select the chromium project.
+    [['--project=journeys', 'chromium'], ['journeys']],
     [['--project', 'chromium'], ['fixtures']],
     [['--project=JOUR*'], ['journeys']],
     [[], ['fixtures', 'journeys']],

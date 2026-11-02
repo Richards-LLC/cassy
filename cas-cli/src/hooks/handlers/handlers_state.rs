@@ -1206,6 +1206,7 @@ mod supervisor_handoff_tests {
         let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
         assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
         assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
+        assert!(context.contains("Supervisor handoff"), "unreadable recovery metadata must not lose the claimed handoff: {context}");
         assert!(context.contains("task action=close id=cas-tier-two"), "one unreadable row must not hide valid recovery: {context}");
         assert!(!context.contains("task action=close id=cas-unreadable"), "unreadable metadata must not authorize recovery: {context}");
         assert!(context.contains("cas-unreadable: verification metadata unreadable"), "startup must report the skipped row: {context}");

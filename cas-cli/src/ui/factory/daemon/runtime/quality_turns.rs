@@ -785,9 +785,17 @@ impl Scanner {
                         .flatten()
                         .filter(|r| r.origin == Some(QueueOrigin::Daemon))
                         .map(|r| r.id);
-                    project.to_str().and_then(|project| {
+                    // Native Codex workers launch in their registered worktree,
+                    // while the supervisor keeps the factory project cwd.
+                    let cwd = if agent.role == AgentRole::Worker {
+                        agent.metadata.get("clone_path").map(String::as_str)
+                            .or_else(|| project.to_str())
+                    } else {
+                        project.to_str()
+                    };
+                    cwd.and_then(|cwd| {
                         crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
-                            project,
+                            cwd,
                             source.account_dir.as_deref(),
                             &|path| {
                                 codex_rollout_owns_recipient(

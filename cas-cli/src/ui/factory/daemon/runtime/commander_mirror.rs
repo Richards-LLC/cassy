@@ -919,7 +919,17 @@ mod tests {
                 let queue = SqlitePromptQueueStore::open(&root).unwrap();
                 queue.init().unwrap();
                 let mut agent = Agent::new_with_role("turn-agent".into(), "turn-worker".into(), role);
-                agent.cc_session_id = Some("native-ledger-session".into());
+                // Factory Codex registrations precede the native rollout UUID.
+                agent.cc_session_id = Some(if cli == cas_mux::SupervisorCli::Codex {
+                    "codex-turn-agent".into()
+                } else { "native-ledger-session".into() });
+                let cwd = if cli == cas_mux::SupervisorCli::Codex && role == AgentRole::Worker {
+                    root.join("worktrees/turn-worker")
+                } else { temp.path().to_path_buf() };
+                std::fs::create_dir_all(&cwd).unwrap();
+                if role == AgentRole::Worker {
+                    agent.metadata.insert("clone_path".into(), cwd.to_string_lossy().into_owned());
+                }
                 agent.factory_session = Some("factory-1".into());
                 let account = temp.path().join("account");
                 let prefix = if role == AgentRole::Supervisor { "supervisor" } else { "worker" };
@@ -946,7 +956,7 @@ mod tests {
                     ]
                 } else {
                     vec![
-                        serde_json::json!({"type":"session_meta","payload":{"id":"native-ledger-session","cwd":temp.path(),"source":"cli"}}),
+                        serde_json::json!({"type":"session_meta","payload":{"id":"native-ledger-session","cwd":cwd,"source":"cli"}}),
                         serde_json::json!({"type":"event_msg","timestamp":at(0),"payload":{"type":"task_started","turn_id":"turn-1"}}),
                         serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}),
                         serde_json::json!({"type":"response_item","timestamp":at(1),"payload":{"type":"function_call","call_id":"call-1","name":"mcp__cs__task","arguments":call.to_string()}}),

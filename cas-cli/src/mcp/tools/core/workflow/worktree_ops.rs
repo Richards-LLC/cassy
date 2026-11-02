@@ -31,11 +31,13 @@ enum BranchCiState {
     Pending {
         sha: String,
         url: Option<String>,
+        waiting_for_rerun: bool,
     },
     /// cas-6c13: a code delivery whose lane CI has not finished. Refused.
     CodePending {
         sha: String,
         url: Option<String>,
+        waiting_for_rerun: bool,
     },
     NoChecks {
         sha: String,
@@ -120,7 +122,7 @@ fn admit_branch_ci(
     }
     // cas-6c13: never merge code on pending lane CI. A pending run can still
     // fail (cas-38e7 went red 7 min after a merge on pending); no override.
-    if let BranchCiState::CodePending { sha, url } = state {
+    if let BranchCiState::CodePending { sha, url, .. } = state {
         return Err(format!(
             "CI PENDING: refusing worktree_merge for {sha}: lane CI is still running ({}). Retry when it finishes; pending CI cannot be overridden. No merge was attempted.",
             url.as_deref().unwrap_or("run URL unavailable")
@@ -151,10 +153,24 @@ impl BranchCiState {
 /// workflow completing, an empty response or an unavailable forge.
 pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
-    match lookup_branch_ci(sha, target, cwd).state {
-        BranchCiState::Green { sha: checked, .. } if checked == ci_sha || checked == sha => CiStatus::Green,
-        BranchCiState::Red { sha: checked, .. } if checked == ci_sha || checked == sha => CiStatus::Red,
-        _ => CiStatus::Pending,
+    let state = lookup_branch_ci(sha, target, cwd).state;
+    if state.sha() != ci_sha && state.sha() != sha {
+        return CiStatus::Stopped(format!("CI evidence moved to {}; request a fresh exact-SHA merge", state.sha()));
+    }
+    match state {
+        BranchCiState::Green { .. } => CiStatus::Green,
+        BranchCiState::Red { .. } => CiStatus::Red,
+        BranchCiState::Pending { waiting_for_rerun: true, .. }
+        | BranchCiState::CodePending { waiting_for_rerun: true, .. } =>
+            CiStatus::Stopped("CI was cancelled and no replacement check is running; inspect CI and request the merge again".into()),
+        BranchCiState::Pending { .. } | BranchCiState::CodePending { .. } => CiStatus::Pending,
+        BranchCiState::NoChecks { reason, .. }
+        | BranchCiState::Unknown { reason, .. }
+        | BranchCiState::UnvalidatedCode { reason, .. }
+        | BranchCiState::CodeValidationUnconfirmed { reason, .. }
+        | BranchCiState::MissingCommit { reason, .. } => CiStatus::Stopped(reason),
+        BranchCiState::GhFailure { status, .. } =>
+            CiStatus::Stopped(format!("CI lookup failed ({status}); check gh access and request the merge again")),
     }
 }
 
@@ -329,7 +345,7 @@ fn classify_code_ci_response(branch: &str, sha: &str, output: GhApiOutput) -> Br
         }) { return None; }
         let url = classifier.get("html_url").and_then(serde_json::Value::as_str);
         if runs.iter().any(|run| code_check(run) && check_run_unfinished(run)) {
-            return Some(BranchCiState::CodePending { sha: sha.to_string(), url: url.map(str::to_string) });
+            return Some(BranchCiState::CodePending { sha: sha.to_string(), url: url.map(str::to_string), waiting_for_rerun: false });
         }
         if runs.iter().any(|run| check_run_unfinished(run)) { return None; }
         Some(BranchCiState::UnvalidatedCode {
@@ -359,7 +375,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
                 reason: "only documentation checks succeeded".to_string(),
             };
         }
-        BranchCiState::Pending { sha, url } => return BranchCiState::CodePending { sha, url },
+        BranchCiState::Pending { sha, url, waiting_for_rerun } => return BranchCiState::CodePending { sha, url, waiting_for_rerun },
         BranchCiState::NoChecks {
             sha,
             reason,
@@ -764,6 +780,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     // check whose every run was cancelled is superseded (awaiting its
     // rerun), never red.
     let (runs, superseded) = select_latest_check_runs(runs);
+    let waiting_for_rerun = superseded && !runs.iter().any(|run| check_run_unfinished(run));
     let mut pending = superseded;
     let mut url = None;
     let mut observed_checks = Vec::new();
@@ -819,6 +836,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         return BranchCiState::Pending {
             sha: sha.to_string(),
             url,
+            waiting_for_rerun,
         };
     }
     if test_checks.is_empty() {
@@ -838,6 +856,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         BranchCiState::Pending {
             sha: sha.to_string(),
             url,
+            waiting_for_rerun,
         }
     } else if passed_test_checks.is_empty() {
         BranchCiState::Unknown {
@@ -1039,7 +1058,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI check-run (red; merge gated)",
             url.as_deref().unwrap_or("unavailable"),
         ),
-        BranchCiState::Pending { sha, url } => (
+        BranchCiState::Pending { sha, url, .. } => (
             sha,
             format!(
                 "CI state: pending — checks for {sha} are still running{}.",
@@ -1050,7 +1069,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI check-run (pending; advisory)",
             url.as_deref().unwrap_or("unavailable"),
         ),
-        BranchCiState::CodePending { sha, url } => (
+        BranchCiState::CodePending { sha, url, .. } => (
             sha,
             format!(
                 "CI state: pending — code checks for {sha} are still running{}.",
@@ -5045,7 +5064,7 @@ impl CasCore {
                         ci_sha: branch_ci_state.sha().to_string(),
                         target: worktree.parent_branch.clone(), repo: cwd.clone(),
                         supervisor: supervisor.id.clone(), session: session.to_string(),
-                        force, allow_trunk, cleanup,
+                        force, allow_trunk, cleanup, armed_at: Some(chrono::Utc::now()),
                     };
                     match crate::factory_ci_retry::arm(&cas_root, &request) {
                         Ok(()) => retry_notice = format!("\nAutomatic retry armed for {source_sha}; green CI retries this merge, red CI or a moved lane sends one notice."),
@@ -5677,7 +5696,8 @@ impl CasCore {
                         search_manifest: None,
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))
-                    .await?;
+                    .await
+                    .unwrap_or_else(|error| CallToolResult::error(vec![Content::text(error.message.to_string())]));
                 crate::mcp::tools::service::mutation_receipt::merge_followup(
                     &close_result
                         .content
@@ -5972,15 +5992,16 @@ impl CasCore {
         }
 
         if let Some(mut close_result) = delivery_close_result {
-            // Git and durable delivery state reached CloseReady, but the
-            // internal close surfaced another exact gate. Preserve that
-            // result verbatim so the caller receives the required next action
-            // instead of a misleading generic merge success.
-            //
-            // cas-5ee0: if the target never reached origin, that is very
-            // likely *why* the close gate fired — append the diagnosis rather
-            // than letting the caller re-derive it. Appended as an extra
-            // content block so the gate's own text stays verbatim.
+            // Merge and close are separate outcomes. A published CloseReady
+            // delivery landed successfully even when a later task gate holds
+            // close. Keep that gate actionable without reporting merge failure.
+            if push_outcome.is_published() {
+                close_result.is_error = Some(false);
+                close_result.content.insert(0, Content::text(format!(
+                    "Merge landed; close held for {}. Target {} is published at {}. Follow the close gate below; no second merge is needed.",
+                    task_id.unwrap_or("task"), worktree.parent_branch, merge_commit.as_deref().unwrap_or("unknown")
+                )));
+            }
             close_result.content.insert(
                 0,
                 Content::text(format!(

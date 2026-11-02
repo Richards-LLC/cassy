@@ -1550,7 +1550,7 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "gh-failure", "green-bad-neighbor", "missing-supervisor"] {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
         let home = TempDir::new().unwrap();
         let fake_bin = TempDir::new().unwrap();
         let gh = fake_bin.path().join("gh");
@@ -1559,6 +1559,7 @@ async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
         cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
+if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = missing-commit ]; then echo 'HTTP 422: no commit found' >&2; exit 1; fi
 cat "$CAS_CI_RETRY_TEST_RESPONSE"
 "#);
         let mut env = TestEnvGuard::new();
@@ -1582,8 +1583,8 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         assert_eq!(saved["sha"],fixture.receipt.commit_sha);
         assert_eq!(saved["ci_sha"],fixture.receipt.commit_sha);
         let session = format!("{slug}-factory");
-        // A different factory cannot consume the intent. Pending CI and an
-        // unavailable check response retain it without a supervisor notice.
+        // A different factory cannot consume the intent; genuinely pending
+        // CI retains it without a supervisor notice.
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, "other-factory").await.unwrap();
         cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
         assert!(request.exists());
@@ -1610,7 +1611,12 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         }
         std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
             if outcome == "red" { "failure" } else { "success" })).unwrap();
-        if outcome == "no-checks" { std::fs::write(&response, "{}").unwrap(); }
+        if outcome == "no-checks" { std::fs::write(&response, r#"{"check_runs":[]}"#).unwrap(); }
+        if outcome == "unknown" { std::fs::write(&response, "{}").unwrap(); }
+        if outcome == "unvalidated" {
+            std::fs::write(&response, r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"}]}"#).unwrap();
+        }
+        if outcome == "missing-commit" { std::fs::write(&response, "missing-commit").unwrap(); }
         if outcome == "gh-failure" { std::fs::write(&response, "gh-failure").unwrap(); }
         if outcome == "cancelled" {
             std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled"}]}"#).unwrap();

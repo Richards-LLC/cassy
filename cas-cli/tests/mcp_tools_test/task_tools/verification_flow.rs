@@ -1098,9 +1098,9 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
 
 /// cas-ce5e: in release QA mode Tier 1 merged deliveries open no verifier and
 /// close on one verdict naming them. A Tier 2 delivery named in that same verdict
-/// still gets its own verifier.
+/// still owes its adversarial probe and its own verifier.
 #[tokio::test]
-async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_cas_ce5e() {
+async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_ce5e() {
     let mut env = TestEnvGuard::temp_home();
     let branch = "factory/release-batch";
     let (temp, worker, cas_dir, first, lane) = delivered_worktree_fixture(&mut env, branch).await;
@@ -1142,8 +1142,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
             assert!(waiting.contains("WAITING FOR RELEASE VERDICT"), "{waiting}");
             assert!(!dispatched(id), "{waiting}");
         } else {
-            assert!(!waiting.contains("WAITING FOR RELEASE VERDICT"), "{waiting}");
-            assert!(dispatched(id), "{waiting}");
+            assert!(waiting.contains("no adversarial probe"), "{waiting}");
         }
     }
 
@@ -1178,10 +1177,25 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_verifier_c
         if path.starts_with("src/") {
             assert!(closed.contains("Closed task:"), "{closed}");
             assert!(!dispatched(id), "{closed}");
-        } else {
-            assert!(closed.contains("VERIFICATION REQUIRED"), "{closed}");
-            assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
+            continue;
         }
+        // Named in the verdict, the Tier 2 delivery still owes its probe...
+        assert!(closed.contains("no adversarial probe"), "{closed}");
+        let ledger = closed.split(" if ").nth(1).and_then(|rest| rest.split(" is missing").next()).unwrap();
+        std::fs::create_dir_all(std::path::Path::new(ledger).parent().unwrap()).unwrap();
+        std::fs::write(
+            ledger,
+            format!(
+                "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n{}\n| P1 | Adversarial probe: bypass the guard | refused | refused | PASS | real-build | LEDGER.md | - |\n",
+                cas::qa_ledger::HEADER
+            ),
+        )
+        .unwrap();
+        // ...and then its own verifier, whose dispatch the verdict cannot satisfy.
+        let probed = close(id, &tips[index]).await;
+        assert!(probed.contains("VERIFICATION REQUIRED"), "{probed}");
+        assert!(dispatched(id), "{probed}");
+        assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
     }
 }
 

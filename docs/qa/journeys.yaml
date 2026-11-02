@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-answer-and-timer-wakes:
+    title: Actionable peer replies wake the asking supervisor and deadlines and work retries remain valid timers
+    tasks: [cas-e4c7]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
   native-background-wait-bound:
     title: Silent native background jobs stop reporting busy after the configured stall window
     tasks: [cas-d8a9]
@@ -251,8 +256,8 @@ invariants:
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
     bug: {task: cas-fc10}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; peer FYIs do not wake and status polling timers are refused.
-    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify a direct answer, an actionable peer ask/status and an actual deadline still work.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; new untyped peer FYIs stay quiet, actionable replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority

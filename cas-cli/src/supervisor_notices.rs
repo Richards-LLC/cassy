@@ -401,7 +401,7 @@ async fn remote_focus_conflict_delivery(
                 project_id: project,
                 sender_agent_id: sender_id,
                 recipient_agent_id: hold.agent_id,
-                body: crate::cloud::peer_mailbox::attach_message_intent(&body, Some("ask"), false),
+                body: crate::cloud::peer_mailbox::attach_message_intent(&body, Some("ask"), false)?,
                 summary: Some("epic focus conflict".into()),
                 in_reply_to: None,
                 dedupe_key: key,

@@ -63,7 +63,15 @@ fn is_delay_poll(message: &str) -> bool {
     if words.iter().any(|word| matches!(*word, "inbox_poll" | "poll" | "polling" | "recheck")) {
         return true;
     }
-    if words.contains(&"retry") && words.iter().any(|word| matches!(*word, "admission" | "capacity")) {
+    // Deadlines and retries perform work at a chosen time; they do not
+    // replace a completion signal. Explicit polls above remain refused.
+    if words.contains(&"deadline") {
+        return false;
+    }
+    if words.contains(&"retry")
+        && words.iter().any(|word| matches!(*word, "admission" | "capacity" | "capped" | "cargo" | "build"))
+        && !words.iter().any(|word| matches!(*word, "status" | "completion" | "log" | "logs" | "ci" | "inbox" | "messages" | "merge"))
+    {
         return false;
     }
     words.iter().any(|word| matches!(*word,
@@ -1034,6 +1042,8 @@ mod tests {
             "Check CI on the pushed SHA",
             "Recheck whether the delivery has merged",
             "Poll detached build log for completion",
+            "Deadline: poll inbox for messages",
+            "Retry build status check",
         ] {
             let request = serde_json::from_value(serde_json::json!({
                 "action": "remind", "remind_message": message, "remind_delay_secs": 180

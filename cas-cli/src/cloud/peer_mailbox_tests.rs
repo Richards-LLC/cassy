@@ -207,7 +207,7 @@ fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
         (Some("blocker"), false, true),
         (None, true, true),
     ] {
-        let body = attach_message_intent("body", kind, blocker);
+        let body = attach_message_intent("body", kind, blocker).unwrap();
         let message = message("pm-typed", "supervisor", REPO, &body);
         let prompt = render_prompt(&message);
         let envelope = parse_envelope(&prompt).unwrap();

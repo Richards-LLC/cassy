@@ -162,7 +162,7 @@ async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
     let replies = [None, Some("answer")].into_iter().enumerate().map(|(i, kind)| {
         let mut reply = peer_message(&format!("pm-reply-{i}"), true);
         if let Some(kind) = kind {
-            reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, Some(kind), false);
+            reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, Some(kind), false).unwrap();
         }
         reply
     }).collect();
@@ -385,7 +385,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
     ] {
         let mut message = peer_message("pm-policy", reply);
         message.body =
-            crate::cloud::peer_mailbox::attach_message_intent(&message.body, Some(kind), false);
+            crate::cloud::peer_mailbox::attach_message_intent(&message.body, Some(kind), false).unwrap();
         assert_eq!(
             decide(&WakeSender::Daemon, &render_prompt(&message)).allowed,
             allowed,

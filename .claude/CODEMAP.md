@@ -73,7 +73,7 @@
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - Claude/Codex transcript ownership, answer mirroring, no-action status suppression and bounded historical reply watches.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - native prompt readiness, queued input and live recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
-- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders, task-wait defaults and delay-poll refusal.
+- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminders, task-wait defaults and delay-poll refusal with deadline/work-retry timers.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - Slack intake and ordered wake recovery.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - per-session consumer receipts and communication health.
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry.rs` - dispatch/readiness attribution and owned-server process checks.

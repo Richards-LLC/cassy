@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Peer answers and reminder timers
+
+- **Peer answers resume the asking supervisor** — Untyped replies to actionable peer messages and explicit answers wake the idle asker; legacy untyped mail remains compatible, explicit receipts stay quiet, and unknown kinds are refused.
+- **Keep legitimate deadlines and retries** — Accept timers such as “Retry capped build check” and “Deadline: check task X before 5 PM” while continuing to refuse status polls.
+
 ### Added — Hosted queue precheck
 
 - **One command validates a commit on hosted CI** — Was: Queue prechecks needed local build and browser setup. → Now: `cas release precheck <sha>` pushes an exact-SHA ref, dispatches the queue job set and records its hosted run; `--status` reports results and elapsed time.

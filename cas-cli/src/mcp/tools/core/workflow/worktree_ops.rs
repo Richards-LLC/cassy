@@ -4205,7 +4205,10 @@ impl CasCore {
         supervisor_override: bool,
         reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
-        self.worktree_merge_checked(id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, None).await
+        crate::async_runtime::heap_future(|| {
+            self.worktree_merge_checked(id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, None)
+        })
+        .await
     }
 
     pub(crate) async fn worktree_merge_checked(
@@ -5689,8 +5692,8 @@ impl CasCore {
             }
 
             if let Some(task_id) = task_id {
-                let close_result = self
-                    .cas_task_close(Parameters(TaskCloseRequest {
+                let close_result = crate::async_runtime::heap_future(|| {
+                    self.cas_task_close(Parameters(TaskCloseRequest {
                         no_delivery: None,
                         stranded_branch_override: None,
                         id: task_id.to_string(),
@@ -5699,7 +5702,8 @@ impl CasCore {
                         search_manifest: None,
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))
-                    .await
+                })
+                .await
                     .unwrap_or_else(|error| CallToolResult::error(vec![Content::text(error.message.to_string())]));
                 crate::mcp::tools::service::mutation_receipt::merge_followup(
                     &close_result
@@ -5938,9 +5942,10 @@ impl CasCore {
                         tip,
                     }
                 });
-                let outcome = self
-                    .close_after_published_merge(task_id, merge_sha, ci_admission, lane)
-                    .await;
+                let outcome = crate::async_runtime::heap_future(|| {
+                    self.close_after_published_merge(task_id, merge_sha, ci_admission, lane)
+                })
+                .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 close_gate_held = matches!(outcome,
                     crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(_));

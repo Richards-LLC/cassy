@@ -385,7 +385,8 @@ impl CasCore {
             search_manifest: None,
             commit_receipt: task.deliverables.factory_branch_anchor.clone(),
         };
-        let result = match as_cassy_merge_close(self.cas_task_close(Parameters(request))).await {
+        let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
+        let result = match as_cassy_merge_close(close).await {
             Ok(result) => result,
             Err(error) => {
                 let text = error.message.to_string();

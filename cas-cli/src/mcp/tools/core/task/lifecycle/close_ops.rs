@@ -7665,9 +7665,12 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let id = req.id.clone();
-        let mut result = self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
-            external_verification_receipt, negative_result, evidence_only,
-            inline_external_ref, inline_execution_note).await;
+        let mut result = crate::async_runtime::heap_future(|| {
+            self.close_task_with_dispositions_inner(Parameters(req), completion_receipt,
+                external_verification_receipt, negative_result, evidence_only,
+                inline_external_ref, inline_execution_note)
+        })
+        .await;
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;
@@ -7853,9 +7856,10 @@ impl CasCore {
             ) {
                 return Ok(Self::tool_error(message.to_string()));
             }
-            return self
-                .submit_worker_completion_receipt(raw_receipt, &mut task, task_store.as_ref())
-                .await;
+            return crate::async_runtime::heap_future(|| {
+                self.submit_worker_completion_receipt(raw_receipt, &mut task, task_store.as_ref())
+            })
+            .await;
         }
 
         // cas-6d0b / cas-b269: short-circuit already-Closed before

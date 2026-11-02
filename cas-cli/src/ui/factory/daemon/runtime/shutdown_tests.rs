@@ -1233,18 +1233,20 @@ async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0
 #[tokio::test(flavor = "current_thread")]
 async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
     if !run_hermetic_recycle_child("same_name_spawn_recovers_dead_pane_cas_35f6") {
-        recover_dead_worker(false).await;
+        recover_dead_worker(false, cas_types::AgentStatus::Stale).await;
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
     if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
-        recover_dead_worker(true).await;
+        for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
+            recover_dead_worker(true, status).await;
+        }
     }
 }
 
-async fn recover_dead_worker(recycle: bool) {
+async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     use crate::mcp::{CasCore, tools::CasService};
     use crate::worktree::{WorktreeConfig, WorktreeManager};
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -1269,6 +1271,7 @@ async fn recover_dead_worker(recycle: bool) {
         ..Default::default()
     }).unwrap();
     let worker = manager.create_for_worker(name).unwrap().path.clone();
+    git(&worker, &["switch", "-qc", "factory/recover-worker-cas-beef"]);
     std::fs::write(worker.join("precious"), "unpublished work").unwrap();
     git(&worker, &["add", "precious"]);
     git(&worker, &["commit", "-qm", "unpublished"]);
@@ -1294,6 +1297,8 @@ async fn recover_dead_worker(recycle: bool) {
     old.pid = Some(pid);
     agents.update(&old).unwrap();
     daemon.app.adopt_worker_pane_for_test(pane);
+    assert!(daemon.app.prepare_worker_spawn(Some(name), true, None).is_err(),
+        "a live same-name worker is never replaced by spawn");
     // Kill only this fixture's child; consume its real PTY exit event.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1307,7 +1312,7 @@ async fn recover_dead_worker(recycle: bool) {
     }).await.expect("killed worker emits its exit");
     // The crash handler retains the checkout because the worker holds work.
     daemon.app.mark_worker_crashed(name).await;
-    old.status = cas_types::AgentStatus::Stale;
+    old.status = status;
     agents.update(&old).unwrap();
     let spec = cas_mux::WorkerSpec {
         cli: cas_mux::SupervisorCli::Codex, model: Some("gpt-6.1-sol".into()),
@@ -1340,6 +1345,7 @@ async fn recover_dead_worker(recycle: bool) {
     }).await.expect("replacement starts in its worktree");
     let cwd = std::fs::read_to_string(env.home().join("replacement-cwd")).unwrap();
     assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&worker).unwrap());
+    assert_eq!(git(&worker, &["branch", "--show-current"]), "factory/recover-worker-cas-beef");
     assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);
     assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
     assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));

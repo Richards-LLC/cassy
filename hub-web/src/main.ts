@@ -2029,6 +2029,13 @@ function sessionOnlyDrop(machineId: string, session: string): boolean {
 }
 
 /** A conversation as the operator knows it: its project, else its session name. */
+function endedSessionTarget(row: ConversationRow): { connection: HubConnectionSupervisor; startedAt: string } {
+  const startedAt = sessions.get(row.machineId)?.find((item) => item.name === row.session)?.started_at;
+  const connection = connections.get(row.machineId);
+  if (!startedAt || !connection) throw new Error("Session identity unavailable");
+  return { connection, startedAt };
+}
+
 function conversationLabel(machineId: string, session: string): string {
   return projectTitle(sessions.get(machineId)?.find((item) => item.name === session)?.project_dir) || session;
 }
@@ -4699,10 +4706,11 @@ function renderConversationList(): void {
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
   }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()), allRows: rows, dismissEnded: async (row) => {
-    const session = sessions.get(row.machineId)?.find((item) => item.name === row.session);
-    const connection = connections.get(row.machineId);
-    if (!session?.started_at || !connection) throw new Error("Session identity unavailable");
-    await connection.dismissEndedSession(row.session, session.started_at);
+    const { connection, startedAt } = endedSessionTarget(row);
+    await connection.dismissEndedSession(row.session, startedAt);
+  }, restoreEnded: async (row) => {
+    const { connection, startedAt } = endedSessionTarget(row);
+    await connection.restoreDismissedSession(row.session, startedAt);
   } });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.

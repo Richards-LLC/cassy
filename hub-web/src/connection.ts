@@ -968,6 +968,12 @@ export class HubConnectionSupervisor {
     void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
   }
 
+  /** Lift the hub's dismissal of an ended session for every paired device. */
+  async restoreDismissedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/restore`, { started_at: startedAt });
+    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
+  }
+
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }

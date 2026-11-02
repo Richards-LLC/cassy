@@ -107,8 +107,13 @@ def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | No
     admission = repo / 'scripts/worker-memory.py'
     if admission.is_file():
         command = [sys.executable, str(admission), '--', *command]
+    # The workflow's Rust wrapper is irrelevant to a Vite snapshot. Inheriting
+    # it makes worker-memory start a compiler-cache daemon before this JS build.
+    build_env = {key: value for key, value in os.environ.items()
+                 if key not in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER')}
     with log.open('w') as output:
-        result = subprocess.run(command, cwd=repo / 'hub-web', stdout=output, stderr=subprocess.STDOUT)
+        result = subprocess.run(command, cwd=repo / 'hub-web', env=build_env,
+                                stdout=output, stderr=subprocess.STDOUT)
     if result.returncode:
         raise ValueError(f'journey snapshot build failed (exit {result.returncode}); see {log}')
     check_source(repo, source, compared)

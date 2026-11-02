@@ -1009,7 +1009,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Commander dependencies
@@ -1038,11 +1038,13 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps chromium
+            npx playwright install --with-deps --no-shell chromium
           else
-            npx playwright install chromium
+            npx playwright install --no-shell chromium
           fi
-          npm run visual-qa
+          # Use the full pinned browser we installed, rather than a system
+          # Chrome or Playwright's default headless shell.
+          CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')" npm run visual-qa
 
   # User journeys (docs/qa/journeys.md) against the committed bundle, on the
   # Chromium build pinned by @playwright/test, in six hosted shards of two
@@ -1076,7 +1078,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Run Commander journeys shard ${{ matrix.shard }}/6
@@ -1088,35 +1090,24 @@ jobs:
         run: |
           npm ci
           if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps chromium
+            npx playwright install --with-deps --no-shell chromium
           else
-            npx playwright install chromium
+            npx playwright install --no-shell chromium
           fi
           python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
             --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
 
-      # cas-4ce5: a journey flake in the queue left no trace to diagnose.
-      # Keep Playwright's traces, error-context.md and screenshots on failure.
-      - name: Upload Commander journey evidence on failure
-        if: failure() || github.event_name == 'merge_group'
-        uses: actions/upload-artifact@v4
-        with:
-          name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
-          path: |
-            hub-web/e2e/.results/
-            target/queue-flakes/
-          # .results is a dot-directory: upload-artifact@v4 skips hidden files
-          # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Publish queue playwright recovery receipts
-        if: always() && github.event_name == 'merge_group'
+      # One artifact serves the queue fan-in and diagnosis. Infrastructure
+      # failures can leave native reports without producing receipt.json.
+      - name: Upload Commander journey evidence and recovery receipts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: queue-flakes-playwright-${{ matrix.shard }}
-          path: target/queue-flakes/playwright-${{ matrix.shard }}/
+          path: |
+            hub-web/e2e/.results/
+            target/queue-flakes/playwright-${{ matrix.shard }}/
+          # Preserve hidden traces as well as the native console/report.
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14

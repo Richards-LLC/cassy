@@ -19,6 +19,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Reuse release dependencies across queue entries** — Main seeds missing dependency caches, release builds keep sccache alive during long compiles, and each uploaded platform archive starts its audit before cache saving finishes. The publisher checks out only the release commit and builds only a missing platform.
 
+### Fixed — Commander CI
+
+- **Journey checks start only the servers they use** — Journey-only runs start the source-bound production server; fixture-only runs start Vite. CI uses its pinned full Chromium without downloading the unused headless shell, retains startup reports and hidden traces in one artifact per shard, and skips Rust compiler-cache startup for JavaScript snapshots.
+
 ## [3.98.1] - 2026-11-02
 
 ### Fixed — Commander

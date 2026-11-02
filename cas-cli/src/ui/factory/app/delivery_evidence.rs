@@ -720,6 +720,7 @@ mod tests {
         std::fs::write(repo.join("src/lib.rs"), "// delivered\n").unwrap();
         git(repo, &["commit", "-am", "cas-a: delivery"]);
         let anchor = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "factory/wa"]);
 
         let cas_dir = crate::store::init_cas_dir(repo).unwrap();
         std::fs::write(cas_dir.join("config.toml"),
@@ -728,6 +729,7 @@ mod tests {
         child.status = cas_types::TaskStatus::AwaitingMerge;
         child.assignee = Some("wa".into());
         child.deliverables.factory_branch_anchor = Some(anchor.clone());
+        child.deliverables.parked_branch = Some("factory/wa".into());
         child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
             work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
             assignee: "wa".into(),
@@ -739,14 +741,14 @@ mod tests {
         let mut facts = parked("cas-a", "wa", None);
         facts.target = Some("main".into());
         facts.anchor = Some(anchor);
-        facts.parked_branch = None;
+        facts.parked_branch = Some("factory/wa".into());
         facts.cas_dir = cas_dir;
         facts.record = Some(child);
         let map = HashMap::from([("cas-a".to_string(), facts.clone())]);
         let git_evidence = CiStatusRequest::new(repo.into(), &map, LaneCiCache::default(), DeliveryContainmentCache::default())
             .unwrap().run().git;
         let evidence = combine(&map, &git_evidence);
-        assert_eq!(evidence["cas-a"].hold, Some(DeliveryHold::ReleaseVerdictPending));
+        assert_eq!(evidence["cas-a"].hold, Some(DeliveryHold::ReleaseVerdictPending), "{git_evidence:?}");
         assert_eq!(evidence["cas-a"].merged_close_blocked, None);
 
         let mut data = DirectorData {
@@ -775,11 +777,13 @@ mod tests {
         assert!(text.contains("verification_type=release"), "{text}");
         assert!(!text.contains("supervisor_override") && !text.contains("worker close"), "{text}");
 
-        let now = Utc::now();
-        let silent_since = Some(now - chrono::Duration::seconds(600));
+        let start = Utc::now();
+        let at = |secs| start + chrono::Duration::seconds(secs);
+        let silent_since = Some(at(-600));
         let mut tracker = SupervisorStallTracker::default();
-        assert!(tracker.observe(Some(due.clone()), silent_since, false, now, 600).wake.is_some());
-        assert!(tracker.observe(Some(due), silent_since, false, now + chrono::Duration::seconds(1200), 600).wake.is_none());
+        assert!(tracker.observe(Some(due.clone()), silent_since, false, at(0), 600).wake.is_none());
+        assert!(tracker.observe(Some(due.clone()), silent_since, false, at(600), 600).wake.is_some());
+        assert!(tracker.observe(Some(due), silent_since, false, at(1800), 600).wake.is_none(), "one wake while it stays the same");
 
         // Other work in the epic can still change the tip under review.
         let mut sibling = facts.task.clone();

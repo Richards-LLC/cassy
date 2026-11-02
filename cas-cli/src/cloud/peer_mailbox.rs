@@ -221,7 +221,11 @@ pub struct PeerEnvelope {
 /// A sender-selected action, independent of Cloud's authenticated identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerMessageKind {
+    Status,
     Ask,
+    Answer,
+    Ready,
+    Secret,
     Blocker,
     Receipt,
     Quiet,
@@ -231,7 +235,11 @@ pub enum PeerMessageKind {
 impl PeerMessageKind {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Status => "status",
             Self::Ask => "ask",
+            Self::Answer => "answer",
+            Self::Ready => "ready",
+            Self::Secret => "secret",
             Self::Receipt => "receipt",
             Self::Quiet => "quiet",
             Self::Blocker => "blocker",
@@ -241,7 +249,11 @@ impl PeerMessageKind {
 
     fn parse(value: &str) -> Option<Self> {
         match value {
+            "status" => Some(Self::Status),
             "ask" => Some(Self::Ask),
+            "answer" => Some(Self::Answer),
+            "ready" => Some(Self::Ready),
+            "secret" => Some(Self::Secret),
             "receipt" => Some(Self::Receipt),
             "quiet" => Some(Self::Quiet),
             "blocker" => Some(Self::Blocker),
@@ -253,6 +265,8 @@ impl PeerMessageKind {
 
 impl PeerEnvelope {
     pub fn wakes_idle(&self) -> bool {
+        // Peers predating intent metadata sent substantive directed mail
+        // without a kind. Preserve those wakes; explicit FYIs opt out.
         !matches!(self.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet))
     }
 }
@@ -260,16 +274,17 @@ impl PeerEnvelope {
 /// Carry action intent through the existing Cloud body contract. This is
 /// routing intent, never authority: only an admitted, daemon-stamped peer
 /// envelope may use it to wake a supervisor.
-pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> String {
+pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> Result<String, String> {
+    let kind = kind.map(|kind| PeerMessageKind::parse(kind).ok_or_else(|| {
+        format!("unknown peer message kind '{kind}'; expected answer, status, ready, secret, ask, blocker, receipt, quiet, or epic_split_decided")
+    })).transpose()?;
     let kind = if blocker {
-        Some(PeerMessageKind::Blocker)
+        PeerMessageKind::Blocker
     } else {
-        kind.and_then(PeerMessageKind::parse)
+        // Untyped peer mail is an FYI. An explicit action opts into a wake.
+        kind.unwrap_or(PeerMessageKind::Receipt)
     };
-    match kind {
-        Some(kind) => format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()),
-        None => body.to_string(),
-    }
+    Ok(format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()))
 }
 
 fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
@@ -366,7 +381,10 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
         session: take("session"),
         repo: take("repo")?,
         in_reply_to: take("in_reply_to"),
-        kind: take("kind").as_deref().and_then(PeerMessageKind::parse),
+        kind: match take("kind") {
+            Some(kind) => Some(PeerMessageKind::parse(&kind)?),
+            None => None,
+        },
         scope: match take("scope").as_deref() {
             Some("user") => PeerScope::User,
             _ => PeerScope::Project,

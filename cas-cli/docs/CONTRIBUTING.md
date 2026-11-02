@@ -162,6 +162,18 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+Planning recall at task creation and worker spawn requires matching content terms;
+weak incidental matches stay silent. Each recalled item and operation lesson is
+shown at most once in a harness session. Spawn lessons tagged for a harness are
+shown only when that harness is selected. Upkeep advisories at close remain in
+the immutable receipt details and task notes.
+
+Worker-owned reminders end on shutdown or a terminal bound task, including
+cross-session and suspended waits. Supervisor-owned cross-session event watches
+retain their completion semantics. A supervisor-stalled prompt requires the
+configured interval of observed actionable idle time, readable worker holds,
+current open tasks, and the existing pinned-epic assignment boundary.
+
 Authenticated messages directed to a supervisor wake its idle pane, including
 peer field reports with no `kind`. The first message opens a fixed burst window
 (`factory.supervisor_message_debounce_secs`, default 20 seconds, range 0–300).
@@ -1056,10 +1068,12 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 | Tier | Paths | Verification | QA |
 | --- | --- | --- | --- |
 | 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
-| 1 | Everything else, including skills, agents and an unmeasurable diff | One verifier | The impacted journeys |
-| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | One verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
+| 1 | Everything else, including skills, agents and an unmeasurable diff | In `qa.mode=batch`, one release verdict naming every delivery; an unmeasurable diff, `force-verifier` or `qa.mode=per_task` gets its own verifier | The impacted journeys |
+| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own verifier plus an adversarial probe, even when a release verdict names it | An `Adversarial probe:` row in the task ledger, in batch mode too |
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
+
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
 
 Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -1891,6 +1905,32 @@ then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
 parser checks structure, counts, labels, defect ownership and readable PASS
 captures; it does not judge what a capture proves. Close applies its diagnostics
 before either verification dispatch path mutates state.
+
+### Hosted queue precheck and pending-CI merge retry
+
+`cas release precheck <sha>` pushes the resolved commit to `precheck/<full-sha>`
+and dispatches `ci.yml` on that ref. The binary includes its dispatcher: the
+checkout needs Git, authenticated `gh` and Python, with no Node, Playwright or
+Rust setup. HEAD and the live hub stay untouched. The receipt in the Git common
+directory records the full SHA and hosted run URL. `--receipt <path>` selects a
+portable receipt location; `--json` prints the complete machine-readable receipt.
+
+`cas release precheck <sha> --status` reads that run without a second dispatch,
+records the job results and elapsed minutes, and compares them with October's
+48- and 53-minute dispatches. A completed red run exits nonzero. Precheck refs
+use the queue's required jobs on hosted runners, excluding advisory builds and
+queue-only receipt publication. A historical SHA runs its own workflow version.
+This command replaces the local assembly-proof precheck.
+
+When an authenticated supervisor's merge of a parked delivery is refused only
+for pending code CI, Cassy persists the original options, source SHA, CI SHA,
+repository, target and supervisor session. The daemon retries on its next CI
+watch pass after that exact CI evidence turns green. Normal merge, ownership,
+QA, verification and target checks still apply. A red result, a moved lane or
+a new admission refusal sends one durable supervisor notice and consumes that
+intent. Missing CI and transport failures retain it without merging; daemon
+restarts resume the persisted intent. In-progress and unparked tasks never arm
+an automatic retry.
 
 ## Build, assembly and CI policy
 
@@ -3741,16 +3781,17 @@ search discovery and cleanup use the scoped namespace. No automatic file move
 or ownership guess is made for legacy directories.
 
 
-### First factory push scope and reference admission
+### Factory delivery scope and reference admission
 
-The shared CI classifier resolves a first factory push against the unique
+The shared CI classifier resolves every factory push against the unique
 maximal merge base among fetched `origin/epic/*` refs, preserving the task fork
 when sibling merges advance the epic. It falls back to the configured default
 remote branch when no epic parent is available. Local refs,
 unknown bases and incomparable epic parents cannot authorize a Rust skip.
-Subsequent repair pushes compare against the previous push, so unrelated epic
-changes do not widen a test-only repair. All scoped consumers use that resolved
-base; the merge queue still proves the complete integration delta.
+A code push followed by a docs-only push still validates the delivery code, even
+when concurrency cancels the earlier run. Direct branch pushes, PRs and merge
+groups retain their event deltas. All scoped consumers use the resolved base;
+the merge queue still proves the complete integration delta.
 
 The Violet/fixture repository reference scan runs in the existing `ci-diff`
 admission job on factory and epic pushes and PRs, including direct release

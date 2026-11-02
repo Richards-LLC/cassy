@@ -25,10 +25,52 @@ const QUEUE_DIR: &str = "candidate-queue";
 const BUILDER_CHECKOUT: &str = "candidate-builder";
 const RUNNER_LOCK: &str = "runner.lock";
 const RUNNER_HEARTBEAT: &str = "runner.heartbeat";
+/// Written by a daemon whose own context cannot run the build sandbox.
+const RUNNER_UNAVAILABLE: &str = "runner.unavailable";
+/// A supervisor's direct build uses no sandbox, so it works where this queue cannot.
+pub(crate) const SUPERVISOR_FALLBACK: &str = "Ask the supervisor to run `cas qa candidate build` for this revision; a direct build needs no sandbox.";
+const BUILD_ENVIRONMENT: [&str; 35] = [
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CC",
+    "CXX",
+    "AR",
+    "LD",
+    "ZIG",
+    "PKG_CONFIG_PATH",
+    "LIBCLANG_PATH",
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OPENSSL_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_FRESH: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SANDBOX_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const FAILURE_TAIL_BYTES: usize = 1000;
@@ -251,10 +293,35 @@ fn stop_child(child: &mut std::process::Child) -> Result<()> {
 /// Uses the worker's credential-store policy, with a private PID namespace so
 /// every build descendant, including a new session, dies with the sandbox.
 fn sandboxed_builder_command(program: &Path) -> Result<Command> {
+    sandboxed_command("bwrap", program)
+}
+
+/// bwrap execs the program itself, so `/proc/self/exe` would name bwrap there.
+/// The sandbox's private /proc also hides the daemon's own PID, so a path is the
+/// only way in. After `cas update` replaced the daemon's binary, that path holds
+/// the update, which builds a candidate just the same.
+fn sandbox_visible_program(program: &Path) -> Result<PathBuf> {
+    if !program.starts_with("/proc") {
+        return Ok(program.to_path_buf());
+    }
+    let target = std::fs::read_link(program)
+        .with_context(|| format!("resolve the builder at {}", program.display()))?;
+    let target = crate::ui::factory::strip_deleted_suffix(target);
+    if !target.is_file() {
+        bail!(
+            "the daemon's binary is gone from {}; restart the factory daemon",
+            target.display()
+        );
+    }
+    Ok(target)
+}
+
+fn sandboxed_command(bwrap: &str, program: &Path) -> Result<Command> {
     if !cfg!(target_os = "linux") {
         bail!("queued candidate builds require Linux bubblewrap credential and process isolation");
     }
-    let mut command = Command::new("bwrap");
+    let program = sandbox_visible_program(program)?;
+    let mut command = Command::new(bwrap);
     command.args([
         "--dev-bind",
         "/",
@@ -290,8 +357,122 @@ fn sandboxed_builder_command(program: &Path) -> Result<Command> {
             Err(error) => return Err(error).context("inspect a candidate credential-store mask"),
         }
     }
-    command.arg("--").arg(program);
+    command.arg("--").arg(&program);
     Ok(command)
+}
+
+/// Compilation needs tools, caches and locale, never daemon identity, API
+/// tokens, SSH agents or arbitrary inherited provider variables.
+fn allow_build_environment(command: &mut Command) {
+    command.env_clear();
+    for name in BUILD_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+/// Why this process cannot run a queued build, tried with the build's own argv
+/// and environment. Only the daemon's answer counts: a worker's `cas serve` is
+/// usually confined in ways the daemon is not.
+fn sandbox_problem(os: &str, bwrap: &str, program: &Path) -> Option<String> {
+    if os != "linux" {
+        return Some(format!(
+            "queued candidate builds need Linux bubblewrap isolation, which {os} does not have"
+        ));
+    }
+    let mut probe = match sandboxed_command(bwrap, program) {
+        Ok(probe) => probe,
+        Err(error) => return Some(format!("{error:#}")),
+    };
+    allow_build_environment(&mut probe);
+    probe.arg("--version");
+    let output = run_sandbox_probe(probe, |started| started.elapsed());
+    match output {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!(
+            "the factory daemon cannot start its build sandbox: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some("bubblewrap (`bwrap`) is not installed on this host".to_owned())
+        }
+        Err(error) => Some(format!("could not run bubblewrap: {error}")),
+    }
+}
+
+/// A regular file keeps stderr from filling a pipe or waiting on a descendant.
+fn run_sandbox_probe(
+    mut probe: Command,
+    elapsed: fn(Instant) -> Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    let mut stderr = tempfile::tempfile()?;
+    probe
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut probe, 0);
+    let mut child = probe.spawn()?;
+    let started = Instant::now();
+    let status = loop {
+        if elapsed(started) >= SANDBOX_PROBE_TIMEOUT {
+            stop_child(&mut child).map_err(std::io::Error::other)?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox probe timed out after 5 seconds",
+            ));
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    };
+    stderr.rewind()?;
+    let mut error = Vec::new();
+    stderr
+        .take(FAILURE_TAIL_BYTES as u64)
+        .read_to_end(&mut error)?;
+    Ok(std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: error,
+    })
+}
+
+fn initialize_runner(
+    cas_root: &Path,
+    probe: impl FnOnce() -> Option<String>,
+) -> Result<Option<(RunnerHeartbeat, std::fs::File)>> {
+    std::fs::create_dir_all(queue_dir(cas_root))?;
+    let lock = open_lock(&queue_dir(cas_root).join(RUNNER_LOCK))?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(None);
+    }
+    // Only the owner may publish either liveness or sandbox availability.
+    let heartbeat = RunnerHeartbeat::start(cas_root, HEARTBEAT_INTERVAL)?;
+    let problem = probe();
+    record_sandbox_state(cas_root, problem.as_deref())?;
+    Ok(Some((heartbeat, lock)))
+}
+
+fn record_sandbox_state(cas_root: &Path, problem: Option<&str>) -> Result<()> {
+    std::fs::create_dir_all(queue_dir(cas_root))?;
+    let marker = queue_dir(cas_root).join(RUNNER_UNAVAILABLE);
+    match problem {
+        Some(problem) => std::fs::write(marker, problem)?,
+        None => match std::fs::remove_file(marker) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        },
+    }
+    Ok(())
+}
+
+/// What the running daemon recorded about its own sandbox, if it cannot build.
+pub(crate) fn sandbox_refusal(cas_root: &Path) -> Option<String> {
+    std::fs::read_to_string(queue_dir(cas_root).join(RUNNER_UNAVAILABLE)).ok()
 }
 
 /// Preparation can block in fetch or worktree setup. Its heartbeat must not
@@ -467,7 +648,8 @@ impl Runner {
         Ok(())
     }
 
-    /// Build the oldest request, if the machine has room. Returns whether one ran.
+    /// Test entry point; the daemon retains this lock for its entire runner.
+    #[cfg(test)]
     pub(crate) fn run_next(&self) -> Result<bool> {
         let dir = queue_dir(&self.cas_root);
         if !dir.is_dir() {
@@ -477,6 +659,11 @@ impl Runner {
         if runner_lock.try_lock_exclusive().is_err() {
             return Ok(false);
         }
+        self.run_next_owned()
+    }
+
+    /// Build the oldest request while the caller holds the runner lock.
+    fn run_next_owned(&self) -> Result<bool> {
         self.requeue_orphans()?;
         let Some(request) = self.queued().into_iter().next() else {
             return Ok(false);
@@ -574,50 +761,7 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(std::fs::File::create(&stdout_path)?)
             .stderr(std::fs::File::create(log)?);
-        // Compilation needs tools, caches and locale, never daemon identity,
-        // API tokens, SSH agents or arbitrary inherited provider variables.
-        command.env_clear();
-        for name in [
-            "HOME",
-            "PATH",
-            "USER",
-            "LOGNAME",
-            "LANG",
-            "LC_ALL",
-            "TERM",
-            "TMPDIR",
-            "TMP",
-            "TEMP",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_CACHE_HOME",
-            "CARGO_HOME",
-            "RUSTUP_HOME",
-            "RUSTUP_TOOLCHAIN",
-            "RUSTC",
-            "RUSTC_WRAPPER",
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CC",
-            "CXX",
-            "AR",
-            "LD",
-            "ZIG",
-            "PKG_CONFIG_PATH",
-            "LIBCLANG_PATH",
-            "LIBRARY_PATH",
-            "LD_LIBRARY_PATH",
-            "CPATH",
-            "C_INCLUDE_PATH",
-            "CPLUS_INCLUDE_PATH",
-            "OPENSSL_DIR",
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
+        allow_build_environment(&mut command);
         command.env("CAS_ROOT", &self.cas_root);
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -714,13 +858,28 @@ pub(crate) fn spawn_runner(
     std::thread::Builder::new()
         .name("cas-candidate-queue".to_string())
         .spawn(move || {
-            let mut beat: Option<Instant> = None;
-            while !runner.shutdown.load(Ordering::Relaxed) {
-                if beat.is_none_or(|beat| beat.elapsed() >= HEARTBEAT_INTERVAL) {
-                    let _ = mark_runner_live(&runner.cas_root);
-                    beat = Some(Instant::now());
+            // Other daemons wait without probing or changing the owner's marker.
+            let _owner = loop {
+                if runner.shutdown.load(Ordering::Relaxed) {
+                    return;
                 }
-                if let Err(error) = runner.run_next() {
+                match initialize_runner(&runner.cas_root, || {
+                    let problem = sandbox_problem(std::env::consts::OS, "bwrap", &runner.program);
+                    if let Some(problem) = &problem {
+                        tracing::warn!(%problem, "queued candidate builds are refused on this daemon");
+                    }
+                    problem
+                }) {
+                    Ok(Some(owner)) => break owner,
+                    Ok(None) => std::thread::sleep(POLL_INTERVAL),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not initialize the candidate runner");
+                        return;
+                    }
+                }
+            };
+            while !runner.shutdown.load(Ordering::Relaxed) {
+                if let Err(error) = runner.run_next_owned() {
                     tracing::warn!(%error, "candidate queue pass failed");
                 }
                 std::thread::sleep(POLL_INTERVAL);

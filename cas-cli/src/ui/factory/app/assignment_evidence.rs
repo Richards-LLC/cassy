@@ -40,9 +40,10 @@ impl AssignmentRequest {
     /// outage keeps start's existing advisory/fail-open policy. Unreadable local
     /// ownership evidence remains pending rather than inventing assignments.
     pub(super) fn read(&self) -> AssignmentEvidence {
-        let (Ok(splits), Ok(agents)) = (
+        let (Ok(splits), Ok(agents), Ok(tasks)) = (
             crate::cloud::epic_split::current_epic_splits(&self.cas_dir),
             crate::store::open_agent_store(&self.cas_dir),
+            crate::store::open_task_store_local(&self.cas_dir),
         ) else {
             return AssignmentEvidence::default();
         };
@@ -74,8 +75,12 @@ impl AssignmentRequest {
                 }
             }
         }
+        let checked = self.task_ids.iter().filter(|id| tasks.get(id).is_ok_and(|task| {
+            task.status == cas_types::TaskStatus::Open && task.assignee.is_none()
+                && task.task_type != cas_types::TaskType::Gate
+        })).cloned().collect();
         AssignmentEvidence {
-            checked: self.task_ids.clone(),
+            checked,
             peer_owned,
         }
     }

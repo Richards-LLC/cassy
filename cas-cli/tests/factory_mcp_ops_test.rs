@@ -14004,15 +14004,34 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         .expect("register supervisor A");
     env.register_supervisor_in_session("noble-lynx-44", "cas-src-vivid-sparrow-8");
 
-    // (1) A messages B.
+    // Untyped peer FYIs stay readable without opening a model turn.
+    let fyi = env.service.coordination(Parameters(coord_msg(
+        "message", "noble-lynx-44", "FYI: the release notes are drafted.", None,
+    ))).await.expect("FYI is delivered to the peer inbox");
+    let fyi_id = queued_notification_id(&get_text(&fyi));
+    let fyi_row = env.prompt_queue().peek_all(10).unwrap().into_iter()
+        .find(|row| row.id == fyi_id).unwrap();
+    let agents = env.agent_store().list(None).unwrap();
+    let origin = fyi_row.origin.as_ref().unwrap();
+    let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
+        Some(origin), Some(&supervisor_a),
+    );
+    let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
+        "noble-lynx-44", "noble-lynx-44", &sender, &fyi_row.source, &fyi_row.prompt,
+        quiet_supervisor_pane(), chrono::Utc::now(),
+    );
+    assert!(!decision.allowed, "an untyped FYI must not wake: {}", decision.reason);
+
+    // (1) A sends an actionable status to B.
+    let mut request = coord_msg(
+        "message", "noble-lynx-44",
+        "Release gate: hold the merge queue until my epic lands.", None,
+    );
+    request.kind = Some("status".into());
     let send = get_text(
         &env.service
-            .coordination(Parameters(coord_msg(
-                "message",
-                "noble-lynx-44",
-                "Release gate: hold the merge queue until my epic lands.",
-                None,
-            )))
+            .coordination(Parameters(request))
             .await
             .expect("a supervisor must be able to message a supervisor in another session"),
     );

@@ -54,6 +54,33 @@ fn is_external_reminder_event(event_type: &str) -> bool {
     )
 }
 
+/// Recognizable status polls have event/completion signals. Keep timers for
+/// actual deadlines and retries of work (for example build admission).
+fn is_delay_poll(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    let words: Vec<_> = text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty()).collect();
+    if words.iter().any(|word| matches!(*word, "inbox_poll" | "poll" | "polling" | "recheck")) {
+        return true;
+    }
+    // Deadlines and retries perform work at a chosen time; they do not
+    // replace a completion signal. Explicit polls above remain refused.
+    if words.contains(&"deadline") {
+        return false;
+    }
+    if words.contains(&"retry")
+        && words.iter().any(|word| matches!(*word, "admission" | "capacity" | "capped" | "cargo" | "build"))
+        && !words.iter().any(|word| matches!(*word, "status" | "completion" | "log" | "logs" | "ci" | "inbox" | "messages" | "merge"))
+    {
+        return false;
+    }
+    words.iter().any(|word| matches!(*word,
+            "check" | "inspect" | "watch" | "wait" | "waiting"))
+        && words.iter().any(|word| matches!(*word,
+            "ci" | "inbox" | "messages" | "merge" | "merged" | "landing"
+            | "task" | "tasks" | "build" | "job" | "release" | "queue" | "completion"))
+}
+
 /// GH #1207: the `remind_filter` contract of one external event. `required`
 /// names each field with the JSON keys that supply it, preferred key first.
 struct ExternalFilterSpec {
@@ -322,6 +349,20 @@ impl CasService {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 "Provide exactly one of remind_delay_secs (time-based) or remind_event (event-based), not both or neither",
+            ));
+        }
+
+        if has_delay && is_delay_poll(&message) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Delay reminders cannot poll inbox, CI, task, merge or job status. \
+                 Use remind_event=ci_completed with remind_filter={\"sha\":\"<40-hex-sha>\"}, \
+                 remind_event=task_completed with remind_filter={\"task_id\":\"<task-id>\"}, \
+                 or remind_event=branch_contained_in with \
+                 remind_filter={\"commit\":\"<sha>\",\"target_branch\":\"main\"}. \
+                 External events require cross_session=true. For detached commands, \
+                 use the harness background-task completion notice. Operator messages \
+                 already wake the supervisor; report a missing wake instead of polling.",
             ));
         }
 
@@ -981,22 +1022,52 @@ mod tests {
             1
         );
 
-        let self_request: crate::mcp::tools::service::FactoryRequest =
-            serde_json::from_value(serde_json::json!({
-                "action": "remind",
-                "remind_message": "self reminder",
-                "remind_delay_secs": 60
-            }))
-            .expect("self reminder request");
-        service
-            .factory_remind(self_request)
-            .await
-            .expect("omitted target remains a self-reminder");
-        let self_reminders = reminders
-            .list_pending_for_target(&worker.id)
-            .expect("self-targeted reminder");
-        assert_eq!(self_reminders.len(), 1);
-        assert_eq!(self_reminders[0].target_id, worker.id);
+        for message in [
+            "Retry capped cargo check after build admission",
+            "Retry capped build check",
+            "Deadline: check task X before 5 PM",
+        ] {
+            let self_request = serde_json::from_value(serde_json::json!({
+                "action": "remind", "remind_message": message, "remind_delay_secs": 60
+            })).unwrap();
+            service.factory_remind(self_request).await
+                .unwrap_or_else(|error| panic!("legitimate timer {message:?} refused: {error}"));
+        }
+        let self_reminders = reminders.list_pending_for_target(&worker.id).unwrap();
+        assert_eq!(self_reminders.len(), 3);
+        assert!(self_reminders.iter().all(|row| row.target_id == worker.id));
+
+        for message in [
+            "Poll inbox_poll for operator messages in three minutes",
+            "Check CI on the pushed SHA",
+            "Recheck whether the delivery has merged",
+            "Poll detached build log for completion",
+            "Deadline: poll inbox for messages",
+            "Retry build status check",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "remind", "remind_message": message, "remind_delay_secs": 180
+            })).unwrap();
+            let error = service.factory_remind(request).await
+                .expect_err("delay-based polling must not create a wake");
+            let error = error.to_string();
+            for pointer in ["ci_completed", "task", "branch_contained_in", "background-task"] {
+                assert!(error.contains(pointer), "missing {pointer}: {error}");
+            }
+        }
+        assert_eq!(reminders.list_pending_for_target(&worker.id).unwrap().len(), 3,
+            "refused polls leave no pending timer");
+        let event_request = serde_json::from_value(serde_json::json!({
+            "action": "remind", "remind_message": "Check CI on the pushed SHA",
+            "remind_event": "ci_completed", "cross_session": true,
+            "remind_filter": serde_json::json!({"sha": "a".repeat(40)}).to_string()
+        })).unwrap();
+        service.factory_remind(event_request).await.expect("the suggested event form is accepted");
+        let pending = reminders.list_pending_for_target(&worker.id).unwrap();
+        assert_eq!(pending.len(), 4);
+        assert!(pending.iter().any(|row| row.trigger_type == cas_store::ReminderTriggerType::Event));
+
+
     }
 
     #[test]

@@ -176,6 +176,8 @@ pub(crate) fn implementation_lineage(
     let id = &task.id;
     let mut actors = cas_store::qa_task_implementation_actors(root, id).map_err(|e| e.to_string())?;
     actors.extend(task.assignee.clone());
+    // cas-f497: the recorded start still names the implementer once the assignee is cleared.
+    actors.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.assignee.clone()));
     for branch in task
         .deliverables
         .parked_branch
@@ -251,6 +253,13 @@ pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     )
 }
 
+/// Whether `report` names `task` as a whole ID, so `cas-12` is not `cas-123`.
+fn report_names(report: &str, task: &str) -> bool {
+    report
+        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .any(|word| word == task)
+}
+
 pub(crate) fn prepare_receipt(
     root: &Path,
     recorder: &cas_types::Agent,
@@ -259,6 +268,7 @@ pub(crate) fn prepare_receipt(
     staging: &str,
     artifact_id: &str,
     ledger: &Path,
+    schema: u32,
 ) -> Result<QaBatchReceipt, String> {
     if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("staging_sha must be a full 40-hex commit SHA".into());
@@ -272,6 +282,12 @@ pub(crate) fn prepare_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let (artifact, ledger) = validate_ledger(root, artifact_id, ledger)?;
+    if schema == cas_store::RELEASE_VERDICT_SCHEMA {
+        let report = std::fs::read_to_string(&ledger).map_err(|e| e.to_string())?;
+        if let Some(id) = task_ids.iter().find(|id| !report_names(&report, id)) {
+            return Err(format!("the published report does not name {id}; one verdict must name every delivery it covers"));
+        }
+    }
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     // A peer on another machine need not be registered here; record it as external.
@@ -289,11 +305,11 @@ pub(crate) fn prepare_receipt(
                 "task {id} belongs to another project or has no project binding"
             ));
         }
-        if task.assignee.is_none() {
-            return Err(format!("task {id} has no implementer"));
-        }
         let (repo, target) = task_context(root, &task)?;
         let actors = implementation_lineage(root, &task, &repo)?;
+        if actors.is_empty() {
+            return Err(format!("task {id} has no implementer"));
+        }
         if in_lineage(agents.as_ref(), &actors, &recorder.id) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
@@ -321,7 +337,7 @@ pub(crate) fn prepare_receipt(
         heads.insert(id.clone(), anchor);
     }
     Ok(QaBatchReceipt {
-        schema_version: 1,
+        schema_version: schema,
         id: format!("qab-{}", uuid::Uuid::new_v4().simple()),
         project_id: project,
         ledger_artifact_id: artifact.id,
@@ -339,13 +355,66 @@ pub(crate) fn prepare_receipt(
     })
 }
 
-/// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
+/// The QA receipt covering this delivery.
 pub(crate) fn satisfying_receipt(
     root: &Path,
     task: &Task,
     repo: &Path,
     target: &str,
     head: &str,
+) -> Result<Option<QaBatchReceipt>, String> {
+    covering_receipt(root, task, repo, target, head, cas_store::qa_batch_receipts_for_task)
+}
+
+/// The release verdict covering this delivery, bound exactly as a QA receipt is.
+pub(crate) fn satisfying_release_verdict(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+) -> Result<Option<QaBatchReceipt>, String> {
+    covering_receipt(root, task, repo, target, head, cas_store::release_verdicts_for_task)
+}
+
+/// cas-f497: whether the close gate would answer WAITING FOR RELEASE VERDICT for
+/// this delivery. Anything unreadable is `false`, so the delivery keeps its usual
+/// stall prompt rather than going quiet. Runs Git; call it off the factory loop.
+pub(crate) fn awaits_release_verdict(root: &Path, task: &Task) -> bool {
+    use crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns;
+    use cas_types::VerificationDispatchState::{Invalidated, Resolved};
+    let (Some(_), Some(anchor)) = (
+        task.deliverables.factory_branch_start.as_ref(),
+        task.deliverables.factory_branch_anchor.as_deref(),
+    ) else {
+        return false;
+    };
+    if task.depth == cas_types::TaskDepth::Light
+        || !crate::config::Config::load(root).is_ok_and(|config| config.verification_enabled())
+    {
+        return false;
+    }
+    let Ok((repo, target)) = task_context(root, task) else {
+        return false;
+    };
+    let no_verifier_on_record = matches!(
+        cas_store::get_latest_verification_dispatch(root, &task.id),
+        Ok(None) | Ok(Some(cas_types::VerificationDispatch { state: Resolved | Invalidated, .. }))
+    ) && crate::store::open_verification_store(root)
+        .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
+    no_verifier_on_record
+        && release_verdict_owns(root, task, &repo)
+        && matches!(satisfying_release_verdict(root, task, &repo, &target, anchor), Ok(None))
+}
+
+/// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
+fn covering_receipt(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+    receipts_for_task: fn(&Path, &str, &str) -> cas_store::Result<Vec<QaBatchReceipt>>,
 ) -> Result<Option<QaBatchReceipt>, String> {
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
@@ -360,11 +429,9 @@ pub(crate) fn satisfying_receipt(
     if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
         return Ok(None);
     }
-    let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
-        .map_err(|e| e.to_string())?;
+    let receipts = receipts_for_task(root, &project, &task.id).map_err(|e| e.to_string())?;
     for receipt in receipts {
-        if receipt.schema_version != 1
-            || receipt.project_id != project
+        if receipt.project_id != project
             || receipt.task_heads.get(&task.id) != Some(&anchor)
             || ancestor(repo, &anchor, head) != Some(true)
             || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)

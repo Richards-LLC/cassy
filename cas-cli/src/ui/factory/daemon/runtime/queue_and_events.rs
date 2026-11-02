@@ -12767,7 +12767,8 @@ struct ReminderScanInput {
 /// must not prevent another reminder from firing or reaching its deadline.
 fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error::CasError> {
     let reminders = crate::store::open_reminder_store(&scan.cas_dir)?;
-    let pending = reminders.list_all_pending()?;
+    let mut pending = reminders.list_all_pending()?;
+    pending.extend(reminders.list_suspended(None)?);
     if pending.is_empty() { return Ok(()) }
     let tasks = crate::store::open_task_store_local(&scan.cas_dir)?;
     for reminder in pending {
@@ -12810,6 +12811,29 @@ fn reconcile_task_reminder(
     reminders: &Arc<dyn cas_store::ReminderStore>,
     tasks: &dyn cas_store::TaskStore,
 ) -> Result<(), crate::error::CasError> {
+    // A retired worker cannot delegate its wait to the supervisor, including
+    // cross-session waits. Reconcile before expiry or any event delivery.
+    let agents = crate::store::open_agent_store(&scan.cas_dir)?;
+    let owner = agents.get(&reminder.owner_id).ok();
+    let target_shutdown = reminder.target_id != reminder.owner_id
+        && agents.get(&reminder.target_id).is_ok_and(|target| {
+            target.role == cas_types::AgentRole::Worker && target.status == cas_types::AgentStatus::Shutdown
+        });
+    let worker_owned = owner.as_ref().is_some_and(|owner| owner.role == cas_types::AgentRole::Worker);
+    if target_shutdown || (worker_owned && owner.as_ref().is_some_and(|owner| owner.status == cas_types::AgentStatus::Shutdown)) {
+        cancel_task_reminder(reminders.as_ref(), reminder)?;
+        return Ok(());
+    }
+    if worker_owned && let Some(id) = reminder.task_id.as_deref() {
+        match tasks.get(id) {
+            Ok(task) if task.is_terminal() => {
+                cancel_task_reminder(reminders.as_ref(), reminder)?;
+                return Ok(());
+            }
+            Ok(_) | Err(cas_store::StoreError::TaskNotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let event = reminder.trigger_event.as_deref();
     let filtered_task = matches!(event, Some("task_completed" | "task_blocked"))
         .then(|| reminder.trigger_filter.as_ref().and_then(|filter| filter.get("task_id"))
@@ -12821,6 +12845,7 @@ fn reconcile_task_reminder(
         Some(Err(cas_store::StoreError::TaskNotFound(_))) | None => None,
         Some(Err(error)) => return Err(error.into()),
     };
+    if reminder.status == cas_store::ReminderStatus::Suspended { return Ok(()); }
     if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
         if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
             let worker = task.assignee.as_deref().unwrap_or("remote");
@@ -14485,6 +14510,55 @@ mod tests {
         super::cancel_task_reminder(reminders.as_ref(), &stale).unwrap();
     }
 
+    #[test]
+    fn worker_reminders_end_silently_on_shutdown_or_terminal_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for (shutdown, terminal, suspended, watch_remote) in [
+            (true, false, false, false), (true, false, true, false),
+            (false, true, false, false), (false, true, true, false),
+            (false, true, false, true), (false, true, true, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let cas = root.path();
+            let agents = crate::store::open_agent_store(cas).unwrap();
+            let mut owner = cas_types::Agent::new_with_role("worker-id".into(), "worker".into(), cas_types::AgentRole::Worker);
+            owner.factory_session = Some("s".into());
+            if shutdown { owner.status = cas_types::AgentStatus::Shutdown; }
+            agents.register(&owner).unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role("sup-id".into(), "sup".into(), cas_types::AgentRole::Supervisor);
+            supervisor.factory_session = Some("s".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = crate::store::open_task_store(cas).unwrap();
+            let mut task = Task::new("cas-wait".into(), "wait".into());
+            if terminal { task.status = TaskStatus::Closed; }
+            tasks.add(&task).unwrap();
+            let reminders = crate::store::open_reminder_store(cas).unwrap();
+            let filter = watch_remote.then(|| serde_json::json!({"task_id": "cas-watched"}));
+            if watch_remote { tasks.add(&Task::new("cas-watched".into(), "remote work".into())).unwrap(); }
+            reminders.create_with_scope(&owner.id, None, "retry task",
+                if watch_remote { cas_store::ReminderTriggerType::Event } else { cas_store::ReminderTriggerType::Time },
+                (!watch_remote).then(|| chrono::Utc::now() - chrono::Duration::hours(2)),
+                watch_remote.then_some("task_completed"), filter.as_ref(), 60,
+                Some("s"), Some("origin"), true, Some(&task.id)).unwrap();
+            if suspended { reminders.suspend_pending_for_target(&owner.id).unwrap(); }
+            for _ in 0..2 {
+                super::run_reminder_scan(super::ReminderScanInput {
+                    cas_dir: cas.to_path_buf(), session_name: "s".into(), supervisor_name: "sup".into(),
+                    agent_id_to_name: HashMap::from([("sup-id".into(), "sup".into()), (owner.id.clone(), owner.name.clone())]),
+                    events: vec![], external_ready: vec![], ci_wakes: vec![],
+                });
+            }
+            let ended = reminders.list_recently_ended(&owner.id, 86400).unwrap();
+            assert_eq!(ended.len(), 1);
+            assert_eq!(ended[0].status, cas_store::ReminderStatus::Cancelled,
+                "worker wait must cancel before expiry can escalate: shutdown={shutdown}, terminal={terminal}");
+            assert!(reminders.list_all_pending().unwrap().is_empty());
+            assert!(crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap().is_empty(),
+                "ended worker wait must not page anyone: shutdown={shutdown}, terminal={terminal}");
+            assert!(reminders.list_recently_fired(60).unwrap().is_empty());
+        }
+    }
+
     /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
     /// satisfied wake fires once with the run conclusions.
     #[test]
@@ -14651,6 +14725,12 @@ mod tests {
                     agents.register(&target).unwrap();
                     scan("origin-factory", HashMap::new());
                     scan("origin-factory", HashMap::new());
+                    if role == AgentRole::Worker {
+                        assert!(reminders.list_pending(owner_id).unwrap().is_empty());
+                        assert_eq!(reminders.list_recently_ended(owner_id, 60).unwrap()[0].status, cas_store::ReminderStatus::Cancelled);
+                        assert!(prompts.peek_all(10).unwrap().is_empty());
+                        continue;
+                    }
                     let rows = prompts.peek_all(10).unwrap();
                     let observed: Vec<_> = rows
                         .iter()

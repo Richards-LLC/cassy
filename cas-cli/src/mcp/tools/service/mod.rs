@@ -23,6 +23,7 @@ use rmcp::model::Content;
 use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
+use crate::async_runtime::heap_future;
 use crate::mcp::server::CasCore;
 
 mod imports;
@@ -1287,6 +1288,9 @@ impl CasService {
                 }
             }
 
+            // cas-6a57: a debug-build poll frame reserves space for every arm it
+            // could await. Unboxed, these arms made this frame 452 KB of the
+            // stack every merge nests its close under.
             let result = match action.as_str() {
                 // ---- Agent domain ----
                 "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
@@ -1315,23 +1319,23 @@ impl CasService {
                         "message" | "interrupt"
                     ) && req.cross_session.unwrap_or(false);
                     match action.as_str() {
-                        "register" => this.agent_register(agent_req).await,
-                        "unregister" => this.agent_unregister(agent_req).await,
-                        "whoami" => this.agent_whoami(agent_req).await,
-                        "heartbeat" => this.agent_heartbeat(agent_req).await,
-                        "session_start" => this.agent_session_start(agent_req).await,
-                        "session_end" => this.agent_session_end(agent_req).await,
-                        "loop_start" => this.loop_start(agent_req).await,
-                        "loop_cancel" => this.loop_cancel(agent_req).await,
-                        "loop_status" => this.loop_status(agent_req).await,
-                        "lease_history" => this.lease_history(agent_req).await,
-                        "queue_notify" => this.queue_notify(agent_req).await,
-                        "queue_poll" => this.queue_poll(agent_req).await,
-                        "queue_peek" => this.queue_peek(agent_req).await,
-                        "queue_ack" => this.queue_ack(agent_req).await,
-                        "inbox_poll" => this.inbox_poll(agent_req).await,
+                        "register" => heap_future(|| this.agent_register(agent_req)).await,
+                        "unregister" => heap_future(|| this.agent_unregister(agent_req)).await,
+                        "whoami" => heap_future(|| this.agent_whoami(agent_req)).await,
+                        "heartbeat" => heap_future(|| this.agent_heartbeat(agent_req)).await,
+                        "session_start" => heap_future(|| this.agent_session_start(agent_req)).await,
+                        "session_end" => heap_future(|| this.agent_session_end(agent_req)).await,
+                        "loop_start" => heap_future(|| this.loop_start(agent_req)).await,
+                        "loop_cancel" => heap_future(|| this.loop_cancel(agent_req)).await,
+                        "loop_status" => heap_future(|| this.loop_status(agent_req)).await,
+                        "lease_history" => heap_future(|| this.lease_history(agent_req)).await,
+                        "queue_notify" => heap_future(|| this.queue_notify(agent_req)).await,
+                        "queue_poll" => heap_future(|| this.queue_poll(agent_req)).await,
+                        "queue_peek" => heap_future(|| this.queue_peek(agent_req)).await,
+                        "queue_ack" => heap_future(|| this.queue_ack(agent_req)).await,
+                        "inbox_poll" => heap_future(|| this.inbox_poll(agent_req)).await,
                         "message" | "interrupt" => {
-                            let result = this.message_send(agent_req).await;
+                            let result = heap_future(|| this.message_send(agent_req)).await;
                             if cross_session_notice {
                                 Self::append_notice(
                                     result,
@@ -1344,32 +1348,32 @@ impl CasService {
                                 result
                             }
                         }
-                        "message_ack" => this.message_ack(agent_req).await,
-                        "message_status" => this.message_status_query(agent_req).await,
+                        "message_ack" => heap_future(|| this.message_ack(agent_req)).await,
+                        "message_status" => heap_future(|| this.message_status_query(agent_req)).await,
                         _ => unreachable!(),
                     }
                 }
                 // agent_list and agent_cleanup: prefixed to avoid collision with worktree
                 "agent_list" => {
                     let agent_req = req.to_agent_request("list");
-                    this.agent_list(agent_req).await
+                    heap_future(|| this.agent_list(agent_req)).await
                 }
                 "agent_cleanup" => {
                     let agent_req = req.to_agent_request("cleanup");
-                    this.agent_cleanup(agent_req).await
+                    heap_future(|| this.agent_cleanup(agent_req)).await
                 }
 
                 // cas-e477: read-only peer supervisor discovery.
-                "peers" => this.coordination_peers(req).await,
+                "peers" => heap_future(|| this.coordination_peers(req)).await,
 
                 // cas-72d3: journaled external Slack-thread authority.
                 "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim"
-                | "renew_claim" | "reply_intent" => this.external_work(req).await,
+                | "renew_claim" | "reply_intent" => heap_future(|| this.external_work(req)).await,
 
                 // ---- Disposable database branches (cas-0033) ----
-                "db_branch_create" => this.db_branch_create(&req).await,
-                "db_branch_show" => this.db_branch_show(&req).await,
-                "db_branch_delete" => this.db_branch_delete(&req).await,
+                "db_branch_create" => heap_future(|| this.db_branch_create(&req)).await,
+                "db_branch_show" => heap_future(|| this.db_branch_show(&req)).await,
+                "db_branch_delete" => heap_future(|| this.db_branch_delete(&req)).await,
 
                 "recover_branch" => {
                     let task_id = req.task_id.as_deref().ok_or_else(|| Self::error(
@@ -1406,40 +1410,40 @@ impl CasService {
                 | "candidate_request" | "restart_spawn_queue" | "restart_supervisor" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
-                        "spawn_workers" => this.factory_spawn_workers(factory_req).await,
-                        "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
-                        "recycle_worker" => this.factory_recycle_worker(factory_req).await,
-                        "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
-                        "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
-                        "worker_status" => this.factory_worker_status(factory_req).await,
-                        "worker_queue" => this.factory_worker_queue(factory_req).await,
-                        "clear_context" => this.factory_clear_context(factory_req).await,
-                        "my_context" => this.factory_my_context(factory_req).await,
-                        "worker_activity" => this.factory_worker_activity(factory_req).await,
-                        "sync_all_workers" => this.factory_sync_all_workers(factory_req).await,
-                        "gc_report" => this.factory_gc_report(factory_req).await,
-                        "gc_cleanup" => this.factory_gc_cleanup(factory_req).await,
+                        "spawn_workers" => heap_future(|| this.factory_spawn_workers(factory_req)).await,
+                        "shutdown_workers" => heap_future(|| this.factory_shutdown_workers(factory_req)).await,
+                        "recycle_worker" => heap_future(|| this.factory_recycle_worker(factory_req)).await,
+                        "hold_worker" => heap_future(|| this.factory_set_worker_hold(factory_req, true)).await,
+                        "release_worker" => heap_future(|| this.factory_set_worker_hold(factory_req, false)).await,
+                        "worker_status" => heap_future(|| this.factory_worker_status(factory_req)).await,
+                        "worker_queue" => heap_future(|| this.factory_worker_queue(factory_req)).await,
+                        "clear_context" => heap_future(|| this.factory_clear_context(factory_req)).await,
+                        "my_context" => heap_future(|| this.factory_my_context(factory_req)).await,
+                        "worker_activity" => heap_future(|| this.factory_worker_activity(factory_req)).await,
+                        "sync_all_workers" => heap_future(|| this.factory_sync_all_workers(factory_req)).await,
+                        "gc_report" => heap_future(|| this.factory_gc_report(factory_req)).await,
+                        "gc_cleanup" => heap_future(|| this.factory_gc_cleanup(factory_req)).await,
                         // cas-8f8f: per-child branch merge-state diagnostic.
                         // Same data source as the epic-close gate so report
                         // and gate cannot disagree.
-                        "epic_status" => this.factory_epic_status(factory_req).await,
-                        "focus_epic" => this.factory_focus_epic(factory_req).await,
+                        "epic_status" => heap_future(|| this.factory_epic_status(factory_req)).await,
+                        "focus_epic" => heap_future(|| this.factory_focus_epic(factory_req)).await,
                         // cas-4736: split an epic with a peer supervisor.
-                        "epic_split" => this.factory_epic_split(factory_req).await,
-                        "remind" => this.factory_remind(factory_req).await,
-                        "remind_list" => this.factory_remind_list(factory_req).await,
-                        "remind_cancel" => this.factory_remind_cancel(factory_req).await,
+                        "epic_split" => heap_future(|| this.factory_epic_split(factory_req)).await,
+                        "remind" => heap_future(|| this.factory_remind(factory_req)).await,
+                        "remind_list" => heap_future(|| this.factory_remind_list(factory_req)).await,
+                        "remind_cancel" => heap_future(|| this.factory_remind_cancel(factory_req)).await,
                         // cas-7c93 (GH #87): sanctioned lifecycle for servers
                         // that must outlive a task or be shared across workers.
-                        "server_start" => this.factory_server_start(factory_req).await,
-                        "server_stop" => this.factory_server_stop(factory_req).await,
-                        "server_list" => this.factory_server_list(factory_req).await,
-                        "candidate_request" => this.factory_candidate_request(factory_req).await,
+                        "server_start" => heap_future(|| this.factory_server_start(factory_req)).await,
+                        "server_stop" => heap_future(|| this.factory_server_stop(factory_req)).await,
+                        "server_list" => heap_future(|| this.factory_server_list(factory_req)).await,
+                        "candidate_request" => heap_future(|| this.factory_candidate_request(factory_req)).await,
                         // cas-73b5 (GH #970): unwedge the spawn queue in place.
                         "restart_spawn_queue" => {
-                            this.factory_restart_spawn_queue(factory_req).await
+                            heap_future(|| this.factory_restart_spawn_queue(factory_req)).await
                         }
-                        "restart_supervisor" => this.factory_restart_supervisor(factory_req).await,
+                        "restart_supervisor" => heap_future(|| this.factory_restart_supervisor(factory_req)).await,
                         _ => unreachable!(),
                     }
                 }
@@ -1531,12 +1535,12 @@ impl CasService {
                         reason: req.reason,
                     };
                     match wt_action {
-                        "create" => this.worktree_create(wt_req).await,
-                        "list" => this.worktree_list(wt_req).await,
-                        "show" => this.worktree_show(wt_req).await,
-                        "cleanup" => this.worktree_cleanup(wt_req).await,
-                        "merge" => this.worktree_merge(wt_req).await,
-                        "status" => this.worktree_status(wt_req).await,
+                        "create" => heap_future(|| this.worktree_create(wt_req)).await,
+                        "list" => heap_future(|| this.worktree_list(wt_req)).await,
+                        "show" => heap_future(|| this.worktree_show(wt_req)).await,
+                        "cleanup" => heap_future(|| this.worktree_cleanup(wt_req)).await,
+                        "merge" => heap_future(|| this.worktree_merge(wt_req)).await,
+                        "status" => heap_future(|| this.worktree_status(wt_req)).await,
                         _ => unreachable!(),
                     }
                 }
@@ -1575,7 +1579,7 @@ impl CasService {
                     });
                 }
             } else if !action.starts_with("db_branch_") {
-                this.db_branch_sweep().await;
+                heap_future(|| this.db_branch_sweep()).await;
             }
 
             if let Err(error) = &result {

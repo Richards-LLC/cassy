@@ -121,10 +121,6 @@ fn page_operator_for_idle_supervisor(
     }
 }
 
-/// How far back an expired verification dispatch is still escalated, so an
-/// upgrade does not page for old history.
-const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
-
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -142,14 +138,22 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
-    let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
-    let expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
+    let since = now - chrono::Duration::hours(
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
+    );
+    let mut expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
         Ok(expired) => expired,
         Err(error) => {
             tracing::warn!(%error, "cas-7456: expired verification dispatches unavailable");
             return 0;
         }
     };
+    // A close retry may already have persisted TimedOut. That dispatch still
+    // owns its one expiry relay, but a finished task no longer needs recovery.
+    let tasks = crate::store::open_task_store_local(cas_dir).ok();
+    expired.retain(|dispatch| !tasks.as_ref().is_some_and(|tasks| {
+        tasks.get(&dispatch.task_id).is_ok_and(|task| task.is_terminal())
+    }));
     let session = std::env::var("CAS_FACTORY_SESSION").ok();
     let supervisor_queue = crate::store::open_supervisor_queue_store(cas_dir).ok();
     let woken = |dispatch: &&cas_types::VerificationDispatch| {
@@ -1845,7 +1849,7 @@ mod worker_attention_tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "dispatch-expiry-test");
         let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
-        for id in ["cas-b4d8", "cas-ancient", "cas-due-later"] {
+        for id in ["cas-b4d8", "cas-ancient", "cas-due-later", "cas-finished"] {
             tasks.add(&cas_types::Task::new(id.into(), id.into())).unwrap();
         }
         let now = chrono::Utc::now();
@@ -1855,12 +1859,19 @@ mod worker_attention_tests {
         };
         let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
         dispatch("cas-ancient", now - chrono::Duration::hours(30));
+        dispatch("cas-missing", now - chrono::Duration::minutes(3));
         dispatch("cas-due-later", now + chrono::Duration::minutes(10));
+        dispatch("cas-finished", now - chrono::Duration::minutes(1));
+        cas_store::timeout_verification_dispatch(&cas_dir, "cas-finished", now).unwrap();
+        let mut finished = tasks.get("cas-finished").unwrap();
+        finished.status = cas_types::TaskStatus::Closed;
+        tasks.update(&finished).unwrap();
 
-        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 2);
         escalate_expired_verification_dispatches(&cas_dir, now);
         let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
+        assert_eq!(rows.len(), 2, "one wake per expired dispatch, including a task absent locally: {rows:?}");
+        assert!(rows.iter().any(|row| row.prompt.contains("cas-missing")));
         assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
         // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
         assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
@@ -3767,7 +3778,15 @@ impl FactoryDaemon {
                             watched_branches.insert(branch);
                         }
                     }
+                    let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        // Durable merge intents are independent of reminders and
+                        // model turns. Run normal admission on the blocking pool.
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::factory_ci_retry::retry_pending(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "CI merge retry scan failed");
+                        }
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let supervisor_prs =
                             super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
@@ -4470,9 +4489,9 @@ impl FactoryDaemon {
             tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
 
-        // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
-        // reminders before their agents are unregistered.
-        self.app.rearm_held_reminders_at_shutdown(&self.session_name);
+        // A shutdown ends every hold; cancel worker reminders before their
+        // agents are unregistered.
+        self.app.cancel_worker_reminders_at_shutdown(&self.session_name);
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {

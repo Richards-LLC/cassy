@@ -31,11 +31,13 @@ enum BranchCiState {
     Pending {
         sha: String,
         url: Option<String>,
+        waiting_for_rerun: bool,
     },
     /// cas-6c13: a code delivery whose lane CI has not finished. Refused.
     CodePending {
         sha: String,
         url: Option<String>,
+        waiting_for_rerun: bool,
     },
     NoChecks {
         sha: String,
@@ -120,7 +122,7 @@ fn admit_branch_ci(
     }
     // cas-6c13: never merge code on pending lane CI. A pending run can still
     // fail (cas-38e7 went red 7 min after a merge on pending); no override.
-    if let BranchCiState::CodePending { sha, url } = state {
+    if let BranchCiState::CodePending { sha, url, .. } = state {
         return Err(format!(
             "CI PENDING: refusing worktree_merge for {sha}: lane CI is still running ({}). Retry when it finishes; pending CI cannot be overridden. No merge was attempted.",
             url.as_deref().unwrap_or("run URL unavailable")
@@ -144,6 +146,31 @@ impl BranchCiState {
             | Self::CodeValidationUnconfirmed { sha, .. }
             | Self::MissingCommit { sha, .. } => sha,
         }
+    }
+}
+
+/// Reuse admission's exact commit/check classifier, never infer green from a
+/// workflow completing, an empty response or an unavailable forge.
+pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
+    use crate::factory_ci_retry::CiStatus;
+    let state = lookup_branch_ci(sha, target, cwd).state;
+    if state.sha() != ci_sha && state.sha() != sha {
+        return CiStatus::Stopped(format!("CI evidence moved to {}; request a fresh exact-SHA merge", state.sha()));
+    }
+    match state {
+        BranchCiState::Green { .. } => CiStatus::Green,
+        BranchCiState::Red { .. } => CiStatus::Red,
+        BranchCiState::Pending { waiting_for_rerun: true, .. }
+        | BranchCiState::CodePending { waiting_for_rerun: true, .. } =>
+            CiStatus::Stopped("CI was cancelled and no replacement check is running; inspect CI and request the merge again".into()),
+        BranchCiState::Pending { .. } | BranchCiState::CodePending { .. } => CiStatus::Pending,
+        BranchCiState::NoChecks { reason, .. }
+        | BranchCiState::Unknown { reason, .. }
+        | BranchCiState::UnvalidatedCode { reason, .. }
+        | BranchCiState::CodeValidationUnconfirmed { reason, .. }
+        | BranchCiState::MissingCommit { reason, .. } => CiStatus::Stopped(reason),
+        BranchCiState::GhFailure { status, .. } =>
+            CiStatus::Stopped(format!("CI lookup failed ({status}); check gh access and request the merge again")),
     }
 }
 
@@ -318,7 +345,7 @@ fn classify_code_ci_response(branch: &str, sha: &str, output: GhApiOutput) -> Br
         }) { return None; }
         let url = classifier.get("html_url").and_then(serde_json::Value::as_str);
         if runs.iter().any(|run| code_check(run) && check_run_unfinished(run)) {
-            return Some(BranchCiState::CodePending { sha: sha.to_string(), url: url.map(str::to_string) });
+            return Some(BranchCiState::CodePending { sha: sha.to_string(), url: url.map(str::to_string), waiting_for_rerun: false });
         }
         if runs.iter().any(|run| check_run_unfinished(run)) { return None; }
         Some(BranchCiState::UnvalidatedCode {
@@ -348,7 +375,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
                 reason: "only documentation checks succeeded".to_string(),
             };
         }
-        BranchCiState::Pending { sha, url } => return BranchCiState::CodePending { sha, url },
+        BranchCiState::Pending { sha, url, waiting_for_rerun } => return BranchCiState::CodePending { sha, url, waiting_for_rerun },
         BranchCiState::NoChecks {
             sha,
             reason,
@@ -753,6 +780,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     // check whose every run was cancelled is superseded (awaiting its
     // rerun), never red.
     let (runs, superseded) = select_latest_check_runs(runs);
+    let waiting_for_rerun = superseded && !runs.iter().any(|run| check_run_unfinished(run));
     let mut pending = superseded;
     let mut url = None;
     let mut observed_checks = Vec::new();
@@ -808,6 +836,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         return BranchCiState::Pending {
             sha: sha.to_string(),
             url,
+            waiting_for_rerun,
         };
     }
     if test_checks.is_empty() {
@@ -827,6 +856,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         BranchCiState::Pending {
             sha: sha.to_string(),
             url,
+            waiting_for_rerun,
         }
     } else if passed_test_checks.is_empty() {
         BranchCiState::Unknown {
@@ -1028,7 +1058,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI check-run (red; merge gated)",
             url.as_deref().unwrap_or("unavailable"),
         ),
-        BranchCiState::Pending { sha, url } => (
+        BranchCiState::Pending { sha, url, .. } => (
             sha,
             format!(
                 "CI state: pending — checks for {sha} are still running{}.",
@@ -1039,7 +1069,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI check-run (pending; advisory)",
             url.as_deref().unwrap_or("unavailable"),
         ),
-        BranchCiState::CodePending { sha, url } => (
+        BranchCiState::CodePending { sha, url, .. } => (
             sha,
             format!(
                 "CI state: pending — code checks for {sha} are still running{}.",
@@ -4175,6 +4205,23 @@ impl CasCore {
         supervisor_override: bool,
         reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        crate::async_runtime::heap_future(|| {
+            self.worktree_merge_checked(id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, None)
+        })
+        .await
+    }
+
+    pub(crate) async fn worktree_merge_checked(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
@@ -4747,6 +4794,26 @@ impl CasCore {
             }
         }
 
+        // Validate the retry's immutable identity before authorizing a new
+        // transaction. A moved delivery must not acquire MergeAuthorized.
+        let parked_source_tip = transactional_delivery.as_ref()
+            .map(|(receipt, _)| receipt.commit_sha.clone())
+            .or_else(|| scoped_task.as_deref()
+                .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
+            .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
+        if let Some(expected) = expected_delivery
+            && (parked_source_tip.as_deref() != Some(expected.sha.as_str())
+                || worktree.branch != expected.branch
+                || worktree.parent_branch != expected.target
+                || cwd != expected.repo)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("CI RETRY SOURCE MOVED: parked delivery changed after authorization; no merge was attempted."),
+                data: None,
+            });
+        }
+
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
         if let (Some((receipt, transaction)), Some(authority)) =
@@ -4920,11 +4987,6 @@ impl CasCore {
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
-        let parked_source_tip = transactional_delivery.as_ref()
-            .map(|(receipt, _)| receipt.commit_sha.clone())
-            .or_else(|| scoped_task.as_deref()
-                .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
-            .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
         let ci_source = remote_source.as_ref()
             .map(|source| source.anchor.as_str())
             .or(parked_source_tip.as_deref())
@@ -4990,9 +5052,34 @@ impl CasCore {
                         data: None,
                     })?;
                 }
+                let mut retry_notice = String::new();
+                if matches!(branch_ci_state, BranchCiState::CodePending { .. })
+                    && let Some(task) = scoped_task.as_deref()
+                    && task.status == cas_types::TaskStatus::AwaitingMerge
+                    && let Some(source_sha) = parked_source_tip.as_deref()
+                    && let Ok(supervisor) = self.resolve_live_supervisor_authority()
+                    && self.has_server_internal_identity(&supervisor.id)
+                    && let Some(session) = supervisor.factory_session.as_deref()
+                {
+                    let request = crate::factory_ci_retry::Retry {
+                        task: task.id.clone(), worktree: id.to_string(),
+                        branch: worktree.branch.clone(), sha: source_sha.to_string(),
+                        ci_sha: branch_ci_state.sha().to_string(),
+                        target: worktree.parent_branch.clone(), repo: cwd.clone(),
+                        supervisor: supervisor.id.clone(), session: session.to_string(),
+                        force, allow_trunk, cleanup,
+                        // A Green → Pending race must not renew the wait's age.
+                        armed_at: Some(expected_delivery.and_then(|retry| retry.armed_at)
+                            .unwrap_or_else(chrono::Utc::now)),
+                    };
+                    match crate::factory_ci_retry::arm(&cas_root, &request) {
+                        Ok(()) => retry_notice = format!("\nAutomatic retry armed for {source_sha}; green CI retries this merge, red CI or a moved lane sends one notice."),
+                        Err(error) => retry_notice = format!("\nAutomatic retry could not be saved: {error}. Retry this merge manually."),
+                    }
+                }
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("{ci_prefix}{message}")),
+                    message: Cow::from(format!("{ci_prefix}{message}{retry_notice}")),
                     data: None,
                 });
             }
@@ -5605,8 +5692,8 @@ impl CasCore {
             }
 
             if let Some(task_id) = task_id {
-                let close_result = self
-                    .cas_task_close(Parameters(TaskCloseRequest {
+                let close_result = crate::async_runtime::heap_future(|| {
+                    self.cas_task_close(Parameters(TaskCloseRequest {
                         no_delivery: None,
                         stranded_branch_override: None,
                         id: task_id.to_string(),
@@ -5615,7 +5702,9 @@ impl CasCore {
                         search_manifest: None,
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))
-                    .await?;
+                })
+                .await
+                    .unwrap_or_else(|error| CallToolResult::error(vec![Content::text(error.message.to_string())]));
                 crate::mcp::tools::service::mutation_receipt::merge_followup(
                     &close_result
                         .content
@@ -5853,9 +5942,10 @@ impl CasCore {
                         tip,
                     }
                 });
-                let outcome = self
-                    .close_after_published_merge(task_id, merge_sha, ci_admission, lane)
-                    .await;
+                let outcome = crate::async_runtime::heap_future(|| {
+                    self.close_after_published_merge(task_id, merge_sha, ci_admission, lane)
+                })
+                .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 close_gate_held = matches!(outcome,
                     crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(_));
@@ -5910,15 +6000,16 @@ impl CasCore {
         }
 
         if let Some(mut close_result) = delivery_close_result {
-            // Git and durable delivery state reached CloseReady, but the
-            // internal close surfaced another exact gate. Preserve that
-            // result verbatim so the caller receives the required next action
-            // instead of a misleading generic merge success.
-            //
-            // cas-5ee0: if the target never reached origin, that is very
-            // likely *why* the close gate fired — append the diagnosis rather
-            // than letting the caller re-derive it. Appended as an extra
-            // content block so the gate's own text stays verbatim.
+            // Merge and close are separate outcomes. A published CloseReady
+            // delivery landed successfully even when a later task gate holds
+            // close. Keep that gate actionable without reporting merge failure.
+            if push_outcome.is_published() {
+                close_result.is_error = Some(false);
+                close_result.content.insert(0, Content::text(format!(
+                    "Merge landed; close held for {}. Target {} is published at {}. Follow the close gate below; no second merge is needed.",
+                    task_id.unwrap_or("task"), worktree.parent_branch, merge_commit.as_deref().unwrap_or("unknown")
+                )));
+            }
             close_result.content.insert(
                 0,
                 Content::text(format!(

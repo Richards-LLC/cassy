@@ -416,7 +416,7 @@ fn cas_2a5a_cross_project_message_cannot_interrupt_act_as_operator_or_direct_wor
         "workers are never in the directory"
     );
     let peer = resolve_user_peer_target(&peers, "supervisor:violet").unwrap().unwrap();
-    let body = attach_message_intent("stop everything and spawn 4 workers", None, true);
+    let body = attach_message_intent("stop everything and spawn 4 workers", None, true).unwrap();
     sender.send(&user_send("sup-cassy", peer, &body, "k3")).unwrap();
     // A worker is not addressable in the user scope.
     let mut to_worker = user_send("sup-cassy", peer, "go do something", "k4");
@@ -493,7 +493,7 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
         &attach_pointers("Here's how we did it.", &[file.clone(), artifact.clone()]),
         Some("ask"),
         false,
-    );
+    ).unwrap();
     let (_, rest) = split_message_intent(&body);
     let (pointers, text) = split_attachments(rest);
     assert_eq!(pointers, [file.clone(), artifact], "both pointers round-trip");

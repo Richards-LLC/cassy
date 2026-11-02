@@ -965,6 +965,18 @@ export class HubConnectionSupervisor {
    */
   async dismissEndedSession(session: string, startedAt: string): Promise<void> {
     await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
+    // Settle on a catalog that cannot predate the save: the caller then drops
+    // its local key, and an older read must not show the row again.
+    const signal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS);
+    try {
+      if (this.catalogRequest) await this.refreshSessions(signal).catch(() => {});
+      await this.refreshSessions(signal);
+    } catch { /* The hub already saved it; reconnect refreshes the catalog. */ }
+  }
+
+  /** Lift the hub's dismissal of an ended session for every paired device. */
+  async restoreDismissedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/restore`, { started_at: startedAt });
     void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
   }
 

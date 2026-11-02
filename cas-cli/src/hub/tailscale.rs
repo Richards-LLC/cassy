@@ -180,10 +180,7 @@ impl TailscaleServeManager {
     ) -> Result<TailscaleServeReceipt> {
         let local_target = format!("http://127.0.0.1:{local_port}");
         if !self.cli_available() {
-            return Err(PublicationUnavailable(format!(
-                "Tailscale CLI unavailable; install Tailscale to publish the route\nCLI: {}\nSocket: {}",
-                self.executable_display(), self.socket_display(),
-            )).into());
+            return Err(PublicationUnavailable(tailscale_unavailable_message()).into());
         }
         let status = self.status()?;
         if let Some(issue) = self.login_issue_for(&status) {

@@ -318,3 +318,82 @@ async fn superseding_a_memory_expires_it_and_removes_it_from_session_start() {
         assert_eq!(stored.content, old.content, "history stays available by ID");
     }
 }
+
+fn policy_service() -> (TempDir, CasService) {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let core = CasCore::with_daemon(root, None, None);
+    assert!(core.cached_config.set(Config::default()).is_ok());
+    core.open_rule_store().unwrap().init().unwrap();
+    #[cfg(feature = "mcp-proxy")]
+    let service = CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = CasService::new(core);
+    (dir, service)
+}
+
+#[tokio::test]
+async fn rule_drift_reports_generated_and_peer_status_without_mutating_policy() {
+    use cas_types::{Rule, RuleStatus};
+    let (dir, service) = policy_service();
+    let rules = service.inner.open_rule_store().unwrap();
+    for id in ["rule-177", "rule-183", "rule-192"] {
+        let mut rule = Rule::new(id.into(), "Current stakeholder instruction".into());
+        rule.status = RuleStatus::Proven;
+        rule.helpful_count = 3;
+        rules.add(&rule).unwrap();
+    }
+    service.inner.sync_rules().unwrap();
+    let generated = dir.path().join(".claude/rules/cas/rule-177.md");
+    std::fs::write(&generated, "Stale broad gate").unwrap();
+    let peer = json!({
+        "machine": "soundwave", "project": "policy-fixture", "captured_at": "2026-11-03T12:00:00Z",
+        "cloud": {"auto_sync": true, "pull_on_start": true, "interval_secs": 60},
+        "rules": rules.list().unwrap().into_iter().map(|mut r| {
+            if r.id != "rule-177" { r.status = RuleStatus::Retired; }
+            r
+        }).collect::<Vec<_>>()
+    });
+    // Bind fixture project identity for cross-machine snapshots.
+    std::fs::write(dir.path().join(".cas/config.toml"), "[project]\ncanonical_id='policy-fixture'\n").unwrap();
+    let result = service.rule(Parameters(serde_json::from_value(json!({
+        "action": "drift", "peer_snapshot": peer.to_string()
+    })).unwrap())).await.expect("report-only drift action must be available");
+    assert_eq!(result.is_error, Some(false));
+    let report = result.content.iter().filter_map(|c| c.as_text()).map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+    for finding in ["rule-177", "generated", "rule-183", "rule-192", "proven", "retired", "cloud", "soundwave"] {
+        assert!(report.contains(finding), "missing {finding}: {report}");
+    }
+    assert_eq!(std::fs::read_to_string(&generated).unwrap(), "Stale broad gate");
+    assert!(rules.list().unwrap().iter().all(|r| r.status == RuleStatus::Proven));
+    assert!(result.structured_content.is_some(), "the local snapshot must be exportable for a peer check");
+}
+
+#[tokio::test]
+async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date() {
+    let (_dir, service) = policy_service();
+    let words = "  Review PROMPT changes via PR.\nDon't ask me to approve wording in Slack.  ";
+    let scope = "Prompt changes in this project; staging delivery remains immediate.";
+    for extra in [json!({}), json!({"stakeholder_quote": words}), json!({"stakeholder_quote": words, "stakeholder_scope": scope})] {
+        let mut request = json!({"action": "create", "content": "HARD RULE: Prompt changes via PR", "stakeholder": "Ben"});
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let result = service.rule(Parameters(serde_json::from_value(request).unwrap())).await;
+        assert!(result.is_err() || result.as_ref().is_ok_and(|r| r.is_error == Some(true)), "incomplete attribution was accepted");
+    }
+    assert!(service.inner.open_rule_store().unwrap().list().unwrap().is_empty());
+    let result = service.rule(Parameters(serde_json::from_value(json!({
+        "action": "create", "content": "HARD RULE: Prompt changes via PR", "stakeholder": "Ben",
+        "stakeholder_quote": words, "stakeholder_scope": scope, "review_after": "2100-01-01T00:00:00Z"
+    })).unwrap())).await.unwrap();
+    assert_ne!(result.is_error, Some(true));
+    let rule = service.inner.open_rule_store().unwrap().list().unwrap().pop().unwrap();
+    let saved = serde_json::to_value(&rule).unwrap();
+    assert_eq!(saved["stakeholder"]["name"], "Ben");
+    assert_eq!(saved["stakeholder"]["quote"], words, "never paraphrase or trim the quote");
+    assert_eq!(saved["stakeholder"]["scope"], scope);
+    assert!(rule.review_after.is_some());
+    let shown = service.rule(Parameters(serde_json::from_value(json!({"action": "show", "id": rule.id})).unwrap())).await.unwrap();
+    let text = shown.content.iter().filter_map(|c| c.as_text()).map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(text.contains(words) && text.contains(scope), "{text}");
+}

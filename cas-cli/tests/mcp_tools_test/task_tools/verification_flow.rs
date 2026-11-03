@@ -1035,7 +1035,7 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
 #[tokio::test]
 async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c() {
     let mut test_env = TestEnvGuard::temp_home();
-    let branch = "factory/a32c-lane";
+    let branch = "factory/test-agent";
     let (temp, service, cas_dir, task_id, lane) =
         delivered_worktree_fixture(&mut test_env, branch).await;
     let repo = temp.path();

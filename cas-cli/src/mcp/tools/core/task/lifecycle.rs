@@ -5507,7 +5507,9 @@ mod related_recall_response_tests {
         crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy").unwrap();
         let source = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
         let contract: serde_json::Value = serde_json::from_str(include_str!("../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
+        // pin: the coordination v1 fixture names its cross-machine ownership refusal case.
         let mut held = contract["cases"].as_array().unwrap().iter().find(|case| case["name"] == "held by a peer").unwrap()["response"]["payload"].clone();
+        let owner = held["receipt"]["visible_owner"]["label"].as_str().unwrap().to_owned();
         held["receipt"]["expires_at"] = serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
         let journal = SqliteRequestJournal::open(temp.path()).unwrap();
         let request = "00000002-2222-4222-8222-000000000002";
@@ -5520,7 +5522,7 @@ mod related_recall_response_tests {
         req.external_ref = Some(source.into());
         let response = core.cas_task_create(Parameters(req)).await
             .map(text).unwrap_or_else(|error| error.message.to_string());
-        assert!(response.contains("alpha (laptop)"), "a second supervisor must see the real ask owner: {response}");
+        assert!(response.contains(&owner), "a second supervisor must see the real ask owner: {response}");
         assert!(response.contains(source), "the ownership response must identify the ask: {response}");
     }
 

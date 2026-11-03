@@ -2645,6 +2645,14 @@ async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_
     assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
     let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id)
         .unwrap().unwrap();
+    let replay = delivery_service(&fixture.cas_root, "rebound-worker")
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "worker handoff",
+            "completion_receipt": serde_json::to_string(&receipt).unwrap(),
+        })))).await.unwrap();
+    assert!(!get_text(&replay).contains("REJECTED"), "{}", get_text(&replay));
+    assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
+        dispatch.id, "an exact receipt retry cannot add another candidate review");
     assert_eq!(dispatch.delivery_transaction_id.as_deref(), Some(transaction.id.as_str()));
     let candidate = dispatch.repository.as_ref().expect("receipt and candidate share one atomic dispatch");
     let tree = git_stdout(&fixture.repo.root, &["rev-parse", &format!("{}^{{tree}}", candidate.head_commit)]);
@@ -2665,6 +2673,84 @@ async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_
         git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]));
     assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
         dispatch.id, "transactional publication cannot add a post-merge verifier");
+}
+
+#[tokio::test]
+async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
+    let mut env = test_env();
+    for change in ["source", "target", "epic plan", "evidence", "manifest"] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let _ = fixture.service.factory(Parameters(merge.clone())).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Approve the unchanged candidate only",
+        })))).await.unwrap();
+        assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        match change {
+            "source" => {
+                std::fs::write(fixture.worker.join("delivery.txt"), "Changed after review\n").unwrap();
+                run_git(&["commit", "-am", "Change source after review"], &fixture.worker);
+                run_git(&["push", "origin", &fixture.branch], &fixture.worker);
+                task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
+                tasks.update(&task).unwrap();
+            }
+            "target" => {
+                let target = fixture.cas_root.join("target-writer");
+                run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
+                std::fs::write(target.join("independent.txt"), "Another delivery\n").unwrap();
+                run_git(&["add", "independent.txt"], &target);
+                run_git(&["commit", "-m", "Independent target progress"], &target);
+                run_git(&["push", "origin", "epic/rebound"], &target);
+            }
+            "epic plan" => {
+                let mut epic = tasks.get("epic-rebound").unwrap();
+                epic.design = "The approved plan now requires an additional outcome.".into();
+                tasks.update(&epic).unwrap();
+            }
+            "evidence" => {
+                let [directory, _] = cas::config::factory_task_artifact_dirs(&fixture.cas_root,
+                    &env.home().join(".cas/artifacts"), &task.id);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(directory.join("LEDGER.md"), format!(
+                    "# Changed evidence\n\nbuild: {}\nscope: fixture\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=0; NOT EXERCISED=1; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | Evidence changed | Re-review | Changed after approval | NOT EXERCISED: fixture | fixture | - | - |\n",
+                    fixture.tip)).unwrap();
+            }
+            "manifest" => {
+                let path = Path::new(&dispatch.repository.as_ref().unwrap().worktree_root)
+                    .parent().unwrap().join("candidate.json");
+                let mut body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                body["context_digest"] = serde_json::Value::String("forged approval context".into());
+                std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+        let remote = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        let result = fixture.service.factory(Parameters(merge)).await;
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before,
+            "{change} drift must hold this delivery: {result:?}");
+        assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote,
+            "{change} drift cannot publish an old approval");
+        if change != "manifest" {
+            assert_eq!(cas_store::get_verification_dispatch(&fixture.cas_root, &dispatch.id).unwrap().state,
+                cas::types::VerificationDispatchState::Invalidated, "{change}");
+        }
+    }
 }
 
 #[tokio::test]

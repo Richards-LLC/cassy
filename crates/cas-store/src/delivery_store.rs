@@ -1525,7 +1525,13 @@ mod tests {
         };
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let deadline = Utc::now() + chrono::Duration::minutes(10);
-        let (first, first_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+        let proof = cas_types::RepositoryProofBoundary {
+            repository_root: root.path().to_string_lossy().into_owned(),
+            worktree_root: root.path().join("candidate").to_string_lossy().into_owned(),
+            head_commit: "c".repeat(40), state_digest: "immutable candidate".into(),
+            target_branch: None, anchor_commits: Vec::new(),
+        };
+        let (first, first_dispatch) = create_worker_delivery_with_dispatch_for_lease_at_repository(
             root.path(),
             &receipt,
             WorkerDeliveryState::AwaitingVerification,
@@ -1533,6 +1539,7 @@ mod tests {
             lease.epoch,
             "verifier-owner",
             deadline,
+            &proof,
         )
         .unwrap();
         assert!(
@@ -1547,7 +1554,7 @@ mod tests {
         );
         let after_first = delivery_boundary_counts(root.path(), &receipt.id);
 
-        let (replay, replay_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+        let (replay, replay_dispatch) = create_worker_delivery_with_dispatch_for_lease_at_repository(
             root.path(),
             &receipt,
             WorkerDeliveryState::AwaitingVerification,
@@ -1555,10 +1562,18 @@ mod tests {
             lease.epoch,
             "verifier-owner",
             deadline,
+            &proof,
         )
         .expect("exact replay by the persisting session re-reads its boundary");
         assert_eq!(replay.id, first.id);
         assert_eq!(replay_dispatch.id, first_dispatch.id);
+        assert_eq!(replay_dispatch.repository.as_ref(), Some(&proof));
+        let mut changed = proof.clone();
+        changed.state_digest = "a different candidate".into();
+        assert!(create_worker_delivery_with_dispatch_for_lease_at_repository(
+            root.path(), &receipt, WorkerDeliveryState::AwaitingVerification,
+            "worker-session", lease.epoch, "verifier-owner", deadline, &changed,
+        ).is_err(), "an exact receipt cannot substitute another candidate after lease release");
         assert_eq!(
             delivery_boundary_counts(root.path(), &receipt.id),
             after_first

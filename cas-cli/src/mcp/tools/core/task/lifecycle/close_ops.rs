@@ -10192,6 +10192,16 @@ impl CasCore {
                             return Ok(Self::tool_error(message));
                         }
 
+                        if !is_epic && !empty_delivery
+                            && task.deliverables.factory_branch_anchor.is_some()
+                            && (task.deliverables.factory_branch_start.is_some()
+                                || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
+                        {
+                            return Ok(Self::tool_error(format!(
+                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Reconcile the delivery's candidate and recorded promotion with its supervisor.",
+                                task.id
+                            )));
+                        }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {

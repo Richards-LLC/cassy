@@ -66,6 +66,57 @@ fn fail(message: impl std::fmt::Display) -> McpError {
     )
 }
 
+fn candidate_key(
+    task: &str,
+    repo: &Path,
+    source: &str,
+    source_sha: &str,
+    target: &str,
+    target_sha: &str,
+    context: &str,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(
+        "premerge-v1",
+        task,
+        repo,
+        source,
+        source_sha,
+        target,
+        target_sha,
+        context,
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn write_once<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
+    path: &Path,
+    value: &T,
+) -> Result<(), String> {
+    use std::io::Write;
+    let directory = path.parent().ok_or("immutable record directory missing")?;
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    file.write_all(&serde_json::to_vec(value).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    match file.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let previous: T =
+                serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            if &previous == value {
+                Ok(())
+            } else {
+                Err("immutable candidate record changed".into())
+            }
+        }
+        Err(error) => Err(error.error.to_string()),
+    }
+}
+
 fn task_context(task: &Task) -> serde_json::Value {
     serde_json::json!({
         "id": task.id, "title": task.title, "description": task.description,
@@ -143,7 +194,28 @@ pub(crate) fn candidate_for_dispatch(
     let candidate: Candidate =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    if candidate.proof != *proof || candidate.task_id != dispatch.task_id {
+    let key = candidate_key(
+        &candidate.task_id,
+        &candidate.repository,
+        &candidate.source_branch,
+        &candidate.source_sha,
+        &candidate.target_branch,
+        &candidate.target_sha,
+        &candidate.context_digest,
+    )?;
+    if candidate.proof != *proof
+        || candidate.task_id != dispatch.task_id
+        || candidate.repository.to_string_lossy() != proof.repository_root
+        || checkout
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            != Some(key.as_str())
+        || git(
+            &candidate.repository,
+            &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
+        )? != candidate.tree
+    {
         return Err("candidate does not match its immutable dispatch proof".into());
     }
     Ok(Some(candidate))
@@ -290,31 +362,7 @@ impl Approval {
             candidate_tree: candidate.tree.clone(),
             landed_sha: landed.into(),
         };
-        let path = candidate.directory()?.join("promotion.json");
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(&serde_json::to_vec(&record).map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
-                file.sync_all().map_err(|error| error.to_string())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let previous: Promotion = serde_json::from_slice(
-                    &std::fs::read(path).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-                if previous == record {
-                    Ok(())
-                } else {
-                    Err("candidate promotion identity changed".into())
-                }
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        write_once(&candidate.directory()?.join("promotion.json"), &record)
     }
 }
 
@@ -431,6 +479,7 @@ impl CasCore {
             return Ok(None);
         }
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
+        let repository = repo.canonicalize().map_err(fail)?;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
@@ -438,6 +487,7 @@ impl CasCore {
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                && candidate.repository == repository
                 && candidate.source_branch == source
                 && candidate.target_branch == target
                 && task.deliverables.factory_branch_anchor.as_deref()
@@ -456,6 +506,8 @@ impl CasCore {
                 }
             }
             if candidate.context_digest == digest
+                && dispatch.state != cas_types::VerificationDispatchState::Invalidated
+                && candidate.repository == repository
                 && candidate.source_branch == source
                 && candidate.target_branch == target
                 && candidate.validate(&self.cas_root, task).is_ok()
@@ -475,6 +527,11 @@ impl CasCore {
                     task.id, dispatch.id, dispatch.state
                 )));
             }
+            if dispatch.delivery_transaction_id.is_some() {
+                return Err(fail(
+                    "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
+                ));
+            }
             cas_store::invalidate_verification_dispatch_for_repository_drift(
                 &self.cas_root,
                 &dispatch.id,
@@ -488,6 +545,7 @@ impl CasCore {
         )
         .map_err(fail)?;
         let candidate = self.build_verification_candidate(task, repo, source, target, digest)?;
+        candidate.validate(&self.cas_root, task).map_err(fail)?;
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
         let dispatch = cas_store::create_verification_dispatch_bound(
@@ -526,13 +584,15 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
-        self.build_verification_candidate(
+        let candidate = self.build_verification_candidate(
             task,
             repo,
             source,
             target,
             context_digest(&self.cas_root, task).map_err(fail)?,
-        )
+        )?;
+        candidate.validate(&self.cas_root, task).map_err(fail)?;
+        Ok(candidate)
     }
 
     fn build_verification_candidate(
@@ -546,13 +606,17 @@ impl CasCore {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = git(repo, &["rev-parse", target]).map_err(fail)?;
-        let key = format!(
-            "{:x}",
-            Sha256::digest(format!(
-                "{}:{source}:{source_sha}:{target}:{target_sha}:{digest}",
-                task.id
-            ))
-        );
+        let repository = repo.canonicalize().map_err(fail)?;
+        let key = candidate_key(
+            &task.id,
+            &repository,
+            source,
+            &source_sha,
+            target,
+            &target_sha,
+            &digest,
+        )
+        .map_err(fail)?;
         let directory = self.cas_root.join("verification-candidates").join(key);
         let _candidate_lock = crate::worktree::target_lock::lock_delivery_target(
             &self.cas_root,
@@ -566,6 +630,29 @@ impl CasCore {
         }
         std::fs::create_dir_all(&directory).map_err(fail)?;
         let checkout = directory.join("checkout");
+        if checkout.exists() {
+            let bound = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .map_err(fail)?
+                .and_then(|dispatch| dispatch.repository)
+                .is_some_and(|proof| Path::new(&proof.worktree_root) == checkout);
+            if bound {
+                return Err(fail(
+                    "candidate manifest missing for an existing dispatch; explicit recovery required",
+                ));
+            }
+            git(
+                repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    checkout
+                        .to_str()
+                        .ok_or_else(|| fail("non-UTF8 candidate path"))?,
+                ],
+            )
+            .map_err(fail)?;
+        }
         let merged = git(
             repo,
             &["merge-tree", "--write-tree", &target_sha, &source_sha],
@@ -608,7 +695,7 @@ impl CasCore {
                 .map_err(fail)?;
         let candidate = Candidate {
             task_id: task.id.clone(),
-            repository: repo.canonicalize().map_err(fail)?,
+            repository,
             source_branch: source.into(),
             source_sha,
             target_branch: target.into(),
@@ -618,7 +705,7 @@ impl CasCore {
             proof,
             preparation_ms: started.elapsed().as_millis(),
         };
-        std::fs::write(manifest, serde_json::to_vec(&candidate).map_err(fail)?).map_err(fail)?;
+        write_once(&manifest, &candidate).map_err(fail)?;
         let store = self.open_task_store()?;
         let mut current = store.get(&task.id).map_err(fail)?;
         let expected = current.clone();

@@ -180,7 +180,7 @@ owner_groups:
 invariants:
   HUB-J13-COMPATIBLE-CLAUDE:
     statement: Commander and factory launches prefer a verified native Claude over stale PATH clients, or refuse with an actionable version error. Hub readiness keeps missing, outdated and unverifiable clients visible with their own repair action.
-    check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME/PATH and CAS_TEST_HUB_PATH_ONLY=1; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.
+    check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME and CAS_TEST_HUB_PATH; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.
   HUB-J4-API-ERROR-VISIBLE:
     statement: The first native Claude API failure appears in the conversation and session preview within that turn.
     check: Run commander_mirror::tests::claude_api_error_reaches_commander_in_one_scan_cas_d8e0 through a real transcript scan and queue; verify the error reply and summary before another turn, and dedupe on replay.

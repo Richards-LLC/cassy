@@ -603,10 +603,8 @@ fn launch_path(home: &Path) -> Vec<PathBuf> {
     // CLI integration fixtures inject their own HOME/PATH. Never let a login
     // shell or a fixed host directory turn a missing/broken fixture into a
     // successful probe of the operator's installed provider.
-    if std::env::var_os("CAS_TEST_HUB_PATH_ONLY").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).filter(|path| path.is_absolute()).collect())
-            .unwrap_or_default();
+    if let Some(path) = std::env::var_os("CAS_TEST_HUB_PATH") {
+        return std::env::split_paths(&path).filter(|path| path.is_absolute()).collect();
     }
     let mut paths: Vec<PathBuf> = Vec::new();
     // A user service does not inherit the terminal's PATH. Probe a login shell
@@ -800,8 +798,7 @@ mod tests {
         let home = env.home().to_path_buf();
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
-        env.set("CAS_TEST_HUB_PATH_ONLY", "1");
-        env.set("PATH", &bin);
+        env.set("CAS_TEST_HUB_PATH", &bin);
         env.remove("CLAUDE_CONFIG_DIR");
         env.remove("CODEX_HOME");
         for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {
@@ -899,8 +896,8 @@ mod tests {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &format!("{module}::launch_catalog_recommends_without_opening_provider_credentials"), "--nocapture"])
             .current_dir(&home).env("HOME", &home).env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("SHELL", &shell).env("PATH", path).env("CAS_TEST_CATALOG_AUDIT_CHILD", "1")
-            .env("CAS_TEST_HUB_PATH_ONLY", "1")
+            .env("SHELL", &shell).env("PATH", &path).env("CAS_TEST_CATALOG_AUDIT_CHILD", "1")
+            .env("CAS_TEST_HUB_PATH", &path)
             .env_remove("CAS_ROOT").env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
             .output().unwrap();
         let mut events = [0u8; 4096];

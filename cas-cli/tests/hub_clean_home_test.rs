@@ -38,7 +38,7 @@ fn cas_command(home: &Path, path: &OsStr) -> Command {
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
-        .env("CAS_TEST_HUB_PATH_ONLY", "1")
+        .env("CAS_TEST_HUB_PATH", path)
         .env("TAILSCALE", fixture_tailscale(home, path))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
@@ -50,7 +50,7 @@ fn cas_process_command(home: &Path, path: &OsStr) -> std::process::Command {
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
-        .env("CAS_TEST_HUB_PATH_ONLY", "1")
+        .env("CAS_TEST_HUB_PATH", path)
         .env("TAILSCALE", fixture_tailscale(home, path))
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command

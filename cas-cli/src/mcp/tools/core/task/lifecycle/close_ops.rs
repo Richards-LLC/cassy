@@ -34076,6 +34076,7 @@ esac
         let recorded = commit_local(p, "a.rs", "feat(cas-a0a0): delivery");
         let candidate = commit_local(p, "a2.rs", "fix(cas-a0a0): continuation");
         let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
         let store = cas_store::SqliteTaskStore::open(&root).unwrap();
         store.init().unwrap();
         let core = CasCore::with_daemon(root.clone(), None, None);

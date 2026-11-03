@@ -1425,32 +1425,71 @@ mod tests {
         }
     }
 
+    fn register_rule_author(core: &CasCore, role: crate::types::AgentRole, factory: bool) {
+        let mut agent = crate::types::Agent::new_with_role(
+            "rule-author".into(), "rule-author".into(), role,
+        );
+        agent.factory_session = factory.then(|| "factory-session".into());
+        let store = core.open_agent_store().unwrap();
+        store.init().unwrap();
+        store.register(&agent).unwrap();
+        core.set_agent_id_for_testing(agent.id);
+    }
+
+    /// cas-70a6: every encode-producing write uses the current caller's
+    /// authority, including edits to a previously operator-authorised rule.
     #[tokio::test]
-    async fn mechanical_first_occurrence_files_chore_without_promoting_draft() {
-        for mechanism in ["lint", "test", "hook", "gate", "type"] {
-            let (_temp, core) = isolated_core();
-            core.cas_rule_create(Parameters(RuleCreateRequest {
-                stakeholder: None,
-                stakeholder_quote: None,
-                stakeholder_scope: None,
-                review_after: None,
-                scope: "project".into(),
-                content: "Parser failures must be caught by the grammar check".into(),
-                paths: None,
-                tags: Some(format!("enforceable:{mechanism}")),
-                source_ids: Some("incident-one".into()),
-                auto_approve_tools: None,
-                auto_approve_paths: None,
-            }))
-            .await
-            .unwrap();
-            let rules = core.open_rule_store().unwrap().list().unwrap();
-            assert_eq!(rules.len(), 1);
-            assert_eq!(rules[0].status, RuleStatus::Draft);
-            let tasks = core.open_task_store().unwrap().list(None).unwrap();
-            assert_eq!(tasks.len(), 1, "{mechanism}");
-            assert_eq!(tasks[0].external_ref, Some(encode_chore_ref(&rules[0].id)));
-            assert!(tasks[0].description.contains("incident-one"));
+    async fn encode_chores_require_operator_authority_for_every_write() {
+        use crate::types::AgentRole::{Director, Standard, Supervisor, Worker};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for (identity, role, factory, factory_env, allowed) in [
+            ("worker", Some(Worker), true, false, false),
+            ("supervisor", Some(Supervisor), true, false, false),
+            ("director", Some(Director), false, false, false),
+            ("factory agent", Some(Standard), true, false, false),
+            ("factory environment", Some(Standard), false, true, false),
+            ("unregistered", None, false, false, false),
+            ("operator", Some(Standard), false, false, true),
+        ] {
+            if factory_env { env.set("CAS_FACTORY_MODE", "1"); }
+            else { env.remove("CAS_FACTORY_MODE"); }
+            for action in ["create", "update", "promote", "already proven", "helpful", "restore"] {
+                let (_temp, core) = isolated_core();
+                if let Some(role) = role { register_rule_author(&core, role, factory); }
+                let rules = core.open_rule_store().unwrap();
+                let mut rule = Rule::new("rule-mechanical".into(), "Check parser grammar".into());
+                rule.tags = vec!["enforceable:test".into()];
+                rule.source_ids = vec!["incident-one".into()];
+                // Stored authority never delegates permission to the next writer.
+                rule.authorize_operator_hard_rule("operator:previous-author");
+                if action == "already proven" { rule.status = RuleStatus::Proven; }
+                if action != "create" { rules.add(&rule).unwrap(); }
+                let result = match action {
+                    "create" => core.cas_rule_create(Parameters(RuleCreateRequest {
+                        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
+                        scope: "project".into(), content: rule.content.clone(), paths: None,
+                        tags: Some("enforceable:test".into()), source_ids: Some("incident-one".into()),
+                        auto_approve_tools: None, auto_approve_paths: None,
+                    })).await,
+                    "update" => core.cas_rule_update(Parameters(update_rule(&rule.id, Some("enforceable:test"), None))).await,
+                    "promote" | "already proven" => core.cas_rule_promote(rule.id.clone(), Some("reviewed mechanism".into()), None).await,
+                    "helpful" => core.cas_rule_helpful(Parameters(IdRequest { id: rule.id.clone() })).await,
+                    "restore" => core.cas_rule_restore(Parameters(VersionRequest {
+                        id: rule.id.clone(), version: Some(1), version_id: None,
+                        changed_by: None, change_note: Some("restore mechanism".into()),
+                    })).await,
+                    _ => unreachable!(),
+                }.unwrap();
+                let text = result.content.iter().filter_map(|content| content.as_text()).map(|text| text.text.as_str()).collect::<Vec<_>>().join("\n");
+                let tasks = core.open_task_store().unwrap().list(None).unwrap();
+                assert_eq!(tasks.len(), usize::from(allowed), "{identity}/{action}: {text}");
+                if allowed {
+                    assert!(text.contains("encode chore"), "{identity}/{action}: {text}");
+                } else {
+                    assert!(text.contains("no encode chore created"), "{identity}/{action}: {text}");
+                    assert!(text.contains("rule action=update"), "operator command missing: {text}");
+                }
+            }
         }
     }
 

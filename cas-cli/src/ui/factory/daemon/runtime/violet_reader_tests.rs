@@ -445,23 +445,20 @@ fn refused_dispatch_uncertain_types_nothing() {
 }
 
 #[test]
-fn delivery_routes_to_its_mapped_local_session_cas_c186() {
-    for mapped in [None, Some("mapped-session")] {
+fn managed_delivery_routes_to_its_owner_session() {
+    for session in ["factory-session", "another-owner-session"] {
         let temp = tempfile::tempdir().unwrap();
         let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let cloud = FixtureCloud::new("leases this reader's deliveries");
-        let mut reader = VioletReader::new("factory-session");
-        if let Some(session) = mapped {
-            reader.bind_session(DELIVERY, session);
-        }
+        let reader = Mutex::new(VioletReader::new(session));
         let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
         let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &quarantine };
-        let outcome = reader.tick(&cloud, REGISTRATION, &io, Utc::now());
-        assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
+        let report = read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, Utc::now()).unwrap();
+        assert_eq!(report.wakes, 1);
         let queued = queue.peek_all(10).unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].factory_session.as_deref(), Some(mapped.unwrap_or("factory-session")));
+        assert_eq!(queued[0].factory_session.as_deref(), Some(session));
     }
 }
 

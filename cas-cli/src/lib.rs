@@ -514,3 +514,6 @@ pub use types::{
     Agent, ChangeType, CommitLink, Entry, EntryType, Event, FileChange, Prompt, Rule, RuleStatus,
     Session, SessionOutcome, Skill, Spec, Task, TaskStatus, Verification, Worktree, WorktreeStatus,
 };
+
+#[cfg(test)]
+mod project_hold_tests;

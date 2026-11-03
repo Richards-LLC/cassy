@@ -9,6 +9,7 @@ mod cloud_attach;
 mod daemon;
 mod doctor;
 mod gc;
+pub(crate) mod hold;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -735,6 +736,11 @@ pub enum FactoryCommands {
         #[arg(long)]
         reason: String,
     },
+    /// Inspect or change the operator's project hold
+    Hold {
+        #[command(subcommand)]
+        command: hold::HoldCommand,
+    },
     /// Internal JSON parity for the advisory verification shadow action.
     #[command(hide = true)]
     ShadowReview {
@@ -1262,6 +1268,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 }
                 Ok(())
             }
+            FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
             FactoryCommands::ShadowReview { request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("shadow review requires a Cassy project"))?;
                 if std::fs::metadata(request)?.len() > 512 * 1024 {

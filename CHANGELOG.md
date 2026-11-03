@@ -31,6 +31,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep missed plan targets out of merges** — Supervisor instructions now require the plan's measured target, hold only dependent work when it is missed, and keep independent deliveries shipping. Briefs carry the plan section and metric through worker close; characterization protects only behaviour the plan keeps.
 
+### Added — Operator project holds
+
+- **Stop dispatch and merge invitations for a project** — Was: Ready tasks and
+  merge prompts stayed actionable during an operator's full stop. → Now: Only
+  the operator can set or lift a project hold, with a reason and an audit of who
+  acted and when. Startup leads with the hold, action lists and relays wait,
+  and worker spawning and merges refuse until the operator lifts it.
+
 ### Added — Measured phase outcomes
 
 - **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.

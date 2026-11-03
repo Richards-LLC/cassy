@@ -9050,6 +9050,16 @@ impl FactoryDaemon {
             // once that claim came back.
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
+            if cas_store::project_hold::is_action_relay(&queued.prompt)
+                && cas_store::project_hold::is_held(self.app.cas_dir())
+            {
+                self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "Project hold: action relay withheld".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::seconds(2),
+                    });
+                continue;
+            }
             let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
             let batch_len = facts.message_batch.len();
             let leader_held = facts.deferred_inbox.is_some()
@@ -11720,7 +11730,8 @@ impl FactoryDaemon {
         // Step 2: Pop FIFO when no spawn is active. While one is active, only
         // a shutdown may pass so it can mark/cancel that in-flight worker.
         let action =
-            match take_next_pending_spawn(&mut self.pending_spawns, self.spawn_task.is_some()) {
+            match take_next_pending_spawn(&mut self.pending_spawns,
+                self.spawn_task.is_some() || cas_store::project_hold::is_held(self.app.cas_dir())) {
                 Some(a) => a,
                 None => return,
             };

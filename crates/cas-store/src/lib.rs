@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
+pub mod project_hold;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
@@ -1175,3 +1176,6 @@ pub trait EntityStore: Send + Sync {
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(test)]
+mod project_hold_tests;

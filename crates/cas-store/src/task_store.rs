@@ -1343,6 +1343,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let held = crate::project_hold::held_on_connection(&conn);
 
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
@@ -1372,7 +1373,7 @@ impl TaskStore for SqliteTaskStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
-        Ok(tasks)
+        Ok(tasks.into_iter().filter(|task| !held || task.status != TaskStatus::AwaitingMerge).collect())
     }
 
     fn ids_by_assignees_and_statuses(
@@ -1422,6 +1423,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn list_ready(&self) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
+        if crate::project_hold::held_on_connection(&conn) { return Ok(Vec::new()); }
 
         // Ready = open tasks, plus tasks projected Blocked by an open `blocks`
         // edge because those remain startable for parallel preparation. An

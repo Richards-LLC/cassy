@@ -980,6 +980,11 @@ impl CasService {
         use crate::store::open_prompt_queue_store;
 
         let mut req = req;
+        if req.merge_request.unwrap_or(false)
+            && let Some(hold) = cas_store::project_hold::notice(&self.inner.cas_root)
+        {
+            return Ok(Self::success(hold));
+        }
 
         // cas-6853: broadcast audience policy applies to all_workers only.
         let broadcast_supersede_key = req

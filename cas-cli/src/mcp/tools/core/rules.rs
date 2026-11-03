@@ -195,6 +195,14 @@ impl CasCore {
         let Some(mechanism) = enforceable_mechanism(rule) else {
             return Ok(None);
         };
+        // Reuse the HARD RULE caller check, but its supervisor fast path
+        // does not authorise turning a rule into implementation work.
+        if !self
+            .operator_hard_rule_author()
+            .is_ok_and(|author| author.starts_with("operator:"))
+        {
+            return Ok(None);
+        }
         let task_store = self.open_task_store()?;
         let external_ref = encode_chore_ref(&rule.id);
         if let Some(existing) = task_store
@@ -246,6 +254,18 @@ impl CasCore {
                 data: None,
             })?;
         Ok(Some(id))
+    }
+
+    /// Every rule-write response explains how the operator can request encoding.
+    fn encode_chore_suffix(&self, rule: &Rule) -> Result<String, McpError> {
+        Ok(match self.ensure_encode_chore(rule)? {
+            Some(id) => format!("; encode chore {id} exists"),
+            None if enforceable_mechanism(rule).is_some() => format!(
+                "; no encode chore created: operator authorisation required. Operator command in your registered session outside the factory: rule action=update id={} tags={:?}",
+                rule.id, rule.tags.join(",")
+            ),
+            None => String::new(),
+        })
     }
 
     /// cas-56266: list the cited sites a rule change leaves for review in one
@@ -493,7 +513,7 @@ impl CasCore {
             let _ = self.sync_rules();
         }
 
-        let chore = self.ensure_encode_chore(&rule)?;
+        let chore_suffix = self.encode_chore_suffix(&rule)?;
         let mut msg = format!("Marked {} as helpful", req.id);
         if promoted {
             msg.push_str(&format!(
@@ -510,9 +530,7 @@ impl CasCore {
             ));
         }
 
-        if let Some(chore) = chore {
-            msg.push_str(&format!("; encode chore {chore} exists"));
-        }
+        msg.push_str(&chore_suffix);
         Ok(Self::success(msg))
     }
 
@@ -687,10 +705,7 @@ impl CasCore {
             data: None,
         })?;
 
-        let chore = self.ensure_encode_chore(&rule)?;
-        let chore_suffix = chore
-            .map(|id| format!("; encode chore {id} exists"))
-            .unwrap_or_default();
+        let chore_suffix = self.encode_chore_suffix(&rule)?;
         match hard_rule_author {
             Some(Ok(author)) => {
                 let _ = self.sync_rules();
@@ -773,10 +788,11 @@ impl CasCore {
 
         match rule.status {
             RuleStatus::Proven => {
-                let chore = self.ensure_encode_chore(&rule)?;
-                return Ok(Self::success(match chore {
-                    Some(chore) => format!("{id} is already Proven; encode chore {chore} exists"),
-                    None => format!("{id} is already Proven; nothing changed"),
+                let suffix = self.encode_chore_suffix(&rule)?;
+                return Ok(Self::success(if suffix.is_empty() {
+                    format!("{id} is already Proven; nothing changed")
+                } else {
+                    format!("{id} is already Proven{suffix}")
                 }));
             }
             RuleStatus::Retired => {
@@ -819,7 +835,7 @@ impl CasCore {
                 data: None,
             })?;
         let _ = self.sync_rules();
-        let chore = self.ensure_encode_chore(&rule)?;
+        let chore_suffix = self.encode_chore_suffix(&rule)?;
 
         let mut msg = format!("Promoted {id} to Proven (synced to Claude Code)");
         if raised_to_floor {
@@ -827,9 +843,7 @@ impl CasCore {
                 "; helpful_count raised to the sync floor of {floor}"
             ));
         }
-        if let Some(chore) = chore {
-            msg.push_str(&format!("; encode chore {chore} exists"));
-        }
+        msg.push_str(&chore_suffix);
         Ok(Self::success(msg))
     }
 
@@ -1068,10 +1082,7 @@ impl CasCore {
             let _ = self.sync_rules();
         }
 
-        let chore = self.ensure_encode_chore(&rule)?;
-        let suffix = chore
-            .map(|id| format!("; encode chore {id} exists"))
-            .unwrap_or_default();
+        let suffix = self.encode_chore_suffix(&rule)?;
         let cleanup = self.rule_cleanup_suffix(&rule, &crate::rule_refs::update_changes(&before, &rule));
         Ok(Self::success(format!(
             "Updated rule {}: {}{}{cleanup}",
@@ -1142,10 +1153,7 @@ impl CasCore {
             data: None,
         })?;
         let _ = self.sync_rules();
-        let chore = self.ensure_encode_chore(&restored)?;
-        let suffix = chore
-            .map(|id| format!("; encode chore {id} exists"))
-            .unwrap_or_default();
+        let suffix = self.encode_chore_suffix(&restored)?;
         Ok(Self::success(format!(
             "Restored rule {}{} (status: {}){suffix}",
             req.id,
@@ -1328,9 +1336,11 @@ mod tests {
     use crate::store::init_cas_dir;
 
     async fn promote_with_sources(tags: &[&str], sources: &[&str], repeat: bool) -> Vec<Task> {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().expect("temporary project");
         let cas_root = init_cas_dir(temp.path()).expect("initialize isolated project");
         let core = CasCore::with_daemon(cas_root, None, None);
+        register_rule_author(&core, crate::types::AgentRole::Standard, false);
         let rule_store = core.open_rule_store().expect("rule store");
         rule_store.init().expect("initialize rule store");
         let task_store = core.open_task_store().expect("task store");
@@ -1426,9 +1436,8 @@ mod tests {
     }
 
     fn register_rule_author(core: &CasCore, role: crate::types::AgentRole, factory: bool) {
-        let mut agent = crate::types::Agent::new_with_role(
-            "rule-author".into(), "rule-author".into(), role,
-        );
+        let mut agent =
+            crate::types::Agent::new_with_role("rule-author".into(), "rule-author".into(), role);
         agent.factory_session = factory.then(|| "factory-session".into());
         let store = core.open_agent_store().unwrap();
         store.init().unwrap();
@@ -1451,43 +1460,111 @@ mod tests {
             ("unregistered", None, false, false, false),
             ("operator", Some(Standard), false, false, true),
         ] {
-            if factory_env { env.set("CAS_FACTORY_MODE", "1"); }
-            else { env.remove("CAS_FACTORY_MODE"); }
-            for action in ["create", "update", "promote", "already proven", "helpful", "restore"] {
+            if factory_env {
+                env.set("CAS_FACTORY_MODE", "1");
+            } else {
+                env.remove("CAS_FACTORY_MODE");
+            }
+            for action in [
+                "create",
+                "update",
+                "promote",
+                "already proven",
+                "helpful",
+                "restore",
+            ] {
                 let (_temp, core) = isolated_core();
-                if let Some(role) = role { register_rule_author(&core, role, factory); }
+                if let Some(role) = role {
+                    register_rule_author(&core, role, factory);
+                }
                 let rules = core.open_rule_store().unwrap();
                 let mut rule = Rule::new("rule-mechanical".into(), "Check parser grammar".into());
                 rule.tags = vec!["enforceable:test".into()];
                 rule.source_ids = vec!["incident-one".into()];
                 // Stored authority never delegates permission to the next writer.
                 rule.authorize_operator_hard_rule("operator:previous-author");
-                if action == "already proven" { rule.status = RuleStatus::Proven; }
-                if action != "create" { rules.add(&rule).unwrap(); }
+                if action == "already proven" {
+                    rule.status = RuleStatus::Proven;
+                }
+                if action != "create" {
+                    rules.add(&rule).unwrap();
+                }
                 let result = match action {
-                    "create" => core.cas_rule_create(Parameters(RuleCreateRequest {
-                        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
-                        scope: "project".into(), content: rule.content.clone(), paths: None,
-                        tags: Some("enforceable:test".into()), source_ids: Some("incident-one".into()),
-                        auto_approve_tools: None, auto_approve_paths: None,
-                    })).await,
-                    "update" => core.cas_rule_update(Parameters(update_rule(&rule.id, Some("enforceable:test"), None))).await,
-                    "promote" | "already proven" => core.cas_rule_promote(rule.id.clone(), Some("reviewed mechanism".into()), None).await,
-                    "helpful" => core.cas_rule_helpful(Parameters(IdRequest { id: rule.id.clone() })).await,
-                    "restore" => core.cas_rule_restore(Parameters(VersionRequest {
-                        id: rule.id.clone(), version: Some(1), version_id: None,
-                        changed_by: None, change_note: Some("restore mechanism".into()),
-                    })).await,
+                    "create" => {
+                        core.cas_rule_create(Parameters(RuleCreateRequest {
+                            stakeholder: None,
+                            stakeholder_quote: None,
+                            stakeholder_scope: None,
+                            review_after: None,
+                            scope: "project".into(),
+                            content: rule.content.clone(),
+                            paths: None,
+                            tags: Some("enforceable:test".into()),
+                            source_ids: Some("incident-one".into()),
+                            auto_approve_tools: None,
+                            auto_approve_paths: None,
+                        }))
+                        .await
+                    }
+                    "update" => {
+                        core.cas_rule_update(Parameters(update_rule(
+                            &rule.id,
+                            Some("enforceable:test"),
+                            None,
+                        )))
+                        .await
+                    }
+                    "promote" | "already proven" => {
+                        core.cas_rule_promote(
+                            rule.id.clone(),
+                            Some("reviewed mechanism".into()),
+                            None,
+                        )
+                        .await
+                    }
+                    "helpful" => {
+                        core.cas_rule_helpful(Parameters(IdRequest {
+                            id: rule.id.clone(),
+                        }))
+                        .await
+                    }
+                    "restore" => {
+                        core.cas_rule_restore(Parameters(VersionRequest {
+                            id: rule.id.clone(),
+                            version: Some(1),
+                            version_id: None,
+                            changed_by: None,
+                            change_note: Some("restore mechanism".into()),
+                        }))
+                        .await
+                    }
                     _ => unreachable!(),
-                }.unwrap();
-                let text = result.content.iter().filter_map(|content| content.as_text()).map(|text| text.text.as_str()).collect::<Vec<_>>().join("\n");
+                }
+                .unwrap();
+                let text = result
+                    .content
+                    .iter()
+                    .filter_map(|content| content.as_text())
+                    .map(|text| text.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let tasks = core.open_task_store().unwrap().list(None).unwrap();
-                assert_eq!(tasks.len(), usize::from(allowed), "{identity}/{action}: {text}");
+                assert_eq!(
+                    tasks.len(),
+                    usize::from(allowed),
+                    "{identity}/{action}: {text}"
+                );
                 if allowed {
                     assert!(text.contains("encode chore"), "{identity}/{action}: {text}");
                 } else {
-                    assert!(text.contains("no encode chore created"), "{identity}/{action}: {text}");
-                    assert!(text.contains("rule action=update"), "operator command missing: {text}");
+                    assert!(
+                        text.contains("no encode chore created"),
+                        "{identity}/{action}: {text}"
+                    );
+                    assert!(
+                        text.contains("rule action=update"),
+                        "operator command missing: {text}"
+                    );
                 }
             }
         }
@@ -1495,7 +1572,9 @@ mod tests {
 
     #[tokio::test]
     async fn tagging_legacy_draft_files_once_even_after_chore_closes() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let (_temp, core) = isolated_core();
+        register_rule_author(&core, crate::types::AgentRole::Standard, false);
         let mut rule = Rule::new("legacy-rule".into(), "Check parser grammar".into());
         core.open_rule_store().unwrap().add(&rule).unwrap();
         core.cas_rule_update(Parameters(update_rule(
@@ -1615,7 +1694,9 @@ mod tests {
 
     #[tokio::test]
     async fn retired_harmful_and_unknown_mechanisms_do_not_file() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let (_temp, core) = isolated_core();
+        register_rule_author(&core, crate::types::AgentRole::Standard, false);
         let mut rule = Rule::new("example".into(), "Check parser grammar".into());
         rule.tags = vec!["enforceable:prose".into()];
         assert!(core.ensure_encode_chore(&rule).unwrap().is_none());

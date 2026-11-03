@@ -158,6 +158,6 @@
 ## Policy hygiene
 
 - `cas-cli/src/mcp/tools/core/rule_drift.rs` — read-only rule source/generated/peer snapshot comparisons.
-- `cas-cli/src/mcp/tools/core/rules.rs` — explicit stakeholder attribution and review deadlines.
+- `cas-cli/src/mcp/tools/core/rules.rs` — explicit stakeholder attribution and review deadlines; operator-only encode chores and pending-chore rendering.
 - `crates/cas-types/src/entry/behavior.rs` — supersession and temporal validity shared by context filters.
 - `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` — nullable provenance, without backfill.

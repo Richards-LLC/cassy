@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Operator control of rule encoding
+
+- **Reserve rule encoding chores for the operator** — Agent and supervisor rule
+  writes no longer create implementation chores from enforceable tags. Their
+  replies name the operator command; operator writes still reuse one chore per
+  rule, and existing chores remain visible in the project backlog.
+
 ### Fixed — Policy hygiene
 
 - **Expire superseded policy memories** — Explicit superseded tags and expiry

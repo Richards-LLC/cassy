@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Parked delivery conflict repair
+
+- **Fix your own merge conflict without a supervisor round-trip** — A parked
+  delivery the merge queue dropped for a conflict, or whose target moved into
+  a conflict, refused its own worker's start until the supervisor ran
+  request_changes. Start now checks the parked tip against the current target
+  and lets the assigned worker resume when it truly conflicts; a clean park
+  still waits for review. Merging the target in keeps earlier test receipts
+  when the resolution touches only CHANGELOG.md or generated hub-web files.
+
 ### Fixed — Commander supervisor answers
 
 - **Mirror the supervisor's answer, not its progress line** — When a Claude

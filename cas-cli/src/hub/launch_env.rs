@@ -596,6 +596,14 @@ fn mark_recommendation(
 }
 
 fn launch_path(home: &Path) -> Vec<PathBuf> {
+    // CLI integration fixtures inject their own HOME/PATH. Never let a login
+    // shell or a fixed host directory turn a missing/broken fixture into a
+    // successful probe of the operator's installed provider.
+    if std::env::var_os("CAS_TEST_HUB_PATH_ONLY").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).filter(|path| path.is_absolute()).collect())
+            .unwrap_or_default();
+    }
     let mut paths: Vec<PathBuf> = Vec::new();
     // A user service does not inherit the terminal's PATH. Probe a login shell
     // only for its PATH; neither its output nor any credential value is retained.

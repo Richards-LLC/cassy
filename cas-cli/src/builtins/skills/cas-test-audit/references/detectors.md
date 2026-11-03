@@ -36,10 +36,10 @@ Each recipe is a starting grep or tool, not a verdict. Hand-check 10 flagged row
 
 ## Any language
 
-- **Duplicate:** map assertion to assertion within the same module, then across layers (integration against unit, journey against component test). Quote both sides. A file imported by another test is not deleted.
+- **Duplicate:** map assertion to assertion within the same module, then across layers (integration tests against unit tests, end-to-end tests against component tests). Quote both sides. A file imported by another test is not deleted.
 - **Self-contained test:** a test file that imports nothing from the project and checks its own data (for example raw SQL on its own schema).
 - **Flaky:** a test that failed then passed on retry in the CI retry data.
 
 ## Screenshot and e2e
 
-Flag an e2e test that takes screenshots or dumps the DOM and has no `expect` of its own (reference audit: 1/3). Journeys that finish before the critical path ends do not shorten the run; say so in the ledger.
+Flag an e2e test that takes screenshots or dumps the DOM and has no `expect` of its own (reference audit: 1/3). End-to-end tests that finish before the critical path ends do not shorten the run; say so in the ledger.

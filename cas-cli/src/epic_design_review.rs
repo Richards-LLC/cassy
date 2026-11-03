@@ -83,17 +83,51 @@ struct Graph {
 }
 
 impl Graph {
-    fn load(store: &dyn cas_store::TaskStore) -> Result<Self> {
-        let tasks = store
-            .list(None)?
-            .into_iter()
-            .map(|task| (task.id.clone(), task))
-            .collect();
-        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
-        for edge in store.list_dependencies(Some(DependencyType::ParentChild))? {
-            parents.entry(edge.from_id).or_default().push(edge.to_id);
+    fn load(store: &dyn cas_store::TaskStore, task_id: &str) -> Result<Self> {
+        // Read only this task's ancestors and their subtrees. An unrelated
+        // malformed backlog row must not stop another epic's staffing.
+        let mut graph = Self {
+            tasks: HashMap::new(),
+            parents: HashMap::new(),
+        };
+        let mut pending = vec![task_id.to_string()];
+        while let Some(id) = pending.pop() {
+            if graph.tasks.contains_key(&id) {
+                continue;
+            }
+            let task = store.get(&id).map_err(|error| anyhow::anyhow!(
+                "task_id {id} could not be read (no such task, or task store unavailable): {error}"))?;
+            let parents: Vec<_> = store
+                .get_dependencies(&id)?
+                .into_iter()
+                .filter(|edge| edge.dep_type == DependencyType::ParentChild)
+                .map(|edge| edge.to_id)
+                .collect();
+            pending.extend(parents.iter().cloned());
+            graph.parents.insert(id.clone(), parents);
+            graph.tasks.insert(id, task);
         }
-        Ok(Self { tasks, parents })
+        pending = graph
+            .tasks
+            .values()
+            .filter(|task| task.task_type == TaskType::Epic)
+            .map(|task| task.id.clone())
+            .collect();
+        let mut expanded = HashSet::new();
+        while let Some(parent) = pending.pop() {
+            if !expanded.insert(parent.clone()) {
+                continue;
+            }
+            for child in store.get_subtasks(&parent)? {
+                let parents = graph.parents.entry(child.id.clone()).or_default();
+                if !parents.contains(&parent) {
+                    parents.push(parent.clone());
+                }
+                pending.push(child.id.clone());
+                graph.tasks.insert(child.id.clone(), child);
+            }
+        }
+        Ok(graph)
     }
 
     fn epics(&self, id: &str) -> HashSet<String> {
@@ -132,7 +166,7 @@ fn refresh_at(root: &Path, task_id: &str, now: DateTime<Utc>) -> Result<Option<(
         "factory.design_review_window_hours must be between 1 and 8760"
     );
     let store = crate::store::open_task_store(root)?;
-    let graph = Graph::load(store.as_ref())?;
+    let graph = Graph::load(store.as_ref(), task_id)?;
     ensure!(
         graph.tasks.contains_key(task_id),
         "Task {task_id} not found while checking epic design review"

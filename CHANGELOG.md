@@ -14,6 +14,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Dead-worker cleanup records its readiness on disk and stages one intent per
   shared checkout, preserving frozen task facts across partial staging retries.
 
+### Fixed — macOS worker liveness
+
+- **Detect owned background jobs on macOS** — Was: Worker child-process evidence was unavailable on Mac. → Now: Native process discovery reports live descendants and their ages, excludes persistent MCP sidecars, and keeps missing process evidence explicit.
+
 ### Fixed — Queued-run watchdog
 
 - **Surface uncancellable queued runs** — Was: A sweep stayed green when every

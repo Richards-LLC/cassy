@@ -288,9 +288,15 @@ place_draft() {
     git add -- "$target"
 }
 
+lint_release_draft() {
+    local draft="$1"
+    python3 "$script_dir/release-train-announce.py" --lint "$draft" >&2 \
+        || die "release-notes draft failed lint: $draft"
+}
+
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
-    local base_version version current prepared_commit drafts=()
+    local base_version version current prepared_commit drafts=() prepared_drafts=()
     fetch_base
     sync_with_base
     base_version="$(version_at "$remote/$base")"
@@ -312,12 +318,19 @@ prepare() {
     fi
     if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
         && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
+        mapfile -t prepared_drafts < <(git ls-files "docs/release-notes/*-v$version-slack.md")
+        if ((${#prepared_drafts[@]} == 1)); then
+            lint_release_draft "${prepared_drafts[0]}"
+        else
+            lint_release_draft "$(draft_path "$version")"
+        fi
         say "v$version is already prepared on $branch"
         printf '%s\n' "$version"
         return 0
     fi
     local source
     source="$(draft_source "$version")"
+    lint_release_draft "$source"
     set_versions "$version"
     # Vite embeds cas-cli's version. Build after the bump, before committing,
     # so the merge queue sees exactly the bundle a fresh build will produce.

@@ -63,7 +63,15 @@ Before running a candidate `serve` or any stateful command, isolate it in a disp
 
 ### Step 4: Read every changed file in full
 
-Run `rule action=list` for the project rules. Read each changed file completely. In the changed code, reject:
+Run `rule action=list` for the project rules. Read each changed file completely.
+
+For a task or brief citing an existing rule, compare the causal code/test sites
+with its `Rule-driven sites:` declaration and `cas rules refs <id> --json`.
+Reject omitted rule-driven sites or missing adjacent `cas-rule:` markers; a
+marker on an unrelated function does not cover them. Check the verbatim scope
+against `stakeholder.scope` when present, without expanding it to unrelated work.
+
+In the changed code, reject:
 
 - TODO/FIXME/XXX/HACK markers, and `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `throw new Error('Not implemented')`;
 - temporal shortcuts ("for now", "temporarily", "placeholder") that leave an acceptance-criteria item undone;

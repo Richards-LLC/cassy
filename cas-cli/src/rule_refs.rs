@@ -139,14 +139,16 @@ pub(crate) fn scan(
     Ok(sites)
 }
 
-/// Provenance enrichment seam for cas-adeb: consume its optional serialized
-/// `stakeholder.scope`, without duplicating its type, fields or migration.
-pub(crate) fn stakeholder_scope(rule_json: &serde_json::Value) -> Option<&str> {
-    rule_json.get("stakeholder")?.get("scope")?.as_str()
+/// Provenance enrichment seam: reuse cas-adeb's optional attribution directly,
+/// without duplicating its type, fields or migration.
+pub(crate) fn stakeholder_scope(rule: &cas_types::Rule) -> Option<&str> {
+    rule.stakeholder
+        .as_ref()
+        .map(|stakeholder| stakeholder.scope.as_str())
 }
 
-pub(crate) fn scope_matches(rule_json: &serde_json::Value, scope: &str) -> bool {
-    stakeholder_scope(rule_json).is_none_or(|expected| expected == scope)
+pub(crate) fn scope_matches(rule: &cas_types::Rule, scope: &str) -> bool {
+    stakeholder_scope(rule).is_none_or(|expected| expected == scope)
 }
 
 pub(crate) fn task_context(task: &cas_types::Task) -> String {
@@ -175,16 +177,17 @@ pub(crate) fn task_rule_ids(task: &cas_types::Task, rules: &[cas_types::Rule]) -
 mod tests {
     #[test]
     fn stakeholder_scope_is_verbatim_and_optional_cas_4f87() {
-        let provenance = serde_json::json!({"stakeholder": {
-            "name":"Ben", "quote":"Please limit SMS sending", "scope":"Only SMS sends"
-        }});
+        let mut provenance = cas_types::Rule::new("rule-177".into(), "SMS send constraint".into());
+        provenance.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(),
+            quote: "Please limit SMS sending".into(),
+            scope: "Only SMS sends".into(),
+        });
         assert!(super::scope_matches(&provenance, "Only SMS sends"));
         for broader in ["All sending", "Only SMS sends ", "only SMS sends"] {
             assert!(!super::scope_matches(&provenance, broader));
         }
-        assert!(super::scope_matches(
-            &serde_json::json!({}),
-            "Only SMS sends"
-        ));
+        provenance.stakeholder = None;
+        assert!(super::scope_matches(&provenance, "Only SMS sends"));
     }
 }

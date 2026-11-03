@@ -14,6 +14,8 @@ The command works from any subdirectory of a Git checkout without Cassy login or
 
 Native build: `9b080b6bc0ce1e8ed756b896b593873c69192bd4`. Portable captures and receipts: `art-22f80445` on task `cas-4f87`.
 
+This initial critique covers the unchanged CLI renderer. After integration with stakeholder provenance, the task's final evidence ledger records a new native build and repeated terminal checks.
+
 ```text
 terminal-qa: PASS rule-refs · 12 runs · 0 fail · 0 warn · 0 allowed
 terminal-qa: PASS rule-refs-invalid · 11 runs · 0 fail · 0 warn · 0 allowed

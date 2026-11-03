@@ -114,8 +114,7 @@ fn validate(
             .iter()
             .find(|rule| rule.id == reference.rule_id)
             .expect("filtered rule");
-        let json = serde_json::to_value(rule).map_err(|error| error.to_string())?;
-        if !crate::rule_refs::scope_matches(&json, &reference.scope) {
+        if !crate::rule_refs::scope_matches(rule, &reference.scope) {
             problems.push(format!(
                 "{}:{}: {} scope differs from stakeholder.scope",
                 reference.path, reference.line, reference.rule_id

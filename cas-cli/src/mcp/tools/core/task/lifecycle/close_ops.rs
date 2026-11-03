@@ -27810,15 +27810,20 @@ mod merge_state_gate_tests {
         let root = fixture.dir.path();
         let rules = crate::store::open_rule_store(&root.join(".cas")).unwrap();
         rules.init().unwrap();
-        rules.add(&Rule::new("rule-177".into(), "Only the SMS send path".into())).unwrap();
+        let mut rule = Rule::new("rule-177".into(), "Only the SMS send path".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(), quote: "Only the SMS send path".into(), scope: "Only the SMS send path".into(),
+        });
+        rules.add(&rule).unwrap();
         let declarations = concat!(
             "Rule-driven sites: [",
             "{\"rule_id\":\"rule-177\",\"path\":\"delivery.rs\",\"anchor\":\"fn send() {}\"},",
             "{\"rule_id\":\"rule-177\",\"path\":\"delivery_test.rs\",\"anchor\":\"fn test_send() {}\"}]"
         );
         let marker = "// cas-rule: rule-177 scope: \"Only the SMS send path\"\n";
-        for marked in 0..=2 {
-            std::fs::write(root.join("delivery.rs"), format!("{}fn send() {{}}\n", if marked > 0 { marker } else { "" })).unwrap();
+        for marked in 0..=3 {
+            let production_marker = if marked == 2 { "// cas-rule: rule-177 scope: \"Every sending path\"\n" } else if marked > 0 { marker } else { "" };
+            std::fs::write(root.join("delivery.rs"), format!("{production_marker}fn send() {{}}\n")).unwrap();
             std::fs::write(root.join("delivery_test.rs"), format!("{}fn test_send() {{}}\n", if marked > 1 { marker } else { "" })).unwrap();
             git(root, &["add", "delivery.rs", "delivery_test.rs"]);
             git(root, &["commit", "-q", "-m", "fix(cas-anchor): rule-driven sites"]);
@@ -27830,16 +27835,20 @@ mod merge_state_gate_tests {
             } else { String::new() };
             fixture.store.update(&task).unwrap();
             // The worker can declare symbols in its receipt instead of the brief.
-            let reason = if marked == 2 { format!("ready\n{declarations}") } else { "ready".into() };
+            let reason = if marked >= 2 { format!("ready\n{declarations}") } else { "ready".into() };
             let response = fixture.service.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"close", "id":fixture.task_id, "reason":reason,
             })).unwrap())).await.unwrap();
             let text = response.content.iter().filter_map(|item| match &item.raw {
                 rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
             }).collect::<Vec<_>>().join("\n");
-            if marked < 2 {
+            if marked < 3 {
                 assert!(text.contains("RULE REFERENCES REQUIRED"), "unmarked sites must refuse before park: {text}");
-                assert!(text.contains("delivery_test.rs"), "every declared site must be named: {text}");
+                if marked < 2 {
+                    assert!(text.contains("delivery_test.rs"), "every declared site must be named: {text}");
+                } else {
+                    assert!(text.contains("stakeholder.scope"), "broadened stored scope must refuse: {text}");
+                }
                 assert_ne!(fixture.store.get(&fixture.task_id).unwrap().status, TaskStatus::AwaitingMerge);
             } else {
                 assert!(!text.contains("RULE REFERENCES REQUIRED"), "valid markers must pass: {text}");

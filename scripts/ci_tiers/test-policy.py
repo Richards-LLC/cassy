@@ -349,14 +349,14 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             if step.get('uses') == './.github/actions/setup-rust-linux')
         consumer, producer = setup(archive), setup(prime)
         action = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
-        cache = next(step for step in action['runs']['steps'] if step.get('id') == 'cargo-cache')
+        cache = next(step for step in action['runs']['steps']
+                     if step.get('uses') == 'Swatinem/rust-cache@v2')
         for field in ('cache-key', 'shared-key'):
             self.assertTrue(consumer['with'][field])
             self.assertEqual(consumer['with'][field], producer['with'][field])
         self.assertEqual(archive['env'], prime['env'], 'cache lookup must see the actual archive profile')
         for name in ('CARGO_PROFILE_DEV_DEBUG','CARGO_PROFILE_TEST_DEBUG'):
             self.assertEqual(archive['env'][name],'0')
-        self.assertEqual(action['outputs']['cache-hit']['value'], '${{ steps.cargo-cache.outputs.cache-hit }}')
         self.assertTrue(prime['continue-on-error'], 'cache maintenance cannot fail a required validation')
         build = next(step for step in archive['steps'] if step.get('name') == 'Build full suite archive')
         seed = next(step for step in prime['steps'] if step.get('name') == 'Prime full suite archive dependencies')
@@ -388,6 +388,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                         'needs.fast-validation-main-push-dedupe.outputs.reuse-source':reuse,
                         'needs.fast-validation-runner-route.outputs.mode':'hosted',
                         'steps.rust-setup.outputs.cache-hit':hit}
+                    self.assertEqual(self.gh_value(action['outputs']['cache-hit']['value'],
+                        {f'steps.{cache["id"]}.outputs.cache-hit':hit}),hit)
                     self.assertEqual(self.gh_expr(prime['if'],context),primes)
                     self.assertEqual(self.gh_expr(archive['if'],context),validates)
                     self.assertTrue(self.gh_expr(build['if'],context), 'queue cache hits still compile current source')

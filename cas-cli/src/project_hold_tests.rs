@@ -86,10 +86,13 @@ async fn project_hold_suppresses_ready_and_awaiting_merge_queries_until_lifted()
     );
     // The unfiltered query is also an operator surface; internal store lists
     // retain these rows, but the MCP response must never invite a held merge.
-    let all = || serde_json::from_value(serde_json::json!({})).unwrap();
-    let result = text(core.cas_task_list(Parameters(all())).await.unwrap());
-    assert!(!result.contains("cas-hold-merge"), "{result}");
-    assert!(result.contains("Review the plan"), "{result}");
+    for query in [serde_json::json!({}), serde_json::json!({"status": "merge"})] {
+        let unfiltered = query.get("status").is_none();
+        let result = text(core.cas_task_list(Parameters(serde_json::from_value(query).unwrap())).await.unwrap());
+        assert!(!result.contains("cas-hold-merge"), "{result}");
+        assert!(result.contains("Review the plan"), "{result}");
+        assert_eq!(result.contains("cas-hold-ready"), unfiltered);
+    }
     std::fs::remove_file(root.join("operator/project-hold.json")).unwrap();
     assert!(
         text(core.cas_task_ready(Parameters(ready())).await.unwrap()).contains("cas-hold-ready")

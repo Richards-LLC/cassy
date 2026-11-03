@@ -1343,8 +1343,6 @@ impl TaskStore for SqliteTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let held = crate::project_hold::held_on_connection(&conn);
-
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
                 "SELECT id, title, description, design, acceptance_criteria, notes,
@@ -1373,7 +1371,9 @@ impl TaskStore for SqliteTaskStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
-        Ok(tasks.into_iter().filter(|task| !held || task.status != TaskStatus::AwaitingMerge).collect())
+        // Internal ownership, close and recovery checks need every parked row.
+        // Project holds suppress invitations at the presentation boundary.
+        Ok(tasks)
     }
 
     fn ids_by_assignees_and_statuses(

@@ -612,8 +612,20 @@ pub(crate) fn scan_with(
     now: DateTime<Utc>,
     budget: CitationBudget,
 ) -> Result<BacklogReport, String> {
+    scan_with_visibility(cas_root, now, budget, false)
+}
+
+fn scan_with_visibility(
+    cas_root: &Path,
+    now: DateTime<Utc>,
+    budget: CitationBudget,
+    hide_parked: bool,
+) -> Result<BacklogReport, String> {
     let store = crate::store::open_task_store_local(cas_root).map_err(|error| error.to_string())?;
-    let tasks = store.list(None).map_err(|error| error.to_string())?;
+    let mut tasks = store.list(None).map_err(|error| error.to_string())?;
+    if hide_parked {
+        tasks.retain(|task| task.status != cas_types::TaskStatus::AwaitingMerge);
+    }
     let deps = store
         .list_dependencies(Some(DependencyType::ParentChild))
         .map_err(|error| error.to_string())?;
@@ -866,7 +878,10 @@ pub(crate) fn session_start_block_for_role(
     if role != Some("supervisor") {
         return None;
     }
-    session_start_block(&scan_with(cas_root, now, CitationBudget::SESSION_START).ok()?)
+    session_start_block(&scan_with_visibility(
+        cas_root, now, CitationBudget::SESSION_START,
+        cas_store::project_hold::is_held(cas_root),
+    ).ok()?)
 }
 
 /// The SessionStart block's byte cap.

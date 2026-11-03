@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::mcp::server::CasCore;
-    use crate::mcp::tools::types::TaskStartRequest;
+    use crate::mcp::CasCore;
+    use crate::mcp::tools::TaskStartRequest;
     use cas_types::{Agent, Dependency, DependencyType, Priority, Task, TaskStatus, TaskType};
     use chrono::{Duration, Utc};
     use rmcp::handler::server::wrapper::Parameters;

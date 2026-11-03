@@ -124,6 +124,17 @@ enum ReusedFactoryBranchStart {
         tip: String,
         delivery_branch: Option<String>,
     },
+    /// cas-dd0e: the lane carries commits this task cannot claim, such as an
+    /// earlier hotfix PR that was squash-merged or is still open. Nothing was
+    /// changed; a fresh start cuts its own branch beside it, a resume refuses.
+    Occupied { commit: String },
+}
+
+/// The resume refusal for a lane carrying work this task cannot claim.
+fn occupied_lane_refusal(branch: &str, commit: &str, target_branch: &str) -> String {
+    format!(
+        "Cannot start task: {branch} carries unattributed commit {commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
+    )
 }
 
 /// cas-7ce6: keep a parked tip on its own per-task delivery branch, unless a
@@ -215,7 +226,7 @@ fn checkout_task_beside_parked_delivery(
         .output()
         .map_err(|error| format!("Cannot inspect parked checkout: {error}"))?;
     if !status.status.success() || !status.stdout.is_empty() {
-        return Err("Cannot start task beside a parked delivery: commit or stash tracked changes before switching branches.".into());
+        return Err("Cannot start task on its own branch: commit or stash tracked changes before switching branches.".into());
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
     if require_fresh_base {
@@ -491,9 +502,9 @@ fn reconcile_reused_factory_branch(
         });
     }
 
-    Err(format!(
-        "Cannot start task: {expected_branch} carries unattributed commit {unattributed_commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
-    ))
+    Ok(ReusedFactoryBranchStart::Occupied {
+        commit: unattributed_commit,
+    })
 }
 
 #[cfg(test)]
@@ -549,7 +560,7 @@ mod reused_factory_branch_tests {
     }
 
     #[test]
-    fn unrelated_prior_delivery_is_refused_with_commit_identity() {
+    fn unrelated_prior_delivery_occupies_the_lane_with_commit_identity() {
         let repo = repo();
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
@@ -562,8 +573,12 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect_err("unrelated prior delivery must refuse");
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+            .expect("unrelated prior delivery is reported, not reset");
+        let ReusedFactoryBranchStart::Occupied { commit } = result else {
+            panic!("unrelated prior delivery must occupy the lane: {result:?}");
+        };
+        let error = super::occupied_lane_refusal("factory/test-worker", &commit, "main");
 
         assert!(error.contains(&worker_tip), "{error}");
         assert!(!error.contains("git rebase"), "{error}");
@@ -2629,6 +2644,51 @@ impl CasCore {
                     // its delivery branch remains checked out. That branch is
                     // the task's own history, not a reusable worker lane to
                     // reconcile against a temporarily missing retarget.
+                    // cas-dd0e: a fresh assignment has no work of its own to
+                    // keep, so it never waits on a lane that still holds an
+                    // earlier task's PR: it gets its own branch from the target.
+                    let fresh_start =
+                        initial_factory_branch_reset_target(&task, task.status).is_some();
+                    let mut beside_note = None;
+                    // cas-ff6c: another task's per-task branch is that task's
+                    // delivery ref, never a reusable lane. A supervisor
+                    // rebind that recorded this branch for the task is exempt.
+                    if let Some(owner_task) = crate::factory_isolation::own_task_branch_task_id(
+                        &worker.name,
+                        &worker_branch,
+                    )
+                    .filter(|owner_task| {
+                        *owner_task != task.id
+                            && !owner_task.starts_with(&format!("{}-", task.id))
+                    })
+                        && task
+                            .deliverables
+                            .factory_branch_start
+                            .as_ref()
+                            .is_none_or(|start| start.branch != worker_branch)
+                    {
+                        if !fresh_start {
+                            return Err(Self::error(
+                                ErrorCode::INVALID_PARAMS,
+                                foreign_task_branch_start_refusal(
+                                    worker_checkout,
+                                    &worker.name,
+                                    &worker_branch,
+                                    owner_task,
+                                    &task.id,
+                                    target_branch,
+                                ),
+                            ));
+                        }
+                        let owner_task = owner_task.to_string();
+                        let previous = worker_branch.clone();
+                        worker_branch = checkout_task_beside_parked_delivery(
+                            worker_checkout, &worker.name, &task.id, target_branch, false,
+                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        beside_note = Some(format!(
+                            "\n\n🔀 TASK BRANCH CUT: {previous} stays {owner_task}'s delivery, unchanged. This task starts on {worker_branch} from `{target_branch}`."
+                        ));
+                    }
                     let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
                         &worker.name,
                         &worker_branch,
@@ -2704,6 +2764,21 @@ impl CasCore {
                                 ),
                             )),
                             Ok(ReusedFactoryBranchStart::Unchanged) => None,
+                            Ok(ReusedFactoryBranchStart::Occupied { commit }) if fresh_start => {
+                                let lane = worker_branch.clone();
+                                worker_branch = checkout_task_beside_parked_delivery(
+                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                                Some(format!(
+                                    "\n\n🔀 TASK BRANCH CUT: {lane} still holds {commit} outside `{target_branch}` and stays unchanged. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
+                                ))
+                            }
+                            Ok(ReusedFactoryBranchStart::Occupied { commit }) => {
+                                return Err(Self::error(
+                                    ErrorCode::INVALID_PARAMS,
+                                    occupied_lane_refusal(&worker_branch, &commit, target_branch),
+                                ));
+                            }
                             Err(message) => {
                                 return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
                             }
@@ -2740,7 +2815,7 @@ impl CasCore {
                             base_sha,
                         });
                     }
-                    parked_branch_note.or(reset_note)
+                    parked_branch_note.or(beside_note).or(reset_note)
                 } else {
                     None
                 }

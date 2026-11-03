@@ -11916,30 +11916,19 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         }))
         .unwrap();
         // cas-ff6c: the cas-8001 shape. Another task's merged per-task branch
-        // is refused, left unchanged, and the refusal names this task's cut.
+        // is never reused or reset. cas-dd0e: a fresh task gets its own cut
+        // from the target instead of a refusal, leaving that branch unchanged.
         let started_on = if worker_branch == format!("factory/{worker}") {
             let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
             worker_branch.to_string()
         } else {
-            let refused = env
-                .service
-                .task(Parameters(start.clone()))
-                .await
-                .expect_err("another task's per-task branch must not be reused");
             let own = format!("factory/{worker}-{task_b}");
+            let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert!(
-                refused.message.contains("cas-prior's per-task branch")
-                    && refused.message.contains(&format!(
-                        "git fetch origin epic/foreign && git switch -c {own} origin/epic/foreign && git push -u origin {own}"
-                    )),
-                "{refused}"
+                started.contains("TASK BRANCH CUT") && started.contains(&own),
+                "{started}"
             );
-            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
-            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-            git_stdout(&worker_path, &["fetch", "origin", "epic/foreign"]);
-            git_stdout(&worker_path, &["switch", "-c", &own, "origin/epic/foreign"]);
-            get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert_eq!(
                 git_stdout(&worker_path, &["rev-parse", worker_branch]),
                 clean_tip

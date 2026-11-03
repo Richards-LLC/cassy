@@ -525,10 +525,18 @@ fn clean_idle_assignment_note(
     let tip = git.ref_sha("HEAD").ok()?;
     let target = git.ref_sha(target_branch).ok()?;
     if !git.is_ancestor(&tip, &target) {
-        return None;
+        // cas-dd0e: the branch still holds an earlier PR (open, or squash-
+        // merged so its commits never reach the target). This fresh task
+        // starts on its own branch beside it, so staleness is not a reason
+        // to make it wait.
+        return Some(format!(
+            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch holds work              outside {target_branch}. `task start` will leave it unchanged and cut              factory/{name}-{task_id} from the target.",
+            name = worker.name,
+            task_id = task.id,
+        ));
     }
-    // cas-ff6c: start refuses another task's per-task branch rather than
-    // resetting it, so promise the cut start will ask for.
+    // cas-ff6c/cas-dd0e: start never resets another task's per-task branch;
+    // a fresh task gets its own branch beside it.
     if let Some(owner_task) =
         crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch).filter(|owner_task| {
             *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
@@ -536,8 +544,8 @@ fn clean_idle_assignment_note(
     {
         return Some(format!(
             "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \
-             {target_branch}. That branch belongs to {owner_task}, so `task start` will ask the \
-             worker to cut factory/{name}-{task_id} from the target first.",
+             {target_branch}. That branch belongs to {owner_task}, so `task start` will leave it \
+             unchanged and cut factory/{name}-{task_id} from the target.",
             name = worker.name,
             task_id = task.id,
         ));

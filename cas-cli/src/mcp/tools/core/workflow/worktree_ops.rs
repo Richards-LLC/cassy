@@ -680,6 +680,22 @@ fn workflow_run_cancelled(run_id: &str, cwd: &Path, repo: &str, binary: &Path) -
             .is_ok_and(|run| run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled"))
 }
 
+/// cas-5ea7: an eligible fast-lane tip is judged on the lane's merge checks
+/// only; `None` when GitHub cannot be read, so the normal lookup reports it.
+fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) -> Option<BranchCiLookup> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?.canonical;
+    let output = fetch_branch_ci(sha, cwd, &repo, &binary);
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).ok().filter(|_| output.success)?;
+    let sha = sha.to_string();
+    let state = match crate::fast_lane::merge_gate(lane, &crate::fast_lane::check_runs(&response)) {
+        crate::fast_lane::Gate::Green(test_checks) => BranchCiState::Green { sha, url: None, test_checks },
+        crate::fast_lane::Gate::Pending(_) => BranchCiState::CodePending { sha, url: None, waiting_for_rerun: false },
+        crate::fast_lane::Gate::Red { url, .. } => BranchCiState::Red { sha, url },
+    };
+    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true })
+}
+
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
     gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
@@ -4991,7 +5007,27 @@ impl CasCore {
             .map(|source| source.anchor.as_str())
             .or(parked_source_tip.as_deref())
             .unwrap_or(worktree.branch.as_str());
-        let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
+        // cas-5ea7: an eligible hotfix merges on the lane's merge checks alone;
+        // its deferred checks become the post-merge receipt at close.
+        let fast_lane = scoped_task.as_deref()
+            .and_then(|task| Some((task, crate::fast_lane::configured(&cas_root)?)))
+            .and_then(|(task, lane)| {
+                let head = crate::fast_lane::resolve(&cwd, ci_source)?;
+                let eligibility = crate::fast_lane::evaluate_delivery(&lane, task, &cwd, &worktree.parent_branch, &head);
+                let note = crate::fast_lane::eligibility_note(&lane, &head, &eligibility);
+                Some((lane, head, eligibility, note))
+            });
+        let fast_lane_lookup = fast_lane.as_ref()
+            .filter(|(_, _, eligibility, _)| matches!(eligibility, crate::fast_lane::Eligibility::Eligible { .. }))
+            .and_then(|(lane, head, _, _)| fast_lane_ci(lane, head, &cwd));
+        let fast_lane_head = fast_lane_lookup.as_ref()
+            .and(fast_lane.as_ref())
+            .map(|(_, head, _, _)| head.clone());
+        let fast_lane_notice = fast_lane.as_ref()
+            .map(|(_, _, _, note)| format!("{note}\n\n"))
+            .unwrap_or_default();
+        let branch_ci_lookup = fast_lane_lookup
+            .unwrap_or_else(|| lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -5000,7 +5036,7 @@ impl CasCore {
                 task.id,
             ))
             .unwrap_or_default();
-        let ci_prefix = format!("{unparked_notice}{}",
+        let ci_prefix = format!("{unparked_notice}{fast_lane_notice}{}",
             describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup));
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
@@ -5935,6 +5971,19 @@ impl CasCore {
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
                 // cas-46ea: an unparked task merged from its pushed lane tip
                 // closes the same way as a parked one.
+                if let Some(head) = fast_lane_head.as_deref()
+                    && ci_admission == cas_types::MergeCiAdmission::Green
+                {
+                    let now = chrono::Utc::now();
+                    let note = format!("[{}] {}", now.format("%Y-%m-%d %H:%M"),
+                        crate::fast_lane::merge_note(head, merge_sha, now));
+                    if let Err(error) = self.open_task_store()
+                        .map_err(|error| format!("{error:?}"))
+                        .and_then(|store| store.append_trusted_note(task_id, &note).map_err(|error| error.to_string()))
+                    {
+                        tracing::warn!(%task_id, %error, "fast-lane merge record not saved; the close takes the normal QA path");
+                    }
+                }
                 let lane = observed_source_tip.as_deref().map(|tip| {
                     crate::mcp::tools::core::task::lifecycle::merge_close::MergedLane {
                         repo: &cwd,

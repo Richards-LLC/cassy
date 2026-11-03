@@ -15,6 +15,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   mirror now waits for the turn's final text. A supervisor whose transcript
   cannot be found is named in a warning instead of being skipped silently.
 
+### Added — hotfix fast lane
+
+- **Ship small frontend hotfixes on unit tests and typecheck** — A project
+  that opts in with `[fast_lane]` merges an eligible delivery (inside the
+  configured paths, outside the deny list, at most 10 files and 300 lines,
+  Tier 1, a bug, finding or `hotfix` task) once its named merge checks pass.
+  Hermetic e2e, the production build and the journey walk become a
+  post-merge receipt due within 30 minutes that blocks close. A failed check
+  is rerun once, a failure the hotfix caused opens a revert PR, and an
+  ineligible delivery is refused from the lane with the reason recorded.
+  See `docs/qa/fast-lane.md`.
+
 ### Fixed — Codex worker recycle and context reset
 
 - **Keep each worker's own launch recipe** — The daemon that receives every

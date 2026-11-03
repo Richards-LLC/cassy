@@ -11,6 +11,7 @@ async fn test_rule_create() {
     let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Always use snake_case for function names".to_string(),
         paths: Some("**/*.rs".to_string()),
@@ -37,6 +38,7 @@ async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let create = |content: &str, tags: Option<&str>| RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: content.to_string(),
         paths: None,
@@ -76,6 +78,7 @@ async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
 
 fn hard_rule_request(content: &str) -> RuleCreateRequest {
     RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: content.to_string(),
         paths: None,
@@ -187,6 +190,7 @@ async fn test_rule_show() {
 
     // Create rule
     let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Test rule for show".to_string(),
         paths: None,
@@ -286,6 +290,7 @@ async fn test_rule_list() {
     // Create rules
     for i in 0..3 {
         let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: format!("List rule {i}"),
             paths: None,
@@ -324,6 +329,7 @@ async fn test_rule_update() {
 
     // Create rule
     let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Original rule content".to_string(),
         paths: None,
@@ -343,6 +349,7 @@ async fn test_rule_update() {
 
     // Update rule
     let update_req = RuleUpdateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         id: id.clone(),
         content: Some("Updated rule content".to_string()),
         paths: Some("**/*.ts".to_string()),
@@ -401,6 +408,7 @@ async fn test_rule_helpful_and_harmful() {
 
     // Create rule
     let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Feedback test rule".to_string(),
         paths: None,
@@ -458,6 +466,7 @@ async fn test_rule_helpful_requires_evidence_threshold() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Threshold test rule".to_string(),
             paths: None,
@@ -490,6 +499,7 @@ async fn test_rule_helpful_promotes_draft_to_proven_at_default_threshold() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "End-to-end helpful promotion rule".to_string(),
             paths: None,
@@ -528,6 +538,7 @@ async fn test_rule_helpful_promotes_at_configured_threshold() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Configured threshold rule".to_string(),
             paths: None,
@@ -565,6 +576,7 @@ async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Retrieval evidence rule".to_string(),
             paths: None,
@@ -642,6 +654,7 @@ async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Require independent retrieval evidence".to_string(),
             paths: None,
@@ -735,6 +748,7 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Demotion test rule".to_string(),
             paths: None,
@@ -815,6 +829,7 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
             scope: "project".to_string(),
             content: "Corrected retrieval rule".to_string(),
             paths: None,
@@ -962,6 +977,7 @@ async fn test_rule_delete() {
 
     // Create rule
     let req = RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Delete test rule".to_string(),
         paths: None,
@@ -1011,6 +1027,7 @@ async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
     let (_temp, service) = setup_cas(&mut test_env);
     register_host_project("/nonexistent/zephyr-quokka");
     let create = |tags: Option<&str>| RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: "Zephyr Quokka branching: ALWAYS cut new branches from `staging`".to_string(),
         paths: None,
@@ -1048,6 +1065,7 @@ async fn rule_promote_is_a_recorded_decision_not_a_vote_cas_228e() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let create = |content: &str| RuleCreateRequest {
+        stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
         scope: "project".to_string(),
         content: content.to_string(),
         paths: None,

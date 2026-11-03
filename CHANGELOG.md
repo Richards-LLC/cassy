@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander supervisor answers
+
+- **Mirror the supervisor's answer, not its progress line** — When a Claude
+  supervisor narrated a step before running tools, Commander received that
+  progress line as the turn's answer and the real answer never arrived. The
+  mirror now waits for the turn's final text. A supervisor whose transcript
+  cannot be found is named in a warning instead of being skipped silently.
+
 ### Fixed — Codex worker recycle and context reset
 
 - **Keep each worker's own launch recipe** — The daemon that receives every

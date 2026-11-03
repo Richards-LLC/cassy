@@ -158,7 +158,7 @@ impl CasCore {
                 ));
             }
             return Ok(unchecked(
-                "no current Slack claim receipt; the supervisor must use coordination action=claim external_ref=<source>",
+                "no current Slack claim receipt; the supervisor must use factory action=claim external_ref=<source>",
             ));
         }
         let Some(claims) = PeerClaims::for_project(&self.cas_root) else {

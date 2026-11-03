@@ -2591,6 +2591,9 @@ impl CasService {
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.inner.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
             match factory_provision_build_compatibility(session, provisioner_build) {
                 FactoryProvisionBuildCheck::Compatible => String::new(),

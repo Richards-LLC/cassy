@@ -942,6 +942,11 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         use cas_types::TaskSortOptions;
 
+        if req.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("awaiting_merge"))
+            && let Some(hold) = cas_store::project_hold::notice(&self.cas_root)
+        {
+            return Ok(Self::success(hold));
+        }
         let scope = req.scope.trim().to_ascii_lowercase();
         if scope == "global" {
             return Err(Self::error(

@@ -4226,6 +4226,9 @@ impl CasCore {
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         if let Some(message) = reason
             .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
         {

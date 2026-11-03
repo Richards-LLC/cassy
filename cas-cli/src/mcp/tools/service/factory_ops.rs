@@ -2586,6 +2586,17 @@ impl CasService {
         req: FactoryRequest,
         provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in_with_name_source(ctx, req, provisioner_build,
+            || crate::orchestration::names::generate_unique(1).remove(0)).await
+    }
+
+    async fn factory_spawn_workers_in_with_name_source(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        provisioner_build: Option<&str>,
+        mut next_name: impl FnMut() -> String + Send,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -3060,6 +3071,10 @@ impl CasService {
         // worker identity rather than merely receipt decoration.
         if worker_names.is_empty() && specs.iter().all(|spec| spec.name.is_some()) {
             worker_names = specs.iter().filter_map(|spec| spec.name.clone()).collect();
+        }
+        // Reserve concrete identities before the daemon binds the queue/task.
+        if isolate && worker_names.is_empty() {
+            worker_names = (0..slots).map(|_| next_name()).collect();
         }
 
         // Capture the requesting account separately for each resolved
@@ -13237,6 +13252,60 @@ mod spawn_lifecycle_tests {
         evidence
     }
 
+    #[tokio::test]
+    async fn isolated_spawn_retries_generated_branch_collisions_before_binding_cas_b088() {
+        use cas_store::SpawnQueueStore;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("base"), "fixture").unwrap();
+        git(&["add", "base"]);
+        git(&["commit", "-m", "fixture"]);
+        let local = "occupied-local";
+        let remote = "occupied-origin";
+        let fresh = "fresh-worker";
+        git(&["branch", &format!("factory/{local}")]);
+        git(&["update-ref", &format!("refs/remotes/origin/factory/{remote}"), "HEAD"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = cas_types::Task::new("cas-spawn-epic".into(), "Spawn collision fixture".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = |name: Option<&str>| serde_json::from_value::<FactoryRequest>(serde_json::json!({
+            "action":"spawn_workers","count":1,"cli":"grok","isolate":true,"worker_names":name
+        })).unwrap();
+        let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
+        let mut candidates = [local, remote, fresh].into_iter();
+        service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
+            || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let queued = queue.peek(10).unwrap();
+        let selected = &queued[0].worker_names[0];
+        let worktree = root.join("worktrees").join(selected);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        crate::worktree::GitOperations::new(repo.to_path_buf()).create_worktree(
+            &worktree, &format!("factory/{selected}"), Some("main"))
+            .expect("the queued generated identity must provision on a fresh branch");
+        assert_eq!(selected, fresh);
+        let explicit = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some(local)), None,
+            || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
+        assert!(explicit.message.contains(&format!("factory/{local}")), "{explicit}");
+        assert_eq!(queue.peek(10).unwrap().len(), 1, "explicit refusal creates no second queue row");
+    }
+
     #[test]
     fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
         let home = tempfile::tempdir().unwrap();
@@ -13382,6 +13451,9 @@ mod spawn_lifecycle_tests {
                 request,
             ))
             .expect_err("direct spawn must refuse the unselected account");
+        // pin: the refusal must retain the account policy's actual selection cause.
+        assert!(direct_error.message.contains("no eligible account"), "{direct_error}");
+        assert!(direct_error.message.contains("missing"), "the missing default home must not be reported as a logged-out selected account: {direct_error}");
         for detail in ["config_dir", logged_in.to_str().unwrap()] {
             assert!(
                 direct_error.message.contains(detail),

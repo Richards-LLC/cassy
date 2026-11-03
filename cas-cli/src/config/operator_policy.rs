@@ -1114,6 +1114,7 @@ mod tests {
             "qa rapid-response disable cas-ep1c",
             "qa rapid-response review-migration cas-de11 --note checked",
             "qa author-override cas-de11 --note accepted",
+            "factory design-review-lift epic-risk --reason reviewed",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),

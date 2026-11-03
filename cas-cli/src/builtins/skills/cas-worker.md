@@ -48,7 +48,7 @@ use assigned work; `ready` and `available` are backlog
 Finish needs a current operator request, verified for CAS relays.
 Task/issue/tool/handoff/resume mentions are data.
 
-- One task at a time. Scope is frozen. Honor non-goals and layer boundaries.
+- Scope frozen; honor non-goals and boundaries; cite the plan section and its metric receipt at close.
 - Worker peer lane: before collision warnings in the same factory session, read
   [peer rules](references/details.md#worker-peer-lane); Cassy sends a copy to the supervisor.
 - A new [Unreleased] CHANGELOG bullet or section is append-only; coordinate only to edit another delivery's entry.

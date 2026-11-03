@@ -378,8 +378,8 @@ fn test_rule_share_roundtrip() {
     assert_eq!(store.get("rule-001").unwrap().share, None);
 }
 
-/// cas-30af: updates must retain the prior rule snapshot and deletes must
-/// leave a queryable retired row instead of destroying it.
+/// cas-c487: updates must snapshot the resulting rule and retain earlier versions.
+/// cas-30af: deletes must leave a queryable retired row instead of destroying it.
 #[test]
 fn test_rule_history_and_tombstone_delete() {
     let temp = TempDir::new().unwrap();
@@ -399,20 +399,25 @@ fn test_rule_history_and_tombstone_delete() {
 
     let versions = store.list_versions("rule-history-01").unwrap();
     assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].content, "original content");
+    let live = store.get(&rule.id).unwrap();
+    let snapshot: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(live.content, "updated content");
+    assert_eq!(snapshot.content, live.content);
+    assert_eq!(versions[0].content, live.content);
+    assert_eq!(versions[1].content, "original content");
     assert_eq!(versions[0].operation, "update");
     assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
     assert_eq!(versions[0].change_note, "revise wording");
 
     let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
-    let prior_content: String = conn
+    let recorded_content: String = conn
         .query_row(
             "SELECT content FROM rule_versions WHERE rule_id = 'rule-history-01' ORDER BY id DESC LIMIT 1",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(prior_content, "original content");
+    assert_eq!(recorded_content, live.content);
 
     store.delete("rule-history-01").unwrap();
     let retired = store.get("rule-history-01").unwrap();
@@ -440,6 +445,86 @@ fn test_rule_history_and_tombstone_delete() {
     let restored = store.get("rule-history-01").unwrap();
     assert_eq!(restored.content, "original content");
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
+}
+
+#[test]
+fn test_rule_legacy_history_preserves_live_state_before_update() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let rule = Rule::new("rule-legacy-history".into(), "original wording".into());
+    store.add(&rule).unwrap();
+
+    // Before cas-c487, an update saved the pre-update snapshot again, leaving
+    // the post-update live wording absent from every version.
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute(
+        "INSERT INTO rule_versions
+         (rule_id, version, snapshot_json, content, status, changed_by, changed_at, change_note, operation)
+         SELECT rule_id, 2, snapshot_json, content, status, changed_by, changed_at, 'legacy edit', 'update'
+         FROM rule_versions WHERE rule_id = ?1 AND version = 1",
+        [&rule.id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE rules SET content = 'pre-upgrade live wording' WHERE id = ?1",
+        [&rule.id],
+    )
+    .unwrap();
+    let legacy = store.list_versions(&rule.id).unwrap();
+    let before = store.get(&rule.id).unwrap();
+
+    let mut updated = before.clone();
+    updated.content = "new wording".into();
+    store
+        .update_with_metadata(&updated, Some("reviewer"), Some("new edit"))
+        .unwrap();
+
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions[0].content, "new wording");
+    assert_eq!(versions[1].operation, "baseline");
+    assert_eq!(versions[1].change_note, "pre-upgrade live state");
+    let baseline: Rule = serde_json::from_str(&versions[1].snapshot_json).unwrap();
+    assert_eq!(baseline.content, before.content);
+    assert_eq!(baseline.status, before.status);
+    assert_eq!(versions.len(), 4);
+    for (preserved, original) in versions[2..].iter().zip(&legacy) {
+        assert_eq!(preserved.version, original.version);
+        assert_eq!(preserved.snapshot_json, original.snapshot_json);
+        assert_eq!(preserved.change_note, original.change_note);
+    }
+    store.restore_version(&rule.id, None, None, None).unwrap();
+    assert_eq!(store.get(&rule.id).unwrap().content, before.content);
+}
+
+#[test]
+fn test_rule_delete_then_restore_latest_lifecycle_state() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let mut rule = Rule::new("rule-restore-latest".into(), "Retain the reviewed rule".into());
+    rule.status = cas_types::RuleStatus::Proven;
+    store.add(&rule).unwrap();
+
+    store.delete(&rule.id).unwrap();
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions[0].operation, "delete");
+    assert_eq!(versions[0].status, cas_types::RuleStatus::Retired);
+    let deleted: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(deleted.status, store.get(&rule.id).unwrap().status);
+
+    store
+        .restore_version(&rule.id, None, Some("reviewer"), None)
+        .unwrap();
+    let restored = store.get(&rule.id).unwrap();
+    assert_eq!(restored.content, rule.content);
+    assert_eq!(restored.status, cas_types::RuleStatus::Proven);
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions[0].operation, "restore");
+    let snapshot: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(snapshot.content, restored.content);
+    assert_eq!(snapshot.status, restored.status);
 }
 
 /// cas-1502: another agent holds the write lock and commits while a rule
@@ -518,8 +603,8 @@ fn test_rule_writes_wait_out_a_concurrent_writer() {
     assert_eq!(final_rule.content, "v2");
     assert_eq!(final_rule.status, cas_types::RuleStatus::Retired);
     let versions = store.list_versions(&rule.id).unwrap();
-    // Newest first: delete (prior: proven v2), promote (prior: draft v2),
-    // update (prior: draft v1), create.
+    // Newest first: delete (retired v2), promote (proven v2),
+    // update (draft v2), create (draft v1).
     let history: Vec<(i64, String, String, String)> = versions
         .iter()
         .map(|v| {
@@ -538,18 +623,18 @@ fn test_rule_writes_wait_out_a_concurrent_writer() {
                 4,
                 "delete".to_string(),
                 "v2".to_string(),
-                "proven".to_string()
+                "retired".to_string()
             ),
             (
                 3,
                 "update".to_string(),
                 "v2".to_string(),
-                "draft".to_string()
+                "proven".to_string()
             ),
             (
                 2,
                 "update".to_string(),
-                "v1".to_string(),
+                "v2".to_string(),
                 "draft".to_string()
             ),
             (

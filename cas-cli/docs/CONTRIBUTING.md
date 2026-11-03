@@ -1965,6 +1965,39 @@ live under `.cas/operator/epic-design-review-lifts.json`; pause state lives in
 `.cas/epic-design-reviews.json`, with serialized atomic writes. This policy is
 per epic and independent of any project hold.
 
+## Measured phase outcomes
+
+A supervisor declares an immutable numeric target on an existing epic, phase
+sub-epic or `gate` task with `task action=notes note_type=outcome_target`.
+The JSON note maps metric names (including units) to `min`/`max` (inclusive)
+or `gt`/`lt` (strict) bounds, for example:
+
+```json
+{"stability_percent":{"min":95},"p95_seconds":{"lt":1}}
+```
+
+Record the evaluation with `note_type=outcome_receipt`:
+
+```json
+{"measurements":{"stability_percent":72.7,"p95_seconds":1.48},"receipt":"artifact:reader-evaluation"}
+```
+
+The measurements must name every target metric and include a non-empty receipt
+reference. The supervisor records the measured result; this action does not run
+an evaluator. A missing or failed receipt holds the phase's `blocks` and
+`requires_start` dependants, including children of dependent phases, at start,
+close and merge. The refusal names the target and measurement. Closed phase
+status does not stand in for a passing result. Its own implementation children
+and independent work can continue. Ordinary open blockers retain their existing
+parallel-preparation policy.
+
+Only the operator, from their own terminal, can accept a miss:
+`cas qa outcome-override <phase-id> --reason '<why>'`. This writes a decision
+note and binds the exception to the exact target and receipt; changed measurements
+require a new decision. Agent and supervisor shell contexts cannot issue it.
+A subsequent passing receipt releases the outcome hold. Other close, CI and QA
+gates still apply.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
@@ -3164,6 +3197,17 @@ generated `SKILL.md` sections so consumers can evaluate them in their own
 runtime.
 
 ### Editing supervisor or worker guidance: the SessionStart budget is a hard constraint
+
+SessionStart also checks Slack channels and thread links named in its current
+handoff. `hooks/handoff_updates.rs` inserts newer human posts above that handoff,
+using Violet's author names without treating those labels as operator authority.
+A thread reference includes a channel read so newer sibling posts are visible.
+The lookup has a four-second outer deadline (including Cloud memory lookup),
+three seconds for Violet setup and reads, at most six reads of 50 messages,
+and at most ten excerpts in a 1,800-byte section. Known additional posts have
+a `+N more` line. Bot/app posts and configured Violet bot IDs are excluded.
+Empty results add no section; service failures, partial reads and read caps
+leave a one-line couldn't-check notice. This check adds no Slack writes.
 
 `cas-supervisor.md` and `cas-worker.md` are not ordinary docs. Their bodies are
 injected verbatim into the SessionStart `additionalContext`, which has a **9 216 B

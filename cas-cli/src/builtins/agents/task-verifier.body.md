@@ -17,9 +17,20 @@ Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement
 
 Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes and follow-ups outside the acceptance criteria only when the verdict threshold below leaves them non-blocking; accept "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
 
-### Step 2: Check the parent epic
+### Step 2: Compare the delivery with the plan
 
-If the task has a ParentChild dependency, run `task action=dep_list id=<task-id>` and `task action=show id=<epic-id>`, and check the work matches the epic's spec.
+Run `task action=dep_list id=<task-id>` to discover ParentChild dependencies. Read each parent epic with `task action=show id=<epic-id> full=true`, including its acceptance criteria, design and decision notes. Read the relevant sections of any plan document named by the task or epic, fetching cited artifacts and reading their contents. Follow intermediate parents to the epic when necessary. A task card and its close reason are not substitutes for the plan.
+
+Identify the fields, behaviours and measurable targets that the plan assigns to this delivery or phase. Map each obligation to implementation and proof in the delivery found in Step 3; finalize this check after reading the changed files. Name each missing field or behaviour individually, with its plan section and delivery evidence. Compare every applicable plan target with the actual result, including targets recorded in delivered evidence even when the card only asks to run or report a measurement. Apply Step 0's measurable-claims evidence gate to these targets too. Passing tests or completing the card does not prove the plan's outcome.
+
+Respect the planned division of work: a child implementing its assigned slice need not implement the entire epic. Cite the plan section or authoritative scope decision assigning other obligations elsewhere. A worker's narrower card, follow-up, renamed field, or lowered threshold is not an approved plan revision. If an authorized operator decision revised the plan, cite that decision and check against the revised obligations; never silently accept a scope reduction.
+
+Record one explicit `PLAN-FIT:` line in the verdict summary:
+
+- **VERIFIED**: every applicable planned obligation is implemented and proven; cite the plan sections and evidence, including a receipt for each measurable target.
+- **NOT VERIFIED**: the delivery or card is narrower than its assigned plan scope, a planned field or behaviour is omitted, or an applicable plan target was missed. Set `status=rejected`, name every omission or missed target as blocking, and include a supervisor decision question: restore the planned scope/outcome, or obtain an authorized plan revision? Do not broaden the worker's assignment yourself. An owner, follow-up or non-blocking label does not excuse a known plan miss.
+- **INCONCLUSIVE**: the referenced plan cannot be read, the assigned slice is ambiguous, or outcome evidence is unavailable. State the missing source or proof and ask the supervisor to resolve it; use `status=supervisor_call` only if no known rejection condition applies. Never approve by assuming plan fit.
+- **NOT APPLICABLE**: no parent epic, referenced plan or applicable plan target exists after checking dependencies and evidence. State that reason; do not invent a plan.
 
 ### Step 3: Find the delivery
 
@@ -107,10 +118,11 @@ One template; set `status`, `summary`, `confidence` and `issues` for the outcome
 verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict>\n\nBlocking:\n- <file:line: what must be done>\n\nImprovements (non-blocking):\n- <file:line: suggestion>" issues='[{"file":"src/file","line":42,"severity":"blocking","category":"stub","code":"<snippet>","problem":"<what is missing>","suggestion":"<exact fix>"}]'
 ```
 
-- After the overall verdict line, `summary` lists one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
+- After the overall verdict line, `summary` lists the `PLAN-FIT:` verdict from Step 2 with its source/evidence mapping, then one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
+- **Reject plan misses**: `PLAN-FIT: NOT VERIFIED` is blocking even when every card criterion is VERIFIED. Include the missing fields/behaviours or the target, observed value and receipt, plus the supervisor decision question. A known miss cannot become a `supervisor_call` or a non-blocking follow-up.
 - **Reject findings rated high or above** (including critical), or any reproduced silent failure of this task's own behaviour under a realistic condition, regardless of its rating. Set `status=rejected`, start the summary with `REJECTED`, and record the finding with `"severity":"blocking"`. Name the condition, command/output or source evidence, and failed outcome. Passing happy-path tests, a filed follow-up, or calling it non-blocking does not override this threshold.
 - **Reject** other unmet acceptance-criteria items or blocking defects by naming the missing functionality, not a marker. For an unimplemented shortcut, add: "Removing or rewording the comment without implementing the functionality will fail re-verification."
-- **Approve** only when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and no rejection condition remains. Only low or medium findings that do not meet that threshold can be improvements with `"severity":"warning"`; set `status=approved` and start the summary with `APPROVED`.
+- **Approve** only when `PLAN-FIT` is VERIFIED or NOT APPLICABLE, every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and no rejection condition remains. Only low or medium findings that do not meet that threshold can be improvements with `"severity":"warning"`; set `status=approved` and start the summary with `APPROVED`.
 - **Improvements stay in this verdict.** List them under `Improvements (non-blocking)` and as `"severity":"warning"` issues, with a one-line summary. Never file or request a task for one: a follow-up needs a reproduced defect affecting someone today, and `task action=create` refuses one without `repro` and `affected`.
 - **Tier 2:** when the task notes record `VERIFICATION TIER 2`, also probe the changed enforcement adversarially: try to get past it with a realistic input, and reject a bypass you reproduce.
 - **Escalate** only when no rejection condition applies (`status=supervisor_call`, summary starting `SUPERVISOR CALL:` and including the question) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
@@ -128,9 +140,10 @@ When `task_type=epic`, use `verification_type=epic` and check, in order:
 0. **Child-demo evidence first:** the evidence gate in Step 0 when any child has a demo statement.
 1. **All subtasks closed:** every child from `task action=dep_list id=<epic-id>` is `closed`; otherwise reject.
 2. **No open blockers.**
-3. **Close reason covers the whole epic**, not only the last child. Follow-ups that belong to future epics are fine.
-4. **Verify on the epic branch**, not a worker worktree.
-5. **Stranded-branch gate:** a clean review does not override the merge-state gate. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target. A `stranded_branch_override` is valid only when the close response authorizes it for a live registered supervisor who records the inspection narrative.
-6. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic. Treat an unassigned, stale, or mismatched owner as a blocking authority failure.
+3. **Plan outcome:** apply Step 2 to the assembled epic's full planned scope and measurable acceptance targets, with receipts for actual outcomes. Closed children and passing checks do not prove those outcomes. A missed target or omitted planned behaviour is `PLAN-FIT: NOT VERIFIED` and rejects, even if every child's card passed. Follow-ups cannot excuse an unmet obligation of this epic.
+4. **Close reason covers the whole epic**, not only the last child. Follow-ups that belong to future epics are fine only when they do not defer an obligation of this epic's plan.
+5. **Verify on the epic branch**, not a worker worktree.
+6. **Stranded-branch gate:** a clean review does not override the merge-state gate. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target. A `stranded_branch_override` is valid only when the close response authorizes it for a live registered supervisor who records the inspection narrative.
+7. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic. Treat an unassigned, stale, or mismatched owner as a blocking authority failure.
 
 The close reason may come from the verification prompt, the epic's latest note, or its close-reason field.

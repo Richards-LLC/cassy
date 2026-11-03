@@ -362,6 +362,16 @@ async fn test_rule_update() {
     let text = extract_text(result);
     assert!(text.contains("Updated") || text.contains("updated"));
 
+    let store = open_rule_store(&_temp.path().join(".cas")).expect("rule store should open");
+    let live = store.get(&id).expect("updated rule should exist");
+    let versions = store.list_versions(&id).expect("rule history should exist");
+    let snapshot: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(live.content, "Updated rule content");
+    assert_eq!(snapshot.content, live.content);
+    assert_eq!(snapshot.paths, live.paths);
+    assert_eq!(versions[0].content, live.content);
+    assert_eq!(versions[0].version, 2);
+
     let history = service
         .cas_rule_history(Parameters(VersionRequest {
             id: id.clone(),
@@ -376,6 +386,7 @@ async fn test_rule_update() {
     assert!(history_text.contains("create"));
     assert!(history_text.contains("revise wording"));
     assert!(history_text.contains("Original rule content"));
+    assert!(history_text.contains("Updated rule content"));
 
     service
         .cas_rule_restore(Parameters(VersionRequest {

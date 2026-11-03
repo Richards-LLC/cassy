@@ -169,6 +169,13 @@ pub enum QaCommand {
     PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Operator-only, time-boxed rapid-response window for one epic
     RapidResponse(super::qa_rapid_response::RapidResponseArgs),
+    /// Operator-only: allow dependants of a phase that missed its measured bar
+    OutcomeOverride {
+        task: String,
+        /// Why this measured miss is accepted; recorded as a decision
+        #[arg(long)]
+        reason: String,
+    },
     /// Operator-only: accept QA authored by someone who implemented the task
     AuthorOverride {
         task: String,
@@ -273,6 +280,19 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
         QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
         QaCommand::AuthorOverride { task, note } => author_override(task, note, cas_root),
+        QaCommand::OutcomeOverride { task, reason } => {
+            use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
+            if let Some(refusal) = operator_action_refusal(
+                "Overriding a measured phase outcome",
+                "run `cas qa outcome-override` yourself from your own terminal",
+                &InvocationContext::from_process(),
+            ) { anyhow::bail!(refusal); }
+            let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
+            let store = crate::store::open_task_store(root)?;
+            crate::phase_outcome::record_override(root, store.as_ref(), task, reason)?;
+            println!("Outcome override recorded for {task}; dependent work may proceed.");
+            Ok(())
+        },
         QaCommand::Journeys {
             check: _,
             seed,

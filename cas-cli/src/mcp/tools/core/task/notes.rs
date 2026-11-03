@@ -98,6 +98,21 @@ impl CasCore {
             data: None,
         })?;
 
+        let outcome_kind = req.note_type.to_ascii_lowercase();
+        if matches!(outcome_kind.as_str(), "outcome_target" | "outcome_receipt") {
+            self.resolve_live_supervisor_authority().map_err(|error| Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("OUTCOME RECORD REJECTED: only a live registered supervisor records phase targets and measurements ({error:?})"),
+            ))?;
+            crate::phase_outcome::record_note(task_store.as_ref(), &req.id, &outcome_kind, &req.note)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+            if let Err(error) = self.record_task_note_activity(&req.id, &outcome_kind, &req.note, None) {
+                tracing::warn!(%error, "could not record phase outcome activity");
+            }
+            return Ok(Self::success(format!("Added {outcome_kind} note to task {}", req.id)));
+        }
+
         let proof_note = matches!(
             req.note_type.to_ascii_lowercase().as_str(),
             "platform_proof" | "loaded_proof"

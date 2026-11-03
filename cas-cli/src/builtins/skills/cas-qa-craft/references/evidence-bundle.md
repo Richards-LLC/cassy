@@ -108,7 +108,10 @@ journey evaluation scores polish for it.
   localhost on its session endpoint. The run then goes against the deployed
   origin, with these fields:
   - `origin`: the deployment, which must be listed in the project's
-    `qa.deployed_origins`;
+    `qa.deployed_origins`. A supervisor sets it with
+    `cas config set qa.deployed_origins <origin>[,<origin>]`. Hosts minted
+    per deployment, such as Vercel previews, take one pattern with a `*` in
+    the leftmost label: `https://<project>-*-<team>.vercel.app`;
   - `reason`: why local auth is impossible, in a full sentence;
   - `deployed_sha`: the full commit the deployment serves. It must be the
     delivered head or a descendant of it;

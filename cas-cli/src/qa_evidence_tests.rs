@@ -1193,6 +1193,14 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
     );
     assert!(error.contains("Next: produce the bundle under"), "{error}");
     assert!(error.contains(CONTRACT_REFERENCE), "{error}");
+    // cas-f426: with no local build that can sign in, the refusal names the
+    // deployed route: the empty config and the command that fills it.
+    assert!(
+        error.contains("qa.deployed_origins is empty")
+            && error.contains("`cas config set qa.deployed_origins <origin>[,<origin>]`")
+            && error.contains("declare `deployed` in bundle.json"),
+        "{error}"
+    );
     let error = run_close_gate(
         &ctx,
         EvidenceTier::Ledger { terminal_qa: false },
@@ -1984,6 +1992,29 @@ fn deployed_staging_bundle_with_reason_and_proof_satisfies_the_gate() {
     );
 }
 
+/// cas-f426: Vercel serves each deployment on its own host, so a project
+/// configures one pattern instead of an origin per deployment.
+#[test]
+fn per_deployment_origin_pattern_admits_the_preview_it_names() {
+    const PREVIEW: &str = "https://pulse-card-frontend-bzrfqei28-richards-llc.vercel.app";
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|manifest| manifest["deployed"]["origin"] = serde_json::json!(PREVIEW));
+    write_visual_qa_report(&fx.bundle_dir(), "PASS", chrono::Utc::now(), &format!("{PREVIEW}/admin"));
+    let pattern = vec!["https://pulse-card-frontend-*-richards-llc.vercel.app".to_string()];
+    fx.validate_with_origins(&pattern)
+        .unwrap_or_else(|refusal| panic!("{refusal:?}"));
+    let other_team = vec!["https://pulse-card-frontend-*-someone-else.vercel.app".to_string()];
+    let refused = fx.validate_with_origins(&other_team).unwrap_err();
+    assert!(
+        refused.problem.contains("wrong origin")
+            && refused.command.contains(&format!(
+                "`cas config set qa.deployed_origins {},{PREVIEW}`",
+                other_team[0]
+            )),
+        "{refused:?}"
+    );
+}
+
 #[test]
 fn deployed_bundle_without_a_reason_is_refused() {
     let fx = Fixture::new();
@@ -2249,6 +2280,11 @@ fn deployed_origins_config_accepts_remote_origins_only() {
             .is_err()
     );
     assert!(config.set("qa.deployed_origins", "not a url").is_err());
+    config
+        .set("qa.deployed_origins", "https://App-*-Team.vercel.app/")
+        .unwrap();
+    assert_eq!(config.qa().deployed_origins, vec!["https://app-*-team.vercel.app"]);
+    assert!(config.set("qa.deployed_origins", "https://*.vercel.app").is_err());
 }
 
 /// cas-7c15 (GH #1078): a Quasar focus input, whose `f_<uuid>` id is minted

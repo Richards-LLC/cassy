@@ -768,16 +768,10 @@ impl Config {
                     .map(str::trim)
                     .filter(|raw| !raw.is_empty())
                 {
-                    let origin = crate::qa_evidence::url_origin(raw).ok_or_else(|| {
-                        MemError::Parse(format!(
-                            "qa.deployed_origins: {raw:?} is not an http(s) origin"
-                        ))
-                    })?;
-                    if crate::qa_evidence::is_local_origin(&origin) {
-                        return Err(MemError::Parse(format!(
-                            "qa.deployed_origins: {origin} is local; a local build needs no deployed origin"
-                        )));
-                    }
+                    let origin = crate::qa_evidence::deployed_origins::normalize(raw)
+                        .map_err(|problem| {
+                            MemError::Parse(format!("qa.deployed_origins: {problem}"))
+                        })?;
                     origins.push(origin);
                 }
                 qa.deployed_origins = origins;

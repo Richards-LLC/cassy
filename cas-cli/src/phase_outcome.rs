@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Bar {
+pub(crate) struct Bar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,21 +22,25 @@ struct Bar {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Receipt {
-    measurements: BTreeMap<String, f64>,
-    receipt: String,
+pub(crate) struct Receipt {
+    pub(crate) measurements: BTreeMap<String, f64>,
+    pub(crate) receipt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run_log_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Outcome {
-    target: BTreeMap<String, Bar>,
+pub(crate) struct Outcome {
+    pub(crate) target: BTreeMap<String, Bar>,
     #[serde(default)]
-    evidence: Option<Receipt>,
+    pub(crate) evidence: Option<Receipt>,
 }
 
 impl Outcome {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             !self.target.is_empty(),
             "outcome target needs at least one metric"
@@ -85,7 +89,7 @@ impl Outcome {
         Ok(())
     }
 
-    fn misses(&self) -> Vec<String> {
+    pub(crate) fn misses(&self) -> Vec<String> {
         self.target
             .iter()
             .filter_map(|(metric, bar)| {
@@ -170,8 +174,16 @@ pub(crate) fn record_note(
                 previous.context("declare outcome_target before recording a receipt")?;
             previous.evidence = Some(
                 serde_json::from_str(body)
-                    .context("outcome_receipt expects measurements and a receipt reference")?,
+                    .context("outcome_receipt expects measurements and a receipt artifact path")?,
             );
+            previous.validate()?;
+            crate::model_eval::bind_artifact(
+                previous
+                    .evidence
+                    .as_mut()
+                    .context("phase receipt is missing")?,
+                &previous.target,
+            )?;
             previous
         }
         _ => bail!("unknown outcome note type"),
@@ -301,12 +313,21 @@ pub(crate) fn refusal(
             continue;
         }
         let task = store.get(&id)?;
-        if ((prerequisite && !own_ancestors.contains(&id)) || (include_self && id == origin))
+        let evaluate =
+            (prerequisite && !own_ancestors.contains(&id)) || (include_self && id == origin);
+        if evaluate && let Some(reason) = crate::model_eval::refusal(&task)? {
+            misses.push(reason);
+        }
+        if evaluate
             && let Some(outcome) = read(&task)?
             && !overridden(root, &task)
         {
             let unmet = outcome.misses();
-            if !unmet.is_empty() {
+            if unmet.is_empty() {
+                if let Some(evidence) = &outcome.evidence {
+                    crate::model_eval::verify_artifact(evidence, &outcome.target)?;
+                }
+            } else {
                 misses.push(format!(
                     "{} ({}): {}. Operator only: cas qa outcome-override {} --reason '<why>'",
                     task.id,
@@ -398,7 +419,12 @@ mod tests {
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":72.7,"p95":1.48},"receipt":"artifact:eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &project,
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 72.7, "p95": 1.48}),
+            )
+            .to_string(),
         )
         .unwrap();
         // Closed task status is not evidence that its measured bar passed.
@@ -454,7 +480,12 @@ mod tests {
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":73,"p95":1.5},"receipt":"artifact:new-eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &project,
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 73, "p95": 1.5}),
+            )
+            .to_string(),
         )
         .unwrap();
         assert!(
@@ -465,7 +496,12 @@ mod tests {
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":99,"p95":0.9},"receipt":"artifact:passing-eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &project,
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 99, "p95": 0.9}),
+            )
+            .to_string(),
         )
         .unwrap();
         assert!(check(&root, store.as_ref(), "child", true).is_ok());

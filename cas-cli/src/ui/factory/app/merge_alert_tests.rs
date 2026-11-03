@@ -1437,7 +1437,7 @@ fn unmet_phase_suppresses_cached_and_queued_merge_prompts() {
         created_at: chrono::Utc::now(), created_by: None,
     }).unwrap();
     crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_target", r#"{"stability":{"min":95}}"#).unwrap();
-    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", r#"{"measurements":{"stability":72.7},"receipt":"artifact:reader"}"#).unwrap();
+    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", &crate::model_eval::fixture_receipt(f.repo.path(), serde_json::json!({"stability":{"min":95}}), serde_json::json!({"stability": 72.7})).to_string()).unwrap();
     assert!(f.relay().is_empty(), "a cached READY receipt cannot bypass a new outcome miss");
     assert!(!crate::ui::factory::director::refresh_ci_merge_signal(
         &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
@@ -1452,7 +1452,7 @@ fn unmet_phase_suppresses_cached_and_queued_merge_prompts() {
     let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
         &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
     assert!(facts.outcome_hold.unwrap().contains("72.7"));
-    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", r#"{"measurements":{"stability":99},"receipt":"artifact:reader-pass"}"#).unwrap();
+    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", &crate::model_eval::fixture_receipt(f.repo.path(), serde_json::json!({"stability":{"min":95}}), serde_json::json!({"stability": 99})).to_string()).unwrap();
     let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
         &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
     assert!(facts.outcome_hold.is_none());

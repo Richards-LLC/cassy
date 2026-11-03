@@ -75,7 +75,7 @@ fn bounded<T: Send + 'static>(
 
 #[cfg(feature = "mcp-proxy")]
 fn check_violet(context: &str, handoff: &Entry, root: &Path) -> Result<String, ()> {
-    use crate::cli::violet_cmd::hub::{cli_caller, connect_config, decode_tool_result};
+    use crate::cli::violet_hub::{cli_caller, connect_config, decode_tool_result};
     use cmcp_core::{ProxyEngine, config::VIOLET_SERVER};
 
     if targets(&references(handoff)).is_empty() {

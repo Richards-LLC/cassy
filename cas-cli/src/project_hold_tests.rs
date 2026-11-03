@@ -56,7 +56,7 @@ fn project_hold_is_first_and_hides_ready_tasks_at_session_start() {
         "{context}"
     );
     assert!(
-        !context.contains("ready hold probe") && !context.contains("## Ready Tasks"),
+        !context.contains("ready hold probe") && !context.contains("merge hold probe") && !context.contains("## Ready Tasks"),
         "{context}"
     );
     std::fs::remove_file(root.join("operator/project-hold.json")).unwrap();
@@ -82,6 +82,12 @@ async fn project_hold_suppresses_ready_and_awaiting_merge_queries_until_lifted()
         result.contains("Review the plan") && !result.contains("cas-hold-merge"),
         "{result}"
     );
+    // The unfiltered query is also an operator surface; internal store lists
+    // retain these rows, but the MCP response must never invite a held merge.
+    let all = || serde_json::from_value(serde_json::json!({})).unwrap();
+    let result = text(core.cas_task_list(Parameters(all())).await.unwrap());
+    assert!(!result.contains("cas-hold-merge"), "{result}");
+    assert!(result.contains("Review the plan"), "{result}");
     std::fs::remove_file(root.join("operator/project-hold.json")).unwrap();
     assert!(
         text(core.cas_task_ready(Parameters(ready())).await.unwrap()).contains("cas-hold-ready")

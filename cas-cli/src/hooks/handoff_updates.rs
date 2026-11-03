@@ -41,7 +41,7 @@ pub(super) fn inject(context: String, cas_root: &Path) -> String {
         }
         check_violet(&base, &handoff, &root)
     })
-    .unwrap_or_else(|| insert_section(&context, COULD_NOT_CHECK))
+    .unwrap_or_else(|_| insert_section(&context, COULD_NOT_CHECK))
 }
 
 fn handoff_id(context: &str) -> Option<String> {

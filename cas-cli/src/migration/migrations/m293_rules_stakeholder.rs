@@ -35,6 +35,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        // pin: An additive provenance migration must preserve the prior instruction verbatim.
         assert_eq!(content, "Existing instruction");
         assert!(attribution.is_none());
     }

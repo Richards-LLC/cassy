@@ -513,6 +513,28 @@ impl CasCore {
         )))
     }
 
+    pub(crate) fn build_completion_candidate(
+        &self,
+        task: &Task,
+        repo: &Path,
+        source: &str,
+        target: &str,
+    ) -> Result<Candidate, McpError> {
+        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
+            &self.cas_root,
+            task,
+            true,
+        )
+        .map_err(fail)?;
+        self.build_verification_candidate(
+            task,
+            repo,
+            source,
+            target,
+            context_digest(&self.cas_root, task).map_err(fail)?,
+        )
+    }
+
     fn build_verification_candidate(
         &self,
         task: &Task,
@@ -599,6 +621,7 @@ impl CasCore {
         std::fs::write(manifest, serde_json::to_vec(&candidate).map_err(fail)?).map_err(fail)?;
         let store = self.open_task_store()?;
         let mut current = store.get(&task.id).map_err(fail)?;
+        let expected = current.clone();
         let marker = "PREMERGE CANDIDATE PREPARATION";
         if !current.notes.contains(marker) {
             current.notes.push_str(&format!(
@@ -609,7 +632,7 @@ impl CasCore {
                 candidate.proof.head_commit,
                 candidate.tree
             ));
-            store.update(&current).map_err(fail)?;
+            store.update_if_current(&current, &expected).map_err(fail)?;
         }
         Ok(candidate)
     }

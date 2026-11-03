@@ -6109,33 +6109,34 @@ impl CasCore {
             }
         };
 
-        // cas-2b667 / GH #588: the receipt path must not project an
-        // unmerged current source tip into the merged-delivery states. The
-        // receipt's commit/target fields are a snapshot supplied by the
-        // worker; re-fetch and inspect the live branch immediately before
-        // creating the immutable delivery boundary so a straggler commit
-        // cannot hide behind an earlier receipt or parked anchor.
-        if let Err(message) = validate_current_factory_branch_tip_ancestry_with_delivery_mode(
-            &context.repo_root,
-            &input.source_branch,
-            &input.target_branch,
-            task.delivery_mode,
-        ) {
-            return Ok(Self::tool_error(format!(
-                "DELIVERY RECEIPT REJECTED: task {} cannot accept a completion receipt until the current source tip is merged.\n\n{message}",
-                task.id
-            )));
-        }
-
-        // A receipt creates a fresh proof boundary. A legacy or earlier-cycle
-        // verdict must never authorize this immutable commit by accident.
-        // Exact retries return the existing transaction (which may already
-        // have advanced); genuinely new receipts always await a new verdict.
+        // An unpublished receipt establishes only AwaitingVerification. The
+        // candidate binds its exact source and target before any merge state
+        // can advance; a straggler source or changed target cannot publish.
+        let candidate_repository = if existing_delivery.is_none() {
+            if commit_is_merged_into_parent(&context.repo_root, &input.commit_sha, &input.target_branch) {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: this source is already integrated. Close using its existing pre-merge approval; a fresh completion receipt cannot add a post-merge verifier.",
+                ));
+            }
+            let candidate = self.build_completion_candidate(
+                task, &context.repo_root, &input.source_branch, &input.target_branch,
+            )?;
+            // Candidate timing is appended with a compare-and-swap. Keep the
+            // receipt projection's own CAS bound to the current task row.
+            *task = task_store.get(&task.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            Some(candidate.proof)
+        } else {
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .and_then(|dispatch| dispatch.repository)
+        };
         let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
-        let delivery_boundary = cas_types::VerificationProofBoundary::delivery(
+        let mut delivery_boundary = cas_types::VerificationProofBoundary::delivery(
             receipt.id.clone(),
             cas_store::worker_delivery_transaction_id(&receipt.id),
         );
+        delivery_boundary.repository = candidate_repository.clone();
         let owner_id = self.verification_dispatch_owner(&caller.id)?;
         let transaction = if let Some((_, transaction)) = existing_delivery {
             transaction
@@ -6148,7 +6149,7 @@ impl CasCore {
                     "DELIVERY RECEIPT REJECTED: a new immutable receipt requires the authenticated caller's exact active task lease.",
                 ));
             };
-            cas_store::create_worker_delivery_with_dispatch_for_lease(
+            cas_store::create_worker_delivery_with_dispatch_for_lease_at_repository(
                 &self.cas_root,
                 &receipt,
                 initial_state,
@@ -6156,6 +6157,7 @@ impl CasCore {
                 lease_epoch,
                 &owner_id,
                 chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+                candidate_repository.as_ref().expect("new receipt has an unpublished candidate proof"),
             )
             .map(|(transaction, _)| transaction)
             .map_err(|error| McpError {

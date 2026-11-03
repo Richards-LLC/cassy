@@ -86,6 +86,8 @@ mod update;
 pub mod update_transaction;
 pub(crate) mod viktor;
 mod violet_cmd;
+#[cfg(feature = "mcp-proxy")]
+pub(crate) use violet_cmd::hub as violet_hub;
 pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
 
 use std::path::{Path, PathBuf};

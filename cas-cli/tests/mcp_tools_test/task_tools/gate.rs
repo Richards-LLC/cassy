@@ -165,7 +165,10 @@ async fn test_first_to_no_code_methodology_repair_cas_1b74() {
 
 async fn unified_task(service: &CasService, request: serde_json::Value) -> String {
     let request: cas_mcp::TaskRequest = serde_json::from_value(request).unwrap();
-    extract_text(service.task(Parameters(request)).await.unwrap())
+    match service.task(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    }
 }
 
 #[tokio::test]

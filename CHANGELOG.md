@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Write-root guard
+
+- **Allow read-only scripts that mention the write-roots key** — Was: a
+  read-only script that named `factory.write_roots` in a string and used an
+  unrelated `set(...)` was refused as operator-only. → Now: the catch-all
+  refuses only text that applies `set` to the key, in shell, `eval` or
+  interpreter argument lists; real configuration changes and grant commands
+  stay refused.
+
 ### Security — Hosted Commander
 
 - **Content-Security-Policy on hub.petrastella.io** — Hosted Commander now

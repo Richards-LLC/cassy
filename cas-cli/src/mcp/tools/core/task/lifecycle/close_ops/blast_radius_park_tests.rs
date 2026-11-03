@@ -1012,3 +1012,104 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
     assert_eq!(retained.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()), "{refused}");
     assert_eq!(retained.deliverables.historical_factory_branch_anchors, task.deliverables.historical_factory_branch_anchors);
 }
+
+/// cas-5ea7, through the real close: an eligible hotfix parks with its QA
+/// evidence deferred; after the lane merge Cassy's close is held while the
+/// receipt runs, reruns a failed receipt once, and, with the first parent's
+/// result unreadable, opens a revert PR and returns the task. A worker cannot
+/// forge the lane state that puts a delivery on this path.
+#[tokio::test]
+async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(
+        f.cas_dir().join("config.toml"),
+        format!(
+            "[project]\ncanonical_id=\"{PROJECT}\"\n[verification]\nenabled=false\n[fast_lane]\nenabled=true\npaths=[\"crates/**\"]\nmerge_checks=[\"PR gate\"]\nreceipt_checks=[\"Post-merge receipt\"]\nreceipt_statuses=[\"Vercel\"]\n"
+        ),
+    )
+    .unwrap();
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut bug = tasks.get(ID).unwrap();
+    bug.task_type = cas_types::TaskType::Bug;
+    tasks.update(&bug).unwrap();
+
+    let forged = call(&f.worker, serde_json::json!({
+        "action": "notes", "id": ID, "notes": "FAST_LANE_PROOF: merge head=a merge=b at=2026-11-03T21:05:32Z",
+    })).await;
+    assert!(forged.contains("cannot contain FAST_LANE_PROOF"), "{forged}");
+
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    let notes = f.task().notes;
+    assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
+    assert!(notes.contains("QA evidence is deferred to the post-merge receipt"), "{notes}");
+
+    // The lane merge, as worktree_merge records it, behind a GitHub origin
+    // that Git rewrites to the local bare repository.
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let merge = git(repo, &["rev-parse", "HEAD"]);
+    let bare = git(repo, &["config", "--get", "remote.origin.url"]);
+    git(repo, &["config", &format!("url.{bare}.insteadOf"), "https://github.com/acme/cas.git"]);
+    git(repo, &["config", "remote.origin.url", "https://github.com/acme/cas.git"]);
+    tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
+    let now = chrono::Utc::now();
+    tasks.append_trusted_note(
+        ID,
+        &format!("[{}] {}", now.format("%Y-%m-%d %H:%M"), crate::fast_lane::merge_note(&tip, &merge, now)),
+    ).unwrap();
+
+    let state = f.dir.path().join("gh-state");
+    std::fs::create_dir_all(&state).unwrap();
+    let gh = state.join("gh");
+    std::fs::write(&gh, format!(
+        "#!/bin/sh\nS='{s}'\nif [ \"$1 $2\" = 'repo view' ]; then echo '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\n\
+         echo \"$*\" >> \"$S/calls\"\ncase \"$1 $4\" in\n\
+         'api repos/acme/cas/commits/{merge}/check-runs') cat \"$S/checks.json\" ;;\n\
+         'api repos/acme/cas/commits/{merge}/status') echo '{{\"statuses\":[{{\"context\":\"Vercel\",\"state\":\"success\"}}]}}' ;;\n\
+         'run --failed'|'run '*) exit 0 ;;\n\
+         'pr '*) echo https://github.com/acme/cas/pull/9 ;;\n\
+         *) exit 97 ;;\nesac\n",
+        s = state.display(),
+    )).unwrap();
+    std::fs::set_permissions(&gh, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
+    env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+    let receipt = |status: &str, conclusion: Option<&str>| std::fs::write(
+        state.join("checks.json"),
+        serde_json::json!({"check_runs": [{
+            "id": 5, "name": "Post-merge receipt", "status": status, "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/77/job/1",
+        }]}).to_string(),
+    ).unwrap();
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
+    cassy.set_agent_id_for_testing("br-supervisor-session".into());
+
+    receipt("in_progress", None);
+    let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    assert!(pending.contains("FAST LANE RECEIPT PENDING"), "{pending}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    let wakes = crate::store::open_reminder_store(&f.cas_dir()).unwrap().list_all_pending().unwrap();
+    assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
+        && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
+
+    receipt("completed", Some("failure"));
+    let rerun = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    assert!(rerun.contains("rerunning once"), "{rerun}");
+    assert!(std::fs::read_to_string(state.join("calls")).unwrap().contains("run rerun 77 --failed"));
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+
+    let reverted = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    assert!(reverted.contains("FAST LANE REVERT") && reverted.contains("unknown or unreadable"), "{reverted}");
+    let returned = f.task();
+    assert_eq!(returned.status, TaskStatus::Open, "the hotfix returns to its worker");
+    assert!(returned.notes.contains("FAST_LANE_PROOF: revert merge="), "{}", returned.notes);
+    git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
+}

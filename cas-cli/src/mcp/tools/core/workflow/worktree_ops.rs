@@ -6362,6 +6362,46 @@ mod tests {
         (temp, code_sha, tip)
     }
 
+    /// cas-5ea7: an eligible fast-lane tip is admitted on its merge checks
+    /// alone, so a red backend job on a frontend-only PR no longer refuses it,
+    /// while a red merge check still does.
+    #[cfg(unix)]
+    #[test]
+    fn fast_lane_admits_on_its_merge_checks_alone_cas_5ea7() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let lane = crate::fast_lane::FastLaneConfig {
+            enabled: true,
+            paths: vec!["**".into()],
+            merge_checks: vec!["PR gate".into()],
+            ..Default::default()
+        };
+        let run = |id: u64, name: &str, conclusion: &str| serde_json::json!({
+            "id": id, "name": name, "status": "completed", "conclusion": conclusion,
+            "html_url": format!("https://github.com/acme/cas/actions/runs/{id}/job/1"),
+        });
+        for (gate, expected_green) in [("success", true), ("failure", false)] {
+            let checks = serde_json::json!({"check_runs": [
+                run(1, "PR gate", gate),
+                run(2, "PostgreSQL contracts", "failure"),
+            ]});
+            let (repo, code_sha, _tip) = delivery_ci_fixture_with(true, &checks.to_string(), "");
+            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+            let normal = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            assert!(matches!(normal, BranchCiState::Red { .. }), "{normal:?}");
+            let state = super::fast_lane_ci(&lane, &code_sha, repo.path()).expect("GitHub readable").state;
+            if expected_green {
+                assert!(
+                    matches!(&state, BranchCiState::Green { test_checks, .. } if test_checks == &["PR gate".to_string()]),
+                    "{state:?}"
+                );
+                assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+            } else {
+                assert!(matches!(state, BranchCiState::Red { .. }), "{state:?}");
+                assert!(admit_branch_ci(&state, false, None).is_err());
+            }
+        }
+    }
+
     /// cas-c59e: a newer push cancels the code commit's lane run, and the docs tip
     /// runs Docs Lint only. Nothing can finish at that commit any more, so it is not
     /// pending. What the cancelled run did prove decides; the docs tip proves nothing.

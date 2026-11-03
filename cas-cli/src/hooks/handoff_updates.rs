@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cas_types::Entry;
 use chrono::{DateTime, Utc};
@@ -33,13 +33,14 @@ pub(super) fn inject(context: String, cas_root: &Path) -> String {
     }
     let root = cas_root.to_path_buf();
     let base = context.clone();
+    let deadline = Instant::now() + CHECK_BUDGET;
     bounded(CHECK_BUDGET, move || {
         let store = crate::store::open_store(&root).map_err(|_| ())?;
         let handoff = store.get(&id).map_err(|_| ())?;
         if handoff.created.timestamp() < 0 {
             return Err(());
         }
-        check_violet(&base, &handoff, &root)
+        check_violet(&base, &handoff, &root, deadline)
     })
     .unwrap_or_else(|_| insert_section(&context, COULD_NOT_CHECK))
 }
@@ -74,14 +75,22 @@ fn bounded<T: Send + 'static>(
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn check_violet(context: &str, handoff: &Entry, root: &Path) -> Result<String, ()> {
+fn check_violet(
+    context: &str,
+    handoff: &Entry,
+    root: &Path,
+    deadline: Instant,
+) -> Result<String, ()> {
     use crate::cli::violet_hub::{cli_caller, connect_config, decode_tool_result};
     use cmcp_core::{ProxyEngine, config::VIOLET_SERVER};
 
     if targets(&references(handoff)).is_empty() {
         return Ok(context.into());
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    if Instant::now() >= deadline {
+        return Err(());
+    }
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(3));
     let config = connect_config(Some(root)).map_err(|_| ())?;
     let caller = cli_caller(Some(root));
     let bots = crate::config::Config::load(root)
@@ -139,7 +148,7 @@ fn check_violet(context: &str, handoff: &Entry, root: &Path) -> Result<String, (
 }
 
 #[cfg(not(feature = "mcp-proxy"))]
-fn check_violet(context: &str, handoff: &Entry, _: &Path) -> Result<String, ()> {
+fn check_violet(context: &str, handoff: &Entry, _: &Path, _: Instant) -> Result<String, ()> {
     if targets(&references(handoff)).is_empty() {
         Ok(context.into())
     } else {

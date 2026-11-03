@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   scope and layer-boundary instructions while retaining plan-metric receipts;
   shorter startup prose keeps the worker guidance within its byte budget.
 
+### Added — Epic governance
+
+- **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
+
 ### Fixed — Verification
 
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could

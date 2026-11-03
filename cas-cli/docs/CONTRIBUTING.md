@@ -1932,6 +1932,39 @@ intent. Missing CI and transport failures retain it without merging; daemon
 restarts resume the persisted intent. In-progress and unparked tasks never arm
 an automatic retry.
 
+## Epic design-review staffing pause
+
+A report counts when its task type is `bug`, priority is P0 or P1, and its
+labels include exactly `stakeholder-reported`. Use that label only for a defect
+reported by a customer, operator, or other stakeholder; internal review findings
+do not count unless a stakeholder also reported the defect. Report time is the
+task's `created_at`, so adding the label later does not reset its age. Closed
+reports count too. Reports belong to each ancestor epic through parent-child
+links; unrelated epics and non-epic tasks remain available.
+
+`factory.design_review_bug_threshold` defaults to 5 (range 1–1000), and
+`factory.design_review_window_hours` defaults to 48 (range 1–8760). The window
+includes reports created exactly at its lower boundary and excludes future dates.
+Task creation, updates and parent linking evaluate the trigger; start and spawn
+admission also evaluate it for imported reports. A pause persists across restarts
+and beyond the window until the operator lifts it. Active work, delivery, merges
+and shipping to staging continue normally.
+
+The supervisor receives one durable prompt per pause asking for a design review
+against the epic plan. Start refusals identify the epic and the trigger reports.
+After reviewing the design, the operator runs from their own terminal:
+
+```sh
+cas factory design-review-lift <epic> --reason 'Review outcome and why staffing can resume'
+```
+
+The non-empty reason is recorded on the epic. The lift acknowledges reports
+created through the lift time; a fresh threshold of newer reports can pause the
+epic again. Agent contexts, including supervisors, cannot lift a pause. Lifts
+live under `.cas/operator/epic-design-review-lifts.json`; pause state lives in
+`.cas/epic-design-reviews.json`, with serialized atomic writes. This policy is
+per epic and independent of any project hold.
+
 ## Measured phase outcomes
 
 A supervisor declares an immutable numeric target on an existing epic, phase

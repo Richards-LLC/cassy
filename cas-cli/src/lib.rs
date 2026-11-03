@@ -44,6 +44,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
+pub(crate) mod epic_design_review;
 pub mod extraction;
 mod light_lane;
 #[doc(hidden)]

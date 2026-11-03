@@ -1797,6 +1797,9 @@ impl CasCore {
                 }
             })?;
 
+        crate::epic_design_review::observe(&self.cas_root, &id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
@@ -2499,6 +2502,9 @@ impl CasCore {
                 format!("{}\n\n{}", task.notes, audit)
             };
         }
+
+        crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &req.id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         // The caller or validated queue principal owns this execution lease.
         let agent_store = self.open_agent_store()?;

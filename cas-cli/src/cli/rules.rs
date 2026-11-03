@@ -12,6 +12,21 @@ pub enum RulesCommands {
     Refs { rule_id: String },
 }
 
+fn bounded(text: &str, full: bool) -> String {
+    if full || ratatui::text::Line::raw(text).width() <= 78 {
+        return text.into();
+    }
+    let mut width = 0;
+    let prefix: String = text
+        .chars()
+        .take_while(|character| {
+            width += ratatui::text::Span::raw(character.to_string()).width();
+            width <= 75
+        })
+        .collect();
+    format!("{prefix}...")
+}
+
 pub fn execute(command: &RulesCommands, cli: &Cli) -> anyhow::Result<()> {
     let RulesCommands::Refs { rule_id } = command;
     let root = Command::new("git")
@@ -23,7 +38,19 @@ pub fn execute(command: &RulesCommands, cli: &Cli) -> anyhow::Result<()> {
     }
     let root = String::from_utf8(root.stdout)?;
     let root = std::path::PathBuf::from(root.strip_suffix('\n').unwrap_or(&root));
-    let sites = crate::rule_refs::scan(&root, None, &BTreeSet::from([rule_id.clone()]))?;
+    let sites = crate::rule_refs::scan(&root, None, &BTreeSet::from([rule_id.clone()])).map_err(
+        |error| {
+            let detail = error
+                .to_string()
+                .lines()
+                .map(|line| format!("  {}", bounded(line, cli.full || cli.json)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!(
+                "Rule references unavailable\n{detail}\nUse --full for complete diagnostics."
+            )
+        },
+    )?;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&sites)?);
     } else {
@@ -36,21 +63,7 @@ pub fn execute(command: &RulesCommands, cli: &Cli) -> anyhow::Result<()> {
                 site.line,
                 serde_json::to_string(&site.scope)?
             );
-            if cli.full || ratatui::text::Line::raw(text.as_str()).width() <= 78 {
-                println!("  {text}");
-            } else {
-                // Full fidelity is the JSON contract; narrow human rows stay
-                // legible and always name that escape above the first row.
-                let mut width = 0;
-                let prefix: String = text
-                    .chars()
-                    .take_while(|character| {
-                        width += ratatui::text::Span::raw(character.to_string()).width();
-                        width <= 75
-                    })
-                    .collect();
-                println!("  {prefix}...");
-            }
+            println!("  {}", bounded(&text, cli.full));
         }
     }
     Ok(())

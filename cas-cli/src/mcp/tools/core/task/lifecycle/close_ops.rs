@@ -27857,6 +27857,46 @@ mod merge_state_gate_tests {
         }
     }
 
+    /// cas-d8295: only stakeholder rules make a citation rule-driven, and a
+    /// bulleted declaration is enforced rather than skipped.
+    #[tokio::test]
+    async fn rule_gate_ignores_process_rules_and_enforces_bulleted_sites_cas_d8295() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        let root = fixture.dir.path();
+        let rules = crate::store::open_rule_store(&root.join(".cas")).unwrap();
+        rules.init().unwrap();
+        rules.add(&Rule::new("rule-176".into(), "Release flow: one cycle".into())).unwrap();
+        let mut rule = Rule::new("rule-177".into(), "Only the SMS send path".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(), quote: "Only the SMS send path".into(), scope: "Only the SMS send path".into(),
+        });
+        rules.add(&rule).unwrap();
+        let marker = "// cas-rule: rule-177 scope: \"Only the SMS send path\"\n";
+        std::fs::write(root.join("delivery.rs"), format!("{marker}fn send() {{}}\n")).unwrap();
+        std::fs::write(root.join("delivery_test.rs"), "fn test_send() {}\n").unwrap();
+        git(root, &["add", "delivery.rs", "delivery_test.rs"]);
+        git(root, &["commit", "-q", "-m", "fix(cas-anchor): rule-driven sites"]);
+        git(root, &["push", "-q", "origin", &fixture.branch]);
+        let bulleted = concat!(
+            "- Rule-driven sites: [",
+            "{\"rule_id\":\"rule-177\",\"path\":\"delivery_test.rs\",\"anchor\":\"fn test_send() {}\"}]"
+        );
+        // A refused close stays open, so the parking process-rule case runs last.
+        for (description, brief) in [("Apply rule-177.", bulleted), ("Repair the queue (one cycle, rule-176).", "")] {
+            let mut task = fixture.store.get(&fixture.task_id).unwrap();
+            task.description = description.into();
+            task.notes = format!("[2026-11-03 12:00] 📌 SPAWN BRIEF {description}\n{brief}");
+            fixture.store.update(&task).unwrap();
+            let (_, text) = close_text(&fixture).await;
+            if brief.is_empty() {
+                assert!(!text.contains("RULE REFERENCES REQUIRED"), "a process rule needs no marker: {text}");
+                assert!(text.contains("MERGE REQUIRED"), "{text}");
+            } else {
+                assert!(text.contains("delivery_test.rs: fn test_send() {} needs its adjacent rule-177 marker"), "{text}");
+            }
+        }
+    }
+
     // cas-44e93 AC1: cas-e460 closed with a local-only child of its pushed
     // tip checked out and parked that commit, which origin never had.
     #[tokio::test]

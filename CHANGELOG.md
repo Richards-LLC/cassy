@@ -25,6 +25,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Keep rule-driven code tied to its reason** — Code and tests can cite a rule
   with its verbatim scope. Worker close checks declared causal sites and cited
   rule coverage; `cas rules refs <id>` lists tracked references for review.
+- **Ask for rule markers only for stakeholder rules** — Was: citing any rule,
+  such as a release-flow rule in a repair task, refused close until code carried
+  its marker, while a bulleted `- Rule-driven sites:` declaration went
+  unchecked. → Now: only stakeholder rules need markers, and bulleted or quoted
+  declarations in the brief or close receipt are checked; a malformed one
+  refuses with its line.
 - **List a changed rule's cited sites for cleanup** — Was: retiring or
   narrowing a rule left its cited code and tests behind for someone to find. →
   Now: retiring, superseding, clearing attribution on or changing the scope of a

@@ -58,8 +58,8 @@ Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/refe
 
 ## Phase references
 
-Read each reference once per context at its matching phase; reload after source
-changes or context clears. Do not preload later phases.
+Read each reference once per context; reload after source changes or context
+clears. Do not preload later phases.
 
 | Phase or trigger | Read before acting |
 | --- | --- |

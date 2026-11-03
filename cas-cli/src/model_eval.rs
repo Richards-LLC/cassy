@@ -223,6 +223,8 @@ mod tests {
                 .contains("measured missing")
         );
         let receipt = serde_json::json!({"dataset":"reader-v1", "model":"provider/model", "run_log":log, "measurements":{"accuracy":96}});
+        assert!(record_note(store.as_ref(), "eval", "model_eval_receipt", &receipt.to_string()).is_err(),
+            "inline measurements without an evaluation receipt artifact must not count as proof");
         for (field, value) in [
             ("dataset", serde_json::json!("other-dataset")),
             ("model", serde_json::json!("")),

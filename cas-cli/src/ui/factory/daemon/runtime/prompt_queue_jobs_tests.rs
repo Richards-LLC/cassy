@@ -895,6 +895,7 @@ fn a_stale_mirror_result_is_ignored() {
         state.operator_messages.push(crate::ui::factory::ConversationHistoryMessage {
             notification_id: 77, client_ref: None, target: "terminal-history".into(), text: "Typed in the terminal".into(),
             state: "delivered".into(), stamped: false, reply_to: None, device_id: "terminal".into(),
+            pane_hold: None,
             operator_label: Some("Terminal".into()), session: "factory-1".into(), at: chrono::Utc::now().to_rfc3339(),
         });
     });
@@ -1168,4 +1169,39 @@ fn cas_afe0_settled_broadcast_member_retires_without_fabricating_a_handoff() {
     let peer = run_claim_for_inject(&cas_dir, "s", row, "worker-b", "all_workers", 1);
     assert!(matches!(peer.outcome, ClaimOutcome::Claimed(_)));
     assert!(queue.queued_prompt(row).unwrap().unwrap().acked_at.is_none());
+}
+
+/// cas-062b: an operator turn parked behind the operator's own pane draft is
+/// published as held, so Commander says so instead of a silent queue; its
+/// later delivery is published too. Other parks publish nothing.
+#[test]
+fn cas_062b_a_turn_parked_behind_the_pane_draft_publishes_its_hold() {
+    let (_root, cas_dir) = project();
+    let stamp = cas_store::OperatorStamp {
+        operator: "Daniel".into(),
+        device_id: "chrome".into(),
+        device_label: "Chrome".into(),
+        scopes: vec!["message:send".into()],
+        verified: true,
+    };
+    let id = crate::store::open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .enqueue_operator_message("commander:Daniel@Chrome", "supervisor", "slide two", Some("s"),
+            None, None, false, None, &stamp)
+        .unwrap()
+        .id();
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    let park = |detail: &str| QueueStamp::ParkBusy { detail: detail.into(), recheck_at: chrono::Utc::now() };
+    jobs.stamp(&cas_dir, id, "supervisor", park("pane has not been silent long enough"));
+    jobs.stamp(&cas_dir, id, "supervisor", park(super::super::queue_and_events::COMPOSER_HOLD_DETAIL));
+    settle(&mut jobs, |jobs| !jobs.operator_messages.is_empty());
+    let held = jobs.take_operator_messages();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!((held[0].state.as_str(), held[0].pane_hold.as_deref()),
+        ("acknowledged", Some("Held: your pane draft is unsent")));
+    jobs.stamp(&cas_dir, id, "supervisor", QueueStamp::TransportDelivered);
+    settle(&mut jobs, |jobs| !jobs.operator_messages.is_empty());
+    let delivered = jobs.take_operator_messages();
+    assert_eq!((delivered[0].state.as_str(), delivered[0].pane_hold.as_deref()), ("delivered", None));
 }

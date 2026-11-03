@@ -177,12 +177,12 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(
-                resolve_existing(provider, home.path(), "main@example.com")
-                    .unwrap()
-                    .name,
-                "main"
-            );
+            if provider == Provider::Claude {
+                assert_eq!(resolve_existing(provider, home.path(), "main@example.com").unwrap().name, "main");
+            } else {
+                assert!(resolve_existing(provider, home.path(), "main@example.com").is_err(),
+                    "Codex token email cannot authorize an alias lookup");
+            }
             assert_eq!(
                 resolve_existing(provider, home.path(), "alt").unwrap().name,
                 "alt"
@@ -190,11 +190,11 @@ mod tests {
             let ambiguous = resolve_existing(provider, home.path(), "shared@example.com")
                 .unwrap_err()
                 .to_string();
-            assert!(
-                ambiguous.contains("ambiguous")
-                    && ambiguous.contains("alt")
-                    && ambiguous.contains("work")
-            );
+            if provider == Provider::Claude {
+                assert!(ambiguous.contains("ambiguous") && ambiguous.contains("alt") && ambiguous.contains("work"));
+            } else {
+                assert!(ambiguous.contains("unknown codex account"), "{ambiguous}");
+            }
             let error = resolve_existing(provider, home.path(), "altt")
                 .unwrap_err()
                 .to_string();
@@ -209,7 +209,7 @@ mod tests {
                 cli,
                 model: None,
                 effort: None,
-                config_dir: Some("main@example.com".into()),
+                config_dir: Some(if provider == Provider::Claude { "main@example.com" } else { "main" }.into()),
                 requester_config_dir: None,
                 requester_secure_storage_dir: None,
             }];

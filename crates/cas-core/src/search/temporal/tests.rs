@@ -1,6 +1,6 @@
 use crate::search::temporal::*;
 use cas_types::{Entity, EntityType, RelationType};
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[test]
 fn test_time_period_day() {
@@ -14,6 +14,11 @@ fn test_time_period_day() {
     // End of day
     let end_dt = date.and_hms_opt(23, 59, 59).unwrap().and_utc();
     assert!(period.contains(&end_dt));
+    let final_nanosecond = date
+        .and_hms_nano_opt(23, 59, 59, 999_999_999)
+        .unwrap()
+        .and_utc();
+    assert!(period.contains(&final_nanosecond));
 
     // Next day
     let next_day = date
@@ -56,8 +61,17 @@ fn test_time_period_month() {
 
 #[test]
 fn test_temporal_query_parse_today() {
-    let query = TemporalQuery::parse("today").unwrap();
-    assert!(query.period.contains(&Utc::now()));
+    let now = DateTime::parse_from_rfc3339("2025-05-01T23:59:59.999999999Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let query = TemporalQuery::parse_at("today", now).unwrap();
+    assert!(query.period.contains(&now));
+    let next_midnight = NaiveDate::from_ymd_opt(2025, 5, 2)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    assert!(!query.period.contains(&next_midnight));
 }
 
 #[test]

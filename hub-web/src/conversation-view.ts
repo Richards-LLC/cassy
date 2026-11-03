@@ -1,7 +1,10 @@
-import { fitMachineLine, hostMarkup } from "./conversation-shell";
+import { appendEmojiText } from "./emoji-text";
+import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
+import { sentAttachments, sentMessageLabel } from "./sent-attachments";
+import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
-import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
+import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { reconcileChildren, ThreadWindow } from "./thread-window";
@@ -10,8 +13,9 @@ import { machineName } from "./conversation-list";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
-import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
+import type { ArtifactRef, OperatorReply, OperatorTurnKind, SessionEndOutcome } from "./types";
 import type { WorkEvent } from "./work-events";
+import type { PhaseLine } from "./live-phase";
 import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
   cellTone,
@@ -19,6 +23,7 @@ import {
   dayLabel,
   stampLabel,
   messageBlocks,
+  tableCsv,
   threadModel,
   type ThreadCoalesce,
   type ThreadGroup,
@@ -57,6 +62,10 @@ export interface TurnRenderContext {
   readonly history?: ConversationHistory;
   /** Sends `text` as the operator's reply to `reply` (in_reply_to = its notification_id). Absent when this view cannot send. */
   readonly respond?: (reply: OperatorReply, text: string) => void;
+  /** Answers a secret request over the hub's secrets route, never as a message (cas-1996). Absent when this view cannot send. */
+  readonly answerSecret?: SecretAnswerer;
+  /** The machine this thread's session runs on, as the operator knows it. */
+  readonly machine?: string;
   /** True when rendering the copy pinned above the composer rather than the one in the flow. */
   readonly pinned?: boolean;
 }
@@ -66,7 +75,11 @@ export interface TurnRenderContext {
  * (Pebble 3, the fused-tray objects); `attachment` is called once per artifact
  * on any turn that carries one (Pebble 4, the dog-eared sheet).
  */
-export type RenderableKind = "ask" | "blocker" | "attachment";
+export type RenderableKind = "ask" | "blocker" | "secret" | "attachment";
+/** cas-2f55: when a saved secret is deleted; absent uses the project setting (keep by default). */
+export type SecretAutoDelete = "keep" | "after_use" | "1h" | "24h";
+/** Saves (`value`) or declines a secret request; resolves with where the hub saved it and when it deletes it. */
+export type SecretAnswerer = (request: OperatorReply, answer: { value: string; auto_delete?: SecretAutoDelete } | { decline: true }) => Promise<{ path?: string; auto_delete?: string | null }>;
 export type TurnRenderer = (event: OperatorReply, context: TurnRenderContext) => HTMLElement;
 
 const turnRenderers = new Map<RenderableKind, TurnRenderer>();
@@ -92,6 +105,7 @@ export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer)
 }
 
 export interface ConversationViewOptions {
+  sessionEnd?: () => SessionEndOutcome | undefined;
   /** Supervisor codename; bold in the thread header and the accessible label. */
   supervisor: string;
   /** Machine label and project name for the mono line beneath the name. */
@@ -105,6 +119,8 @@ export interface ConversationViewOptions {
   accentClass?: string;
   /** True while the supervisor is executing: paints the working line. */
   working?: () => boolean;
+  /** Daemon-owned phase facts; a clock here only changes their display. */
+  phase?: () => PhaseLine | undefined;
   /**
    * Render the thread's own header. Inside the conversation shell the shell
    * supplies the single Pebble header (conversationHeaderMarkup), so main.ts
@@ -142,6 +158,8 @@ export interface ConversationViewOptions {
    * "once the session is live again" under a header that reads Live.
    */
   sessionLive?: () => boolean;
+  commandReceipts?: () => readonly CommandReceipt[];
+  commandStep?: (clientRef: string, key: CommandKey) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -155,6 +173,12 @@ export interface ConversationViewOptions {
    * in the history with the same replyTo, which is what marks the ask answered.
    */
   respond?: (ask: OperatorReply, text: string) => void;
+  /**
+   * A secret request's Save securely / Decline (cas-1996). The caller POSTs
+   * to the hub's secrets route; the value never enters a send, the journal
+   * or the history.
+   */
+  answerSecret?: SecretAnswerer;
   /**
    * What the session is doing while it has said nothing to Commander
    * (cas-55a4): when it last did anything and between whom. The empty
@@ -383,7 +407,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
       time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
-    text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
+    text.textContent = plainTextMarkdown(event.kind === "send" ? sentMessageLabel(event.value.text) : event.value.message);
     item.append(who, " ", time, text);
     list.append(item);
   }
@@ -419,6 +443,9 @@ export class ConversationView {
   private readonly head: HTMLElement;
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
+  private readonly endReceipt: HTMLElement;
+  private readonly commands: HTMLElement;
+  private commandSignature = "";
   private readonly empty: HTMLElement;
   /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
   private readonly earlier: HTMLElement;
@@ -499,6 +526,9 @@ export class ConversationView {
   private disposed = false;
   private updateRequest?: object;
   private resize?: ResizeObserver;
+  private contentChanges?: MutationObserver;
+  private phase?: PhaseLine;
+  private phaseClock?: ReturnType<typeof setInterval>;
 
   constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
     this.options = typeof options === "string" ? { supervisor: options, editMessage } : options;
@@ -542,6 +572,15 @@ export class ConversationView {
       if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
+    this.commands = document.createElement("section");
+    this.commands.className = "supervisor-command-receipts";
+    this.commands.setAttribute("aria-label", "Supervisor command receipts");
+    this.commands.setAttribute("aria-live", "polite");
+    this.commands.hidden = true;
+    this.endReceipt = document.createElement("section");
+    this.endReceipt.className = "session-end-receipt";
+    this.endReceipt.setAttribute("role", "status");
+    this.endReceipt.hidden = true;
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.above = document.createElement("div"); this.below = document.createElement("div");
@@ -558,7 +597,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.commands, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -566,29 +605,40 @@ export class ConversationView {
     // Browser pinning/focus recovery also emits scroll. Only a reading gesture
     // may start an older network request; explicit Load earlier works as well.
     this.element.addEventListener("wheel", event => {
-      this.earlierIntent = event.deltaY < 0;
+      this.noteEarlierIntent(event.deltaY < 0);
       if (this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)) this.scrollWindow(true);
     }, { passive: true });
-    this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
+    this.element.addEventListener("keydown", event => {
+      this.noteEarlierIntent(["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey));
+    });
+    this.element.addEventListener("pointerdown", event => {
+      // A scrollbar drag is reading intent too. Clicks on thread content
+      // keep following; only the scrollbar gutter belongs to this control.
+      const rect = this.element.getBoundingClientRect();
+      if (event.target === this.element && event.clientX >= rect.left + this.element.clientLeft + this.element.clientWidth) this.noteEarlierIntent(true);
+    });
     let touchY: number | undefined;
     this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });
     this.element.addEventListener("touchmove", event => {
       const next = event.touches[0]?.clientY;
-      if (next !== undefined && touchY !== undefined) this.earlierIntent = next > touchY;
+      if (next !== undefined && touchY !== undefined) this.noteEarlierIntent(next > touchY);
       touchY = next;
     }, { passive: true });
     this.element.addEventListener("scroll", () => {
-      // cas-6a9b: a scroll that moved the thread up and off its tail is the
-      // reader, whatever else is in flight. Layout never does that: a pin
-      // only moves down to the tail, content growing below leaves scrollTop
-      // where it was, and a box that shrank or clamped keeps the tail in
-      // view. Before this, a reader who scrolled up within the two frames
-      // after a pin was ignored and the pending re-pin took them back down,
-      // and one whose thread had grown unseen was read as layout and pinned.
+      // A preview can collapse (clamping scrollTop) and grow again before
+      // the queued scroll arrives. With changed geometry, the upward offset
+      // alone cannot identify a reader. Their input stops following before
+      // layout or a pending pin can obscure it; ordinary scrolls at stable
+      // geometry still claim the reading position (including scrollIntoView).
       this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
+      const height = this.element.clientHeight;
+      const contentHeight = this.element.scrollHeight;
+      const layoutChanged = (this.lastHeight !== undefined && height !== this.lastHeight)
+        || (this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight);
       const scrollingUp = scrollTop < this.scrolledTo;
-      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
+      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element)
+        && (!this.following || !layoutChanged);
       if (readerLeftTail) {
         this.following = false;
         this.jump.hidden = false;
@@ -605,7 +655,6 @@ export class ConversationView {
       // own scroll adjustment for that lands here before the resize observer
       // does. A scroll that comes with a height change is layout, not the
       // reader scrolling away: a thread following its tail keeps following.
-      const height = this.element.clientHeight;
       if (this.lastHeight !== undefined && height !== this.lastHeight) {
         this.lastHeight = height;
         if (this.following) { this.pin(); return; }
@@ -613,7 +662,6 @@ export class ConversationView {
       this.lastHeight = height;
       // A scroll that comes with a change of content height while following
       // is layout (content grew, the browser re-anchored), not the reader.
-      const contentHeight = this.element.scrollHeight;
       const grew = this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight;
       this.lastContentHeight = contentHeight;
       if (grew && this.following) { this.pin(); return; }
@@ -669,6 +717,13 @@ export class ConversationView {
       // scroll-anchoring nudge then read as the reader scrolling away.
       this.resize.observe(this.msgs);
     }
+    // Preview DOM changes can clamp and regrow the thread before either a
+    // scroll event or ResizeObserver delivery. Re-pin in their microtask,
+    // while explicit reading intent has already released following.
+    this.contentChanges = new MutationObserver(() => {
+      if (!this.disposed && this.following) this.pin();
+    });
+    this.contentChanges.observe(this.msgs, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
   /** Mount and session-state callbacks share one presentation before paint.
@@ -684,7 +739,15 @@ export class ConversationView {
   }
 
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
-  update(): void { this.render(false); }
+  update(): void {
+    this.render(false);
+    const receipts = this.options.commandReceipts?.() ?? [];
+    const signature = JSON.stringify(receipts);
+    if (signature === this.commandSignature) return;
+    this.commandSignature = signature;
+    this.commands.hidden = !receipts.length;
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
+  }
 
   /** Scroll-only window changes reuse the last data/state presentation. */
   private render(reuseModel: boolean): void {
@@ -702,7 +765,10 @@ export class ConversationView {
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
-    const working = this.options.working?.() === true;
+    const ended = this.options.sessionEnd?.();
+    this.phase = ended ? undefined : this.options.phase?.();
+    const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
+    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -747,6 +813,16 @@ export class ConversationView {
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
+    this.endReceipt.hidden = !ended;
+    if (ended) {
+      this.empty.hidden = true;
+      const title = document.createElement("strong"); title.textContent = "Session ended";
+      const summary = document.createElement("p"); summary.textContent = sessionEndSummary(ended);
+      const details = document.createElement("p"); details.className = "session-end-orphans";
+      details.textContent = [ended.orphans.length ? `Still alive: ${ended.orphans.join(", ")}.` : "", ended.unverified?.length ? `Stop not verified: ${ended.unverified.join(", ")}.` : ""].filter(Boolean).join(" ");
+      details.hidden = !details.textContent;
+      this.endReceipt.replaceChildren(title, summary, details);
+    }
     const held = anchor && this.anchorNode(anchor);
     if (anchor && held) {
       // The button sits above every turn, so the browser's own scroll
@@ -758,7 +834,10 @@ export class ConversationView {
       if (offeredEarlier && !hasEarlier) this.revealHistoryEnd();
     }
     this.restorePlace();
-    this.scrolledTo = this.element.scrollTop;
+    // An unseen move still awaits its scroll event (or a remount's deferred
+    // pin). Keep the observed baseline so that event can stop a pending pin
+    // when the reader has scrolled up to Load earlier.
+    if (!this.pinDeferred) this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
@@ -780,6 +859,14 @@ export class ConversationView {
     if (first) this.element.scrollTop += first.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
     this.scrolledTo = this.element.scrollTop;
     this.notePlace();
+  }
+
+  /** Claim an upward reading gesture before the browser delivers its scroll. */
+  private noteEarlierIntent(up: boolean): void {
+    this.earlierIntent = up;
+    // Claim the reader's place before a pending pin or resize callback can
+    // run, even when the browser has not delivered their scroll event yet.
+    if (up && this.element.scrollTop > 0) this.following = false;
   }
 
   /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
@@ -996,7 +1083,7 @@ export class ConversationView {
     const bar = document.createElement("div"); bar.className = "pinned-bar";
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "pinned-expand";
     const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
-    const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
+    const text = document.createElement("span"); text.className = "pinned-bar-text"; appendEmojiText(document, text, askLine(ask.message));
     const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
     jump.append(label, " ", text, glyph.content.firstElementChild!);
     jump.title = "Go to the question";
@@ -1032,6 +1119,21 @@ export class ConversationView {
     this.composing = composing;
     this.renderPinned(this.element.ownerDocument);
     if (this.following) this.pin();
+  }
+
+  /**
+   * cas-1996: once the hub saved or declined a secret, it stops waiting here
+   * at once, before the hub's reply reaches the history. The repaint waits a
+   * task so the card first records its outcome.
+   */
+  private async answerSecret(request: OperatorReply, answer: Parameters<SecretAnswerer>[1]): ReturnType<SecretAnswerer> {
+    const outcome = await this.options.answerSecret!(request, answer);
+    setTimeout(() => {
+      if (this.disposed || !this.history.dismissAsk(request.notification_id)) return;
+      this.update();
+      this.options.dismissalsChanged?.();
+    }, 0);
+    return outcome;
   }
 
   /** Dismiss a waiting ask: it unpins, stops waiting, and its copy in the thread keeps its choices. */
@@ -1118,6 +1220,8 @@ export class ConversationView {
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
+      ...(this.options.answerSecret ? { answerSecret: (request: OperatorReply, answer: Parameters<SecretAnswerer>[1]) => this.answerSecret(request, answer) } : {}),
+      ...(this.options.machine ? { machine: this.options.machine } : {}),
       pinned,
     };
     return context;
@@ -1127,18 +1231,18 @@ export class ConversationView {
     if (!reply.reply_to_session || reply.reply_to === null) return undefined;
     const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
     const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
-    return question?.kind === "send" ? question.value.text : undefined;
+    return question?.kind === "send" ? sentMessageLabel(question.value.text) : undefined;
   }
 
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
   private turnSignature(turn: ThreadTurn): string {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
-    const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
+    const answered = reply?.kind === "ask" || reply?.kind === "secret" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The bookmark target changes when the newest waiting question changes.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
-    const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
+    const retired = reply?.kind === "ask" || reply?.kind === "blocker" || reply?.kind === "secret" ? this.history.retirement(reply.notification_id) : undefined;
     const delivered = turn.event.kind === "send" ? this.history.showsDeliveryStatus(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
@@ -1265,14 +1369,27 @@ export class ConversationView {
     // (threadModel), so it is not a flip to repaint for.
     const newest = this.history.visibleEvents().at(-1);
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
-    const working = this.options.working?.() === true && !sending;
-    if (working !== this.nodes.has("working")) this.update();
+    const phase = this.options.phase?.();
+    const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
+    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
+    if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
+    else {
+      const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+      if (clock && phase?.elapsed !== undefined) clock.textContent = phase.elapsed;
+    }
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
-    if (node.dataset.signature === signature) return;
+    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
+      : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
+    if (node.dataset.signature === signature) {
+      if (item.type === "working") {
+        const clock = node.querySelector(".phase-clock");
+        if (clock && this.phase?.elapsed !== undefined) clock.textContent = this.phase.elapsed;
+      }
+      return;
+    }
     node.dataset.signature = signature;
     switch (item.type) {
       case "day": node.className = "day"; node.textContent = item.label; return;
@@ -1296,19 +1413,34 @@ export class ConversationView {
     if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
     this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
-    this.following = shouldFollowTail(this.element);
-    this.jump.hidden = this.following;
+    // Loading may still fit in the viewport. Opening work is reading intent:
+    // its later detail must not resume tail-following when it grows.
+    this.following = false;
+    this.jump.hidden = shouldFollowTail(this.element);
     this.notePlace();
   }
 
   private renderWorking(node: HTMLElement): void {
     const document = node.ownerDocument;
     node.className = "turn working-turn";
-    const line = document.createElement("div"); line.className = "working"; line.setAttribute("role", "status");
+    const phase = this.phase;
+    const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
+    if (phase) line.dataset.active = String(phase.active);
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-    line.append(dots, document.createTextNode("working"));
+    line.append(dots, document.createTextNode(phase?.label ?? "working"));
+    if (phase?.elapsed !== undefined) {
+      const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
+      line.append(document.createTextNode(" · "), clock);
+    }
     node.replaceChildren(line);
+    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
+      this.phaseClock = setInterval(() => {
+        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+        const current = this.options.phase?.();
+        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
+      }, 1000);
+    }
   }
 
   /**
@@ -1328,10 +1460,10 @@ export class ConversationView {
     line.dataset.count = String(item.count);
     line.dataset.expanded = String(expanded);
     if (expanded) {
-      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); p.textContent = reply.message; return p; }));
+      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); appendInline(document, p, reply.message); return p; }));
     } else {
-      line.textContent = coalesceText(item);
-      line.title = item.replies.map((reply) => reply.message).join("\n");
+      appendInline(document, line, coalesceText(item));
+      line.title = item.replies.map((reply) => plainTextMarkdown(reply.message)).join("\n");
     }
     const more = document.createElement("button"); more.type = "button"; more.className = "coalesce-expand";
     more.textContent = expanded ? "Show less" : "Show full update";
@@ -1459,13 +1591,26 @@ export class ConversationView {
       origin.textContent = `from ${send.deviceLabel}`;
       bubble.append(origin);
     }
-    bubble.append(...paragraphs(document, send.text));
+    const { text, attachments } = sentAttachments(send.text);
+    bubble.append(...paragraphs(document, text));
+    if (attachments.length) {
+      const reply: OperatorReply = { notification_id: send.notificationId ?? 0, reply_to: null, message: text, summary: "", device_id: "", attachments };
+      const context = this.context(document, turn, reply);
+      const renderer = turnRenderers.get("attachment");
+      for (const attachment of attachments) {
+        if (renderer) bubble.append(renderer(reply, { ...context, attachment }));
+        else {
+          const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`;
+          link.textContent = attachment.name; bubble.append(link);
+        }
+      }
+    }
     if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
       // Held while the machine is unreachable (cas-0978): not on the wire yet,
-      // and it will be sent by itself, once, when the machine is back.
-      state.textContent = send.held ? "Waiting for the connection — sends when it's back"
+      // and it can auto-send once within the disclosed two-minute wait.
+      state.textContent = send.held ? "Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry."
         : this.history.awaitsConfirmation(send) ? `Waiting for ${(this.options.machine && machineName(this.options.machine)) || "the machine"} to confirm…`
           : "Sending…";
       bubble.append(state);
@@ -1685,7 +1830,7 @@ export class ConversationView {
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): { bubble: HTMLElement; sheets: HTMLElement[] } {
     const kind = reply.kind ?? "answer";
     const context = this.context(document, turn, reply);
-    const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
+    const custom = kind === "ask" || kind === "blocker" || kind === "secret" ? turnRenderers.get(kind)?.(reply, context) : undefined;
     const sheetRenderer = turnRenderers.get("attachment");
     const sheets: HTMLElement[] = [];
     const bubble = custom ?? document.createElement("div");
@@ -1764,12 +1909,19 @@ export class ConversationView {
       if (this.disposed) return;
       // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
       // following it; the frame-late re-pin leaves them where they went.
-      if (this.following) this.element.scrollTop = this.element.scrollHeight;
+      if (this.following) {
+        this.element.scrollTop = this.element.scrollHeight;
+        // Late preview layout can shrink this pin before another resize.
+        // Its queued scroll must compare against this position, not the
+        // synchronous pin's older offset and appear to be a reader's scroll.
+        this.scrolledTo = this.element.scrollTop;
+        this.lastContentHeight = this.element.scrollHeight;
+      }
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
+  dispose(): void { this.disposed = true; clearInterval(this.phaseClock); this.resize?.disconnect(); this.contentChanges?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */
@@ -1821,7 +1973,7 @@ function timeElement(document: Document, time: string, clockAhead: boolean | und
 
 function paragraphs(document: Document, text: string): HTMLElement[] {
   return text.split(/\n{2,}/).map((chunk) => chunk.trim()).filter(Boolean).map((chunk) => {
-    const p = document.createElement("p"); p.textContent = chunk; return p;
+    const p = document.createElement("p"); appendEmojiText(document, p, chunk); return p;
   });
 }
 
@@ -1834,23 +1986,61 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...renderMarkdown(document, block.text)); continue; }
-    const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
+    const table = document.createElement("div"); table.className = "evi";
+    const actions = document.createElement("div"); actions.className = "evi-actions";
+    const status = document.createElement("span"); status.className = "evi-status"; status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
+    let copyStatusTimer: ReturnType<typeof setTimeout> | undefined;
+    const scroll = document.createElement("div"); scroll.className = "evi-scroll"; scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Scrollable evidence table");
+    const native = document.createElement("table"); native.className = "evi-body"; native.setAttribute("aria-label", "Evidence");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);
+    // Intrinsic table layout shares column widths across rows, preserving each
+    // word's minimum width. The outer sheet owns overflow on narrow screens.
+    const body = document.createElement("tbody");
+    const evidence = (text: string): boolean => /^(?:[+-]?\d[\d,.]*(?:\s*(?:%|ms|s|x))?|(?:\d+\s+)?(?:pass(?:ed)?|ok|green|✓|flakes?|flaky|warn(?:ing)?|skipped|fail(?:ed)?|error|red))$/i.test(plainTextMarkdown(text).trim());
+    const evidenceColumns = Array.from({ length: columns }, (_, index) => {
+      const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
+      return values.length > 0 && values.every(evidence);
+    });
     const row = (cells: string[], head: boolean): HTMLElement => {
-      const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
-      // First column takes the slack, the rest hug their numbers; widths beyond three columns are set here, not in CSS.
-      if (columns !== 3) line.style.gridTemplateColumns = `minmax(0, 1fr)${" auto".repeat(Math.max(0, columns - 1))}`;
+      const line = document.createElement("tr"); line.className = head ? "evi-row evi-head" : "evi-row";
       for (let index = 0; index < columns; index += 1) {
-        const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
-        const text = cells[index] ?? ""; cell.textContent = text;
-        const tone = head ? undefined : cellTone(text); if (tone) cell.classList.add(tone);
+        const text = cells[index] ?? "";
+        // A blank corner (`| | time |`) labels nothing: an empty cell, not a nameless header.
+        const header = head && text.trim() !== "";
+        const cell = document.createElement(header ? "th" : "td"); if (header) cell.setAttribute("scope", "col");
+        appendInline(document, cell, text);
+        if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
+        const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
         line.append(cell);
       }
       return line;
     };
-    if (block.table.header) table.append(row(block.table.header, true));
-    for (const cells of block.table.rows) table.append(row(cells, false));
+    if (block.table.header) {
+      const head = document.createElement("thead"); head.append(row(block.table.header, true)); native.append(head);
+    }
+    for (const cells of block.table.rows) body.append(row(cells, false));
+    native.append(body); scroll.append(native);
+    for (const format of ["Markdown", "CSV"] as const) {
+      const copy = document.createElement("button"); copy.type = "button"; copy.textContent = `Copy ${format}`;
+      copy.addEventListener("click", () => {
+        clearTimeout(copyStatusTimer);
+        void (async () => {
+          copy.disabled = true; status.textContent = "Copying…";
+          try {
+            const clipboard = document.defaultView?.navigator.clipboard;
+            if (!clipboard?.writeText) throw new Error("Clipboard unavailable");
+            const text = format === "Markdown" ? block.source : tableCsv([...native.rows].map(row => [...row.cells].map(cell => cell.textContent ?? "")));
+            await clipboard.writeText(text);
+            status.textContent = `${format} copied`;
+            copyStatusTimer = setTimeout(() => { status.textContent = ""; }, 2000);
+          } catch { status.textContent = "Copy failed. Select the table and copy manually, or try again."; }
+          finally { copy.disabled = false; }
+        })();
+      });
+      actions.append(copy);
+    }
+    table.append(scroll, actions, status);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

@@ -130,6 +130,28 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     // CAS_ROOT env var priority for factory mode compatibility.
     let cas_root: Option<PathBuf> = find_cas_root().ok();
 
+    // A headless review can inherit every factory identity variable. Reject
+    // its lifecycle before normalizing the native thread ID or writing any
+    // parent activity, registration, model observation or SessionEnd cleanup.
+    // Permission hooks must always run their normal policy handlers, including
+    // for a nested process. An empty output here would silently allow tools.
+    if !matches!(event_name, "PreToolUse" | "PermissionRequest")
+        && cas_core::env_overlay::var("CAS_FACTORY_MODE").as_deref() == Ok("1")
+        && let Ok(id) = cas_core::env_overlay::var("CAS_SESSION_ID")
+        && !id.trim().is_empty()
+        && let Some(root) = cas_root.as_deref()
+        && let Ok(store) = crate::store::open_agent_store(root)
+        && let Err(error) = crate::mcp::daemon::ensure_factory_process_owner(
+            store.as_ref(),
+            &id,
+            Some(crate::agent_id::get_cc_pid_for_hook()),
+            None,
+        )
+    {
+        tracing::warn!(%error, "ignoring nested harness hook for another factory process");
+        return Ok(HookOutput::empty());
+    }
+
     normalize_codex_factory_session(&mut input);
 
     // The harness submits a raw prompt string. The delivery authority records
@@ -173,6 +195,9 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
             Ok(HookOutput::empty())
         }
     };
+    if result.is_ok() && let Some(root) = cas_root.as_deref() {
+        crate::agent_model::record_hook(root, event_name, &input);
+    }
     if event_name == "UserPromptSubmit" && result.is_ok() {
         if let Some(root) = cas_root.as_deref() {
             turn_context::record_prompt_hook(root, &input);
@@ -230,7 +255,8 @@ mod internal_llm_tests {
     fn codex_factory_session_start_registers_only_the_cas_session_identity_cas_d0fe() {
         let project = tempfile::tempdir().expect("project");
         let cas_root = crate::store::init_cas_dir(project.path()).expect("cas root");
-        let _env = TestEnvGuard::with_optional_vars(&[
+        let mut env = TestEnvGuard::temp_home();
+        for (key, value) in [
             ("CAS_ROOT", Some(cas_root.to_str().expect("utf8 cas root"))),
             ("CAS_HOOK_HARNESS", Some("codex")),
             ("CAS_FACTORY_MODE", Some("1")),
@@ -238,9 +264,14 @@ mod internal_llm_tests {
             ("CAS_AGENT_NAME", Some("true-leopard-45")),
             ("CAS_SESSION_ID", Some("codex-true-leopard-45-registered")),
             (crate::internal_llm::INTERNAL_LLM_ENV, None),
-        ]);
+        ] {
+            match value {
+                Some(value) => env.set(key, value),
+                None => env.remove(key),
+            }
+        }
         // Codex 0.163 sends its thread UUID as the hook session_id.
-        handle_hook(
+        let output = handle_hook(
             "SessionStart",
             HookInput {
                 session_id: "01a14bb6-a0a5-75c1-ac0f-cb08b8ea56a5".into(),
@@ -251,6 +282,23 @@ mod internal_llm_tests {
             },
         )
         .expect("codex session start");
+        // Codex 0.165 rejects unknown fields in its native SessionStart schema.
+        let wire = serde_json::to_value(&output).expect("hook JSON");
+        let fields = wire["hookSpecificOutput"].as_object().expect("session output");
+        assert_eq!(fields.len(), 2, "Codex accepts only hookEventName/additionalContext: {fields:?}");
+        let Some(HookSpecificOutput::SessionStart { additional_context, .. }) =
+            output.hook_specific_output
+        else {
+            panic!("Codex startup must return session guidance");
+        };
+        // pin: Codex's explicit skill syntax must be directly usable at startup.
+        let hint = additional_context
+            .lines()
+            .find(|line| line.starts_with("Codex skills:"))
+            .expect("Codex startup must explain how to invoke the finish skill");
+        assert!(hint.contains("`$finish`"), "{hint}");
+        assert!(hint.contains("say `finish`"), "{hint}");
+        assert!(!hint.contains("/finish"), "{hint}");
         let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
         let ids: Vec<String> = agents
             .list(None)

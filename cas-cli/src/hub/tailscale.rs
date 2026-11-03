@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -67,12 +67,19 @@ struct TailscaleTeardownReceipt {
     recorded_at: String,
 }
 
+/// Auto transport cannot publish until the operator installs or signs in.
+/// This is distinct from a daemon outage, which service managers retry.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct PublicationUnavailable(String);
+
 #[derive(Debug, Clone)]
 pub struct TailscaleServeManager {
     executable: OsString,
     state_dir: PathBuf,
     socket: Option<OsString>,
     deadline: Option<Deadline>,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TailscaleServeManager {
@@ -102,6 +109,7 @@ impl TailscaleServeManager {
             state_dir: state_dir.as_ref().to_path_buf(),
             socket: env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()),
             deadline: None,
+            cancelled: None,
         }
     }
 
@@ -111,6 +119,11 @@ impl TailscaleServeManager {
 
     pub(crate) fn socket(&self) -> Option<&OsStr> {
         self.socket.as_deref()
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancelled = Some(cancelled);
+        self
     }
 
     pub(crate) fn within_deadline(mut self, deadline: Deadline) -> Self {
@@ -145,6 +158,7 @@ impl TailscaleServeManager {
             match manager.ensure_with_prior_target(local_port, https_port, prior_target.clone()) {
                 Ok(receipt) => return Ok(receipt),
                 Err(error) => {
+                    if error.is::<PublicationUnavailable>() { return Err(error); }
                     let Some(delay) = delays.next().map(Duration::from_secs)
                         .filter(|delay| deadline.remaining() > *delay)
                     else { return Err(error); };
@@ -168,8 +182,17 @@ impl TailscaleServeManager {
         prior_target: Option<(u16, String)>,
     ) -> Result<TailscaleServeReceipt> {
         let local_target = format!("http://127.0.0.1:{local_port}");
+        if !self.cli_available() {
+            return Err(PublicationUnavailable(tailscale_unavailable_message()).into());
+        }
         let status = self.status()?;
         if let Some(issue) = self.login_issue_for(&status) {
+            if matches!(status.get("BackendState").and_then(Value::as_str),
+                Some("NeedsLogin" | "NeedsMachineAuth")) {
+                return Err(PublicationUnavailable(format!(
+                    "{issue}\nSign in to the selected daemon."
+                )).into());
+            }
             anyhow::bail!("{issue}");
         }
         let dns_name = status
@@ -201,9 +224,8 @@ impl TailscaleServeManager {
                     (previous.https_port == https_port
                         && handlers == vec![("/".to_owned(), previous.local_target.clone())])
                         || self.dead_recorded_mapping(https_port, &handlers).is_some()
-                        || dead_known_target(prior_target.as_ref(), https_port, &handlers)
-                        || dead_receipted_port_target(&previous, https_port, &handlers).is_some(),
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                        || dead_known_target(prior_target.as_ref(), https_port, &handlers),
+                    "{}", self.mapping_conflict(https_port)
                 );
                 self.run(&[
                     "serve".into(),
@@ -231,7 +253,7 @@ impl TailscaleServeManager {
                 true
             } else {
                 anyhow::bail!(
-                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                    "{}", self.mapping_conflict(https_port)
                 )
             }
         };
@@ -385,10 +407,9 @@ impl TailscaleServeManager {
         };
         let before = self.serve_status()?;
         let handlers = handlers_on_port(&before, https_port);
+        // A dead loopback service may belong to the operator. Only an exact
+        // receipt or process target proves this mapping was published by Cassy.
         let recorded = self.dead_recorded_mapping(https_port, &handlers);
-        let legacy_dead_target = owned
-            .as_ref()
-            .and_then(|receipt| dead_receipted_port_target(receipt, https_port, &handlers));
         let mut receipt = match owned.or_else(|| {
             recorded.as_ref().map(|target| TailscaleServeReceipt {
                 schema_version: 1,
@@ -415,7 +436,7 @@ impl TailscaleServeManager {
             return Ok(None);
         }
         if handlers != vec![("/".to_owned(), receipt.local_target.clone())] {
-            if let Some(target) = recorded.or(legacy_dead_target) {
+            if let Some(target) = recorded {
                 receipt.local_target = target;
             }
         }
@@ -480,6 +501,20 @@ impl TailscaleServeManager {
         Ok(handlers_on_port(&self.serve_status()?, https_port))
     }
 
+    fn mapping_conflict(&self, https_port: u16) -> String {
+        let mut cli = shell_words::quote(&self.executable_display()).into_owned();
+        if let Some(socket) = &self.socket {
+            cli.push(' ');
+            cli.push_str(&shell_words::quote(&format!("--socket={}", socket.to_string_lossy())));
+        }
+        format!(
+            "tailscale Serve HTTPS port {https_port} is already owned by another mapping\n\
+             Inspect: {cli} serve status\n\
+             Only if safe to remove: {cli} serve --https={https_port} off\n\
+             Then run `cas hub restart --tailscale-serve`."
+        )
+    }
+
     fn status(&self) -> Result<Value> {
         self.run_json(&["status".into(), "--json".into()])
     }
@@ -541,10 +576,12 @@ impl TailscaleServeManager {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
         command.args(args);
-        let output = bounded_process::run_command(
+        let output = bounded_process::run_command_cancellable(
             &mut command,
             self.deadline.unwrap_or_else(|| Deadline::after(COMMAND_TIMEOUT)),
             COMMAND_TIMEOUT,
+            Stdio::null(),
+            self.cancelled.as_deref(),
         )
         .map_err(|error| match error {
             BoundedCommandError::TimedOut => anyhow::anyhow!("tailscale command timed out"),
@@ -705,22 +742,6 @@ fn dead_known_target(
             && handlers == [("/".to_owned(), target.clone())]
             && dead_loopback_target(target)
     })
-}
-
-fn dead_receipted_port_target(
-    receipt: &TailscaleServeReceipt,
-    https_port: u16,
-    handlers: &[(String, String)],
-) -> Option<String> {
-    if receipt.https_port != https_port || handlers.len() != 1 || handlers[0].0 != "/" {
-        return None;
-    }
-    let target = &handlers[0].1;
-    // Older hubs wrote the receipt after Serve publication. A forced kill
-    // could therefore leave the previous hub's receipt beside a newer dead
-    // shim. The private receipt proves Cassy owned this HTTPS port; the sole
-    // dead loopback proxy and unchanged root path identify its successor.
-    (target != &receipt.local_target && dead_loopback_target(target)).then(|| target.clone())
 }
 
 fn classify_stderr(stderr: &[u8]) -> &'static str {
@@ -956,39 +977,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn legacy_stale_receipt_reclaims_dead_loopback_shim_without_process_record() {
-        let temp = private_tempdir();
-        let (binary, state, calls) = stateful_mock(temp.path());
-        let hub = temp.path().join("hub");
-        let manager = TailscaleServeManager::with_executable(&hub, &binary);
-        let old = manager.ensure(4173, 443).unwrap();
-        let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let replacement = format!("http://127.0.0.1:{dead_port}");
-        fs::write(&state, &replacement).unwrap();
-        assert!(!hub.join("process.json").exists());
-        assert_ne!(old.local_target, replacement);
-        assert_eq!(
-            manager.disable_owned().unwrap().unwrap().local_target,
-            replacement
-        );
-        assert!(!state.exists());
-
-        fs::write(hub.join(RECEIPT_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        fs::write(&state, &replacement).unwrap();
-        let next = manager.ensure(4174, 443).unwrap();
-        assert_eq!(next.local_target, "http://127.0.0.1:4174");
-        assert_eq!(fs::read_to_string(&state).unwrap(), next.local_target);
-        assert_eq!(
-            fs::read_to_string(calls)
+    fn failed_start_preserves_stopped_foreign_route() {
+        for has_process_record in [false, true] {
+            let temp = private_tempdir();
+            let (binary, state, _calls) = stateful_mock(temp.path());
+            let hub = temp.path().join("hub");
+            let manager = TailscaleServeManager::with_executable(&hub, &binary);
+            let old = manager.ensure(4173, 443).unwrap();
+            let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
                 .unwrap()
-                .matches("serve --https=443 off")
-                .count(),
-            2
-        );
+                .local_addr()
+                .unwrap()
+                .port();
+            let foreign = format!("http://127.0.0.1:{dead_port}");
+            if has_process_record {
+                let record: super::super::HubProcessRecord =
+                    serde_json::from_value(serde_json::json!({
+                        "pid": 999999, "bind": "127.0.0.1", "port": 4173,
+                        "version": "test", "started_at": "test",
+                        "tailscale_serve_port": 443, "tailscale_serve_target": old.local_target
+                    })).unwrap();
+                crate::hub::HubRuntimePaths::new(&hub)
+                    .write_process_record(&record)
+                    .unwrap();
+            }
+            fs::write(&state, &foreign).unwrap();
+            // Service publication fails before Serve inspection. Its cleanup
+            // must not mistake a stopped operator service for a newer hub shim.
+            let script = fs::read_to_string(&binary).unwrap();
+            let failing = script.replace(
+                "case \"$*\" in",
+                "if [ \"$*\" = 'status --json' ]; then exit 9; fi\ncase \"$*\" in",
+            );
+            crate::test_paths::warm_stub(&binary, &failing);
+            assert!(manager.ensure(4174, 443).is_err());
+            let error = manager.disable_owned().unwrap_err().to_string();
+            assert!(error.contains("mapping changed"), "{error}");
+            assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
+            assert_eq!(manager.owned_receipt().unwrap().unwrap(), old);
+
+            // Once Tailscale responds again, startup must preserve it too.
+            crate::test_paths::warm_stub(&binary, &script);
+            let error = manager.ensure(4174, 443).unwrap_err().to_string();
+            assert!(error.contains("already owned"), "{error}");
+            assert!(error.contains("serve --https=443 off"), "refusal must name port-scoped recovery: {error}");
+            assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
+        }
     }
 
     #[test]

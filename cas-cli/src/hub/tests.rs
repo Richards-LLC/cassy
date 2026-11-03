@@ -16,6 +16,171 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+/// A session subscription may wait on a loaded catalog; the machine's health
+/// response must still travel through the actual upgraded socket.
+#[tokio::test]
+async fn machine_health_answers_while_subscription_catalog_is_busy() {
+    #[derive(Clone)]
+    struct BusyCatalog {
+        entered: Arc<Notify>,
+        released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl SessionReadModel for BusyCatalog {
+        fn list_sessions(&self) -> anyhow::Result<Vec<HubSession>> {
+            self.entered.notify_one();
+            let (lock, wake) = &*self.released;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            Ok(Vec::new())
+        }
+    }
+    let model = BusyCatalog {
+        entered: Arc::new(Notify::new()),
+        released: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+    };
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(model.clone()), Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
+        MachineIdentity { id: "busy-catalog".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let mut request = format!("ws://{address}/v1/attach?ticket=fixture").into_client_request().unwrap();
+    request.headers_mut().insert("origin", "https://controller.example".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket.send(WsMessage::Text(serde_json::json!({"proto":2}).to_string().into())).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+    socket.send(WsMessage::Text(serde_json::json!({"channel":"pty:factory-a","subscribe":true}).to_string().into())).await.unwrap();
+    model.entered.notified().await;
+    socket.send(WsMessage::Text(serde_json::json!({"channel":"health","ping":42}).to_string().into())).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+    // Release the blocking worker even when the assertion fails.
+    *model.released.0.lock().unwrap() = true;
+    model.released.1.notify_all();
+    hub.abort();
+    let frame = reply.expect("catalog work must not block machine health").unwrap().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&frame.into_data()).unwrap();
+    assert_eq!(json, serde_json::json!({"channel":"health","pong":42}));
+}
+
+/// The catalog follows each recorded supervisor account, never the hub's
+/// provider environment; a machine-only pairing cannot read those identities.
+#[tokio::test]
+async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_c021() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    use crate::ui::factory::create_metadata;
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    let claude = home.join("claude-account");
+    let codex = home.join("codex-account");
+    for dir in [&claude, &codex, &home.join(".codex")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
+    std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
+    let project = home.join("project");
+    let cas_root = init_cas_dir(&project).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
+    let unrelated = init_cas_dir(&home.join("unrelated")).unwrap();
+    env.set("CAS_ROOT", unrelated);
+    let agents = SqliteAgentStore::open(&cas_root).unwrap();
+    agents.init().unwrap();
+    // Codex has no proven non-secret email source. Its recorded account
+    // directory is enough for catalog coverage; no token fixture is needed.
+    let cases = [
+        ("claude", "claude", Some(claude.clone()), Some("claude@example.test")),
+        ("codex", "codex", Some(codex.clone()), None),
+        ("default-claude", "claude", Some(home.join(".claude")), Some("default-claude@example.test")),
+        ("default-codex", "codex", Some(home.join(".codex")), None),
+        ("grok", "grok", None, None),
+        ("opencode", "opencode", None, None),
+        ("legacy", "claude", None, None),
+        ("unknown", "new-harness", None, None),
+    ];
+    let mut sessions = Vec::new();
+    for (name, harness, selector, _) in &cases {
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", harness);
+        env.set("CLAUDE_CONFIG_DIR", &claude);
+        env.set("CODEX_HOME", &codex);
+        if name.starts_with("default-") {
+            env.remove("CLAUDE_CONFIG_DIR");
+            env.remove("CODEX_HOME");
+        }
+        let mut agent = cas_types::Agent::new(format!("catalog-{name}"), name.to_string());
+        agent.role = cas_types::AgentRole::Supervisor;
+        agent.factory_session = Some(name.to_string());
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+        if *name == "legacy" {
+            // Old registrations have a selector but no proven provider binding.
+            agent.metadata.remove("supervisor_account_harness");
+        } else {
+            assert_eq!(agent.metadata.get("supervisor_account_dir").map(std::path::PathBuf::from), *selector, "{name}: registration records only this harness's selector");
+        }
+        agents.register(&agent).unwrap();
+        sessions.push(SessionInfo {
+            name: name.to_string(),
+            metadata: create_metadata(name, std::process::id(), name, &[], None, project.to_str(), Some(4173)),
+            is_running: true,
+            socket_exists: true,
+        });
+    }
+    // Valid but unrelated ambient accounts must not fill in legacy identities.
+    env.set("CLAUDE_CONFIG_DIR", &codex);
+    env.set("CODEX_HOME", &claude);
+    let projected = LocalSessionReadModel::default().project(&sessions);
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let pair = |scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), Utc::now()).unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        (signing, auth.exchange_pairing(exchange, Utc::now()).unwrap())
+    };
+    let readers = [pair([Scope::SessionRead].into_iter().collect()), pair([Scope::MachineRead].into_iter().collect())];
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(projected)),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    for (index, (signing, credential)) in readers.iter().enumerate() {
+        let response = app.clone().oneshot(Request::get("/v1/sessions")
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/sessions", Utc::now(), &uuid::Uuid::from_u128(index as u128 + 1).to_string()))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if index == 1 {
+            // The session catalog's existing missing-scope response is bare 401.
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert!(!String::from_utf8_lossy(&bytes).contains("account_email"));
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = body["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), cases.len());
+        for (name, harness, _, email) in &cases {
+            let row = rows.iter().find(|row| row["name"] == *name).unwrap();
+            assert_eq!(row["harness"].as_str(), (*harness != "new-harness").then_some(*harness), "{name}");
+            assert_eq!(row["account_email"].as_str(), *email, "{name}");
+            assert_eq!(row["project"], "catalog-project");
+            assert_eq!(row["machine_online"], true);
+            if email.is_none() { assert!(row.get("account_email").is_none(), "{name}: unknown email is omitted"); }
+        }
+    }
+}
+
 /// cas-5e53: an already-open SSE grant must end after another auth-store
 /// process revokes its device, even with no event traffic or browser heartbeat.
 #[tokio::test]
@@ -47,11 +212,16 @@ async fn installation_revoke_sse(drain_replay: bool) {
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
-    let request = |path: &str| Request::get(path)
-        .header("origin", "https://controller.example")
-        .header("authorization", format!("DPoP {}", credential.credential))
-        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
-        .body(Body::empty()).unwrap();
+    let next_proof_id = std::cell::Cell::new(6u128);
+    let request = |path: &str| {
+        let proof_id = next_proof_id.get();
+        next_proof_id.set(proof_id + 1);
+        Request::get(path)
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(&signing, &credential.credential, "GET", path, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()))
+            .body(Body::empty()).unwrap()
+    };
     let inventory = app.clone().oneshot(request("/v1/auth/devices")).await.unwrap();
     assert_eq!(inventory.status(), StatusCode::OK);
     let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
@@ -151,7 +321,11 @@ async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
         if signed {
             request = request
                 .header("authorization", format!("DPoP {}", credential.credential))
-                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", path, Utc::now(), &uuid::Uuid::from_u128(match path {
+                    "/v1/auth/account/challenge" => 3,
+                    "/v1/auth/account/enrollment" => 4,
+                    _ => 5,
+                }).to_string()));
         }
         request.body(Body::from(body.to_owned())).unwrap()
     };
@@ -169,7 +343,7 @@ async fn account_enrollment_routes_need_a_session_and_an_enrolled_hub() {
     let inventory = app.oneshot(Request::get("/v1/auth/devices")
         .header("origin", "https://controller.example")
         .header("authorization", format!("DPoP {}", credential.credential))
-        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "GET", "/v1/auth/devices", Utc::now(), &uuid::Uuid::from_u128(5).to_string()))
         .body(Body::empty()).unwrap()).await.unwrap();
     let devices: serde_json::Value = serde_json::from_slice(&to_bytes(inventory.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(devices[0]["account_enrollment"]["state"], "unenrolled");
@@ -657,6 +831,77 @@ fn h1_machine_identity_is_stable_on_disk() {
 #[derive(Clone)]
 struct ExactOriginReadAuthorizer(&'static str);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_profiles_follow_the_resolved_projects_account_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.remove("CAS_ROOT");
+    env.remove("CODEX_HOME");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let shell = bin.join("private-shell");
+    crate::test_paths::warm_stub(&shell, &format!("#!/bin/sh\nprintf '__CAS_PATH_BEGIN__{}:/usr/bin:/bin__CAS_PATH_END__'\n", bin.display()));
+    env.set("SHELL", &shell);
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nprintf 'Logged in using ChatGPT'\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let now = chrono::Utc::now();
+    for (name, used, days) in [("soon", 60.0, 1), ("spare", 10.0, 4)] {
+        let folder = home.join(format!(".codex-{name}"));
+        std::fs::create_dir_all(folder.join("sessions")).unwrap();
+        std::fs::write(folder.join("auth.json"), "{}").unwrap();
+        std::fs::write(folder.join("sessions/usage.jsonl"), serde_json::json!({
+            "timestamp": now, "payload": {"rate_limits": {"primary": {
+                "used_percent": used, "window_minutes": 10080,
+                "resets_at": (now + chrono::Duration::days(days)).timestamp()
+            }}}
+        }).to_string()).unwrap();
+    }
+    let repos = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = repos.path().join("project");
+    std::fs::create_dir_all(project.join(".cas")).unwrap();
+    assert!(Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
+    crate::store::known_repos::ensure_host_schema().unwrap();
+    crate::store::known_repos::register_repo_strict(&project).unwrap();
+    let target = super::projects::list_projects(&[]).unwrap().pop().unwrap().target;
+    std::fs::write(home.join(".cas/config.toml"), format!("[hub]\nlaunch_roots = [{}]\n", serde_json::to_string(repos.path()).unwrap())).unwrap();
+    let browse = super::projects::LaunchTarget::Browse {
+        root_id: super::projects::configured_launch_roots().unwrap()[0].id.clone(),
+        path: "project".into(),
+    };
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
+        MachineIdentity { id: "recommendations".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ));
+    // Both overrides must change the actual HTTP projection, while no target
+    // retains the global soonest-reset policy.
+    for (query_target, config, expected) in [
+        (None, "[accounts]\nthreshold = 50\n", "soon"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'most-headroom'\n", "spare"),
+        (Some(serde_json::to_string(&browse).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+    ] {
+        std::fs::write(project.join(".cas/config.toml"), config).unwrap();
+        let query = query_target.map(|target| url::form_urlencoded::Serializer::new(String::new()).append_pair("target", &target).finish());
+        let uri = format!("/v1/launch/profiles{}", query.map(|q| format!("?{q}")).unwrap_or_default());
+        let response = app.clone().oneshot(Request::get(&uri).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let chosen = body["codex"]["profiles"].as_array().unwrap().iter().find(|row| row.get("recommendation").is_some());
+        assert_eq!(chosen.map(|row| row["name"].as_str().unwrap()), Some(expected), "{body}");
+    }
+    for target in ["not-json", r#"{"kind":"project","id":"missing"}"#, r#"{"kind":"browse","root_id":"missing","path":"../escape"}"#] {
+        let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("target", target).finish();
+        let response = app.clone().oneshot(Request::get(format!("/v1/launch/profiles?{query}")).header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
 impl HubAuthorizer for ExactOriginReadAuthorizer {
     fn authorize(&self, request: &HubRequest) -> AuthorizationDecision {
         if request.action == HubAction::Health
@@ -943,14 +1188,17 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         "https://hub.petrastella.io"
     );
     assert_eq!(health_preflight.headers()["vary"], "Origin");
+    let next_proof_id = std::cell::Cell::new(1u128);
     let proof = |method: &str, uri: &str| {
+        let proof_id = next_proof_id.get();
+        next_proof_id.set(proof_id + 1);
         sign_dpop(
             &signing,
             &credential.credential,
             method,
             uri,
             now,
-            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::from_u128(proof_id).to_string(),
         )
     };
 
@@ -1503,10 +1751,7 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
         events,
     )
     .with_machine_metadata(MachineMetadata {
-        transport: MachineTransport {
-            kind: "tailscale_serve".into(),
-            public_url: Some("https://target.tail.ts.net/".into()),
-        },
+        transport: MachineTransport::default(),
         cloud_devices: vec![CloudDeviceSuggestion {
             id: "device-hint".into(),
             name: "Laptop".into(),
@@ -1515,7 +1760,10 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
             ssh_host: None,
         }],
     });
-    let response = router(state)
+    let app = router(state.clone());
+    // Recover after the listener's router has already cloned the state.
+    state.publish_tailscale_transport("https://target.tail.ts.net/");
+    let response = app
         .oneshot(
             Request::get("/v1/machine")
                 .header("origin", "https://controller.example")
@@ -1595,7 +1843,7 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
     // pin: Native media and workers receive only these exact CSP sources.
-    for (directive, expected) in [("img-src", "img-src 'self' data:"),
+    for (directive, expected) in [("img-src", "img-src 'self' data: blob:"),
         ("media-src", "media-src 'self'"), ("worker-src", "worker-src 'self'")] {
         let value = csp.split(';').map(str::trim)
             .find(|value| value.starts_with(&format!("{directive} "))).unwrap();
@@ -1860,6 +2108,42 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     assert_eq!(pane.kind, MachineEventKind::PaneAdded);
     assert_eq!(pane.pane_id.as_deref(), Some("worker-1"));
 
+    // cas-c095: a pane exit carries its code, and names the supervisor's, so
+    // a device can tell a deliberate supervisor exit from a worker crash.
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::PaneAdded {
+            pane: PaneInfo {
+                id: "noble-cheetah-84".into(),
+                kind: PaneKind::Supervisor,
+                focused: true,
+                title: "Supervisor".into(),
+                exited: false,
+            },
+        },
+    );
+    receiver.recv().await.unwrap();
+    for (pane_id, exit_code, payload) in [
+        ("worker-1", Some(1), serde_json::json!({ "exit_code": 1 })),
+        (
+            "noble-cheetah-84",
+            Some(0),
+            serde_json::json!({ "exit_code": 0, "role": "supervisor" }),
+        ),
+    ] {
+        events.observe_daemon(
+            "factory-a",
+            &DaemonMessage::PaneExited {
+                pane_id: pane_id.into(),
+                exit_code,
+            },
+        );
+        let exited = receiver.recv().await.unwrap();
+        assert_eq!(exited.kind, MachineEventKind::PaneExited);
+        assert_eq!(exited.pane_id.as_deref(), Some(pane_id));
+        assert_eq!(exited.payload, Some(payload));
+    }
+
     events.reconcile_sessions(std::iter::empty::<&str>()).await;
     let removed = receiver.recv().await.unwrap();
     assert_eq!(removed.kind, MachineEventKind::SessionRemoved);
@@ -2008,8 +2292,12 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     assert!(!credential.credential.is_empty());
     assert!(auth.exchange_pairing(exchange, now).is_err());
 
-    let reopened = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let boot = now + Duration::seconds(1);
+    let reopened = AuthStore::open_at(&state_dir, "machine-test", boot).unwrap();
     assert_eq!(reopened.list_devices().unwrap().len(), 1);
+    let (_, fresh) = paired_context(&reopened, boot + Duration::milliseconds(1), Scope::default_read_only());
+    assert!(reopened.ensure_active_context(&fresh, boot + Duration::milliseconds(1)).is_ok(),
+        "a credential paired during this boot authenticates immediately");
 
     let expired = reopened
         .mint_pairing(
@@ -2201,6 +2489,12 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
         1
     );
 
+    let before = std::fs::read(temp.path().join("hub/auth.json")).unwrap();
+    let before_restart = auth.issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now).unwrap();
+    let restarted = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    assert!(restarted.consume_ws_ticket(&before_restart.ticket, "https://controller.example", "factory-a", "/v1/sessions/factory-a/attach", now).is_err());
+    assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), before);
+
     let expired = auth
         .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)
         .unwrap();
@@ -2214,6 +2508,42 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
         )
         .is_err()
     );
+}
+
+/// Large legacy ticket collections must be removed without losing durable identities.
+#[test]
+fn hub_auth_startup_compacts_legacy_tickets_and_keeps_devices() {
+    use chrono::{Duration, Utc};
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let now = Utc::now();
+    let (_, context) = paired_context(&auth, now, Scope::default_read_only());
+    let path = root.join("auth.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let devices = legacy["devices"].clone();
+    let pairings = legacy["pairings"].clone();
+    let ticket = serde_json::json!({
+        "ticket_hash": "redacted-ticket", "context": context, "session": "fixture",
+        "endpoint": "/v1/sessions/fixture/attach", "issued_at": now - Duration::days(30),
+        "expires_at": now - Duration::days(29), "consumed_at": now - Duration::days(30)
+    });
+    legacy["tickets"] = serde_json::Value::Array(vec![ticket; 10_977]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    drop(auth);
+    let reopened = AuthStore::open(&root, "machine-test").unwrap();
+    let compact = std::fs::read(&path).unwrap();
+    assert!(compact.len() < 200_000, "startup left {} bytes of legacy tickets", compact.len());
+    let compact: serde_json::Value = serde_json::from_slice(&compact).unwrap();
+    assert_eq!(compact["devices"], devices);
+    assert_eq!(compact["pairings"], pairings);
+    // pin: older CLI versions require these legacy array keys to exist.
+    assert_eq!(compact["tickets"], serde_json::json!([]));
+    assert_eq!(compact["dpop_jtis"], serde_json::json!([]));
+    let before = std::fs::read(&path).unwrap();
+    let ticket = reopened.issue_ws_ticket(&context, "fixture", "/attach", now).unwrap();
+    reopened.consume_ws_ticket(&ticket.ticket, "https://controller.example", "fixture", "/attach", now).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before, "ephemeral ticket traffic must not rewrite durable state");
 }
 
 #[test]
@@ -2427,7 +2757,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
     assert_eq!(receipt["OperatorNoticePersisted"]["device_id"], device_id);
 
     cli_auth.revoke_device(&device_id, Utc::now()).unwrap();
-    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             match socket.next().await {
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
@@ -2489,6 +2819,48 @@ fn h2_audit_06_independent_process_writers_append_complete_records() {
             .count(),
         64
     );
+}
+
+#[test]
+fn hub_audit_group_commit_rotates_and_bounds_retention() {
+    use chrono::Utc;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    for _ in 0..64 {
+        auth.audit(None, "allowed", "batch", None, None, Utc::now()).unwrap();
+    }
+    assert!(auth.audit_sync_count() < 64, "audit rows must share durability commits");
+    let log = root.join(super::AUDIT_LOG_FILE);
+    for _ in 0..4 {
+        // A sparse file stands in for the measured 290 MB legacy log. Rotation
+        // must use metadata and rename; it must not read that history.
+        std::fs::OpenOptions::new().write(true).open(&log).unwrap().set_len(8 * 1024 * 1024).unwrap();
+        auth.audit(None, "allowed", "after-rotation", None, None, Utc::now()).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&std::fs::read(&log).unwrap()).unwrap();
+        assert_eq!(row["action"], "after-rotation");
+    }
+    assert!(root.join("audit.jsonl.3").is_file());
+    assert!(!root.join("audit.jsonl.4").exists());
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(root.join("audit.jsonl.3")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn supervisor_commands_are_a_closed_leased_control_without_freeform_input() {
+    let known: ClientMessage = serde_json::from_value(serde_json::json!({
+        "SupervisorCommand": { "command": "compact", "client_ref": "cmd-1", "confirmed": false }
+    })).expect("an allowlisted supervisor command is exposed");
+    assert_eq!(required_scope(&known), Some(Scope::PaneInput));
+    assert!(!super::server::is_pane_read_message(&known));
+    for command in ["/compact", "compact; exit", "unknown", "model gpt-anything", "exit\nwhoami"] {
+        let frame = serde_json::json!({"SupervisorCommand": {
+            "command": command, "client_ref": "cmd-2", "confirmed": true
+        }});
+        assert!(serde_json::from_value::<ClientMessage>(frame).is_err(), "arbitrary command accepted: {command}");
+    }
 }
 
 #[test]
@@ -2800,11 +3172,25 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
     let page = serde_json::to_vec(&DaemonMessage::WorkEvents {
         request_id: "events-1".into(),
         schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
-        events: Vec::new(),
+        events: vec![serde_json::from_value(serde_json::json!({
+            "id":"v2-tool", "kind":"tool", "session":"factory-1",
+            "at":"2026-10-28T12:00:00Z", "label":"Read: lib.rs",
+            "tool":{"name":"Read","operation":"read","targets":["lib.rs"]},
+            "lifecycle":{"id":"call","stage":"end","outcome":"success"}
+        })).unwrap()],
         has_earlier: false,
         next_before: None,
     })
     .unwrap();
+    // The shared protocol accepts v1 and retains v2 while the hub relays original bytes.
+    let decoded: DaemonMessage = serde_json::from_slice(&page).unwrap();
+    let roundtrip = serde_json::to_value(decoded).unwrap();
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["tool"]["targets"], serde_json::json!(["lib.rs"]));
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["lifecycle"]["stage"], "end");
+    let legacy: crate::ui::factory::WorkEvent = serde_json::from_value(serde_json::json!({
+        "id":"v1", "kind":"tool", "session":"factory-1", "at":"2026-10-28T12:00:00Z", "label":"old"
+    })).unwrap();
+    assert!(legacy.tool.is_none() && legacy.lifecycle.is_none());
     let history = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),
@@ -2838,6 +3224,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-2".into(),
         messages: vec![crate::ui::factory::ConversationHistoryMessage {
+            client_ref: None,
             notification_id: 41,
             target: "supervisor".into(),
             text: "private prompt".into(),
@@ -3018,6 +3405,11 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             .is_none(),
         "expired leases stop enabling every viewer"
     );
+    let cli = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    cli.revoke_device(&phone.device_id, now).unwrap();
+    assert!(auth.acquire_lease(&laptop, "factory-a", now).is_ok(),
+        "a CLI revocation immediately releases the cached controller lease");
+
 }
 
 #[test]
@@ -3067,6 +3459,7 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     exchange.public_key_jwk = public_jwk(&signing);
     let credential = auth.exchange_pairing(exchange, now).unwrap();
     let authorization = format!("DPoP {}", credential.credential);
+    let persisted = std::fs::read(temp.path().join("hub/auth.json")).unwrap();
     let proof = sign_dpop(
         &signing,
         &credential.credential,
@@ -3098,6 +3491,32 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
         .is_err(),
         "a DPoP jti is accepted once"
     );
+    assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), persisted,
+        "ordinary DPoP traffic must not rewrite durable identities");
+    // cas-3b22: the old skew window accepts this proof before a restart.
+    // Delay the assertion so the red run also exercises the replay itself.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(60), "future");
+    let before_restart = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now);
+    // A pre-boot proof with an unused jti must also be refused: after restart
+    // the previous process's in-memory replay set no longer exists.
+    let pre_boot = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "pre-boot-unused");
+    let restarted = AuthStore::open_at(temp.path().join("hub"), "machine-test", now + chrono::Duration::seconds(1)).unwrap();
+    let refused = restarted.authenticate_dpop(&authorization, &pre_boot, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
+    assert!(matches!(refused.downcast_ref::<super::AuthRefusal>(), Some(super::AuthRefusal::StaleProof { .. })));
+
+    // Replaying the formerly accepted +60s proof after restarting must fail
+    // even though its iat clears the boot cutoff and its jti was forgotten.
+    let refused = restarted.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
+    assert_eq!(refused.downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 58 }));
+    assert_eq!(before_restart.unwrap_err().downcast_ref::<super::AuthRefusal>(), Some(&super::AuthRefusal::StaleProof { skew_secs: 60 }));
+    // Even one second ahead is a retryable stale proof, rather than a
+    // credential failure or an entry in the volatile replay set.
+    let future = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now + chrono::Duration::seconds(1), "slightly-fast");
+    let refused = auth.authenticate_dpop(&authorization, &future, "https://controller.example", "GET", "/v1/sessions", now).unwrap_err();
+    let refusal = refused.downcast_ref::<super::AuthRefusal>().unwrap();
+    assert_eq!(*refusal, super::AuthRefusal::StaleProof { skew_secs: 1 });
+    assert!(refusal.retryable());
+
     let wrong_method = sign_dpop(
         &signing,
         &credential.credential,
@@ -3640,12 +4059,15 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     dormant.workers.clear();
+    let mut stopped = fixture_session("stopped");
+    stopped.liveness = DaemonLiveness::StaleMetadata;
     let source = RecordingReadModel::with_sessions(vec![
         fixture_session("factory-a"),
         empty_supervisor,
         bare,
         hung_empty,
         dormant,
+        stopped,
     ]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
@@ -3691,17 +4113,18 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
         default_catalog["freshness_threshold_secs"],
         crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS
     );
+    assert_eq!(default_catalog["stopped_sessions"][0]["name"], "stopped");
     assert_eq!(
         names(default_catalog),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=0").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
-        vec!["factory-a", "empty-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?dormant=1").await),
@@ -3710,18 +4133,6 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     assert_eq!(
         names(fetch("/v1/sessions?workers=1&dormant=1").await),
         vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
-    );
-}
-
-/// cas-94e1: metadata can outlive the supervisor pane and must be marked
-/// dormant rather than treated as a live Commander conversation.
-#[test]
-fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
-    let mut dormant = fixture_session("orphaned-supervisor");
-    dormant.dormant = true;
-    assert!(
-        super::server::supervisor_sessions(vec![dormant], false).is_empty(),
-        "a non-empty supervisor name is not proof of a live supervisor"
     );
 }
 
@@ -4278,7 +4689,8 @@ impl OpsFixture {
             &self.signing,
             &self.credential,
             method,
-            uri,
+            // Match the browser: DPoP binds the bare path, without a query.
+            uri.split('?').next().unwrap_or(uri),
             chrono::Utc::now(),
             &uuid::Uuid::new_v4().to_string(),
         );
@@ -4524,6 +4936,192 @@ async fn cas_ab04_write_grants_refuse_unauthenticated_and_unscoped_callers() {
         !crate::config::operator_policy::operator_policy_path(&fixture.cas_dir).exists(),
         "no grant was written"
     );
+}
+
+/// A supervisor `kind=secret` turn, recorded the way `coordination message
+/// target=operator kind=secret` records it (cas-1996).
+fn record_secret_request(cas_dir: &std::path::Path, kind: crate::ui::factory::OperatorTurnKind, name: &str) -> i64 {
+    let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message: "Needed to publish. Create one at the provider's API keys page.".into(),
+        summary: name.into(),
+        device_id: "*".into(),
+        operator_label: None,
+        kind,
+        attachments: Vec::new(),
+        options: Vec::new(),
+        reply_to_session: None,
+    })
+    .unwrap();
+    crate::store::open_prompt_queue_store(cas_dir)
+        .unwrap()
+        .record_operator_turn(&cas_store::OperatorTurn {
+            source: "supervisor",
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(OPS_SESSION),
+            metadata: cas_store::OperatorTurnMetadata {
+                summary: Some(name),
+                origin: Some(&cas_store::QueueOrigin::Daemon),
+                kind: Some(kind.as_str()),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+        .id()
+}
+
+/// cas-1996: the operator answers an agent's secret request from a paired
+/// device holding factory:manage. The value lands in a mode-600 file in the
+/// configured destination, the supervisor gets a reply naming the path, and
+/// the value is in no other file under the fixture (cas.db and its WAL, the
+/// hub's audit log), no log line and no response. Declining saves nothing.
+#[tokio::test]
+async fn cas_1996_secret_answer_saves_a_private_file_and_sends_only_its_path() {
+    use std::io::{Read, Seek};
+    use std::os::unix::fs::PermissionsExt;
+    const VALUE: &str = "sk_live_cas1996_d7f3a9c2e4b1";
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds/<project>");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let request = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let uri = format!("/v1/sessions/{OPS_SESSION}/secrets/{request}");
+
+    let mut log = tempfile::tempfile().unwrap();
+    let capture = log.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || capture.try_clone().unwrap()).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let (status, body) = fixture.call("POST", &uri, Some(serde_json::json!({"value": format!("  {VALUE}\n")}))).await;
+    let (again, _) = fixture.call("POST", &uri, Some(serde_json::json!({"value": VALUE}))).await;
+    drop(guard);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(again, StatusCode::CONFLICT, "an answered request cannot be answered again");
+
+    let file = fixture._temp.path().join("creds/project/STRIPE_KEY");
+    assert_eq!(body["path"], file.display().to_string(), "{body}");
+    // cas-2f55: auto-delete is off unless chosen: nothing is listed for deletion.
+    assert!(body["auto_delete"].is_null(), "{body}");
+    assert!(!fixture.cas_dir.join("secret-auto-delete.json").exists());
+    // pin: the file holds exactly the pasted value, with surrounding whitespace trimmed.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE, "saved trimmed");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+
+    let rows = fixture.queued();
+    let reply = rows.iter().find(|row| row.target == "supervisor").expect("a reply to the supervisor");
+    assert!(
+        reply.prompt.starts_with(&format!("[CAS reply: explicitly acknowledges notification_id={request}]\n"))
+            && reply.prompt.contains(&file.display().to_string()),
+        "{}",
+        reply.prompt
+    );
+    assert!(reply.operator.as_ref().is_some_and(|stamp| stamp.verified && stamp.device_id == fixture.device_id));
+    let queue = crate::store::open_prompt_queue_store(&fixture.cas_dir).unwrap();
+    assert!(queue.queued_prompt(request).unwrap().unwrap().acked_at.is_some(), "the request is answered");
+    let outcomes: Vec<_> = fixture.audit("secret_save").iter().map(|row| row["outcome"].as_str().unwrap().to_string()).collect();
+    assert_eq!(outcomes, ["requested", "allowed", "requested", "invalid"]);
+
+    // The value is nowhere else on disk, in the logs or in the response.
+    let mut stack = vec![fixture._temp.path().to_path_buf()];
+    let mut scanned = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path != file {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                assert!(!bytes.windows(VALUE.len()).any(|window| window == VALUE.as_bytes()), "the value leaked into {}", path.display());
+                scanned += 1;
+            }
+        }
+    }
+    assert!(scanned > 2 && fixture.cas_dir.join("cas.db").exists(), "the scan read the store");
+    log.rewind().unwrap();
+    let mut logged = String::new();
+    log.read_to_string(&mut logged).unwrap();
+    assert!(!logged.contains(VALUE), "{logged}");
+    assert!(!body.to_string().contains(VALUE));
+
+    let declined = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "NPM_TOKEN");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{declined}"), Some(serde_json::json!({"decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!fixture._temp.path().join("creds/project/NPM_TOKEN").exists());
+    assert!(queue.queued_prompt(declined).unwrap().unwrap().acked_at.is_some(), "a decline answers the request");
+
+    // cas-2f55: chosen on the card, the file goes once the supervisor answers the "saved" reply.
+    let chosen = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "DEPLOY_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{chosen}"), Some(serde_json::json!({"value": "dk-value", "auto_delete": "after_use"})))
+        .await;
+    assert_eq!((status, &body["auto_delete"]), (StatusCode::OK, &serde_json::json!("after_use")), "{body}");
+    let saved = fixture._temp.path().join("creds/project/DEPLOY_KEY");
+    let reply = fixture.queued().into_iter().find(|row| row.target == "supervisor" && row.prompt.contains("DEPLOY_KEY")).unwrap();
+    // pin: the supervisor learns from this reply that its own answer deletes the file.
+    assert!(reply.prompt.contains("deleted once you confirm"), "{}", reply.prompt);
+    assert!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, chosen).unwrap().is_empty(), "the request id is not the reply");
+    assert_eq!(crate::hub::secret_auto_delete::confirm_use(&fixture.cas_dir, OPS_SESSION, reply.id).unwrap(), ["DEPLOY_KEY"]);
+    assert!(!saved.exists());
+}
+
+/// cas-1996: only a factory:manage device answers, only an open secret
+/// request of that session, and nothing is written when refused.
+#[tokio::test]
+async fn cas_1996_secret_answer_refuses_unscoped_devices_and_other_turns() {
+    let unscoped = ops_fixture(control_scopes());
+    let request = record_secret_request(&unscoped.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, body) = unscoped
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{request}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["required_scope"], "factory:manage");
+
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let destination = fixture._temp.path().join("creds");
+    let mut config = crate::config::Config::load(&fixture.cas_dir).unwrap();
+    config.set("secrets.destination", &destination.display().to_string()).unwrap();
+    config.save(&fixture.cas_dir).unwrap();
+    let ask = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Ask, "STRIPE_KEY");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{ask}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "an ask is not a secret request: {body}");
+    let secret = record_secret_request(&fixture.cas_dir, crate::ui::factory::OperatorTurnKind::Secret, "STRIPE_KEY");
+    let (status, _) = fixture
+        .call("POST", &format!("/v1/sessions/factory-other/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another session cannot answer it");
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "decline": true})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // cas-2f55: an unknown deletion choice is refused before anything is saved.
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk", "auto_delete": "forever"})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!destination.exists(), "nothing was written");
+    // A name that already holds a file is refused, and the file is kept.
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("STRIPE_KEY"), "existing").unwrap();
+    let (status, body) = fixture
+        .call("POST", &format!("/v1/sessions/{OPS_SESSION}/secrets/{secret}"), Some(serde_json::json!({"value": "sk"})))
+        .await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::CONFLICT, Some("secret_exists")), "{body}");
+    // pin: the existing file's bytes are untouched.
+    assert_eq!(std::fs::read(destination.join("STRIPE_KEY")).unwrap(), b"existing");
+    assert!(fixture.queued().iter().all(|row| row.target == "operator"), "nothing was sent");
 }
 
 /// A retried `op_id` returns the first outcome and sends nothing twice.
@@ -4872,6 +5470,76 @@ async fn operations_focus_epic_inverse() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["current"]["epic_id"], "cas-epa1");
     assert_eq!(pinned().as_deref(), Some("cas-epa1"));
+}
+
+/// Dismissal belongs to a session birth on the hub, surviving new pairings and restart.
+#[tokio::test]
+async fn ended_dismissal_is_shared_durable_and_generation_bound() {
+    let mut f = ops_fixture([Scope::SessionRead].into_iter().collect());
+    let mut ended = fixture_session("ended-a");
+    ended.started_at = Some("2026-10-31T10:00:00Z".into());
+    ended.ended = Some(crate::ui::factory::SessionEndOutcome {
+        at: "2026-10-31T11:00:00Z".into(), reason: "prompt_input_exit".into(),
+        workers_stopped: vec![], orphans: vec![], unverified: vec![],
+    });
+    let app = |auth: AuthStore, rows: Vec<HubSession>| router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(rows)), Arc::new(PreAuthAuthorizer),
+        MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), f.events.clone()), f.events.clone(),
+    ).with_auth(auth).with_effective_origin("https://controller.example"));
+    f.app = app(f.auth.clone(), vec![ended.clone()]);
+    let body = serde_json::json!({"started_at": ended.started_at});
+    let (status, _) = f.call("POST", "/v1/sessions/ended-a/dismiss", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Reopen the store before pairing the second device: the hub's restart
+    // fence correctly refuses proofs from pre-boot credentials in that second.
+    let reopened = AuthStore::open(&f.hub_root, "machine-test").unwrap();
+    // A different signed-in device, with its own credential, reads the same tombstone.
+    let signing = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let invite = reopened.mint_pairing("https://controller.example", [Scope::SessionRead].into_iter().collect(), chrono::Utc::now()).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invite.token, "machine-test", "https://controller.example", [Scope::SessionRead].into_iter().collect());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = reopened.exchange_pairing(exchange, chrono::Utc::now()).unwrap();
+    f.auth = reopened.clone();
+    f.signing = signing; f.credential = credential.credential;
+    ended.ended.as_mut().unwrap().at = "2026-10-31T11:01:00Z".into();
+    f.app = app(reopened, vec![ended.clone()]);
+    let (status, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows["sessions"], serde_json::json!([]), "ended history is not a navigation destination");
+    let markers = std::fs::read_dir(f.hub_root.join("dismissed-sessions")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(markers.len(), 1, "the legacy dismissal stays durable across hub restart");
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(markers[0].path()).unwrap()).unwrap();
+    assert_eq!(marker, serde_json::json!({"session": ended.name, "started_at": ended.started_at}));
+    // The same codename ending again is a new generation; stale dismissal cannot hide it.
+    ended.started_at = Some("2026-10-31T12:00:00Z".into());
+    f.app = app(f.auth.clone(), vec![ended.clone(), fixture_session("live-a")]);
+    let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["sessions"][0]["name"], "live-a");
+    assert_eq!(rows["sessions"][0]["dismissed"], false);
+    for (path, body) in [
+        ("/v1/sessions/ended-a/dismiss", body),
+        ("/v1/sessions/live-a/dismiss", serde_json::json!({"started_at": "anything"})),
+    ] {
+        assert_eq!(f.call("POST", path, Some(body)).await.0, StatusCode::CONFLICT);
+    }
+    // Restore lifts the tombstone for every paired device, for this birth only.
+    ended.started_at = Some("2026-10-31T10:00:00Z".into());
+    f.app = app(f.auth.clone(), vec![ended.clone()]);
+    let restore = serde_json::json!({"started_at": ended.started_at});
+    let other_birth = serde_json::json!({"started_at": "2026-10-31T12:00:00Z"});
+    let path = "/v1/sessions/ended-a/restore";
+    assert_eq!(f.call("POST", path, Some(other_birth)).await.0, StatusCode::CONFLICT);
+    let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+    assert_eq!(rows["sessions"], serde_json::json!([]));
+    assert!(markers[0].path().is_file(), "a stale restore keeps the legacy tombstone");
+    for _repeat in 0..2 {
+        assert_eq!(f.call("POST", path, Some(restore.clone())).await.0, StatusCode::NO_CONTENT);
+        let (_, rows) = f.call("GET", "/v1/sessions", None).await;
+        assert_eq!(rows["sessions"], serde_json::json!([]), "restoring a legacy dismissal cannot list an ended session");
+        assert!(!markers[0].path().exists(), "restore removes the hub tombstone idempotently");
+    }
 }
 
 /// End session was the one Commander mutation with no audit row (brief O8).
@@ -5235,6 +5903,21 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
     );
 }
 
+/// cas-6f79: Commander titled a project card with its canonical id ("cas-src").
+/// The session's human name is the configured display name, else the main
+/// project's folder, and never the canonical id.
+#[test]
+fn project_name_is_the_display_name_or_folder_never_the_canonical_id_cas_6f79() {
+    let parent = tempfile::tempdir().unwrap();
+    let cas_root = parent.path().join("widget").join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let config = cas_root.join("config.toml");
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \" Cassy \"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("Cassy"));
+    std::fs::write(&config, "[project]\ncanonical_id = \"cas-src\"\ndisplay_name = \"\"\n").unwrap();
+    assert_eq!(project_display_name(&cas_root).as_deref(), Some("widget"));
+}
+
 /// cas-2c559: `/v1/projects` needs only machine:read, but a live session's
 /// project (cas-0273) is session data. A pairing that can only see machines
 /// must not learn the folder of a running session in an unregistered project;
@@ -5316,20 +5999,25 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let read_credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
     let mut session = fixture_session("factory-a");
     session.project_dir = Some(root.parent().unwrap().display().to_string());
+    let mut other_session = session.clone();
+    other_session.name = "factory-b".into();
     let events = MachineEventBus::new(16);
     let app = router(HubState::new(
-        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session, other_session])),
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
-    let id = uuid::Uuid::new_v4();
+    let id = uuid::Uuid::from_u128(1);
+    let next_dpop_id = std::cell::Cell::new(100u128);
     let send = |session: &str, upload_id: uuid::Uuid, name: &str, data: &[u8], access: u8| {
         let uri = format!("/v1/sessions/{session}/uploads/{upload_id}");
         let mut request = Request::post(&uri).header("origin", "https://controller.example").header("content-type", "application/json");
         if access > 0 {
             let (signing, token) = if access == 1 { (&signing, &credential.credential) } else { (&read_signing, &read_credential.credential) };
+            let proof_id = next_dpop_id.get();
+            next_dpop_id.set(proof_id + 1);
             request = request.header("authorization", format!("DPoP {token}"))
-                .header("dpop", sign_dpop(signing, token, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+                .header("dpop", sign_dpop(signing, token, "POST", &uri, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()));
         }
         request.body(Body::from(serde_json::json!({"name":name,"data":base64::engine::general_purpose::STANDARD.encode(data)}).to_string())).unwrap()
     };
@@ -5356,23 +6044,88 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     }
     // A misleading extension never controls MIME: this is a real PNG named .txt.
     let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0l8AAAAASUVORK5CYII=").unwrap();
-    let image = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "photo.txt", &png, 1)).await.unwrap();
+    let image = app.clone().oneshot(send("factory-a", uuid::Uuid::from_u128(2), "photo.txt", &png, 1)).await.unwrap();
     assert_eq!(image.status(), StatusCode::OK);
     let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(image["mime"], "image/png");
     assert_eq!(std::fs::read(image["path"].as_str().unwrap()).unwrap(), png);
+    // cas-195a: the real upload must be previewable without publishing to Cloud,
+    // including by another read-only paired device, but only in its own session.
+    let image_id = image["artifact_id"].as_str().unwrap();
+    let ticket_for = |session: &str, artifact: &str| {
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
+        let proof_id = next_dpop_id.get();
+        next_dpop_id.set(proof_id + 1);
+        Request::post(&uri).header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", read_credential.credential))
+            .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::from_u128(proof_id).to_string()))
+            .body(Body::empty()).unwrap()
+    };
+    let ticket_request = |session: &str| ticket_for(session, image_id);
+    assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let response = app.clone().oneshot(ticket_request("factory-a")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own upload must mint a preview ticket");
+    let ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    for (session, range, expected) in [
+        ("factory-a", None, StatusCode::OK),
+        ("factory-a", Some("bytes=1-4"), StatusCode::PARTIAL_CONTENT),
+        ("factory-b", None, StatusCode::UNAUTHORIZED),
+    ] {
+        let mut request = Request::get(format!("/v1/sessions/{session}/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap()));
+        if let Some(range) = range { request = request.header("range", range); }
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected.is_success() {
+            assert_eq!(response.headers()["content-type"], "image/png");
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+            assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
+        }
+    }
+    // cas-a4c4: the sender's own notes.txt opens too, as sandboxed plain text, never a document.
+    let text_id = first.as_ref().unwrap()["artifact_id"].as_str().unwrap().to_owned();
+    let response = app.clone().oneshot(ticket_for("factory-a", &text_id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own text upload must mint a ticket");
+    let text_ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{text_id}/content?t={}", text_ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(response.headers()["content-disposition"], "inline");
+    assert!(response.headers().get_all("content-security-policy").iter().any(|policy| policy == "default-src 'none'; sandbox"));
+    assert_eq!(to_bytes(response.into_body(), 65536).await.unwrap().as_ref(), b"hello");
+    // Neither forged bytes nor symlink replacements become local preview access.
+    let image_path = std::path::Path::new(image["path"].as_str().unwrap());
+    std::fs::write(image_path, vec![b'x'; png.len()]).unwrap();
+    assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    std::fs::write(image_path, &png).unwrap();
+    #[cfg(unix)]
+    for directory in [false, true] {
+        let original = if directory { image_path.parent().unwrap() } else { image_path };
+        let moved = temp.path().join(if directory { "moved-directory" } else { "moved-image" });
+        std::fs::rename(original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, original).unwrap();
+        assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "an existing ticket must recheck storage");
+        std::fs::remove_file(original).unwrap();
+        std::fs::rename(moved, original).unwrap();
+    }
     // ISO-BMFF major and compatible brands, not the filename, identify phone media.
-    for (brands, mime) in [
+    for (index, (brands, mime)) in [
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),
         (&b"mif1\0\0\0\0heic"[..], "image/heic"),
         (&b"avif\0\0\0\0mif1"[..], "image/avif"),
+        (&b"mif1\0\0\0\0"[..], "image/heif"),
+        (&b"heim\0\0\0\0"[..], "image/heif"),
+        (&b"heis\0\0\0\0"[..], "image/heif"),
+        (&b"msf1\0\0\0\0"[..], "image/heif"),
         (&b"qt  \0\0\0\0"[..], "video/quicktime"),
         (&b"isom\0\0\0\0mp42"[..], "video/mp4"),
-    ] {
+    ].into_iter().enumerate() {
         let mut bytes = ((8 + brands.len()) as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(b"ftyp");
         bytes.extend_from_slice(brands);
-        let response = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "misleading.txt", &bytes, 1)).await.unwrap();
+        let response = app.clone().oneshot(send("factory-a", uuid::Uuid::from_u128(10 + index as u128), "misleading.txt", &bytes, 1)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(body["mime"], mime);
@@ -5754,6 +6507,191 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
             assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
             assert_eq!(response.headers()["content-range"], "bytes 0-0/6");
             assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), &b"a"[..]);
+        }
+    }
+}
+
+/// Terminal facts survive metadata deletion and hub restart; a replacement
+/// with the same name cannot inherit the old generation's end state.
+#[test]
+fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
+    use crate::ui::factory::{SessionManager, create_metadata};
+    use crate::ui::factory::SessionEndOutcome;
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let project = env.home().join("ended-project");
+    let cas_root = init_cas_dir(&project).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"ended-catalog-project\"\n").unwrap();
+    let account = env.home().join("recorded-claude");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"ended@example.test"}}"#).unwrap();
+    let agents = SqliteAgentStore::open(&cas_root).unwrap();
+    agents.init().unwrap();
+    let mut agent = cas_types::Agent::new("ended-supervisor".into(), "supervisor-a".into());
+    agent.role = cas_types::AgentRole::Supervisor;
+    agent.factory_session = Some("ended-session".into());
+    agent.metadata.extend([
+        ("supervisor_cli".into(), "claude".into()),
+        ("supervisor_account_harness".into(), "claude".into()),
+        ("supervisor_account_dir".into(), account.to_string_lossy().into_owned()),
+    ]);
+    agents.register(&agent).unwrap();
+    let manager = SessionManager::new();
+    let mut metadata = create_metadata("ended-session", std::process::id(), "supervisor-a", &[], None, project.to_str(), Some(4173));
+    metadata.created_at = "2026-10-28T15:00:00Z".into();
+    manager.save_metadata(&metadata).unwrap();
+    let outcome = SessionEndOutcome {
+        at: "2026-10-28T15:24:00Z".into(), reason: "prompt_input_exit".into(),
+        workers_stopped: vec!["worker-a".into(), "worker-b".into()],
+        orphans: vec!["worker-c".into()], unverified: vec!["worker-d".into()],
+    };
+    manager.record_ended(&metadata.name, outcome.clone()).unwrap();
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert_eq!(rows[0].ended, Some(outcome.clone()));
+    assert_eq!(rows[0].harness.as_deref(), Some("claude"));
+    assert_eq!(rows[0].account_email.as_deref(), Some("ended@example.test"));
+    assert_eq!(rows[0].project.as_deref(), Some("ended-catalog-project"));
+    assert_eq!(rows[0].machine_online, Some(false));
+    manager.remove_metadata(&metadata.name).unwrap();
+    assert!(manager.list_sessions_read_only().unwrap().is_empty());
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert!(super::server::supervisor_sessions(rows.clone(), false).is_empty(), "ended history is readable but never listed in Commander");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].ended, Some(outcome));
+    assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);
+    assert_eq!(rows[0].workers, vec!["worker-c"]);
+    assert_eq!(rows[0].supervisor, "supervisor-a");
+    assert_eq!(rows[0].harness.as_deref(), Some("claude"));
+    assert_eq!(rows[0].account_email.as_deref(), Some("ended@example.test"));
+    assert_eq!(rows[0].project.as_deref(), Some("ended-catalog-project"));
+    assert_eq!(rows[0].machine_online, Some(false));
+    assert!(rows[0].ws_port.is_none());
+    metadata.created_at = "2026-10-28T16:00:00Z".into();
+    manager.save_metadata(&metadata).unwrap();
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].ended.is_none());
+    assert_eq!(rows[0].machine_online, Some(true));
+}
+
+#[path = "accounts_route_tests.rs"]
+mod accounts_route_tests;
+
+/// Native model observations reach both read APIs without borrowing another role/session.
+#[test]
+fn native_model_switch_projects_role_scoped_model_effort_in_catalog_and_status() {
+    use crate::store::{AgentStore, init_cas_dir};
+    use crate::ui::factory::create_metadata;
+    use cas_types::{Agent, AgentRole};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let project = env.home().join("model-project");
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    // A Claude host's own effort would otherwise answer for an unreported one.
+    env.remove("CLAUDE_EFFORT");
+    let store = crate::store::open_agent_store(&root).unwrap();
+    let session = SessionInfo { name: "model-session".into(),
+        metadata: create_metadata("model-session", std::process::id(), "lead", &["helper".into()], None, project.to_str(), Some(4173)),
+        is_running: true, socket_exists: true };
+    for (id, role, harness, model, effort) in [
+        ("lead", AgentRole::Supervisor, "claude", "claude-opus-5-5", "high"),
+        ("helper", AgentRole::Worker, "codex", "gpt-6.1-sol", "xhigh"),
+    ] {
+        let mut agent = Agent::new_with_role(id.into(), id.into(), role);
+        agent.factory_session = Some(session.name.clone());
+        let prefix = if role == AgentRole::Worker { "worker" } else { "supervisor" };
+        agent.metadata.insert(format!("{prefix}_cli"), harness.into());
+        // Opposite-role launch defaults cannot supply this pane's observations.
+        agent.metadata.insert(if role == AgentRole::Worker { "supervisor_model" } else { "worker_model" }.into(), "wrong-model".into());
+        store.register(&agent).unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "session_id": id, "hook_event_name":"PostModelSwitch",
+            "from_model":"old", "to_model":model, "effort":{"level":effort}
+        })).unwrap();
+        crate::hooks::handle_hook("PostModelSwitch", input).unwrap();
+    }
+    let catalog = serde_json::to_value(hub_session(&session)).unwrap();
+    assert_eq!(catalog["model"], "claude-opus-5-5");
+    assert_eq!(catalog["effort"], "high");
+    assert_eq!(catalog["workers"], serde_json::json!(["helper"]));
+    let status = serde_json::to_value(crate::bridge::server::session::build_status_json(&session, &root, 20).unwrap()).unwrap();
+    for view in [&catalog, &status] {
+        let agents = view["agents"].as_array().unwrap();
+        for (name, harness, model, effort) in [("lead", "claude", "claude-opus-5-5", "high"), ("helper", "codex", "gpt-6.1-sol", "xhigh")] {
+            let row = agents.iter().find(|row| row["name"] == name).unwrap();
+            assert_eq!(row["harness"], harness);
+            assert_eq!(row["model"], model);
+            assert_eq!(row["effort"], effort);
+        }
+    }
+    // Re-registration from the original launch cannot undo the observed selection.
+    let mut launch = cas_types::Agent::new_with_role("lead".into(), "lead".into(), AgentRole::Supervisor);
+    launch.factory_session = Some(session.name.clone());
+    launch.metadata.insert("supervisor_cli".into(), "claude".into());
+    launch.metadata.insert("supervisor_model".into(), "stale-launch".into());
+    crate::mcp::daemon::register_with_role_reconciliation(store.as_ref(), &launch, Some(AgentRole::Supervisor)).unwrap();
+    assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");
+    // A pre-switch attempt is not a completed selection.
+    crate::hooks::handle_hook("PreModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"unconfirmed"})).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(hub_session(&session)).unwrap()["model"], "claude-opus-5-5");
+    // A same-model selection can also change effort; absence cannot retain stale high.
+    crate::hooks::handle_hook("PostModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"claude-opus-5-5"})).unwrap()).unwrap();
+    assert!(serde_json::to_value(hub_session(&session)).unwrap().get("effort").is_none());
+    // Changing models without an effort observation clears the old model's effort.
+    crate::hooks::handle_hook("PostModelSwitch", serde_json::from_value(serde_json::json!({"session_id":"lead", "to_model":"claude-sonnet-5-5"})).unwrap()).unwrap();
+    let changed = serde_json::to_value(hub_session(&session)).unwrap();
+    assert_eq!(changed["model"], "claude-sonnet-5-5");
+    assert!(changed.get("effort").is_none());
+    let missing = serde_json::to_value(hub_session(&SessionInfo { name:"unreported".into(), ..session })).unwrap();
+    assert!(missing.get("model").is_none());
+    assert!(missing.get("effort").is_none());
+}
+
+/// cas-8125: the catalog never borrows another session's, worker's, or hub's version.
+#[test]
+fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
+    use crate::factory_binary_skew::{ServerVersion, Snapshot};
+    use crate::store::{AgentStore, init_cas_dir};
+    use cas_types::{Agent, AgentRole};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = init_cas_dir(project.path()).unwrap();
+    let mut supervisor = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
+    supervisor.factory_session = Some("badge-session".into());
+    crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let session = SessionInfo {
+        name: "badge-session".into(),
+        metadata: crate::ui::factory::create_metadata("badge-session", std::process::id(), "lead", &[], None, project.path().to_str(), Some(4173)),
+        is_running: true, socket_exists: true,
+    };
+    let observed = ServerVersion { name: "lead".into(), role: AgentRole::Supervisor,
+        session: Some("badge-session".into()), pid: 42, version: Some("9.99.1".into()), older: true };
+    for (name, role, owner, version, duplicate, live, expected) in [
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, Some("9.99.1")),
+        ("lead", AgentRole::Supervisor, "another-session", Some("9.99.1"), None, true, None),
+        ("another-lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Worker, "badge-session", Some("9.99.1"), None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", None, None, true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), Some("9.99.2"), true, None),
+        ("lead", AgentRole::Supervisor, "badge-session", Some("9.99.1"), None, false, None),
+    ] {
+        let model = LocalSessionReadModel::default();
+        let mut servers = vec![ServerVersion { name: name.into(), role, session: Some(owner.into()),
+            version: version.map(str::to_owned), ..observed.clone() }];
+        if let Some(version) = duplicate {
+            servers.push(ServerVersion { pid: 43, version: Some(version.into()), ..observed.clone() });
+        }
+        // Inject the already independently tested Factory MCP snapshot boundary;
+        // exercise the real registry/session projection and wire omission below.
+        model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
+            read_at: std::time::Instant::now(),
+            snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
+        });
+        let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
+        if expected.is_some() {
+            assert_eq!(wire["installed_version"], "9.99.2");
         }
     }
 }

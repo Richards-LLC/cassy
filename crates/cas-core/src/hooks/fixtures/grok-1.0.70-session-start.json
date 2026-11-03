@@ -1,0 +1,12 @@
+{
+  "hookEventName": "session_start",
+  "sessionId": "fixture-grok-session",
+  "cwd": "/fixture/grok-project",
+  "workspaceRoot": "/fixture/grok-project",
+  "timestamp": "2026-10-27T23:54:55.990529343+00:00",
+  "permissionMode": "default",
+  "source": "new",
+  "hook_event_name": "SessionStart",
+  "session_id": "fixture-grok-session",
+  "permission_mode": "default"
+}

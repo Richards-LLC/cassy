@@ -1,0 +1,4 @@
+title: A retryable 401 cannot shift proof signing or preview expiry beyond 60 seconds; oversized server clocks surface an error without losing pairing or poisoning later proofs, while 1–4 second fast clients recover once
+tasks: [cas-c2e9]
+invariants: [HUB-J12-GOAL]
+journeys: [HUB-J12]

@@ -1,0 +1,4 @@
+title: A machine hub's originating store must not override the project selected for New session
+tasks: [cas-dd2e]
+invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
+journeys: [HUB-J13]

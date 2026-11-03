@@ -1,0 +1,4 @@
+title: Opaque authenticated HTTP failures retain pairing while independent transport recovery may already be Live
+tasks: [cas-ee74]
+invariants: [HUB-J12-GOAL]
+journeys: [HUB-J12]

@@ -156,9 +156,20 @@ impl Fixture {
         worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
         worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
         agents.update(&worker).unwrap();
+        self.mark_ready("cas-9efb-test");
     }
 
-    fn ci(&self, conclusion: Option<&str>) {
+    fn mark_ready(&self, task_id: &str) {
+        let store = crate::store::open_task_store_local(&self.app.cas_dir).unwrap();
+        let mut task = store.get(task_id).unwrap();
+        let tip = git(self.repo.path(), &["rev-parse", "HEAD"]);
+        task.notes.push_str(&format!(
+            "\n[2026-10-29 09:07] 📝 PROGRESS status: ready\ntip: {tip}\n"
+        ));
+        store.update(&task).unwrap();
+    }
+
+    pub(crate) fn ci(&self, conclusion: Option<&str>) {
         std::fs::write(
             self.app.cas_dir.join("ci.json"),
             serde_json::json!({"check_runs": [{
@@ -216,6 +227,93 @@ impl Fixture {
 }
 
 #[test]
+fn cas_adbb_merge_readiness_requires_work_after_the_current_task_start() {
+    for (binding, new_work) in [
+        ("current", false), ("current", true),
+        ("legacy", false), ("legacy", true),
+        ("previous-worker", false), ("previous-worker", true),
+        ("previous-branch", false), ("previous-branch", true),
+    ] {
+        let recorded_start = binding != "legacy";
+        let mut f = Fixture::new();
+        f.in_progress();
+        let old_tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
+        f.advance_target(true);
+        git(f.repo.path(), &["fetch", "-q", "origin", "epic/test"]);
+        git(f.repo.path(), &["merge-base", "--is-ancestor", &old_tip, "origin/epic/test"]);
+        git(f.repo.path(), &["branch", "epic/next", "HEAD^"]);
+        git(f.repo.path(), &["push", "-q", "origin", "epic/next"]);
+        let tasks = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut previous = tasks.get("cas-9efb-test").unwrap();
+        previous.status = TaskStatus::Closed;
+        tasks.update(&previous).unwrap();
+        let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+        agents.release_lease(&previous.id, "merge-w").unwrap();
+        let mut next = Task::new("cas-adbb-next".into(), "work in another epic".into());
+        next.status = TaskStatus::InProgress;
+        next.assignee = Some("merge-w".into());
+        let target = WorkTarget { repo_selector: "project:fixture".into(), target_branch: "epic/next".into() };
+        next.deliverables.work_target = Some(target.clone());
+        if recorded_start {
+            next.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target,
+                assignee: if binding == "previous-worker" { "old-worker" } else { "merge-w" }.into(),
+                branch: match binding {
+                    "previous-worker" => "factory/old-worker",
+                    "previous-branch" => "factory/merge-w-old",
+                    _ => "factory/merge-w",
+                }.into(),
+                base_sha: old_tip.clone(),
+            });
+        }
+        tasks.add(&next).unwrap();
+        assert!(agents.try_claim(&next.id, "merge-w", 600, None).unwrap().is_success());
+        if new_work {
+            std::fs::write(f.repo.path().join("next.rs"), "// new task work\n").unwrap();
+            git(f.repo.path(), &["add", "next.rs"]);
+            // Recorded graph attribution needs no message convention; older
+            // tasks without a start boundary still have explicit task identity.
+            let message = if matches!(binding, "current" | "previous-worker") { "new task work".into() } else { format!("{} new task work", next.id) };
+            git(f.repo.path(), &["commit", "-qm", &message]);
+            git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+            if binding == "previous-worker" {
+                // Commit capture on the new holder binds this task's work,
+                // even when an older runtime retained the previous start.
+                next.deliverables.factory_branch_anchor = Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
+                tasks.update(&next).unwrap();
+            }
+            f.mark_ready(&next.id);
+        }
+        let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+        f.app.set_director_data_for_test(data);
+        let events = f.app.merge_alert_retry_events_at(Utc::now());
+        assert!(events.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle {
+            active_task: Some(active), ..
+        } if active.task_id == next.id)), "the real retry path must probe the new assignment");
+        let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        let ready: Vec<_> = prompts.iter().filter(|prompt| prompt.is_merge_ready()).collect();
+        // pin: the director emits one merge action for current work and none for a preceding delivery.
+        assert_eq!(ready.len(), usize::from(new_work), "binding={binding}, new_work={new_work}; prior merged delivery={old_tip}; prompts={:?}", prompts.iter().map(|prompt| &prompt.text).collect::<Vec<_>>());
+        if let Some(prompt) = ready.first() {
+            let evidence = prompt.merge_alert.as_ref().unwrap();
+            assert_eq!(evidence.task_id, next.id);
+            assert_eq!(evidence.factory_tip, git(f.repo.path(), &["rev-parse", "HEAD"]));
+            if binding == "current" {
+                // A source rebind to this tip withdraws readiness even when a
+                // durable READY receipt and successful probe already exist.
+                next.deliverables.factory_branch_start.as_mut().unwrap().base_sha = evidence.factory_tip.clone();
+                tasks.update(&next).unwrap();
+                let (_, cached, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+                assert!(
+                    cached.iter().all(|prompt| !prompt.is_merge_ready()),
+                    "start rebinding must invalidate cached attribution"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     let mut f = Fixture::new();
     f.in_progress();
@@ -268,6 +366,7 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// new pushed tip\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.ci(None);
     f.app.revalidate_and_prompt_for_delivery(&events);
     let pending = counts(&f);
@@ -294,6 +393,7 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// already merged correction\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test merged correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.advance_target(true);
     f.app.revalidate_and_prompt_for_delivery(&events[..1]);
     let merged = counts(&f);
@@ -311,6 +411,138 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
 }
 
 #[test]
+fn cas_619c_in_progress_pushed_green_tip_without_worker_ready_is_not_merge_ready() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = None;
+    task.notes.clear();
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(f.repo.path(), &["rev-parse", "epic/test"]),
+    });
+    store.update(&task).unwrap();
+    let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
+    assert_eq!(tip, git(f.repo.path(), &["rev-parse", "origin/factory/merge-w"]));
+    f.ci(Some("success"));
+
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()),
+        "an ordinary in-progress task has not declared completion merely by pushing green CI");
+
+    // cas-fc42: the worker's ready contract usually names a short SHA.
+    task.notes = format!("[2026-10-29 09:07] 📝 PROGRESS status: ready\ntip: {} on factory/merge-w; worktree: clean", &tip[..9]);
+    store.update(&task).unwrap();
+    assert_eq!(f.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1,
+        "the worker's ready contract, short SHA included, must enable the pre-park signal");
+}
+
+/// Green lane CI can omit the newly failing test; only the worker can mark
+/// this test-first checkpoint complete. Exercise producer, cache and release.
+#[test]
+fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("test-first".into());
+    task.deliverables.factory_branch_anchor = None;
+    // A started test-first task records its graph boundary before its red
+    // checkpoint; completion readiness and commit attribution are separate.
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: "merge-w".into(),
+        branch: "factory/merge-w".into(),
+        base_sha: git(f.repo.path(), &["rev-parse", "epic/test"]),
+    });
+    let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    // Replace the fixture delivery with a real test-only, intentionally red
+    // commit. Its lane CI fixture remains green because that lane skips it.
+    git(f.repo.path(), &["reset", "--hard", "epic/test"]);
+    std::fs::write(f.repo.path().join("regression_test.rs"), "#[test] fn regression() { assert!(false); }\n").unwrap();
+    git(f.repo.path(), &["add", "regression_test.rs"]);
+    git(f.repo.path(), &["commit", "-qm", "test: red test-first checkpoint"]);
+    git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
+    let checkpoint = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(tip, checkpoint);
+    for (status, methodology, notes) in [
+        (TaskStatus::InProgress, Some("test-first"), String::new()),
+        (TaskStatus::InProgress, Some("test-first"),
+            format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.")),
+        (TaskStatus::Blocked, None,
+            format!("[2026-10-28 12:00] 📝 PROGRESS Test-only checkpoint {checkpoint}.\nImplementation pending.")),
+        (TaskStatus::InProgress, None,
+            format!("[2026-10-28 12:00] 📝 PROGRESS {checkpoint} is not merge-ready.")),
+        (TaskStatus::InProgress, Some("test-first"),
+            format!("[2026-10-28 12:00] 📝 PROGRESS PASS {tip}: previous delivery complete.")),
+    ] {
+        task.status = status;
+        task.execution_note = methodology.map(str::to_string);
+        task.notes = notes;
+        store.update(&task).unwrap();
+        let prompts = f.relay();
+        assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()),
+            "a test-first checkpoint is not a completed delivery: {prompts:?}");
+    }
+    // Passing a selected compile/test does not complete the delivery. A later
+    // ordinary receipt must not lift an earlier incomplete checkpoint.
+    for receipt in [
+        format!("check: PASS {checkpoint} packages=cas"),
+        format!("test: PASS {checkpoint} cas test(existing_test) 1"),
+        format!("PASS {checkpoint}: selected test passed"),
+        format!("Example completion contract, not submitted:\nstatus: ready\ntip: {checkpoint}"),
+    ] {
+        task.notes = format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.\n\n[2026-10-28 12:01] 📝 PROGRESS {receipt}\nNew regression still pending.");
+        store.update(&task).unwrap();
+        let prompts = f.relay();
+        assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()));
+    }
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:00] 📝 PROGRESS\nstatus: ready\ntip: {tip} on factory/merge-w\nproof: comparing with {checkpoint}"));
+    store.update(&task).unwrap();
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    // Completion may be recorded before park. It must invalidate the settled
+    // negative read and produce one immediate signal without a new commit.
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:01] 📝 PROGRESS status: ready\ntip: {checkpoint} on factory/merge-w\nproof: completed test-only correction; regression green."));
+    store.update(&task).unwrap();
+    let mut ready = f.relay().into_iter().find(|prompt| prompt.is_merge_ready())
+        .expect("worker completion enables the pre-park signal");
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    // A later checkpoint correction must withdraw a signal already cached,
+    // receipted and queued, even though the Git tip and lane CI did not move.
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:02] 📝 PROGRESS Correction: {checkpoint} remains a red checkpoint, not merge-ready."));
+    store.update(&task).unwrap();
+    assert!(!f.app.refresh_prompt_for_delivery(&mut ready));
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:03] 📝 PROGRESS\nstatus: ready\ntip: {checkpoint}"));
+    store.update(&task).unwrap();
+    assert!(f.app.refresh_prompt_for_delivery(&mut ready));
+    // Same-tip completion must not duplicate the wake.
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    // Parking the already-signalled tip must not create a second wake.
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(checkpoint);
+    store.update(&task).unwrap();
+    let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut f.event else { unreachable!() };
+    active.task_status = TaskStatus::AwaitingMerge;
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    drop(f);
+
+    // A distinct parked delivery is an explicit completion boundary, even
+    // with historical incomplete notes. It must still signal exactly once.
+    let mut parked = Fixture::new();
+    let store = crate::store::open_task_store_local(&parked.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("test-first".into());
+    task.notes = "[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint, not merge-ready.".into();
+    store.update(&task).unwrap();
+    assert_eq!(parked.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1);
+    assert!(parked.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+}
+
+#[test]
 fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
     for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
         let mut f = Fixture::new();
@@ -322,6 +554,10 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         task.deliverables.factory_branch_anchor = None;
         task.notes = "Close rejected: FAST ROWS REQUIRED".into();
         store.update(&task).unwrap();
+        // The worker separately declares completion after the park refusal;
+        // a rejected close by itself does not authorize the merge signal.
+        f.mark_ready(&task.id);
+        task = store.get(&task.id).unwrap();
         if status == TaskStatus::Blocked {
             git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
             git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);
@@ -358,18 +594,90 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // pin: the supervisor merges directly without a worker relay.
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
         assert!(f.app.refresh_prompt_for_delivery(prompt));
+        // Routing is production intent; localized wording cannot turn a green delivery red.
+        prompt.text = prompt.text.replacen("READY TO MERGE", "Merge delivery now", 1);
+        assert!(prompt.is_merge_ready());
+        // The actual director producer, park relay and manual worker request
+        // must reserve one shared wake, including before a task can park.
+        let session = "readiness-fixture";
+        let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+        let mut supervisor = cas_types::Agent::new("lead".into(), prompt.target.clone());
+        supervisor.role = cas_types::AgentRole::Supervisor;
+        supervisor.factory_session = Some(session.into());
+        agents.register(&supervisor).unwrap();
+        let mut worker = agents.get("merge-w").unwrap();
+        worker.factory_session = Some(session.into());
+        agents.update(&worker).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap();
+        let director = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
+            &f.app.cas_dir, session, prompt,
+        ).unwrap();
+        let row = queue.queued_prompt(director).unwrap().unwrap();
+        assert!(crate::ui::factory::daemon::runtime::delivery::parse_merge_ready_prompt(
+            &row.target, &row.prompt).unwrap().is_merge_ready());
+        use crate::ui::factory::daemon::runtime::queue_and_events::{read_row_facts, WakeSender, SupervisorWakeClass};
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "unparked green delivery remains actionable through the queue");
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Daemon, &prompt.target, &row.source, &row.prompt), Some(SupervisorWakeClass::MergeRequest));
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Unattributed, &prompt.target, &row.source, &row.prompt), None,
+            "the director envelope cannot grant an unauthenticated wake");
+        git(f.remote.path(), &["config", "uploadpack.hideRefs", &format!("refs/heads/{branch}")]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Err(_))), "an unavailable source fetch defers the sole action instead of consuming it");
+        git(f.remote.path(), &["config", "--unset", "uploadpack.hideRefs"]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "source recovery retains the original queued action");
+        let head = &prompt.merge_alert.as_ref().unwrap().factory_tip;
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        store.update(&task).unwrap();
+        let lifecycle = format!(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"merge-w\" notification_id=\"1\" occurrence=\"{}\" branch_tip=\"{head}\">MERGE REQUIRED</task-lifecycle>",
+            task.id, Utc::now().to_rfc3339(),
+        );
+        queue.enqueue_idempotent("lifecycle-wake:1", &prompt.target, &lifecycle, Some(session), None, None,
+            "park-1", Some(&cas_store::QueueOrigin::Daemon)).unwrap();
+        let manual = format!(
+            "manual proof remains readable\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{head}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>",
+            task.id, prompt.merge_alert.as_ref().unwrap().epic_sha,
+        );
+        let manual_id = queue.enqueue_urgent_with_outcome("merge-w", &prompt.target, &manual, Some(session), None, None,
+            false, Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: worker.id.clone() })).unwrap().id();
+        let rows = queue.peek_for_targets(&[&prompt.target], Some(session), 10).unwrap();
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director],
+            "direct readiness and later park/manual evidence must create only one transport");
+        let full = queue.poll_named_for_recipient(&prompt.target, Some(session), &[manual_id]).unwrap();
+        // pin: explicit evidence reads preserve the complete submitted body.
+        assert_eq!(full[0].prompt, manual, "manual evidence survives dedupe");
+        // Restore this test's active-task scenario for its new-tip controls.
+        task.status = status;
+        task.deliverables.factory_branch_anchor = None;
+        store.update(&task).unwrap();
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         std::fs::write(f.repo.path().join("delivery.rs"), "// next delivery\n").unwrap();
         git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
         let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
         assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(None))), "a newer local tip withdraws queued readiness for the old tip");
         git(f.repo.path(), &["push", "-q", "origin", &branch]);
+        f.mark_ready(&task.id);
         let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(newer.len(), 1);
+        let next = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
+            &f.app.cas_dir, session, &newer[0],
+        ).unwrap();
+        assert!(queue.peek_for_targets(&[&prompt.target], Some(session), 10).unwrap().iter().any(|row| row.id == next),
+            "a different pushed tip gets its own action");
+        let next_row = queue.queued_prompt(next).unwrap().unwrap();
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
         assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &next_row).director_ready,
+            Some(Ok(None))), "integrated delivery must be withdrawn before queue transport");
     }
 }
 
@@ -440,10 +748,16 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.app.merge_alert_retries.now = Some(minute);
     let retries = f.app.merge_alert_retry_events_at(minute);
     assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
-    assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
-        "after the wake ends, an idle worker must still alert without a new detector event");
+    assert!(f.app.revalidate_and_prompt_for_delivery(&retries).1.is_empty(),
+        "cas-0ea7: a wait ending a minute after the alert does not repeat it");
+    let quiet = now + chrono::Duration::minutes(11);
+    f.app.merge_alert_retries.now = Some(quiet);
+    let retries = f.app.merge_alert_retry_events_at(quiet);
+    assert!(f.app.revalidate_and_prompt_for_delivery(&retries).1.is_empty(),
+        "unchanged idle episodes never repeat after a timer or wait expires");
     // A same-SHA rerun is visible when the settled-failure backoff expires.
-    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let later = now + chrono::Duration::minutes(12);
+    f.app.merge_alert_retries.now = Some(later);
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
     assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
@@ -463,11 +777,79 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
+
+    // cas-0ea7: a changed condition always relays; only an identical repeat is
+    // held, and only the worker's latest no-need status for this task holds it.
+    let cas_dir = f.app.cas_dir.clone();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let message = |at: chrono::DateTime<Utc>, text: &str| {
+        let id = queue.enqueue("merge-w", "test-supervisor", text).unwrap();
+        rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2", rusqlite::params![at.to_rfc3339(), id])
+            .unwrap();
+    };
+    let status = crate::prompt_revalidation::attach_worker_action_envelope(
+        "status: in_progress\nneed: nothing. Not blocked; tests rerunning.",
+        crate::prompt_revalidation::WorkerActionKind::Status, "merge-w", Some("cas-9efb-test"),
+    );
+    let at = |minutes| later + chrono::Duration::minutes(minutes);
+    message(at(1), &status);
+    f.app.merge_alert_retries.now = Some(at(2));
+    f.ci(Some("failure"));
+    assert_eq!(f.relay().len(), 1, "a changed condition alerts at once, even after a status");
+    message(at(6), &status);
+    f.app.merge_alert_retries.now = Some(at(13));
+    assert!(f.relay().is_empty(), "a no-need status quiets the identical repeat");
+    message(at(7), "Blocked: need a supervisor decision on the failing check.");
+    assert!(f.relay().is_empty(), "a blocker has its own wake; it does not repeat an unchanged idle episode");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn background_child_suppresses_idle_until_it_finishes() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, Command, Stdio};
+
+    // Closing stdin releases both reads, kills and reaps only this fixture's
+    // child, and lets the fake pane exit even if an assertion panics.
+    struct Pane(Child);
+    impl Drop for Pane {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let mut pane = Pane(Command::new("sh")
+        .args(["-c", "sleep 60 & child=$!; printf 'ready\\n'; read -r finish; kill \"$child\"; wait \"$child\" 2>/dev/null || :; printf 'idle\\n'; read -r finish"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+    let mut output = BufReader::new(pane.0.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = agents.get("merge-w").unwrap();
+    worker.pid = Some(pane.0.id());
+    worker.pid_starttime = crate::mcp::daemon::read_pid_starttime(pane.0.id());
+    agents.update(&worker).unwrap();
+
+    let events = [f.event.clone()];
+    let inputs = f.app.delivery_request(&events).read(None);
+    assert!(inputs.worker_waits["merge-w"].waiting, "the worker's live child counts as pending work");
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, inputs).1.is_empty());
+
+    writeln!(pane.0.stdin.as_mut().unwrap()).unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "idle\n");
+    assert_eq!(f.relay().len(), 1, "child completion restores the idle alert");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
 #[test]
-fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
+fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
     // Green delivery tips have a one-shot merge signal, not an idle backoff.
@@ -475,12 +857,23 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");
+    let log = f.repo.path().join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let run = crate::factory_worker_runs::register(&f.app.cas_dir, f.repo.path(), &log, now)
+        .unwrap().unwrap();
+    crate::factory_worker_runs::bind(&f.app.cas_dir, &run, std::process::id()).unwrap();
+    assert!(f.relay().is_empty(), "a registered job needs no lane lock or harness ancestry to suppress idle");
+    crate::factory_worker_runs::finish(&f.app.cas_dir, &run, 7, now).unwrap();
+    let finished = f.relay();
+    assert_eq!(finished.len(), 1, "one completed run starts one new idle episode at the same tip");
+    assert!(finished[0].text.contains("EXIT 7") && finished[0].text.contains(log.to_str().unwrap()),
+        "the idle relay states which detached job ended: {}", finished[0].text);
     for minutes in [1, 2, 5] {
         f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(minutes));
         assert!(f.relay().is_empty(), "identical idle signal must not wake again at minute {minutes}");
     }
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1));
-    assert_eq!(f.relay().len(), 1, "a long backoff permits a reminder about a genuinely stuck worker");
+    assert!(f.relay().is_empty(), "elapsed time is not a new idle episode");
     std::fs::write(f.repo.path().join("delivery.rs"), "// new tip\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "new tip"]);
     assert_eq!(f.relay().len(), 1, "new tip is a changed idle signal");
@@ -497,7 +890,7 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_
     // A failed fresh read has no worker_waits row; it needs the same unknown key.
     let events = vec![f.event.clone()];
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(2));
-    assert_eq!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.len(), 1);
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(), "uncertain rereads never re-arm the same idle episode");
     assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
         "failed reads retain first-alert liveness without manufacturing repeated wakes");
 
@@ -726,6 +1119,7 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     let prompts = f.relay();
     assert_eq!(prompts.len(), 1, "missing CI");
+    assert!(!prompts[0].is_merge_ready());
     assert!(
         prompts[0].text.contains("CI unknown"),
         "{}",
@@ -734,6 +1128,33 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(f.relay().is_empty());
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "later settled CI is a new decision");
+
+    // A supervisor hold wins even over a previously admitted READY receipt.
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.notes.push_str("\n[2026-10-28 17:00] ✅ DECISION Merge held pending review.\n");
+    store.update(&task).unwrap();
+    let (ready, wait) = merge_alert::read_delivery(
+        &std::sync::Arc::new(merge_alert::Probes::default()),
+        &f.event,
+        &f.app.director_data,
+        f.repo.path(),
+        now + chrono::Duration::minutes(11),
+        "test-supervisor",
+    );
+    assert!(ready.is_none() && wait.is_none(), "held delivery must not reuse READY");
+
+    drop(f);
+    let mut no_code = Fixture::new();
+    let store = crate::store::open_task_store_local(&no_code.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("no-code".into());
+    store.update(&task).unwrap();
+    std::fs::write(no_code.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+    no_code.app.merge_alert_retries.now = Some(now);
+    assert!(no_code.relay().is_empty());
+    no_code.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    assert!(no_code.relay().is_empty(), "declared no-code work has no missing-CI decision");
 }
 
 #[test]
@@ -791,6 +1212,12 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     git(f.repo.path(), &["add", "README.md"]);
     git(f.repo.path(), &["commit", "-qm", "docs delivery"]);
     git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
+    let docs_now = Utc::now();
+    std::fs::write(f.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+    f.app.merge_alert_retries.now = Some(docs_now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(docs_now + chrono::Duration::minutes(10));
+    assert!(f.relay().is_empty(), "docs-only work has no missing-CI decision");
     std::fs::write(
         f.app.cas_dir.join("ci.json"),
         serde_json::json!({"check_runs": [{
@@ -823,6 +1250,7 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     f.ci(Some("failure"));
     let (_, failed, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(failed.len(), 1, "the later real failure needs a decision");
+    assert!(!failed[0].is_merge_ready());
     assert!(failed[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
 }
@@ -971,6 +1399,7 @@ fn cas_43d2_declined_tip_settles_until_the_worker_commits() {
     std::fs::write(f.repo.path().join("delivery.rs"), "// corrected\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.mark_ready("cas-9efb-test");
     f.relay();
     assert!(probes(&f) > settled, "a new commit is read again");
 }

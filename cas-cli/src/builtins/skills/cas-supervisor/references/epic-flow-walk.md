@@ -11,17 +11,13 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    `<artifacts_root>/<project-key>/<epic-id>/candidate/`, or sequence the
    binary cells after publish against the installed release whose `--version`
    names the tip. Record its path, `--version` and SHA-256 for the ledger.
-   Launch the release gate detached using the project's release procedure
-   **before** dispatching QA. Record the gate receipt and schedule its
-   reminder immediately; neither QA availability nor completion may block the
-   gate launch or monitoring.
 3. Inspect `<artifacts_root>/<project-key>/<epic-id>/LEDGER.md` (`[factory] artifacts_root`) and epic notes before spawning.
    If a pass is running or complete, resume its recorded agent or consume its
-   receipt; never spawn a duplicate on a gate retry or supervisor restart.
+   receipt; never spawn a duplicate on a supervisor restart.
    Otherwise initialize that ledger with status `running`, epic tip, worktree,
-   binary source, gate receipt, start/deadline, and all child demos. Spawn
+   binary source, start/deadline, and all child demos. Spawn
    exactly one verifier-class evidence agent against that assembled build,
-   concurrently with the gate, and record its agent ID in the ledger. This is evidence
+   and record its agent ID in the ledger. This is evidence
    collection, not a close verdict: use a separate evidence-agent prompt with
    the procedure below, not the sealed task-verifier close dispatch.
 4. Give the agent `cas-qa-craft` and the epic ledger context. Override its task
@@ -38,13 +34,13 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    surface; a surface fixed by one child must not contradict another child's
    surface. Map conflicting claims to child IDs and captures in Contradictions.
    This combined-tip check catches regressions that each child's own QA misses.
-6. At the deadline mark all unrun cells `NOT EXERCISED`; keep them as owed
+6. At the deadline mark all unrun cells `NOT EXERCISED: <reason>`; keep them as owed
    work. File one task per defect without patching the build. Finish the single
    ledger with status `complete` and add exactly one epic note headed
    `Epic flow walk` with tip, child coverage, ledger path, counts, and label
    split. Stop registered QA servers. A completed pass may still contain FAIL
    or NOT EXERCISED; completion is not approval.
-7. Once both gate and walk receipts exist, call `task action=close id=<epic-id>`
+7. Once the walk receipt exists and the queue has landed the epic, call `task action=close id=<epic-id>`
    as the registered epic owner. With verification enabled and deep/default
    depth, close returns the pending dispatch ID and bound head; ownership and
    assembly proof do not replace an epic verdict. Use that exact dispatch for
@@ -61,9 +57,10 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    verdict retry close. After rejection, keep the epic open until the owed
    evidence is resolved; the next close creates a fresh review dispatch.
 
-## Example epic note
+## Example epic note and ledger
 
-Illustrative receipt, not proof of an actual run:
+Illustrative receipt and matching matrix, not proof of an actual run. Copy the
+whole block to the ledger and supply the named captures before checking it:
 
 ```text
 Epic flow walk
@@ -75,4 +72,11 @@ labels: source-inferred=1; fixture=0; real-build=3; eyewitness=0
 Budget: 60 minutes; status: complete
 Owed: M04 keyboard revisit (time box expired).
 Contradictions: none in captured terminal states; M04 remains unexercised.
+
+| id | cell | expected | observed | verdict | label | evidence path | defect task |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M01 | combined demo happy path | both child actions complete | both actions completed | PASS | real-build | M01.txt | - |
+| M02 | invalid input | clear refusal | clear refusal shown | PASS | real-build | M02.txt | - |
+| M03 | adjacent status | count agrees with list | count and list agree | PASS | real-build | M03.txt | - |
+| M04 | keyboard revisit | focus and state persist | time box expired | NOT EXERCISED: time box expired | source-inferred | - | - |
 ```

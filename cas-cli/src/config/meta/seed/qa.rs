@@ -86,8 +86,8 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     });
     registry.register(ConfigMeta {
         key: "qa.mode", section: "qa", name: "QA Mode",
-        description: "per_task keeps per-delivery evidence and independent QA. batch defers evidence at park and accepts one published staging ledger for its listed delivery anchors after integration; no automatic per-task QA is dispatched. Explicit QA requests remain available.",
-        value_type: ConfigType::String, default: "per_task",
+        description: "batch (default) defers evidence at park and accepts one published staging ledger for its listed delivery anchors after integration; no automatic per-task QA is dispatched. per_task explicitly opts into per-delivery evidence and independent QA. Project QA keys override user ~/.cas/config.toml, then built-in defaults. Explicit QA requests remain available.",
+        value_type: ConfigType::String, default: "batch",
         constraint: Constraint::OneOf(vec!["per_task".into(), "batch".into()]),
         advanced: false, requires_feature: None,
         keywords: &["qa", "batch", "staging", "ledger", "receipt"],

@@ -67,8 +67,8 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(details.querySelector(".earlier-label")?.textContent).toMatch(/^Earlier session wise-lion-31, /);
     expect(details.querySelector(".earlier-count")?.textContent).toBe("1 message");
     const time = details.querySelector("time")!;
-    expect(time.textContent).toMatch(/ 21:20$/);
-    expect(time.textContent).not.toBe("21:20");
+    expect(time.textContent).toMatch(/ 9:20 PM$/);
+    expect(time.textContent).not.toBe("9:20 PM");
     // Nothing in an earlier section is an object to act on.
     expect(details.querySelectorAll("button")).toHaveLength(0);
     // The section sits above the thread, and an opened section stays open on repaint.
@@ -192,7 +192,21 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(rows.map((item) => item.group?.active ?? null)).toEqual([true, false, false, null]);
     expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 conversations on Atlas" });
     expect(conversationRowMarkup(rows[0]!)).toContain('<span class="conversation-session-mark">Most recent</span>');
-    expect(conversationRowMarkup(rows[1]!)).not.toContain("Most recent");
+    const inactive = new DOMParser().parseFromString(conversationRowMarkup(rows[1]!), "text/html");
+    expect(inactive.querySelector('.conversation-session-slot[aria-hidden="true"]')?.textContent).toBe("Most recent");
+  });
+
+  it("keeps Most recent steady during alternating output in one activity minute (cas-6faf)", () => {
+    const minute = 120_000;
+    const active = (a: number, b: number) => groupConversationRows([
+      row("calm-puma-34", a), row("wild-shark-68", b),
+    ]).find(item => item.group?.active)?.session;
+    expect(active(minute + 2_000, minute + 1_000)).toBe("calm-puma-34");
+    expect(active(minute + 2_000, minute + 3_000)).toBe("calm-puma-34");
+    expect(active(minute + 4_000, minute + 3_000)).toBe("calm-puma-34");
+    expect(active(minute + 4_000, minute + 5_000)).toBe("calm-puma-34");
+    // Activity in a later minute can move the marker; the old leader is never stuck.
+    expect(active(minute + 4_000, minute + 61_000)).toBe("wild-shark-68");
   });
 
   it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {
@@ -204,6 +218,8 @@ describe("grouped project sessions (cas-55a4)", () => {
     const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
     // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
     expect([preview(0), preview(1), preview(2)]).toEqual(["Messaged bright-robin-85", "Stem export is at 60%.", "Live"]);
+    const ended = row("watchful-heron-16", 50, { ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
+    expect(new DOMParser().parseFromString(conversationRowMarkup(ended), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Ended");
     // An ungrouped row keeps its connection words.
     expect(new DOMParser().parseFromString(conversationRowMarkup({ ...row("solo", 1), activityLine: "Wrote to you" }), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Live");
   });
@@ -227,12 +243,20 @@ describe("grouped project sessions (cas-55a4)", () => {
   it("asks before ending a session, and only the confirmation ends it", async () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     const list = new ConversationList();
-    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true }), row("solo", 50, { projectDir: "/projects/cas-src" })]);
     let resolve!: () => void;
     const end = vi.fn((_row: ConversationRow) => new Promise<void>((ok) => { resolve = ok; }));
     list.render(container, rows, vi.fn(), end);
     expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 conversations on Atlas");
-    expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
+    const group = container.querySelector('[role="group"]')!;
+    expect(group?.getAttribute("aria-label")).toBe("gabber-studio · 2 conversations on Atlas");
+    expect([...group.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
+    expect(container.children).toHaveLength(2);
+    expect(container.lastElementChild?.textContent).toContain("solo");
+    const focused = group.querySelector<HTMLButtonElement>(".conversation-row")!;
+    focused.focus();
+    list.render(container, rows, vi.fn(), end);
+    expect(document.activeElement).toBe(focused);
     const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
     const ask = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
     expect(ask.getAttribute("aria-label")).toBe("End session noble-cheetah-84 on Atlas");
@@ -264,7 +288,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
     expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
     expect(before.children).toHaveLength(0);
-    expect(control.parentElement).toBe(live);
+    expect(control.closest("nav")).toBe(live);
     expect(control.dataset.state).toBe("confirm");
     expect(control.querySelector(".conversation-end-question")?.textContent).toBe("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
     expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
@@ -345,9 +369,10 @@ describe("grouped project sessions (cas-55a4)", () => {
     const list = new ConversationList();
     let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
     const open = vi.fn();
-    // As main.ts does: the hub ends it, the catalog drops it, the list redraws.
+    // Hold the hub response so completion cannot be inferred from elapsed time.
+    let completeEnd!: () => void;
     const end = vi.fn(async (ended: ConversationRow) => {
-      await new Promise((ok) => setTimeout(ok, 0));
+      await new Promise<void>(resolve => { completeEnd = resolve; });
       live = live.filter((item) => item.key !== ended.key);
       list.render(container, groupConversationRows(live), open, end);
     });
@@ -360,7 +385,8 @@ describe("grouped project sessions (cas-55a4)", () => {
       confirm.click();
       // While it ends, focus waits on the status line, not the page.
       expect(document.activeElement?.textContent).toBe(`Ending ${session}…`);
-      await new Promise((ok) => setTimeout(ok, 5));
+      completeEnd();
+      await vi.waitFor(() => expect(document.activeElement?.matches(".conversation-row")).toBe(true));
     };
     draw();
     await endFromKeyboard("wild-shark-68");
@@ -439,7 +465,7 @@ describe("grouped project sessions (cas-55a4)", () => {
       control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!.click();
       await vi.advanceTimersByTimeAsync(0);
       expect(status.textContent).toBe("wild-shark-68 on Atlas ended.");
-      expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
+      expect([...container.querySelector(".conversation-group")!.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
       expect(container.querySelector(".conversation-ended")?.textContent).toBe("wild-shark-68 on Atlas ended.");
       // A catalog poll keeps it in place.
       list.render(container, groupConversationRows(live), open, end);

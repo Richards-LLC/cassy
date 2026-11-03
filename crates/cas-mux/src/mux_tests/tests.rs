@@ -1809,6 +1809,22 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
         "dynamic Codex cs MCP env must include CAS_FACTORY_SESSION; args={:?}",
         pty_config.args
     );
+    // Exercise the same config builder and backend selection used by launch.
+    let assignment = "Assigned task cas-abcd: show, start and implement it";
+    mux.set_worker_startup_prompt("dynamic-worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+        let mut spec = WorkerSpec::codex_default("dynamic-worker");
+        spec.cli = cli;
+        let config = mux.build_add_worker_config("dynamic-worker", PathBuf::from("/tmp/test"),
+            None, "supervisor", None, Some(spec));
+        assert!(!config.args.iter().any(|arg| arg.contains(assignment)),
+            "the assigned launch must keep the brief out of argv for {cli:?}");
+        assert_eq!(env_value(&config, "CAS_INTERNAL_WORKER_STARTUP_BRIEF"), Some(assignment));
+        // pin: assigned startup must replace the generic Codex task-selection prompt.
+        assert!(!config.args.iter().any(|arg| arg.starts_with("I'm initiating Cassy worker startup now:")));
+
+    }
+
 }
 
 #[test]
@@ -2162,6 +2178,8 @@ fn effective_worker_spec_uses_worker_specs_map() {
 /// a Claude worker's mail over PTY and labelled it `[worker:codex]`.
 #[test]
 fn cas_2567_initial_worker_harness_matches_the_spec_it_launched_from() {
+    // The launch lists the account's skills, so this reads an isolated account.
+    let _env = TestEnvGuard::temp_home();
     let fallback_claude = WorkerSpec {
         name: None,
         ..WorkerSpec::builtin_default()
@@ -3603,24 +3621,37 @@ async fn interrupt_and_inject_waits_for_real_output_quiescence_on_codex() {
     // Deliberately far shorter than the ~600ms output burst the pane emits:
     // proves the wait is driven by observed quiescence, not just this floor.
     let floor = std::time::Duration::from_millis(50);
-    let start = std::time::Instant::now();
     let res = mux
         .interrupt_and_inject("cas4208-codex-tick", MULTILINE_REDIRECT, floor)
         .await;
-    let elapsed = start.elapsed();
-
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
-    assert!(
-        elapsed >= std::time::Duration::from_millis(500),
-        "Codex (supports_textbox_submit=false) must wait for the pane's own \
-         output burst to actually go quiet (~600ms here) rather than injecting \
-         right after the {floor:?} floor — got elapsed={elapsed:?}. This is the \
-         cas-4208 regression: a flat sleep races a still-transitioning child \
-         and can leave the correction sitting unsent in the composer."
-    );
+
+    // Keep draining until the child's echoed payload is visible, then assert
+    // it followed the whole real output burst. This proves quiescence by event
+    // order instead of assuming how quickly this host schedules the test.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            mux.poll_batch();
+            let output = mux
+                .panes()
+                .find(|pane| pane.id() == "cas4208-codex-tick")
+                .expect("pane remains attached")
+                .dump_viewport()
+                .expect("terminal snapshot");
+            if output.contains("STOP.") {
+                break output;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the pane echoes the injected payload");
+    let last_tick = output.find("tick6").expect("the output burst completed");
+    let injected = output.find("STOP.").expect("payload was echoed");
+    assert!(last_tick < injected, "payload followed output burst:\n{output}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
     // Same ticking child, tagged Claude this time — must NOT wait for the
     // burst. Regression guard for cas-4208 AC4: Claude/Grok behavior (a flat
@@ -3633,7 +3664,7 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
     mux.add_pane(pane);
 
     let floor = std::time::Duration::from_millis(50);
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let res = mux
         .interrupt_and_inject("cas4208-claude-tick", MULTILINE_REDIRECT, floor)
         .await;
@@ -3641,10 +3672,9 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
 
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
     assert!(
-        elapsed < std::time::Duration::from_millis(400),
+        elapsed == floor,
         "Claude/Grok (supports_textbox_submit=true) must keep the old flat-floor \
-         behavior unchanged — got elapsed={elapsed:?}, which suggests the new \
-         quiescence poll leaked into a harness that must not use it"
+         behavior unchanged — controlled time advanced by {elapsed:?}, expected {floor:?}"
     );
 }
 
@@ -3782,19 +3812,21 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
     let pane = Pane::with_pty("urgent-pane", PaneKind::Worker, pty, 24, 80, SupervisorCli::Claude)
         .expect("pane");
     mux.add_pane(pane);
-    let floor = std::time::Duration::from_millis(300);
+    let floor = std::time::Duration::from_secs(3_600);
 
-    let started = std::time::Instant::now();
-    let InjectStart::Started(ticket) = mux
-        .begin_interrupt_and_inject("urgent-pane", "redirect", floor, true)
-        .await
-        .unwrap()
+    let InjectStart::Started(ticket) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mux.begin_interrupt_and_inject("urgent-pane", "redirect", floor, true),
+    )
+    .await
+    .expect("begin returns without waiting for the settle floor")
+    .unwrap()
     else {
         panic!("a clean pane starts the inject");
     };
-    assert!(started.elapsed() < std::time::Duration::from_millis(100), "begin never waits for the settle");
     assert!(mux.inject_pending("urgent-pane"));
-    assert!(mux.advance_injects().await.is_empty(), "the floor has not passed");
+    let before_floor = std::time::Instant::now();
+    assert!(mux.advance_injects_at(before_floor).await.is_empty(), "the floor has not passed");
     assert_eq!(
         mux.inject("urgent-pane", "normal").await.unwrap(),
         InjectOutcome::DeferredComposerDirty,
@@ -3808,17 +3840,18 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
         "one urgent inject per pane"
     );
 
-    tokio::time::sleep(floor).await;
-    // The payload is queued on this advance; its write receipt reports on
-    // this or a following one.
-    let mut done = mux.advance_injects().await;
-    for _ in 0..50 {
-        if !done.is_empty() {
-            break;
+    // Advance with an explicit future instant so the test exercises the floor
+    // without sleeping for it. The PTY receipt remains real and is polled with
+    // a generous hang guard.
+    let mut done = mux.advance_injects_at(before_floor + floor).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while done.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            done = mux.advance_injects().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        done = mux.advance_injects().await;
-    }
+    })
+    .await
+    .expect("PTY reports the payload write receipt");
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].ticket, ticket);
     assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
@@ -4221,6 +4254,29 @@ fn cas_940c_worker_mcp_modes_preserve_supervisor_and_codex_launches() {
             }
             assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), original);
         }
+    }
+}
+
+/// Claude's `--mcp-config` is variadic: a bare prompt after it is read as a
+/// config path and the worker exits at launch. Only the terminator ends it.
+#[test]
+fn startup_prompt_follows_the_option_terminator_on_a_real_worker_tail() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(project.path().join(".mcp.json"), r#"{"mcpServers":{"cas":{"command":"cas-fixture"}}}"#).unwrap();
+    let assignment = "Assigned task cas-abcd";
+    let mut mux = Mux::new(24, 80);
+    mux.set_worker_startup_prompt("worker", Some(assignment.into()));
+    for cli in [SupervisorCli::Claude, SupervisorCli::Grok] {
+        let spec = WorkerSpec { cli, ..WorkerSpec::builtin_default() };
+        let config = mux.build_add_worker_config("worker", project.path().into(), Some(&root), "supervisor", None, Some(spec));
+        assert!(env_value(&config, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert_eq!(config.args[config.args.len() - 2], "--", "{cli:?}: {:?}", config.args);
+        assert_eq!(env_value(&config, "CAS_INTERNAL_WORKER_STARTUP_BRIEF"), Some(assignment));
+        assert_eq!(config.args.contains(&"--mcp-config".to_string()), cli == SupervisorCli::Claude);
     }
 }
 

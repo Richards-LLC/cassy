@@ -26,6 +26,15 @@ pub(crate) fn started_delivery(
     repo: &Path,
     task: &Task,
 ) -> Result<Option<StartedDelivery>, String> {
+    Ok(validated_started_delivery(repo, task)?.filter(|delivery| !delivery.commits.is_empty()))
+}
+
+/// Keep a validated boundary after integration empties the off-target graph.
+/// QA still needs that baseline; absence checks use `started_delivery` above.
+pub(super) fn validated_started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
     };
@@ -98,6 +107,9 @@ pub(crate) fn started_delivery(
     if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
         return Err(refuse("the base is no longer an ancestor of the delivery"));
     }
+    // cas-985f: a worker told to merge the released trunk into its lane brings
+    // in other tasks' already-released commits. They are upstream, not foreign.
+    let upstream = released_upstream_refs(repo, &target);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -111,8 +123,11 @@ pub(crate) fn started_delivery(
             "--format=%H %P%x1f%B%x1e",
             &range,
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the lane history cannot be read"))?;
     // Inspect side-parent work too, excluding integrated target history so a
@@ -127,8 +142,11 @@ pub(crate) fn started_delivery(
             &tip,
             &format!("^{}", start.base_sha),
             &format!("^{target}"),
-            "--",
-        ],
+        ]
+        .into_iter()
+        .chain(upstream.iter().map(String::as_str))
+        .chain(["--"])
+        .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the off-target history cannot be read"))?;
     let mut records = Vec::new();
@@ -159,7 +177,9 @@ pub(crate) fn started_delivery(
         }
         let parents: Vec<String> = metadata.map(str::to_owned).collect();
         let merged = parents.get(1..).unwrap_or_default();
-        if is_target_sync_merge(repo, merged, &target) {
+        if is_target_sync_merge(repo, merged, &target)
+            || upstream.iter().any(|reference| is_target_sync_merge(repo, merged, &reference[1..]))
+        {
             continue;
         }
         if subject_claims_another_task(message, &identity) {
@@ -181,7 +201,7 @@ pub(crate) fn started_delivery(
             commits.push(sha.to_string());
         }
     }
-    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+    Ok(Some(StartedDelivery { branch, commits }))
 }
 
 /// A legacy start may name the previous task's lane, before the worker
@@ -444,6 +464,35 @@ fn merge_brings_foreign_work(
     false
 }
 
+/// cas-985f: exclusions (`^ref`) for the repository's released trunk. Empty
+/// when the trunk is the target itself or unresolvable, so a delivery to the
+/// trunk keeps its existing attribution.
+fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
+    released_trunk_ref(repo, target)
+        .map(|reference| format!("^{reference}"))
+        .into_iter()
+        .collect()
+}
+
+/// The ref whose history counts as released upstream for a lane bound to
+/// `target`: `refs/remotes/origin/<trunk>` when it exists (cas-3d57: a local
+/// trunk can be ahead of origin or moved by hand, so it never vouches for release), else
+/// the local trunk in a repository without that remote ref. None when the
+/// trunk is the target itself or unresolvable.
+pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
+    let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    if trunk == target || !is_safe_git_refname(&trunk) {
+        return None;
+    }
+    [
+        format!("refs/remotes/origin/{trunk}"),
+        format!("refs/heads/{trunk}"),
+    ]
+    .into_iter()
+    .find(|reference| git_ref_exists(repo, reference))
+}
+
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
     !merged_parents.is_empty()
         && merged_parents.iter().all(|parent| {
@@ -519,13 +568,19 @@ fn task_delivery_selection(
     let target = preferred_diff_target_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
-    let unmerged: std::collections::HashSet<String> = git_text(
-        repo,
-        &["rev-list", "--first-parent", &format!("{base}..{tip}")],
-    )?
-    .lines()
-    .map(str::to_owned)
-    .collect();
+    // GH #1382: an unmerged start base can carry the preceding task's UI.
+    // Only unowned commits after the validated start belong to this cycle;
+    // named/recorded earlier delivery commits keep their identity below.
+    let start_exclusion = window.identity.start_base.as_ref().map(|base| format!("^{base}"));
+    let unmerged_range = format!("{base}..{tip}");
+    let mut unmerged_args = vec!["rev-list", "--first-parent", &unmerged_range];
+    if let Some(exclusion) = start_exclusion.as_deref() {
+        unmerged_args.push(exclusion);
+    }
+    let unmerged: std::collections::HashSet<String> = git_text(repo, &unmerged_args)?
+        .lines()
+        .map(str::to_owned)
+        .collect();
     let mut history_args = vec![
         "log".to_string(),
         "--first-parent".into(),
@@ -757,6 +812,24 @@ pub(crate) fn paths(
     paths_from_ranges(repo, ranges)
 }
 
+/// cas-2a65: the (base, tip) bounds of the same task-attributed delivery
+/// ranges, so a gate can judge what this task's own segments introduced
+/// (including a same-task predecessor merge) without crediting target-sync
+/// or another task's merged work.
+pub(crate) fn range_bounds(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    Some(ranges.into_iter().map(|range| (range.base, range.tip)).collect())
+}
+
 /// cas-2d27: without a task delivery tip, a no-code supervisor close must
 /// not adopt unclaimed work from the closing checkout merely because it is
 /// unmerged and inside the task's clock window. Named/recorded task commits
@@ -792,7 +865,7 @@ fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<Stri
 
 /// Reviewable paths from selected task ranges. An empty result is meaningful
 /// when the task only merged history or changed whitespace/deletions.
-pub(super) fn qa_paths(
+pub(crate) fn qa_paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -911,17 +984,67 @@ pub(crate) fn squash_receipt_qa_anchor(
     (!own.is_empty() && own.iter().all(|path| carried.contains(path))).then_some(anchor)
 }
 
+/// Snapshot proof can recover an integrated unnamed delivery from its recorded
+/// sync anchor. Re-run the ordinary selection against that merge's immutable
+/// target parent, before integration erased the off-target range. Keep the
+/// same start/time/foreign-task fences and split ranges at imported baselines.
+/// This is content evidence only; it does not broaden QA or receipt attribution.
+fn final_snapshot_delivery_ranges(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<Vec<DeliveryRange>> {
+    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+    if !ranges.is_empty() {
+        return Some(ranges);
+    }
+    let tip = resolve_branch_sha(repo, &format!("{tip}^{{commit}}"))?;
+    let target = preferred_diff_target_ref(repo, target);
+    if !window.identity.matches_known_commit(&tip) || !git_commit_is_ancestor(repo, &tip, &target) {
+        return Some(ranges);
+    }
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &tip])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [_, _, target_parent] = parents.as_slice() else {
+        return Some(ranges);
+    };
+    if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
+        return Some(ranges);
+    }
+    // The recorded anchor binds the earlier cycle after a restart. Match the
+    // merge-tip content proof's creation floor, keeping the immutable start
+    // exclusion and foreign-task fences from ordinary range selection.
+    let anchored_window = TaskCommitReceiptWindow {
+        not_before: window.task_floor,
+        ..window.clone()
+    };
+    task_delivery_ranges(repo, target_parent, &anchored_window, Some(&tip))
+}
+
+pub(super) fn final_snapshot_delivery_base(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<String> {
+    Some(
+        final_snapshot_delivery_ranges(repo, target, window, tip)?
+            .first()?
+            .base
+            .clone(),
+    )
+}
+
 /// Shared candidate selection for whole-delivery and final-snapshot proof.
 /// Preserve side-parent identity, foreign-subject and work-window rules.
 fn attributed_content_commits(
     repo: &Path,
-    target: &str,
     tip: &str,
     window: &TaskCommitReceiptWindow,
     identity: &TaskCommitIdentity,
+    ranges: &[DeliveryRange],
 ) -> Option<Vec<String>> {
-    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
-
     let mut commits = Vec::new();
     for range in ranges {
         let range = format!("{}..{}", range.base, range.tip);
@@ -997,10 +1120,10 @@ pub(super) fn final_path_snapshot_proven(
     path: &str,
 ) -> Option<bool> {
     let snapshot = tree_path_blob(repo, tip, path)?;
-    let ranges = task_delivery_ranges(repo, target, window, Some(tip))?;
+    let ranges = final_snapshot_delivery_ranges(repo, target, window, tip)?;
     let mut authored_blobs = Vec::new();
     let mut imported_baselines = Vec::new();
-    for range in ranges {
+    for range in &ranges {
         let history = git_text(repo, &["rev-list", "--first-parent", "--reverse", &format!("{}..{}", range.base, range.tip)])?;
         let mut path_commits = Vec::new();
         for commit in history.lines().filter(|commit| !commit.is_empty()) {
@@ -1029,7 +1152,26 @@ pub(super) fn final_path_snapshot_proven(
     if imported_baselines.contains(&snapshot) {
         return Some(false);
     }
-    for commit in attributed_content_commits(repo, target, tip, window, &window.identity)? {
+    let mut commits = attributed_content_commits(repo, tip, window, &window.identity, &ranges)?;
+    // A recorded sync can regenerate a bundle itself. Credit that new merge
+    // output only for a task-authored artifact, never a parent/imported blob.
+    // The normal ownership walk below must still prove it survives on target;
+    // equality after an unrelated deletion/recreation cannot revive delivery.
+    if snapshot.is_some()
+        && !authored_blobs.is_empty()
+        && super::regenerable_build_artifact(repo, path)
+        && window.identity.matches_known_commit(tip)
+    {
+        let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", tip])?;
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        if let [_, first, second] = parents.as_slice()
+            && tree_path_blob(repo, first, path)? != snapshot
+            && tree_path_blob(repo, second, path)? != snapshot
+        {
+            commits.push(tip.to_string());
+        }
+    }
+    for commit in commits {
         let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
         if delivery_evolution::is_revert_message(&message)
             || !super::commit_changes_path(repo, &commit, path).ok()? {
@@ -1116,7 +1258,8 @@ pub(super) fn merge_tip_content_presence(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let mut commits = attributed_content_commits(repo, target, merge_tip, window, identity)?;
+    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+    let mut commits = attributed_content_commits(repo, merge_tip, window, identity, &ranges)?;
 
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())
@@ -1407,6 +1550,38 @@ pub(super) fn merge_tip_content_presence(
                         append_unique(&mut dropped_paths, vec![path]);
                         continue;
                     }
+                    // cas-68d2 / GH #1404: a rename inside the anchor may
+                    // also edit a migration ID. Prove the earlier task owns
+                    // the source up to the merge, then measure the net
+                    // base..anchor destination, not the obsolete source blob.
+                    // The anchor-to-target walk still rejects a later loss,
+                    // including deletion followed by identical recreation.
+                    if let Some((first, renamed)) = anchor_rename(repo, merge_tip, &path)
+                        && git_commit_is_ancestor(repo, commit, &first)
+                        && git_diff_is_empty(repo, merge_tip, &target_ref, &renamed) == Some(true)
+                        && matches!(
+                            super::delivery_content_presence_in_parent_for_paths(
+                                repo, commit, &first, Some(std::slice::from_ref(&path)), false,
+                            ),
+                            DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. }
+                        )
+                        && let Some(base) = git_text(repo, &["rev-parse", &format!("{commit}^1")])
+                        && match delivery_evolution::line_content_presence(
+                            repo, &base, merge_tip, &target_ref, &renamed,
+                        ) {
+                            Ok(Some(DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. })) => true,
+                            Ok(None) => super::reverse_delivery_path_applies_to_tree(
+                                repo, &base, merge_tip, &target_ref, &renamed,
+                            ).unwrap_or(false),
+                            _ => false,
+                        }
+                    {
+                        append_unique(&mut superseded_paths, vec![path]);
+                        append_unique(&mut superseding_commits, vec![merge_tip.to_string()]);
+                        continue;
+                    }
                     // cas-18aa: an earlier draft this delivery itself later
                     // replaced is judged by the delivery's own final tree,
                     // not by following each draft line through the target.
@@ -1539,6 +1714,30 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// Only a rename in the supplied anchor's first-parent diff can carry an
+/// earlier path here. The caller proves attribution before the rename and
+/// the net final content after it; similarity alone never proves delivery.
+/// NUL-delimited records preserve unusual paths.
+fn anchor_rename(repo: &Path, anchor: &str, path: &str) -> Option<(String, String)> {
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", anchor])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    if parents.len() != 3 {
+        return None;
+    }
+    let first = parents[1];
+    let listing = git_text(repo, &[
+        "diff", "--find-renames", "--diff-filter=R", "--name-status", "-z",
+        first, anchor, "--",
+    ])?;
+    let fields: Vec<_> = listing.split('\0').collect();
+    for entry in fields.chunks_exact(3) {
+        if entry[0].starts_with('R') && entry[1] == path && !entry[2].is_empty() {
+            return Some((first.to_string(), entry[2].to_string()));
+        }
+    }
+    None
 }
 
 /// Indexed content lines of a unified patch, inside its `@@`
@@ -3673,8 +3872,19 @@ mod tests {
             rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Closed task:"), "{text}");
-        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
-        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        let detail_path = text
+            .split_once("Details: ")
+            .expect("close receipt detail reference")
+            .1
+            .split_once(" (SHA-256 ")
+            .unwrap()
+            .0;
+        let detail = std::fs::read_to_string(detail_path).expect("close detail artifact exists");
+        assert!(detail.contains("first.md") && detail.contains("second.md"), "{detail}");
+        assert!(
+            !detail.contains("next.md"),
+            "next task's diff was attributed to the old delivery: {detail}"
+        );
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
         assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);

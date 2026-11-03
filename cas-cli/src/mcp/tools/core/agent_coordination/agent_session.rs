@@ -164,6 +164,10 @@ impl CasCore {
         });
 
         let input = HookInput {
+            model: None,
+            from_model: None,
+            to_model: None,
+            effort: None,
             prompt_id: None,
             session_id: session_id.clone(),
             cwd,
@@ -350,6 +354,10 @@ impl CasCore {
             .to_string();
 
         let input = HookInput {
+            model: None,
+            from_model: None,
+            to_model: None,
+            effort: None,
             prompt_id: None,
             session_id: session_id.clone(),
             cwd,

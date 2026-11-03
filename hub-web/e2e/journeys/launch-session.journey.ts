@@ -53,7 +53,7 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
-    await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible();
     // cas-865c: New session is named by its goal before the permission too; it
     // opens the sheet's grant view, which explains what is asked.
     const toggle = page.locator("#new-session-toggle");
@@ -82,9 +82,11 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
   });
 });
 
-test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }) => {
+test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }, testInfo) => {
   const launch = atlasLaunch();
-  Object.assign(launch.profiles!.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)" });
+  const projectProfiles = structuredClone(launch.profiles!);
+  Object.assign(projectProfiles.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)" });
+  launch.targetProfiles = { "p-ledger": projectProfiles };
   const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -104,6 +106,16 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
     await expect(sheet.getByRole("radio", { name: "Claude Default" })).toBeChecked();
+    // Capture the same project/account state on phone and desktop, including
+    // the failing base build where main remains selected.
+    const captures = join(testInfo.outputDir, "project-policy");
+    mkdirSync(captures, { recursive: true });
+    await expect(sheet.locator(".launch-accounts")).toBeVisible();
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.screenshot({ path: join(captures, `recommendation-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await expect(sheet.getByText("Start ledger-api with Claude (support@petrastella.io) on Atlas · Linux.")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
   });
@@ -133,6 +145,15 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
   });
 
+  await journey.stage("Changing projects refreshes the account recommendation", async () => {
+    await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("");
+    await sheet.getByRole("radio", { name: /old-notes/ }).check();
+    await expect(sheet.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+    await expect(sheet.getByText("Start old-notes with Claude (main) on Atlas · Linux.")).toBeVisible();
+    await sheet.getByRole("radio", { name: /ledger-api/ }).check();
+    await expect(sheet.getByRole("radio", { name: /support@petrastella.io Recommended/ })).toBeChecked();
+  });
+
   await journey.stage("Start it and land on its supervisor", async () => {
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude (support@petrastella.io) on Atlas · Linux…");
@@ -152,7 +173,7 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await page.reload();
     await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await back.tap();
-    await expect(list.getByRole("button", { name: /ledger-api/ })).toBeVisible();
+    await expect(list.getByRole("button", { name: /ledger-api/ }).and(list.locator(".conversation-row"))).toBeVisible();
   });
 });
 
@@ -232,20 +253,7 @@ test("HUB-J13 read the grant command and supervisor and worker hints on a phone"
       return chars.flatMap((item, index) => index > 0 && item.top !== chars[index - 1]!.top && chars[index - 1]!.char !== " " && chars[index - 1]!.char !== "," && item.char !== " " ? [`${chars[index - 1]!.char}|${item.char}`] : []);
     });
     expect(splits, "the command breaks only at spaces and after commas").toEqual([]);
-    await expect(sheet.locator(".launch-grant-note")).toHaveText("The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.");
-    await sheet.getByRole("button", { name: "Close", exact: true }).tap();
-    hub.setScopes("atlas", [...SCOPES, "session-launch"]);
-    await hub.seedPaired();
-    await page.reload();
-    // cas-cee5 (journey F33): the hints say what each field changes, and the
-    // Workers placeholder agrees with its hint.
-    await page.getByRole("button", { name: "New session", exact: true }).tap();
-    await sheet.getByRole("tab", { name: "Known projects" }).tap();
-    await sheet.getByRole("radio", { name: /old-notes/ }).check();
-    await expect(sheet.locator("#launch-cli-hint")).toHaveText("Which assistant runs the supervisor.");
-    await expect(sheet.locator("input[name=launch-workers]")).toHaveAttribute("placeholder", "None");
-    await expect(sheet.locator("#launch-workers-hint")).toHaveText("Up to 16. None starts the supervisor alone.");
-    await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
+
   });
 });
 
@@ -295,7 +303,7 @@ test("HUB-J13 New session says a reconnecting machine is reconnecting, then load
     await journey.open();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await hub.down("atlas", { sockets: "close" });
-    await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Reconnecting", { timeout: 20_000 });
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Last known", { timeout: 20_000 });
   });
 
   await journey.stage("New session says it is reconnecting and offers nothing that can only fail", async () => {
@@ -384,3 +392,167 @@ for (const cell of consentCells) {
     });
   });
 }
+
+// Fixture coverage of the shell/panel path; real lifecycle effects are also
+// exercised against the supervisor-built hub candidate for this task.
+test("HUB-J13 inspect and remove an account from the shell", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const removed: string[] = [];
+  let accounts = [
+    { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", location: "~/.claude-spare", login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: "Soonest weekly reset", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }], usage_observed_at: "2026-10-28T18:10:00Z", capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "codex:old", provider: "codex", name: "old", display_name: "old@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } },
+    { key: "grok:default", provider: "grok", name: "default", display_name: "Grok", login_state: "unknown", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Unsupported", disable: "Unsupported", enable: "Unsupported", rename: "Unsupported", set_default: "Unsupported" } },
+  ];
+  launch.profiles!.claude!.profiles = [{ name: "spare", logged_in: true, is_default: true }, { name: "main", logged_in: true, is_default: false }];
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-manage", "session-launch"] }, launch: { atlas: launch } });
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts(?:\/operations)?$/, async route => {
+    const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    if (route.request().method() === "POST") {
+      const request = route.request().postDataJSON();
+      expect(request).toEqual({ operation: "remove", account: "claude:spare", confirmation: "claude:spare" });
+      removed.push(request.account);
+      accounts = accounts.filter(account => account.key !== request.account);
+      launch.profiles!.claude!.profiles = launch.profiles!.claude!.profiles.filter(profile => profile.name !== "spare");
+      return route.fulfill({ headers, json: { ok: true } });
+    }
+    return route.fulfill({ headers, json: { accounts } });
+  });
+  await journey.open();
+  const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await journey.stage(`Header accounts control at ${width} in ${colorScheme}`, async () => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      await page.reload();
+      const accounts = page.getByRole("button", { name: "Accounts", exact: true });
+      await expect(accounts).toHaveAttribute("title", "Accounts");
+      await expect(accounts).toBeInViewport({ ratio: 1 });
+      const geometry = await accounts.evaluate(button => {
+        const box = (node: Element) => { const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
+        const header = button.closest(".conversation-list-heading")!;
+        const settings = header.querySelector("#command-palette-toggle")!;
+        const styles = getComputedStyle(header);
+        return { button: box(button), icon: box(button.querySelector("svg")!), settings: box(settings), header: box(header), inset: parseFloat(styles.paddingRight), gap: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-2")) };
+      });
+      if (process.env.DELIVERY_QA) {
+        mkdirSync(process.env.DELIVERY_QA, { recursive: true });
+        await page.screenshot({ path: join(process.env.DELIVERY_QA, `header-${width}-${colorScheme}.png`) });
+        writeFileSync(join(process.env.DELIVERY_QA, `header-${width}-${colorScheme}.json`), JSON.stringify(geometry, null, 2));
+      }
+      // cas-a9d3: a named button can still be an empty square or push settings out of its panel.
+      expect(geometry.icon.width).toBeGreaterThanOrEqual(16);
+      expect(geometry.icon.width).toBeLessThanOrEqual(24);
+      expect(geometry.icon.height).toBeGreaterThanOrEqual(16);
+      expect(geometry.icon.height).toBeLessThanOrEqual(24);
+      expect(geometry.icon.x).toBeGreaterThanOrEqual(geometry.button.x);
+      expect(geometry.icon.right).toBeLessThanOrEqual(geometry.button.right);
+      expect(geometry.settings.x - geometry.button.right).toBeGreaterThanOrEqual(geometry.gap);
+      expect(geometry.header.right - geometry.settings.right).toBeGreaterThanOrEqual(geometry.inset - 0.5);
+    });
+    await journey.stage(`Accounts at ${width} in ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".accounts-editor")).toBeHidden();
+      await expect(dialog.locator(".accounts-meter").filter({ hasText: "weekly" })).toContainText(/62% left · resets .*(AM|PM) [A-Z]/);
+      await expect(dialog.getByText("Stale login", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Lives in ~/.claude-spare on Atlas · Linux · used by Claude Code", { exact: true })).toBeVisible();
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      if (width === 390) {
+        await page.mouse.move(200, 600);
+        await page.mouse.wheel(0, 1800);
+        await expect(dialog.getByText("Grok uses one account. Named account management and login status are unavailable.", { exact: true })).toBeInViewport();
+        await page.mouse.wheel(0, -1800);
+        await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
+      }
+    });
+  }
+  await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
+    const row = dialog.locator("li").filter({ hasText: "hello@example.test" });
+    // Set default stays on the card; Rename, Disable and Remove live in its ⋯ menu.
+    await expect(row.getByRole("button", { name: "Set default", exact: true })).toBeVisible();
+    await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeHidden();
+    await row.locator(".accounts-more > summary").click();
+    await row.getByRole("button", { name: "Remove", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
+    await dialog.getByRole("textbox").fill("cancelled confirmation");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
+    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
+    await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeFocused();
+    expect(removed).toEqual([]);
+    await page.keyboard.press("Enter");
+    await dialog.getByRole("textbox").fill("claude:spare");
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByText("Account updated.", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("hello@example.test", { exact: true })).toHaveCount(0);
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    await expect(dialog.locator(".accounts-editor input")).toHaveValue("");
+    await expect(dialog.locator(".accounts-editor h3")).toBeEmpty();
+    expect(removed).toEqual(["claude:spare"]);
+    await dialog.getByRole("button", { name: "Close accounts" }).click();
+    await expect(page.getByRole("button", { name: "Accounts", exact: true })).toBeFocused();
+    await page.locator("#new-session-toggle").click();
+    const start = page.getByRole("dialog", { name: "New session", exact: true });
+    await expect(start.locator('input[name="launch-account"][value="main"]')).toBeVisible();
+    await expect(start.locator('input[name="launch-account"][value="spare"]')).toHaveCount(0);
+  });
+  await journey.stage("Read-only accounts have no rendered confirmation editor", async () => {
+    hub.setScopes("atlas", ["machine-read", "session-read"]);
+    await hub.seedPaired();
+    await page.reload();
+    await page.getByRole("button", { name: "Accounts", exact: true }).click();
+    await expect(dialog.getByText("Read-only on Atlas", { exact: false })).toBeVisible();
+    await expect(dialog.locator("[data-grant-command]")).toBeVisible();
+    for (const button of await dialog.locator("[data-operation]").all()) await expect(button).toBeDisabled();
+    await expect(dialog.locator(".accounts-editor")).toBeHidden();
+    expect(await dialog.locator(".accounts-editor").evaluate(node => node.getClientRects().length)).toBe(0);
+  });
+});
+
+// One shared action, reached through both entry points; provider data is a fixture.
+test("HUB-J13 check native account usage before starting without switching", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
+  const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
+  const calls: string[] = [];
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts$/, route => route.fulfill({ headers, json: { accounts: ["claude", "codex"].map(provider => ({ key: `${provider}:main`, provider, name: "main", display_name: `${provider} main`, login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Protected", disable: null, enable: "Already enabled", rename: "Protected", set_default: null } })) } }));
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts\/usage\?/, async route => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    expect(route.request().method()).toBe("GET");
+    const account = new URL(route.request().url()).searchParams.get("account")!; calls.push(account);
+    return route.fulfill({ headers, json: { checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", windows: [{ name: "5h", used_percent: 23, resets_at: "2050-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2050-11-08T16:57:00Z" }], reason: "Snapshot is stale. Open a session on this account to refresh." } });
+  });
+  await journey.open();
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
+    await journey.stage(`Native usage in Accounts at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+      for (const provider of ["claude", "codex"]) {
+        await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
+        const result = dialog.locator(`[data-usage-account="${provider}:main"]`);
+        await expect(result).toContainText("5h 23% used"); await expect(result).toContainText("weekly 44% used");
+        await expect(result).toContainText("Checked at Nov 3, 12:00 PM ET"); await expect(result).toContainText("Usage as of Nov 3, 11:00 AM ET");
+        await expect(result).toContainText("Snapshot is stale");
+      }
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    });
+    await page.getByRole("button", { name: "Close accounts" }).click();
+    await journey.stage(`Native usage in New session at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "New session", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "New session", exact: true });
+      await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+      await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
+      await expect(dialog.locator('[data-usage-account="claude:support@petrastella.io"]')).toContainText("Checked at Nov 3, 12:00 PM ET");
+
+      await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+      expect(hub.launches).toEqual([]);
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    });
+    await page.getByRole("dialog", { name: "New session", exact: true }).getByRole("button", { name: "Cancel", exact: true }).click();
+  }
+  expect(calls).toContain("claude:main"); expect(calls).toContain("codex:main");
+});

@@ -1,45 +1,43 @@
 # Evidence ledger
 
-Store the file at `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The header names the
-build revision (for a served app, the backend and frontend SHAs at walk start
-and end, and any mixed build: [map the build](../SKILL.md#walk-rules)),
-one-line scope, surface, 30-minute budget, headline counts for
-cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
-sweep state (`sweep: configured — <path>` or the exact line
-`sweep: not configured`).
+Create the task ledger with `cas qa ledger init --task <id>`. It prints the
+project-scoped path, includes predicted live journeys, and preserves existing
+evidence. No-code deliveries start with route exclusions; live routes start
+unexercised. Edit the scaffold as you walk.
 
-Use this exact row grammar so the verifier can consume it:
+Run `cas qa ledger check <path> --task <id>` before close or review. The CLI,
+close gate and verifier share one parser for fields, counts, labels, breadth,
+defect ownership and readable PASS captures. Repair each line/row diagnostic.
+The executable owns the grammar; use its scaffold instead of a copied table.
+A passing check proves structure and readability, not the expected user outcome.
 
-```text
-| id | cell | expected | observed | verdict | label | evidence path | defect task |
-```
-
-Every row uses one label: `source-inferred` (code read only; proves nothing
-user-facing), `fixture` (harness, emulator, or mock), `real-build` (the actual
-binary or site), `eyewitness` (a human report recorded verbatim), or
-`eyewitness/telemetry` (one valid finding emitted by the configured read-only
-sweep). A weaker label than the cell requires is `NOT EXERCISED`, never `PASS`;
-`partial` is not a verdict. Each run cell has one screenshot or terminal
-capture and a short observed result. Telemetry rows use the saved sweep stdout
-as their evidence path and include all six parsed fields in `observed`.
+Name the build revision, scope, surface and budget. For a served app, record
+backend and frontend SHAs at walk start and end, including mixed builds
+([map the build](../SKILL.md#walk-rules)). Capture each exercised cell and
+describe what happened. Label evidence by how it was obtained; source reading
+and fixtures do not prove the real build. Telemetry findings cite saved sweep
+stdout and include all six parsed fields in the observed result.
 
 A `real-build` row that drives a compiled binary needs a binary of the build
 revision, and the header names it: path, `--version` output and SHA-256. Three
 sources qualify:
 
 - an exact-revision build by someone the project's build policy allows to
-  compile; in a factory that is the supervisor or operator, who places it at
-  `<artifacts_root>/<project-key>/<task-id>/candidate/`. In the Cassy source
-  repository, run `cas qa candidate build --task <task-id> --rev <sha>`; it
-  prints the binary path, version and SHA-256 and writes `VERSION.txt`,
-  `SHA256SUMS` and `RECEIPT.json` beside the binary. Anyone, a worker
-  included, gets that binary's path with `cas qa candidate path --task
-  <task-id>`, which refuses until the candidate exists;
+  compile; in a factory that is the factory daemon, supervisor or operator. In
+  the Cassy source repository a worker or QA walker calls `factory
+  action=candidate_request task_id=<own-task> revision=<full-sha>`; the revision
+  must be reachable from HEAD of its own checkout, and a newer request replaces
+  a queued one. The daemon runs `cas qa candidate build` and messages the path,
+  version, revision, SHA-256 and log, or the exact error. Each build lives at
+  `<artifacts_root>/<project-key>/<task-id>/candidates/<revision>/` with
+  `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` beside the binary, and a later
+  build leaves it alone, so cite that path. `cas qa candidate path --task
+  <task-id>` prints the newest build's path and refuses until one exists;
 - a CI release archive whose recorded commit or tree equals the revision;
 - the installed release, once the revision is published and `--version` names it.
 
-When the build guard refuses you a compile, do not work around it: ask the
-supervisor for a candidate, and leave the binary cells `NOT EXERCISED` until it
+When the build guard refuses you a compile, do not work around it: request a
+candidate, and leave the binary cells `NOT EXERCISED: <reason>` until it
 arrives. An installed release whose version names another revision proves
 nothing about this one.
 

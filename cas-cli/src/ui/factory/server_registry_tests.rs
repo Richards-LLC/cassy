@@ -727,6 +727,63 @@ fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
     assert!(wait_until_gone(shared.pid));
 }
 
+/// cas-2e98: an empty original cgroup does not prove that a workload moved
+/// into another scope has stopped. Exercise the production stop adapter without
+/// writing a host cgroup; only the fingerprinted owned process may be killed.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_stop_reaps_owned_process_outside_original_scope_and_spares_control() {
+    struct OwnedProcessGuard(RegisteredServer);
+    impl Drop for OwnedProcessGuard {
+        fn drop(&mut self) {
+            let _ = kill_process_tree_fingerprinted(self.0.pid, self.0.pid_starttime);
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let scope_ops = FakeScopeOps::default();
+    let owned = OwnedProcessGuard(
+        super::start_with_scope_ops(
+            temp.path(),
+            &spec("escaped-scope", "exec sleep 300", temp.path(), false),
+            &scope_ops,
+        )
+        .unwrap(),
+    );
+    let control = OwnedProcessGuard(
+        super::start_with_scope_ops(
+            temp.path(),
+            &spec("scope-control", "exec sleep 300", temp.path(), false),
+            &scope_ops,
+        )
+        .unwrap(),
+    );
+    let record = &owned.0;
+    let original_scope = record.cgroup.as_ref().unwrap();
+    scope_ops.remove_scope(original_scope);
+    assert!(!original_scope.exists());
+
+    // A reused pid must still be refused before any authoritative cgroup or
+    // fallback signal. The current process and independent control stay live.
+    let mut stale = record.clone();
+    stale.pid_starttime = Some(record.pid_starttime.unwrap() + 1);
+    assert!(matches!(
+        super::stop(temp.path(), &stale).unwrap(),
+        StopOutcome::RefusedUnverified(ServerLiveness::Replaced)
+    ));
+    assert_eq!(liveness(record), ServerLiveness::Live);
+    assert_eq!(liveness(&control.0), ServerLiveness::Live);
+
+    let outcome = super::stop(temp.path(), record).unwrap();
+    assert!(matches!(outcome, StopOutcome::Stopped { .. }));
+    assert!(wait_until_gone(record.pid));
+    assert_eq!(
+        find(temp.path(), &record.id).unwrap().unwrap().state,
+        ServerState::Stopped
+    );
+    assert_eq!(liveness(&control.0), ServerLiveness::Live);
+}
+
 /// Docker workloads belong to the daemon, outside the client's process group.
 #[cfg(unix)]
 fn docker_stop_fixture(client_gone: bool, reused: bool) {

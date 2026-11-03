@@ -5,14 +5,13 @@
 // to the pairing relay is answered here, at the network boundary. Payload
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
-import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
-import { createHash, webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { journeyNow } from "./clock";
+import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { runtime } from "./hub-double-runtime";
+export const LATEST_RELEASE_URL = "https://api.github.com/repos/Richards-LLC/cassy/releases/latest";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
 /** The hub's visual page policy, the very file it embeds (cas-3aff). */
-const VISUAL_PAGE_CSP = readFileSync(new URL("../../../cas-cli/src/hub/visual_page_csp.txt", import.meta.url), "utf8").trim();
+const VISUAL_PAGE_CSP = runtime.visualPageCsp;
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 
 export type Session = {
@@ -20,13 +19,25 @@ export type Session = {
   supervisor: string;
   project_dir: string;
   workers: string[];
-  liveness: "live";
+  liveness: "live" | "stale_metadata";
+  ended?: import("../../src/types").SessionEndOutcome;
+  started_at?: string;
+  dismissed?: boolean;
   dormant?: boolean;
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
   cloud_project_id?: string;
+  /** Additive catalog identity; older hubs omit these fields. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  /** The project's human name (cas-6f79); older hubs omit it. */
+  project_name?: string;
+  machine_online?: boolean;
+  mcp_version?: string;
+  installed_version?: string;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };
@@ -56,7 +67,15 @@ export type ProtocolTime = {
   delay(callback: () => void, ms: number): void;
 };
 
+type ComposerUpload = { machine: string; session: string; id: string; mime: string; body: Buffer };
+
 export type DoubleOptions = {
+  /** Sessions whose hub and daemon both advertise structured supervisor commands. */
+  commands?: string[];
+  /** Actual /v1/machine reports for the version-badge journey. */
+  versions?: Record<string, string>;
+  /** Durable local uploads, shared with a separately paired device's hub double. */
+  composerUploads?: Map<string, ComposerUpload>;
   /** Unreceipted daemon replies, independent of the bounded history page. */
   pendingReplies?: Record<string, Array<Record<string, unknown>>>;
   /** Controlled journeys own the browser and protocol reply clock together. */
@@ -110,9 +129,10 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; latest_activity?: { summary: string } }>;
-  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string }>;
-  epics: Array<{ id: string; title?: string }>;
+  supervisor_phase?: { event_id: string; kind: string; lifecycle: { id: string; stage: string; phase?: string; started_at?: string; ended_at?: string; outcome?: string }; observed_at: string; stale: boolean };
+  agents: Array<{ harness?: string; model?: string; task_started_at?: string; recent_trail?: readonly { step: string; reference: string; at?: string }[]; id?: string; name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
+  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
+  epics: Array<{ id: string; title?: string; status?: string; assignee?: string | null; epic_verification_owner?: string | null; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null } }>;
   focused_epic: string | null;
   /** Names new workers get, in order. */
   spawnNames: string[];
@@ -143,6 +163,8 @@ export type LaunchWorld = {
   names: string[];
   /** GET /v1/launch/profiles per CLI (cas-7b52); absent lists nothing. */
   profiles?: Record<string, { installed: boolean; profiles: Array<{ name: string; logged_in: boolean; is_default: boolean }>; error?: string }>;
+  /** Project/browse-specific projections keyed by the opaque target id or path. */
+  targetProfiles?: Record<string, NonNullable<LaunchWorld["profiles"]>>;
   /** Session-list fetches after a start before the new session is listed (it is booting). */
   bootPolls?: number;
 };
@@ -168,14 +190,8 @@ const PANE_EPOCH = 1_788_970_165_000;
 /** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
 const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
 type InstallationRow = { machine: string; device_id: string; credential_id: string; credential_generation: number; credential: string; scopes: string[]; device_label: string; operator_label: string; controller_origin: string; public_key_jwk: JsonWebKey; revoked_at: string | null };
-const hash = (value: string) => createHash("sha256").update(value).digest("base64url");
+const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
-async function verifyInstallation(key: JsonWebKey, proof: string, transcript: unknown[]): Promise<boolean> {
-  try {
-    const imported = await webcrypto.subtle.importKey("jwk", key, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    return await webcrypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, imported, Buffer.from(proof, "base64url"), new TextEncoder().encode(JSON.stringify(transcript)));
-  } catch { return false; }
-}
 
 export class HubDouble {
   readonly sends: SentMessage[] = [];
@@ -209,6 +225,12 @@ export class HubDouble {
   /** Every `/v1/pages/...` path the browser fetched, in order. */
   readonly pageRequests: string[] = [];
   readonly previewTicketRequests: string[] = [];
+  readonly composerUploads: Map<string, ComposerUpload>;
+  private readonly mediaTickets = new Map<string, { machine: string; session: string; id: string }>();
+
+  storeComposerUpload(machine: string, session: string, id: string, mime: string, body: Buffer): void {
+    this.composerUploads.set(`${machine}/${session}/${id}`, { machine, session, id, mime, body });
+  }
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly protocolWaiters = new Set<() => void>();
@@ -221,6 +243,8 @@ export class HubDouble {
   private polls = 0;
   /** Relay polls answered so far: the pairing's own clock (cas-03b7). */
   get relayPolls(): number { return this.polls; }
+  /** The current relay request's deadline: set when it is created, repeated by its polls (cas-fa56). */
+  private relayExpiresAt: string | undefined;
   private requestedScopes: string[] = [];
   private nextId = 1000;
   /** Machines currently unreachable (network down, Tailscale off), and how. */
@@ -231,6 +255,8 @@ export class HubDouble {
   private readonly sessionSocketsByMachine = new Map<string, Set<WebSocketRoute>>();
   /** Health pings the double answered, per machine. */
   readonly pongs = new Map<string, number>();
+  /** Delay real health responses using the journey's protocol clock. */
+  healthPongDelayMs = 0;
   /**
    * GET /v1/sessions answered, per machine (cas-9772). Every catalog the page
    * renders arrives through one of these, so a journey bounds "the page shows
@@ -257,6 +283,8 @@ export class HubDouble {
   readonly deliveredRefusals: string[] = [];
   /** POST /v1/sessions/<s>/write-grants calls, in order, with what the double answered (cas-ab04). */
   readonly writeGrants: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
+  /** POST /v1/sessions/<s>/secrets/<id> calls, in order, with what the double answered (cas-1996). */
+  readonly secrets: Array<{ machine: string; session: string; notification_id: number; body: Record<string, unknown>; status: number }> = [];
   /** POST /v1/sessions/<s>/operations calls, in order, with what the double answered (cas-a474). */
   readonly operations: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
   private readonly operationOutcomes = new Map<string, Record<string, unknown>>();
@@ -283,6 +311,10 @@ export class HubDouble {
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {
+    // Current hubs identify each daemon birth. Keep it stable across reads;
+    // a replacement fixture changes started_at explicitly, just as the hub does.
+    for (const machine of options.machines) for (const session of machine.sessions) session.started_at ??= this.stamp(-60_000);
+    this.composerUploads = options.composerUploads ?? new Map();
     for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
   }
 
@@ -303,7 +335,7 @@ export class HubDouble {
     return Object.entries(this.options.baseUrls ?? {}).find(([, base]) => new URL(base).host === url.host)?.[0] ?? url.hostname.replace(/\.test$/, "");
   }
 
-  private now(): number { return this.options.time?.now() ?? journeyNow(); }
+  private now(): number { return this.options.time?.now() ?? runtime.now(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
   private delay(callback: () => void, ms: number): void {
     if (this.options.time) this.options.time.delay(callback, ms);
@@ -397,13 +429,19 @@ export class HubDouble {
    * pause a loaded host can outrun.
    */
   async received(notificationId: number, page = this.page): Promise<void> {
-    await expect.poll(() => page.evaluate((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId), {
-      message: `the page received hub frame ${notificationId}`,
-    }).toBe(true);
+    try {
+      await page.waitForFunction((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId, { timeout: 5_000 });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(`hub double: timed out waiting for hub frame ${notificationId}`, { cause: error });
+      }
+      throw error;
+    }
   }
 
   /** Install routes; call before the first navigation. */
   async install(page = this.page): Promise<void> {
+    await page.context().route(LATEST_RELEASE_URL, route => route.fulfill({ json: { tag_name: "v3.87.0" } }));
     // /v1/events is a long-lived event stream the bundle reads with fetch.
     await page.addInitScript((bases) => {
       const localHosts = new Set(bases.map((base) => new URL(base).host));
@@ -475,6 +513,9 @@ export class HubDouble {
     // cas-3aff: a visual page opened in its own tab is a new page; its
     // ticketed route is answered there too.
     await page.context().route(/^https:\/\/[^/]+\.test\/v1\/pages\//, (route) => this.visualPage(route, new URL(route.request().url()).pathname));
+    // The first navigation of a preview popup bypasses page routes. It must use
+    // the same scoped storage and capability checks as in-page image requests.
+    await page.context().route("https://*.test/v1/sessions/*/artifacts/*/content?*", route => this.hub(route));
     for (const base of Object.values(this.options.baseUrls ?? {})) await page.route(`${new URL(base).origin}/v1/**`, (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
     await page.routeWebSocket((url) => url.pathname.startsWith("/v1/") && (url.hostname.endsWith(".test") || Object.values(this.options.baseUrls ?? {}).some((base) => new URL(base).host === url.host)), (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
@@ -501,10 +542,11 @@ export class HubDouble {
 
   private fleetStatus(fleet: FleetWorld): Record<string, unknown> {
     return {
+      supervisor_phase: fleet.supervisor_phase ?? null,
       agents: fleet.agents,
       tasks_in_progress: fleet.tasks.filter((task) => task.status !== "open"),
       tasks_ready: fleet.tasks.filter((task) => task.status === "open"),
-      epics: fleet.epics.map((epic) => ({ ...epic, focused: epic.id === fleet.focused_epic })),
+      epics: fleet.epics.map((epic) => ({ ...epic, status: epic.status ?? "open", focused: epic.id === fleet.focused_epic })),
       focused_epic: fleet.focused_epic,
     };
   }
@@ -531,6 +573,27 @@ export class HubDouble {
     if (!(path.startsWith("/") || path.startsWith("~/"))) return answer(400, { error: "invalid_write_grant", detail: `write root \`${path}\` must be an absolute path (or start with ~/)` });
     const resolved = path.startsWith("~/") ? `/home/operator/${path.slice(2)}` : path;
     return answer(200, { grant: { task, path: resolved, modes: String(body.mode ?? "create+edit").split("+"), reason: body.reason, granted_by: "commander-device:journey-device" } });
+  }
+
+  /**
+   * As the hub's secrets route answers (cas-1996): factory:manage only, one
+   * answer per request, the path of a mode-600 file, never the value.
+   */
+  private async answerSecret(route: Route, machineId: string, session: string, notificationId: number): Promise<void> {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    const answer = async (status: number, json: Record<string, unknown>) => {
+      this.secrets.push({ machine: machineId, session, notification_id: notificationId, body, status });
+      this.observed();
+      await route.fulfill({ status, json });
+    };
+    if (!this.scopesFor(machineId).includes("factory-manage")) return answer(403, { error: "scope_denied", required_scope: "factory:manage" });
+    const request = this.live.get(session)?.replies.find((reply) => reply.notification_id === notificationId && (reply as { kind?: string }).kind === "secret");
+    if (!request || this.secrets.some((call) => call.notification_id === notificationId && call.status === 200)) {
+      return answer(409, { error: "secret_not_open", detail: "This secret request is not waiting in this session. It may already be answered." });
+    }
+    const name = String((request as { summary?: string }).summary ?? "").trim();
+    if (body.decline === true) return answer(200, { name, declined: true });
+    return answer(200, { name, path: `/home/operator/.cas/private/creds/cassy/${name}`, saved: true });
   }
 
   /** The brief's operations endpoint: scope, op_id dedupe, `expected` preconditions (409 stale), effects, FleetChanged. */
@@ -956,9 +1019,9 @@ export class HubDouble {
     if (path === "/v1/machine") {
       this.machineProbes.set(machineId, (this.machineProbes.get(machineId) ?? 0) + 1);
       this.observed();
-      const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
+      const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.commands?.length ? ["supervisor_commands"] : []), ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
-      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
+      return route.fulfill({ json: { schema_version: 1, version: this.options.versions?.[machineId] ?? "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
     if (path === "/v1/auth/scopes" && method === "POST") {
       const add = (route.request().postDataJSON() as { add?: string[] }).add;
@@ -974,6 +1037,15 @@ export class HubDouble {
     }
     if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);
     // cas-55a4: End session, as hub/server.rs `end_session` answers it.
+    const dismissing = /^\/v1\/sessions\/([^/]+)\/(dismiss|restore)$/.exec(path);
+    if (dismissing && method === "POST") {
+      if (!this.scopesFor(machineId).includes("session-read")) return route.fulfill({ status: 403 });
+      const session = this.sessionsFor(machineId).find(row => row.name === decodeURIComponent(dismissing[1]!));
+      if (!session) return route.fulfill({ status: 404 });
+      if (!session.ended || session.started_at !== route.request().postDataJSON().started_at) return route.fulfill({ status: 409 });
+      session.dismissed = dismissing[2] === "dismiss";
+      return route.fulfill({ status: 204 });
+    }
     const ending = /^\/v1\/sessions\/([^/]+)$/.exec(path);
     if (ending && method === "DELETE") {
       const session = decodeURIComponent(ending[1]!);
@@ -996,7 +1068,11 @@ export class HubDouble {
       this.observed();
       return;
     }
-    if (path === "/v1/launch/profiles") return route.fulfill({ json: this.options.launch?.[machineId]?.profiles ?? {} });
+    if (path === "/v1/launch/profiles") {
+      const world = this.options.launch?.[machineId];
+      const target = JSON.parse(url.searchParams.get("target") ?? "null") as { id?: string; path?: string } | null;
+      return route.fulfill({ json: world?.targetProfiles?.[target?.id ?? target?.path ?? ""] ?? world?.profiles ?? {} });
+    }
     if (path === "/v1/projects") {
       const world = this.options.launch?.[machineId];
       return route.fulfill({ json: { projects: world?.projects ?? [], browse_roots: world?.browse_roots ?? [] } });
@@ -1021,15 +1097,38 @@ export class HubDouble {
       });
     }
     if (path === "/v1/auth/websocket-ticket") return route.fulfill({ json: { ticket: "journey-ticket" } });
-    // cassy#910: a signed view URL for an artifact the session published. An
-    // id starting `art-local` was never uploaded to Cloud.
-    const previewTicket = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/ticket$/.exec(path);
+    // Match real hub eligibility: a bounded media ref published in this thread,
+    // or this session's own stored composer upload. Unknown ids never get tickets.
+    const previewTicket = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/ticket$/.exec(path);
     if (previewTicket && method === "POST") {
-      const id = decodeURIComponent(previewTicket[1]!);
+      const session = decodeURIComponent(previewTicket[1]!);
+      const id = decodeURIComponent(previewTicket[2]!);
       this.previewTicketRequests.push(id);
-      if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud" } });
+      if (!this.scopesFor(machineId).includes("session-read")) return route.fulfill({ status: 403 });
+      const upload = this.composerUploads.get(`${machineId}/${session}/${id}`);
+      const replies = [...(this.live.get(session)?.replies ?? []),
+        ...(this.options.history?.[session] ?? []).flatMap(page => page.replies)];
+      const published = replies.flatMap(reply => (reply.attachments ?? []) as Array<{ artifact_id: string; mime: string; size_bytes: number }>)
+        .find(ref => ref.artifact_id === id && !id.startsWith("art-local"));
+      const mime = upload?.mime ?? published?.mime ?? "";
+      const size = upload?.body.length ?? published?.size_bytes ?? 0;
+      if (!this.sessionsFor(machineId).some(row => row.name === session)
+          || !/^(image|video|audio)\/[a-zA-Z0-9.+-]+$|^application\/pdf$/.test(mime)
+          || size <= 0 || size > 25 * 1024 * 1024) return route.fulfill({ status: 404 });
       const count = this.previewTicketRequests.filter((value) => value === id).length;
-      return route.fulfill({ json: { ticket: `fixture-${id}-${count}`, expires_at: this.stamp(60_000) } });
+      const ticket = `fixture-${id}-${count}`;
+      this.mediaTickets.set(ticket, { machine: machineId, session, id });
+      return route.fulfill({ json: { ticket, expires_at: this.stamp(60_000) } });
+    }
+    const mediaContent = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/content$/.exec(path);
+    if (mediaContent && method === "GET") {
+      const session = decodeURIComponent(mediaContent[1]!);
+      const id = decodeURIComponent(mediaContent[2]!);
+      const ticket = this.mediaTickets.get(url.searchParams.get("t") ?? "");
+      if (!ticket || ticket.machine !== machineId || ticket.session !== session || ticket.id !== id) return route.fulfill({ status: 401 });
+      const upload = this.composerUploads.get(`${machineId}/${session}/${id}`);
+      if (!upload) return route.fulfill({ status: 404 });
+      return route.fulfill({ contentType: upload.mime, body: upload.body, headers: { "cache-control": "private, no-store" } });
     }
     const artifactView = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/url$/.exec(path);
     if (artifactView) {
@@ -1089,6 +1188,8 @@ export class HubDouble {
     }
     if (path.endsWith("/operations") && method === "POST") return this.operation(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
     if (path.endsWith("/write-grants") && method === "POST") return this.writeGrant(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
+    const secretRoute = /^\/v1\/sessions\/([^/]+)\/secrets\/(\d+)$/.exec(path);
+    if (secretRoute && method === "POST") return this.answerSecret(route, machineId, decodeURIComponent(secretRoute[1]!), Number(secretRoute[2]));
     return route.fulfill({ json: {} });
   }
 
@@ -1184,7 +1285,11 @@ export class HubDouble {
     const relay = this.options.relay;
     if (!relay) return route.fulfill({ status: 503, json: { error: "relay not configured for this journey" } });
     const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
-    const expiresAt = this.stamp(600_000);
+    // A request keeps the deadline it was created with while it is polled; only
+    // a new request gets a fresh one. A deadline moving on every poll reads as
+    // a new pairing step to the page and resets its view (cas-fa56).
+    if (url.pathname.endsWith("/requests")) this.relayExpiresAt = this.stamp(600_000);
+    const expiresAt = this.relayExpiresAt ?? this.stamp(600_000);
     if (url.pathname.endsWith("/requests")) {
       this.requestedScopes = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({
@@ -1263,7 +1368,7 @@ export class HubDouble {
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
         protocol_version: 3,
-        capabilities: ["conversation_history", "paged_scrollback", ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
+        capabilities: ["conversation_history", "paged_scrollback", ...(this.options.commands?.includes(session) ? ["supervisor_commands"] : []), ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
         // cas-f285: the pane's rows are paged, not replayed as bytes.
         pane_bootstrap: [{ pane_id: "supervisor", epoch: PANE_EPOCH, cols: 100, rows: 28, scrollback_start_row: 0, scrollback_end_row: PANE_ROWS.length }],
       },
@@ -1286,6 +1391,7 @@ export class HubDouble {
     const subscribed = new Set<string>();
     const channel = (session: string): WebSocketRoute => ({
       send: (text: string) => { if (!this.stalledSockets.has(ws)) ws.send(JSON.stringify({ channel: `pty:${session}`, message: JSON.parse(text) })); },
+      close: () => { subscribed.delete(session); ws.send(JSON.stringify({ channel: `pty:${session}`, closed: true })); },
     }) as unknown as WebSocketRoute;
     ws.onMessage((data) => {
       if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }
@@ -1294,7 +1400,9 @@ export class HubDouble {
       if (frame.channel === "health" && typeof frame.ping === "number") {
         this.pongs.set(machineId, (this.pongs.get(machineId) ?? 0) + 1);
         this.observed();
-        ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        const reply = () => ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        if (this.healthPongDelayMs > 0) this.delay(reply, this.healthPongDelayMs);
+        else reply();
         return;
       }
       if (frame.channel === "events") return;

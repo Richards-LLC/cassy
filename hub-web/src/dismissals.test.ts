@@ -221,6 +221,14 @@ describe("swipe to dismiss", () => {
     chip.dispatchEvent(pointer("pointerup", 150));
     chip.click();
     expect(clicked).not.toHaveBeenCalled();
+    // A swipe may produce no compatibility click (including a dismissed card
+    // restored from the unsent chip). Its suppression must not eat the next
+    // deliberate press on Edit, even before the fallback timer expires.
+    swipe(element, 50);
+    chip.dispatchEvent(pointer("pointerdown", 100, 0, "mouse"));
+    chip.dispatchEvent(pointer("pointerup", 100, 0, "mouse"));
+    chip.click();
+    expect(clicked).toHaveBeenCalledTimes(1);
   });
 });
 

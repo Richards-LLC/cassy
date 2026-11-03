@@ -37,7 +37,7 @@ for (const cell of cells) {
 
       await journey.stage("Choose cas-src and read its machine", async () => {
         await journey.open();
-        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
         if (cell.width === 390) await row.tap(); else await row.click();
         await expect(page.locator(".conversation-identity h1")).toMatchAriaSnapshot('- heading "cas-src" [level=1]');
         await expect(page.locator(".conversation-identity .host-machine")).toBeVisible();

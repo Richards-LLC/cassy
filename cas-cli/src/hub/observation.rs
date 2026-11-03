@@ -524,7 +524,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn diagnostic_identity_refuses_a_symlink_without_reenrolling() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::for_home(home.path());
         let store = MachineIdentityStore::new(paths.root());
         let identity = store.load_or_create().unwrap();
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn healthy_hub_receipt_never_promises_public_reachability_or_rebooted_jobs() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::for_home(home.path());
         let identity = MachineIdentityStore::new(paths.root())
             .load_or_create()

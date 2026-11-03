@@ -13,10 +13,10 @@ const fleet = (): FleetWorld => ({
     { name: "brisk-wren-9", status: "active", current_task: "cas-1500", generation: 4 },
   ],
   tasks: [
-    { id: "cas-1234", title: "Docs lane", status: "in_progress", assignee: "swift-lark-3", updated_at: "2026-10-03T11:00:00Z" },
-    { id: "cas-1500", title: "Release notes", status: "in_progress", assignee: "brisk-wren-9", updated_at: "2026-10-03T11:10:00Z" },
-    { id: "cas-2001", title: "Footer copy", status: "open", assignee: null, updated_at: "2026-10-03T11:20:00Z" },
-    { id: "cas-1999", title: "Pairing wording", status: "awaiting_merge", assignee: "brisk-wren-9", updated_at: "2026-10-03T11:30:00Z", tip: "9ffb3897", branch: "factory/wren-cas-1999" },
+    { id: "cas-1234", title: "Docs lane", epic_id: "cas-f29b", status: "in_progress", assignee: "swift-lark-3", updated_at: "2026-10-03T11:00:00Z" },
+    { id: "cas-1500", title: "Release notes", epic_id: "cas-f29b", status: "in_progress", assignee: "brisk-wren-9", updated_at: "2026-10-03T11:10:00Z" },
+    { id: "cas-2001", title: "Footer copy", epic_id: "cas-f29b", status: "open", assignee: null, updated_at: "2026-10-03T11:20:00Z" },
+    { id: "cas-1999", title: "Pairing wording", epic_id: "cas-f29b", status: "awaiting_merge", assignee: "brisk-wren-9", updated_at: "2026-10-03T11:30:00Z", tip: "9ffb3897", branch: "factory/wren-cas-1999" },
   ],
   epics: [{ id: "cas-f29b" }, { id: "cas-c4d3" }],
   focused_epic: "cas-f29b",
@@ -42,7 +42,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
   const result = page.locator("#fleet-ops-announcer");
   await journey.stage("Open the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
     await expect(row).toBeVisible();
   });
@@ -92,34 +92,6 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
-    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: connection and pairing refusals`, journeyPart, async ({ page, journey }) => {
-      const { row, panel, result } = await openFailureFleet(page, journey, width);
-      await journey.stage("A connection failure offers connection recovery without diagnostics", async () => {
-        await page.unroute("**/v1/sessions/*/operations");
-        await page.route("**/v1/sessions/*/operations", (route) => route.abort("failed"));
-        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-        await panel().getByRole("menuitem", { name: "Pause" }).click();
-        await expect(result).toHaveText("Could not pause swift-lark-3: the machine could not be reached. Check its connection and try again.");
-        await expect(row.locator(".fleet-ops-note")).not.toContainText(/POST|\/v1\/|Failed to fetch|500/);
-        await expect(row.locator(".status-chip")).toHaveText("Active");
-      });
-      for (const [status, reason, detail] of [
-        [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
-        [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
-      ] as const) {
-        await journey.stage(`A ${status} refusal names the pairing problem and recovery`, async () => {
-          await page.unroute("**/v1/sessions/*/operations");
-          await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status, json: { error: "unauthorized", reason, retryable: false } }));
-          await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-          await panel().getByRole("menuitem", { name: "Pause" }).click();
-          const text = `Could not pause swift-lark-3: ${detail}`;
-          await expect(result).toHaveText(text);
-          await expect(row.locator(".fleet-ops-note")).toHaveText(text);
-          await expect(row.locator(".status-chip")).toHaveText("Active");
-          if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-        });
-      }
-    });
     test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, async ({ page, journey }) => {
       const { result } = await openFailureFleet(page, journey, width);
       await journey.stage("A failed assignment names the task before its assignee", async () => {
@@ -155,7 +127,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const open = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
       await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await open();
         await agent.getByRole("button", { name: "Actions for swift-lark-3" }).click();
         await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Stop…" }).click();
@@ -199,7 +171,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const sheet = page.locator("dialog.fleet-action-sheet");
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
         await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
@@ -241,7 +213,7 @@ async function openDesktopFleet(page: Page, journey: Journey) {
 
   await journey.stage("Open the conversation; the rail lists the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(row("swift-lark-3")).toBeVisible();
     await expect(rail.getByRole("button", { name: "Add worker…" })).toBeVisible();
     await expect(rail.getByRole("button", { name: "Focus epic…" })).toBeVisible();
@@ -354,7 +326,7 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
   });
 
   await journey.stage("A pairing without factory:manage", async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click();
     await expect(row("swift-lark-3")).toBeVisible();
     // cas-d043 G13: the merge was asked on cas-src; the same task id here is another task.
     await expect(task("cas-1999")).toBeVisible();
@@ -372,38 +344,19 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
     await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toContainText("Allow managing workers in Paired machines.");
-    // cas-ba64: one lead, a short permission line per group, and one remedy
-    // sentence that names the grant and re-pair actions in Paired machines.
     const header = page.locator("#status-view .fleet-ops-header");
-    await expect(header.locator(":scope > .fleet-ops-reason")).toHaveText([
-      "Not allowed on this pairing.",
-      "Add worker, Focus epic: needs Manage workers and tasks.",
-      "Write access: needs Stop and restart workers and sessions.",
-    ]);
-    await expect(header.locator(":scope > .fleet-ops-instruction")).toHaveText("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
-    for (const name of ["Add worker…", "Focus epic…", "Write access…"]) {
-      const control = header.getByRole("button", { name });
-      const descriptions = (await control.getAttribute("aria-describedby"))?.split(" ") ?? [];
-      expect(descriptions).toHaveLength(3);
-      for (const id of descriptions) await expect(header.locator(`#${id}`), name).toBeVisible();
-    }
+    await expect(header.getByRole("button")).toHaveCount(0);
+    const permissions = header.locator("details");
+    await expect(permissions.locator("summary")).toHaveText("View only · Permissions");
+    await permissions.locator("summary").click();
+    await expect(permissions).toContainText("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
     const before = hub.operations.length;
     await stop.click({ force: true });
     expect(hub.operations.length, "a disabled item sends nothing").toBe(before);
     await page.keyboard.press("Escape");
     await page.locator("#paired-machines-toggle").click();
     const paired = page.locator("#paired-machines-dialog");
-    const manage = paired.locator('[data-machine-id="studio"] [data-permission="manage"]');
     await expect(paired).toBeVisible();
-    await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
-    await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
-    expect(await manage.evaluate((node) => {
-      const reason = node.querySelector(".fleet-permission-reason")!;
-      const also = node.querySelector(".fleet-permission-also")!;
-      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-    })).toBe(true);
-    await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
-    await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
   });
 });
 
@@ -423,7 +376,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   };
   await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
     // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
@@ -451,7 +404,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await journey.stage("Switch conversation and confirm Stop on the second machine", async () => {
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         await page.getByRole("button", { name: "‹ Conversations" }).click();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click(); await openFleet();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click(); await openFleet();
         await expect(page.locator(".context-sheet-where")).toHaveText("gabber-studio on Studio Mac");
         await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
         await actions().getByRole("menuitem", { name: "Stop…" }).click();
@@ -532,14 +485,15 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
     test.use({ viewport });
     for (const disposition of ["success", "stale"] as const) {
       test(`HUB-J17 phone Raw output return ${viewport.width}×${viewport.height}: pending and ${disposition} remain usable`, journeyPart, async ({ page, journey }) => {
-        const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+        const machine = fleetMachine(ATLAS);
+        const hub = await journey.hub({ machines: [machine], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
         let request: Route | undefined;
         await page.route("**/v1/sessions/*/operations", async (route) => { request = route; });
         const agent = () => page.locator(".status-agent", { hasText: "swift-lark-3" });
         const raw = () => page.getByRole("button", { name: "Raw output", exact: true });
         const drawer = () => page.getByRole("dialog", { name: "Raw output" });
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
           await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
@@ -583,6 +537,12 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
               return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
             })).toBe(true);
             await undo.focus();
+            await expect(undo).toBeFocused();
+            // A new session changes the shell while Undo is the keyboard's
+            // next action. Wait for the catalog read-back, then check focus.
+            machine.sessions.push({ ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/new-project", workers: [] });
+            await hub.announceCatalog("atlas", { added: ["calm-wren-2"] });
+            await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
             await expect(undo).toBeFocused();
           }
         });

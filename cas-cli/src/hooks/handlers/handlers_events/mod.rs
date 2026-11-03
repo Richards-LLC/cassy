@@ -19,8 +19,10 @@ pub(crate) use attribution::{
     compute_content_hash, extract_commit_hash, extract_commit_message, generate_file_change_id,
     is_git_commit_command,
 };
+#[cfg(test)]
+pub use codemap::check_codemap_freshness;
 pub use codemap::{
-    CodemapStaleness, check_codemap_freshness, codemap_stop_reminder,
+    CodemapStaleness, codemap_stop_reminder,
     detect_codemap_structural_changes,
 };
 pub use message_display::handle_message_display;

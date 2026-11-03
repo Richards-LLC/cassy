@@ -290,7 +290,7 @@ impl KnowledgeEmbedder {
         // `ureq` keeps a separate 30-second connect timeout unless it is
         // overridden explicitly.  The request-level timeout alone therefore
         // does not bound DNS/connect stalls (the documented exception to the
-        // overall deadline), which made ambient recall report every semantic
+        // overall deadline), which made callers report every semantic
         // request as a timeout even when the endpoint itself was healthy.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(self.timeout)

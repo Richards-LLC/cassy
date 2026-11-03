@@ -95,11 +95,7 @@ pub(super) async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
         "exercise Teams delivery, never its missing-tree PTY fallback"
     );
     daemon.teams = Some(teams);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    for pane in daemon.app.mux.panes_mut() {
-        pane.drain_output();
-    }
-    let bytes = daemon.app.mux.pane_bytes_received(&name).unwrap();
+    let bytes = super::provisioning_tests::await_ready_fixture_pane(&mut daemon, &name).await;
     assert!(bytes > 0);
     daemon.last_pane_output_bytes.insert(name.clone(), bytes);
     daemon
@@ -163,13 +159,14 @@ fn import(
 async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = peer_fixture().await;
-    let imported = import(
-        &daemon,
-        vec![
-            peer_message("pm-reply-1", true),
-            peer_message("pm-reply-2", true),
-        ],
-    );
+    let replies = [None, Some("answer")].into_iter().enumerate().map(|(i, kind)| {
+        let mut reply = peer_message(&format!("pm-reply-{i}"), true);
+        if let Some(kind) = kind {
+            reply.body = crate::cloud::peer_mailbox::attach_message_intent(&reply.body, Some(kind), false).unwrap();
+        }
+        reply
+    }).collect();
+    let imported = import(&daemon, replies);
     assert_eq!(imported.delivered, 2, "{imported:?}");
     age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();
@@ -388,7 +385,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
     ] {
         let mut message = peer_message("pm-policy", reply);
         message.body =
-            crate::cloud::peer_mailbox::attach_message_intent(&message.body, Some(kind), false);
+            crate::cloud::peer_mailbox::attach_message_intent(&message.body, Some(kind), false).unwrap();
         assert_eq!(
             decide(&WakeSender::Daemon, &render_prompt(&message)).allowed,
             allowed,
@@ -421,17 +418,29 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         );
         let intro = queue.peek_for_targets(&[harness], None, 10).unwrap();
         assert_eq!(intro.len(), 1, "{harness} intro");
-        assert!(
-            intro[0].prompt.contains(peer_policy),
-            "{harness} queued intro omits peer wake policy"
-        );
+        if cli == cas_mux::SupervisorCli::Codex {
+            // Codex receives this policy in its resident developer contract,
+            // checked above; its visible launch trigger must not duplicate it.
+            assert!(!intro[0].prompt.contains(peer_policy));
+        } else {
+            assert!(
+                intro[0].prompt.contains(peer_policy),
+                "{harness} queued intro omits peer wake policy"
+            );
+        }
     }
+    let skill = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/builtins/skills/cas-supervisor.md"
+    ));
+    // pin: the installed skill routes readers to the policy moved out for the SessionStart budget.
+    assert!(skill.contains("[message delivery](references/reference.md#message-delivery-and-wake-authority)"));
     for (name, surface) in [
         (
-            "cas-supervisor",
+            "cas-supervisor reference",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/src/builtins/skills/cas-supervisor.md"
+                "/src/builtins/skills/cas-supervisor/references/reference.md"
             )),
         ),
         (

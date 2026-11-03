@@ -17,6 +17,17 @@ async function machine(scopes: StoredMachine["scopes"]): Promise<StoredMachine> 
 }
 
 describe("a refused hub request says what the hub said (cas-d382, fleet-operations brief)", () => {
+  it("requests launch recommendations for the selected opaque target, preserving the machine-wide request", async () => {
+    const urls: URL[] = [];
+    vi.stubGlobal("fetch", async (input: URL | string) => { urls.push(new URL(input)); return new Response("{}"); });
+    const connection = new HubConnectionSupervisor(await machine(["machine-read"]), {} as HubCallbacks);
+    await connection.launchProfiles();
+    const target = { kind: "browse" as const, root_id: "root-code", path: "clients/a & b" };
+    await connection.launchProfiles(undefined, target);
+    expect(urls[0]!.pathname + urls[0]!.search).toBe("/v1/launch/profiles");
+    expect(JSON.parse(urls[1]!.searchParams.get("target")!)).toEqual(target);
+  });
+
   it("surfaces the {error, detail} body instead of only the status", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "stale", detail: "swift-lark-3 already restarted" }), { status: 409 }));
     const connection = new HubConnectionSupervisor(await machine(["session-read"]), {} as HubCallbacks);

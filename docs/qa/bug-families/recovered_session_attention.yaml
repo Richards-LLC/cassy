@@ -1,0 +1,6 @@
+title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
+found: '2026-10-27'
+fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
+tasks: [cas-d53c, cas-9e46]
+invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
+journeys: [HUB-J11]

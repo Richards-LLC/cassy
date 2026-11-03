@@ -40,7 +40,7 @@ pub struct ServeArgs {
     /// Reads from the `CAS_SERVE_TOKEN` env var if not passed on argv. Prefer
     /// the env var: passing the token on argv exposes it via `/proc/<pid>/cmdline`,
     /// `systemctl status`, and `ps -ef`.
-    #[arg(long, env = "CAS_SERVE_TOKEN")]
+    #[arg(long, env = "CAS_SERVE_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 
     /// Disable authorization (not recommended; still binds to localhost by default)

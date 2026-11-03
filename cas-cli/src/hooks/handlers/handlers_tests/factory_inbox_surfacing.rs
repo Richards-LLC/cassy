@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;
 use crate::test_support::TestEnvGuard;
-use crate::types::{Entry, EntryType, Task, TaskStatus};
+use crate::types::{EntryType, Task, TaskStatus};
 
 const SESSION: &str = "cas-src-happy-jay-91";
 const WORKER: &str = "ready-cheetah-71";
@@ -390,54 +390,6 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
     assert!(history[0].processed_at.is_some());
 }
 
-/// cas-0337: this is the actual factory supervisor turn path, not a direct
-/// retriever unit seam. A long active-task title must not hide a same-day
-/// Learning whose vocabulary is present in the submitted turn.
-#[test]
-fn supervisor_turn_surfaces_matching_same_day_learnings() {
-    let mut env = TestEnvGuard::new();
-    supervisor_env(&mut env);
-    let project = TempDir::new().unwrap();
-    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    let entries = crate::store::open_store_local(&cas_root).unwrap();
-    let mut stale_refs = Entry::new(
-        "2026-08-14-5".into(),
-        "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into(),
-    );
-    stale_refs.entry_type = EntryType::Learning;
-    stale_refs.importance = 0.85;
-    entries.add(&stale_refs).unwrap();
-    let mut hermetic_ci = Entry::new(
-        "2026-08-14-3".into(),
-        "Local green is insufficient merge evidence: a populated developer HOME masks inherited git identity and CAS_AGENT_NAME failures that clean CI exposes".into(),
-    );
-    hermetic_ci.entry_type = EntryType::Learning;
-    hermetic_ci.importance = 0.90;
-    entries.add(&hermetic_ci).unwrap();
-
-    let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
-    let mut task = Task::new(
-        "cas-ambient".into(),
-        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".into(),
-    );
-    task.status = TaskStatus::InProgress;
-    tasks.add(&task).unwrap();
-
-    let mut stale_input = input("supervisor");
-    stale_input.cwd = project.path().to_string_lossy().into_owned();
-    stale_input.user_prompt =
-        Some("Investigate epic_status before trusting stale refs on main".into());
-    let stale_context =
-        context_of(&handle_user_prompt_submit(&stale_input, Some(&cas_root)).unwrap());
-    assert!(stale_context.contains("2026-08-14-5"), "{stale_context}");
-
-    let mut ci_input = stale_input;
-    ci_input.user_prompt =
-        Some("Local green diverged from clean CI; audit inherited HOME, git identity, and CAS_AGENT_NAME".into());
-    let ci_context = context_of(&handle_user_prompt_submit(&ci_input, Some(&cas_root)).unwrap());
-    assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
-}
-
 /// cas-b657 (GH #375): the real UserPromptSubmit handler must preserve useful
 /// operator context in a factory worker session while rejecting every known
 /// machine origin. The test parses the actual hook wire shape and delivers it
@@ -649,23 +601,22 @@ fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
 }
 
 #[test]
-fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
+fn post_tool_second_prompt_recovers_mail_and_skips_repeated_tools() {
     let mut env = TestEnvGuard::new();
     supervisor_env(&mut env);
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    let entries = crate::store::open_store_local(&cas_root).unwrap();
-    let mut memory = Entry::new("recall-hook-recovery".into(), "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into());
-    memory.entry_type = EntryType::Learning;
-    memory.importance = 0.95;
-    entries.add(&memory).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+    queue
+        .enqueue_with_session("peer", "supervisor", "mail-hook-recovery", SESSION)
+        .unwrap();
     let transcript = project.path().join("session.jsonl");
     let mut hook = input("supervisor");
     hook.cwd = project.path().to_string_lossy().into_owned();
     hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
     hook.prompt_id = Some("first".into());
     crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
-    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate epic_status before trusting stale refs on main\"}}}}\n", hook.session_id)).unwrap();
+    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate stale refs on main\"}}}}\n", hook.session_id)).unwrap();
     hook.hook_event_name = "PostToolUse".into();
     hook.tool_name = Some("Read".into());
     let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
@@ -673,10 +624,10 @@ fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
         additional_context: Some(additional_context),
     }) = output.hook_specific_output
     else {
-        panic!("missing recovered recall");
+        panic!("missing recovered mail");
     };
     assert!(
-        additional_context.contains("recall-hook-recovery"),
+        additional_context.contains("mail-hook-recovery"),
         "{additional_context}"
     );
     assert_eq!(
@@ -1732,11 +1683,11 @@ fn a_tool_call_does_not_replay_a_body_being_typed_into_the_pane_cas_a1ed() {
 
 /// cas-6ccb (GH #1215 §3.4): `inbox_poll` marks rows seen before its response
 /// is read, so a row polled mid-turn and not acted on was lost. A polled row
-/// the agent never acknowledged is shown once more at its next turn, labelled
-/// as such; a row it acknowledged with message_ack is not, and nothing is
+/// the agent never acknowledged gets a reference at its next turn;
+/// a row it acknowledged with message_ack is not, and nothing is
 /// repeated inside the polling turn or after the one repeat.
 #[test]
-fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
+fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeated() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let (_temp, cas_root) = teams_member_root();
@@ -1745,25 +1696,38 @@ fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
 
     let first_turn = worker.start_turn("working through cas-x");
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let kept = "Rebase onto v43, then re-run the named tests.";
+    let kept = "Rebase onto v43, then re-run the named tests.\n".repeat(60);
     let acked = "FYI: lane CI is green.";
-    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, &kept, SESSION).unwrap();
     let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
     // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
     let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
     assert_eq!(polled.len(), 2);
     store.ack(acked_id).unwrap();
     let same_turn = worker.tool_call();
-    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+    assert!(!same_turn.contains(kept.trim()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let next_turn = worker.take_turn("continuing my work");
-    assert_eq!(next_turn.matches(kept).count(), 1, "{next_turn}");
+    println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
+    // Durable diagnostics for replaying this synthetic fixture on the base
+    // and treatment with the same capped test command.
+    let report_root = crate::test_paths::workspace_root();
+    if report_root.join("Cargo.toml").is_file() {
+        let report_dir = report_root.join("target");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(report_dir.join("afe0-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "input_body_bytes": kept.len(), "repeat_hook_bytes": next_turn.len(), "rendered": next_turn
+        })).unwrap()).unwrap();
+    } else {
+        eprintln!("SKIP byte replay artifact export: runtime checkout is absent");
+    }
+    assert_eq!(next_turn.matches(kept.trim()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(
         store.recipient_receipt(kept_id, WORKER).unwrap(),
-        Some(cas_store::SurfacingSource::HookSurfaced)
+        Some(cas_store::SurfacingSource::InboxPoll)
     );
     assert_eq!(
         store.recipient_receipt(acked_id, WORKER).unwrap(),
@@ -1771,7 +1735,7 @@ fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
     );
 
     let after = worker.take_turn("still working");
-    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+    assert!(!after.contains(kept.trim()) && !after.contains("[not acknowledged]"), "once: {after}");
 }
 
 /// cas-6ccb: a Claude Teams member's next turn may be a teammate-message
@@ -1798,7 +1762,7 @@ fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
     deliver_to_claude_worker(&store, &mut worker, next_id, next);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let teammate_turn = worker.next_teammate_turn().unwrap();
-    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(kept).count(), 0, "{teammate_turn}");
     assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
     assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
     assert!(!worker.take_turn("continuing my work").contains(kept));
@@ -1826,7 +1790,7 @@ fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
-    assert_eq!(turn.matches(kept).count(), 1, "{turn}");
+    assert_eq!(turn.matches(kept).count(), 0, "{turn}");
     assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
     assert!(turn.contains("one-time repeat"), "{turn}");
     assert!(!worker.tool_call().contains(kept));
@@ -1861,7 +1825,7 @@ fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
 }
 
 /// cas-6ccb review: a polled row that this turn's pointer also names gets one
-/// note. Shown in full as the repeat, it is not also "[already shown]".
+/// note. Its recovery reference is not also labelled "[already shown]".
 #[test]
 fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
     let mut env = TestEnvGuard::new();
@@ -1881,7 +1845,7 @@ fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let woken = worker.take_turn(&wake);
-    assert_eq!(woken.matches(body).count(), 1, "{woken}");
+    assert_eq!(woken.matches(body).count(), 0, "{woken}");
     assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");
     assert!(!woken.contains(&format!("[already shown] Message #{id}")), "{woken}");
 }
@@ -1971,7 +1935,8 @@ fn cas_bf890_peer_messages_lead_and_fifteen_notices_fold_into_one_digest_row() {
     assert!(local_at < digest_at && cloud_at < digest_at, "{context}");
     // One digest row standing for all fifteen notices; no notice body as a row.
     assert_eq!(context.matches("[digest]").count(), 1, "{context}");
-    assert!(context.contains("15 system notices"), "{context}");
+    // pin: 5092b8d5f includes routine lifecycle and peer-copy updates in this digest.
+    assert!(context.contains("15 inbox updates"), "{context}");
     assert!(!context.contains("was abandoned as undeliverable"), "notice bodies stay out: {context}");
     assert!(!context.contains("--- from delivery-watchdog"), "{context}");
     // Every notice is retired by the digest; none comes back next turn.

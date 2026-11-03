@@ -24,7 +24,7 @@ Step 0. **Binary freshness check.** Before anything else — confirm the running
 
    If they don't match AND `git log --oneline HEAD --not <running-hash> -- cas-cli/src/mcp cas-cli/src/hooks cas-cli/src/cli/factory` returns anything, the binary must be rebuilt — but **do not kill or restart `cas serve` from this active MCP session**. That stdio process is this session's Cassy-tool connection, so restarting it here disconnects the very tools needed to finish setup.
 
-   Stop at step 0 and ask the operator to run `cargo build --release` and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
+   Stop at step 0 and ask the operator to run `cargo build --release` and use the harness's MCP reconnect/restart control to launch the new `cas serve`; that keeps every worker running. A plain supervisor exit stops every worker in the factory; `factory action=restart_supervisor` replaces only the supervisor (see `cas-supervisor/references/worker-recovery.md`, Supervisor restart). Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
 
 ## From `cas-supervisor/references/workflow.md` — resuming an epic
 
@@ -40,14 +40,14 @@ with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
    after lane CI and the lane compile, open the epic PR and let the queue run
    the full workspace suite, doctests, archive mode and macOS Check on the exact
-   merged tree. Do not run a local full suite first. When a queue run fails and
-   needs local reproduction, the opt-in diagnostic is
-   `python3 scripts/assembly-proof.py prove <epic-worktree>`, or a direct suite
-   (add `cargo test -p cas --doc` when the epic touches doctests):
-
-   ```bash
-   cargo nextest run -p cas
-   ```
+   merged tree. The diagnostic before enqueue and after a failed queue run is
+   the [interim queue precheck](../../cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md#interim-queue-precheck):
+   a clean checkout at the SHA, root and hub-web `npm ci`, resolvable Playwright
+   and Chromium, then `cargo nextest run --workspace --no-fail-fast` and
+   `make -C cas-cli test-ci-tiers`. Follow that section's runnable commands;
+   cas-298f replaces them with the hosted precheck. Do not substitute
+   `assembly-proof.py`: its scrubbed environment cannot resolve Playwright or
+   browsers outside `/home` on soundwave. The queue remains the final proof.
 
 Step 5. After the fix lands, re-enqueue the PR. For a local diagnostic run,
    capture the real exit code and record a fresh `ASSEMBLY_PROOF` for it:

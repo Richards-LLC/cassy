@@ -48,6 +48,8 @@ pub enum HookCommand {
     Status,
     /// Handle SessionStart hook event
     SessionStart,
+    /// Record a completed native model switch
+    PostModelSwitch,
     /// Handle SessionEnd hook event
     SessionEnd,
     /// Handle Stop hook event
@@ -98,6 +100,7 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::Cleanup { dry_run } => execute_cleanup(*dry_run, cli),
         HookCommand::Status => execute_status(cli),
         HookCommand::SessionStart => execute_event("SessionStart", cli),
+        HookCommand::PostModelSwitch => execute_event("PostModelSwitch", cli),
         HookCommand::SessionEnd => execute_event("SessionEnd", cli),
         HookCommand::Stop => execute_event("Stop", cli),
         HookCommand::SubagentStart => execute_event("SubagentStart", cli),
@@ -546,6 +549,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 
     let has_session_start = check_hook("SessionStart");
     let has_session_end = check_hook("SessionEnd");
+    let has_post_model_switch = check_hook("PostModelSwitch");
     let has_stop = check_hook("Stop");
     let has_subagent_stop = check_hook("SubagentStop");
     let has_post_tool = check_hook("PostToolUse");
@@ -557,7 +561,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 
     if cli.json {
         println!(
-            r#"{{"configured":{has_hooks},"session_start":{has_session_start},"session_end":{has_session_end},"stop":{has_stop},"subagent_stop":{has_subagent_stop},"post_tool_use":{has_post_tool},"pre_tool_use":{has_pre_tool},"user_prompt_submit":{has_user_prompt},"permission_request":{has_permission_request},"notification":{has_notification},"pre_compact":{has_pre_compact}}}"#
+            r#"{{"configured":{has_hooks},"session_start":{has_session_start},"session_end":{has_session_end},"post_model_switch":{has_post_model_switch},"stop":{has_stop},"subagent_stop":{has_subagent_stop},"post_tool_use":{has_post_tool},"pre_tool_use":{has_pre_tool},"user_prompt_submit":{has_user_prompt},"permission_request":{has_permission_request},"notification":{has_notification},"pre_compact":{has_pre_compact}}}"#
         );
     } else {
         let theme = ActiveTheme::default();
@@ -577,6 +581,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
         KeyValue::new()
             .add("SessionStart", status_str(has_session_start))
             .add("SessionEnd", status_str(has_session_end))
+            .add("PostModelSwitch", status_str(has_post_model_switch))
             .add("Stop", status_str(has_stop))
             .add("SubagentStop", status_str(has_subagent_stop))
             .add("PostToolUse", status_str(has_post_tool))
@@ -588,6 +593,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
             .render(&mut fmt)?;
 
         let all_configured = has_session_start
+            && has_post_model_switch
             && has_session_end
             && has_stop
             && has_subagent_stop
@@ -630,8 +636,15 @@ pub(crate) fn configure_claude_hooks_with_home(
     // Resolve every config dir a session on this machine could launch under:
     // `<home>/.claude` plus the active $CLAUDE_CONFIG_DIR (cas-5b96).
     let home = home_dir.map(Path::to_path_buf).or_else(dirs::home_dir);
-    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-    let config_dirs = known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref());
+    // An injected home is an isolated test seam, never a request to mutate
+    // an ambient profile from the caller's real home.
+    let env_config_dir = home_dir.is_none().then(|| std::env::var("CLAUDE_CONFIG_DIR").ok()).flatten();
+    let mut config_dirs = known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref());
+    if let Some(home) = &home {
+        for account in crate::accounts::discover(crate::accounts::Provider::Claude, home)? {
+            if !config_dirs.contains(&account.path) { config_dirs.push(account.path); }
+        }
+    }
 
     configure_claude_hooks_with_config_dirs(project_root, force, &config_dirs)
 }
@@ -647,6 +660,20 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
     force: bool,
     config_dirs: &[std::path::PathBuf],
 ) -> anyhow::Result<bool> {
+    configure_claude_hooks_with_warnings(project_root, force, config_dirs, |warning| eprintln!("{warning}"))
+}
+
+fn configure_claude_hooks_with_warnings(
+    project_root: &Path,
+    force: bool,
+    config_dirs: &[std::path::PathBuf],
+    mut warning: impl FnMut(String),
+) -> anyhow::Result<bool> {
+    for dir in config_dirs {
+        if let Err(error) = config_gen::migrate_claude_statusline(dir) {
+            warning(format!("Warning: {error:#}\n  Repair this profile settings file, then run `cas hook configure` again."));
+        }
+    }
     configure_claude_hooks_at(project_root, force, config_dirs, project_root)
 }
 

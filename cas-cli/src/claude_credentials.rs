@@ -1,4 +1,4 @@
-//! Claude Code's macOS secure-storage identity, shared by auth and usage probes.
+//! Claude Code's macOS secure-storage identity for metadata probes and deletion.
 
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;

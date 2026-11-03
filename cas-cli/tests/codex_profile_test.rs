@@ -102,8 +102,47 @@ fn list_profiles_shows_detected_accounts_login_state_and_excludes_lock_dirs() {
         .stdout(predicate::str::contains("(active)"))
         .stdout(predicate::str::contains("work"))
         .stdout(predicate::str::contains("not logged in"))
+        .stdout(predicate::str::contains("Full profile names and folders:").not())
         // a `.lock` directory is not an account and must not be selectable
         .stdout(predicate::str::contains("support@example.com").not());
+
+    for alias in [
+        format!("{}@example.com", "long-profile-".repeat(5)),
+        "界".repeat(50),
+        "🚀".repeat(40),
+    ] {
+        let directory = home.path().join(format!(".codex-{alias}"));
+        std::fs::create_dir(&directory).unwrap();
+        let output = cas_cmd(home.path())
+            .env("COLUMNS", "80")
+            .env("CODEX_HOME", &directory)
+            .args(["codex", "--list-profiles"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        for line in output.lines() {
+            let width = ratatui::text::Line::from(line).width();
+            assert!(width <= 80, "profile list overflows 80 cells: {line}");
+        }
+        let header = output.lines().find(|line| line.contains("(active)")).unwrap();
+        assert!(ratatui::text::Line::from(header).width() >= 79, "unused display cells: {header}");
+        assert!(header.contains("(not logged in) (active)"), "{output}");
+        assert!(output.contains("--full"), "truncated identity needs an escape: {output}");
+        for flag in ["--full", "--json"] {
+            cas_cmd(home.path())
+                .env("CODEX_HOME", &directory)
+                .args(["codex", "--list-profiles", flag])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(&alias))
+                .stdout(predicate::str::contains(format!("~/.codex-{alias}")))
+                .stdout(predicate::str::contains("Full profile names and folders:").not());
+        }
+        std::fs::remove_dir(&directory).unwrap();
+    }
 }
 
 /// The headline behavior: `cas codex alt` selects that account and hands off to

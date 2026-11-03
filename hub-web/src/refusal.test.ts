@@ -12,6 +12,8 @@ describe("refusal (F6: plain reasons with a next step)", () => {
     ["semantic message enqueue failed: in_reply_to notification 7 belongs to factory session a, not b", "The question it answered is no longer open.", "Edit it and send it as a new message."],
     ["semantic message enqueue failed: database is locked", "The supervisor's machine couldn't take the message.", "Retry in a moment."],
     ["authentication required", "This device's pairing is no longer accepted.", "Re-pair this device, then retry."],
+    ["forbidden: authorization refused because device pairing was revoked", "This device's pairing is no longer accepted.", "Re-pair this device, then retry."],
+    ["This device was paired without supervisor messages. Pair this device again with message:send to send messages.", "This device was paired without permission to send messages.", "Re-pair this device with Send messages to supervisors, then retry."],
     ["Session daemon stream closed", "The connection to the machine dropped.", "Retry once the session is live again."],
     // cas-a0e2: the hub's retryable upstream code (legacy socket: the code;
     // machine channel: its message) reads as a dropped connection, never as

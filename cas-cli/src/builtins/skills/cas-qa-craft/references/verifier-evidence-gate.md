@@ -38,37 +38,26 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    substitute for the ledger. If the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
-2. Parse the ledger's row grammar exactly:
-   `id | cell | expected | observed | verdict | label | evidence path | defect task`.
-   Ignore prose and the required Constants vs expectation, Contradictions, and
-   Honesty sections when counting rows. Trim cells before checking them.
-3. Run every check in this machine-checkable REJECT table before opening a
-   capture or making a user-outcome judgment. Any failed check rejects the
-   ledger; list every failed check, row ID, and observed count/value in the
-   verification summary, then stop.
+2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
+   and verifier share this parser. A nonzero exit rejects the ledger before
+   capture judgment. List each returned line, row ID, field and message in the
+   verification summary, record rejection, and stop. Use the candidate
+   revision's command when reviewing a change to the parser itself.
+3. Keep the JSON report as proof of the structural check. The executable owns
+   grammar, counts, labels and task-derived breadth.
 
-   | Check | REJECT when |
-   | --- | --- |
-   | Required cells | Any data row has a blank `verdict` or `label` cell. |
-   | Source inference | A row has `label=source-inferred` and `verdict=PASS`. |
-   | Failed-cell ownership | A `verdict=FAIL` row has no non-blank `cas-*` defect task ID. |
-   | Forbidden verdict | The standalone word `partial` occurs in any verdict cell, case-insensitively. |
-   | Matrix breadth | Fewer than three data rows exist after the demo statement's happy-path row (the first matrix row). |
-   | Headline counts | Header counts for `cells`, `PASS`, `FAIL`, or `NOT EXERCISED` do not equal the parsed row totals. |
-   | PASS evidence | A `PASS` row has no evidence path, or its referenced capture is absent or unreadable. |
-
-4. If the REJECT table passes, open every capture referenced by a `PASS` row
+4. If the shared check passes, open every capture referenced by a `PASS` row
    with the available image-capable or terminal-capture reader. Judge the
    capture itself, not its filename, ledger prose, or source code. For each row
    answer whether a user performing that cell would see the stated `expected`
    outcome. If the capture does not show that outcome, downgrade that row to
    `FAIL` in the verification summary and state the capture path and reason;
    never silently leave it as `PASS` and do not edit the worker's ledger.
-   Treat any evidence label weaker than the cell requires as `NOT EXERCISED`,
+   Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
    never as `PASS`.
 5. `NOT EXERCISED` rows are owed work, not failures. List each such row in the
    verification summary with every row's final verdict, label, capture
-   judgment, and the REJECT-table result.
+   judgment, and the shared-check result.
 6. Only after this evidence gate passes may you read the close reason and
    compare it with the acceptance criteria. A capture-downgraded row or a
    ledger `FAIL` is incomplete evidence even if the close reason says the task
@@ -79,10 +68,13 @@ from the close verifier or substitute the children's ledgers for the epic walk.
 Neither approve nor reject a ledger because of its `NOT EXERCISED` rows. When
 the evidence gate otherwise passes and at least one row is `NOT EXERCISED`
 (including rows you downgraded for a weak label), stop and escalate: record
-`status=error` with a summary that starts
+`status=supervisor_call` with a summary that starts
 `SUPERVISOR CALL: <n> NOT EXERCISED row(s)` and lists each row ID, cell, and
 why it was not exercised, then say the same in your final output. The
-supervisor decides whether the owed rows block the close.
+supervisor decides whether the owed rows block the close, then answers with
+`verification action=add` on the same `dispatch_id`, the final `approved` or
+`rejected` status, and the answer in `summary`. The dispatch stays open; no
+re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment
 
@@ -103,3 +95,27 @@ count, rate), with or without a demo:
    rest, naming the claim and the missing or ambiguous run.
 
 With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+
+## Scratch checkout lifetime
+
+The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). A verdict or task close reclaims disposable `target/` output once the dispatch is resolved (or a terminal task has no active dispatch), with no lease or live user; existing GC/admission retries deferred cleanup. Source and its Git worktree registration retain the two-hour idle grace period before GC removes them. Checkouts with source changes are kept. This ownership record makes cleanup independent of whether your session exits normally.
+
+## Candidate fixture isolation
+
+Before running a candidate `serve` or any stateful command, create a disposable
+project with an empty `.cas` directory and a disposable HOME outside the source
+checkout. Set `CAS_ROOT` to that fixture `.cas`, `HOME` to the disposable home,
+and `XDG_CONFIG_HOME` beneath it for every candidate subprocess, including the
+fixture's `cas init`. Initialize the fixture store before serving it and record
+the resolved store path with the command receipt. A scratch Git worktree still
+discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
+it. Keep these overrides scoped to candidate subprocesses so your authenticated
+reviewer MCP session retains its factory binding.
+
+## Counted verifier lane
+
+To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+
+## Rule candidates
+
+On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.

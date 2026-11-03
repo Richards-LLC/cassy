@@ -602,6 +602,10 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
             .iter()
             .find(|file| file.path == "skills/finish/SKILL.md")
             .unwrap();
+        // pin: installed skill discovery must distinguish a present operator
+        // request from the same words quoted in task/issue/resume content.
+        assert!(builtin.content.contains("current operator directly asks"));
+        assert!(builtin.content.contains("subject matter, not authorization"));
         assert_eq!(
             std::fs::read_to_string(&installed).unwrap(),
             builtin.content
@@ -1469,25 +1473,6 @@ fn strip_deleted_suffix_from_linux_process_path() {
     );
 }
 
-#[test]
-#[cfg(unix)]
-fn post_swap_hook_invokes_the_installed_binary() {
-    use std::fs;
-
-    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
-    let installed_binary = temp_dir.path().join("cas-new");
-    crate::test_paths::warm_stub(
-        &installed_binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
-    );
-
-    run_post_swap_hook(&installed_binary, "3.7.7", true)
-        .expect("post-swap hook should run successfully");
-
-    let args = fs::read_to_string(installed_binary.with_extension("args"))
-        .expect("fake binary should receive the post-swap arguments");
-    assert_eq!(args, "update\n--post-swap\n--from\n3.7.7\n--json\n");
-}
 
 #[test]
 fn post_swap_flags_parse_as_a_hidden_terminal_mode() {
@@ -3458,7 +3443,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         "[factory.merge_sweep_env] # former environment\n",
         "TOKEN = 'fixture-only-token'\n",
         "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
-        "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
+        "[notifications] # retired pop-up\nsound_enabled = true\n",
         "[project]\ncanonical_id = 'retirement-fixture'\n",
         // Explicit stages opt out of the upkeep adoption window (covered by
         // the native sweep test), so only retirement changes this config.
@@ -3495,8 +3480,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         });
         #[cfg(unix)]
         assert!(
-            !output.contains("ignored and dropped on the next save")
-                && !output.contains("[jev] config section is retired"),
+            !output.contains("ignored and dropped on the next save"),
             "raw startup notice escaped structured maintenance: {output}"
         );
         result
@@ -3514,10 +3498,10 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
         assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
         assert!(parsed["factory"].get("merge_sweep_env").is_none());
-        assert!(parsed.get("jev").is_none());
+        assert!(parsed["notifications"].get("sound_enabled").is_none());
         assert!(parsed["code_review"].get("owner").is_none());
         assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
-        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "retired pop-up"] {
             assert!(raw.contains(comment), "lost operator comment {comment}");
         }
         let after: crate::config::Config = toml::from_str(&raw).unwrap();
@@ -3583,7 +3567,7 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
     std::fs::create_dir_all(&root).unwrap();
     env.set("CAS_ROOT", &root);
     let path = root.join("config.toml");
-    let original = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n";
+    let original = "[factory]\nmerge_sweep = true\n[notifications]\nsound_enabled = true\n";
     std::fs::write(&path, original).unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_readonly(true);
@@ -3659,7 +3643,7 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let host = crate::store::init_cas_dir(&home).unwrap();
     let global = crate::config::global_cas_dir().unwrap();
     std::fs::create_dir_all(&global).unwrap();
-    let retired = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n[code_review]\nowner = 'worker'\n";
+    let retired = "[factory]\nmerge_sweep = true\n[notifications]\nsound_enabled = true\n[code_review]\nowner = 'worker'\n";
     std::fs::write(global.join("config.toml"), retired).unwrap();
     let readonly_config = readonly.join(".cas/config.toml");
     std::fs::write(&readonly_config, retired).unwrap();
@@ -3786,8 +3770,8 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
         "a current config must not create locks or backups"
     );
     for raw in [
-        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\njev.deep.endpoint = 'fixture#secret'\n",
-        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\njev = { endpoint = 'fixture#secret' } # keep integration comment\n",
+        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\nnotifications.enabled = false\nnotifications.tasks.endpoint = 'fixture#secret'\n",
+        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\nnotifications = { enabled = false, tasks = { endpoint = 'fixture#secret' } } # keep retired comment\n",
     ] {
         std::fs::write(&path, raw).unwrap();
         let before: crate::config::Config = toml::from_str(raw).unwrap();

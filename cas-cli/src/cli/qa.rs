@@ -157,12 +157,25 @@ struct CheckReport<'a> {
 
 #[derive(Subcommand)]
 pub enum QaCommand {
+    /// Validate or scaffold a task evidence ledger
+    Ledger(super::qa_ledger::LedgerArgs),
     /// Build an exact-revision binary for a task's real-build QA evidence
     Candidate(CandidateArgs),
     /// Map a diff to journeys and unowned CODEMAP areas
     Impact(super::qa_impact::ImpactArgs),
+    /// List an epic's warning findings from approved verdicts, by file
+    Polish(super::qa_polish::PolishArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
+    /// Operator-only, time-boxed rapid-response window for one epic
+    RapidResponse(super::qa_rapid_response::RapidResponseArgs),
+    /// Operator-only: accept QA authored by someone who implemented the task
+    AuthorOverride {
+        task: String,
+        /// Why this author's QA is accepted; recorded on the task
+        #[arg(long)]
+        note: String,
+    },
     /// Seed, inspect or validate the journey registry
     #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status", "traffic"])))]
     Journeys {
@@ -191,7 +204,7 @@ pub enum QaCommand {
 }
 
 /// Compare the checkout with the pinned upkeep commit, including a newly
-/// created registry that Git has not tracked yet. Unavailable is not equal.
+/// created registry or family file that Git has not tracked yet. Unavailable is not equal.
 fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> Option<bool> {
     let (_, sha) = upkeep.measured_ref.rsplit_once('@')?;
     let diff = Command::new("git")
@@ -202,6 +215,24 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     match diff.status.code()? {
         1 => Some(true),
         0 => {
+            let families = Path::new(registry).parent()?.join("bug-families");
+            // Include ignored files too: the working registry loader reads them.
+            let untracked = Command::new("git")
+                .args(["--literal-pathspecs", "ls-files", "--others", "-z", "--"])
+                .arg(families)
+                .current_dir(root)
+                .output()
+                .ok()?;
+            if !untracked.status.success() {
+                return None;
+            }
+            if std::str::from_utf8(&untracked.stdout)
+                .ok()?
+                .split('\0')
+                .any(|path| crate::qa_registry::is_registry_input(registry, path))
+            {
+                return Some(true);
+            }
             let committed = Command::new("git")
                 .args(["show", &format!("{sha}:{registry}")])
                 .current_dir(root)
@@ -216,11 +247,32 @@ fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> O
     }
 }
 
+/// cas-26ac: the operator accepts a lineage author's QA for one task.
+fn author_override(task: &str, note: &str, cas_root: Option<&Path>) -> Result<()> {
+    use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
+    if let Some(refusal) = operator_action_refusal(
+        "Overriding the independent QA author rule",
+        "run `cas qa author-override` yourself from your own terminal",
+        &InvocationContext::from_process(),
+    ) {
+        anyhow::bail!(refusal);
+    }
+    let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
+    let store = crate::store::open_task_store(root)?;
+    crate::qa_author_override::record(root, store.as_ref(), task, note, chrono::Utc::now())?;
+    println!("QA author override recorded for {task}; its batch receipt or QA round may now count.");
+    Ok(())
+}
+
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
+        QaCommand::Ledger(args) => super::qa_ledger::execute(args, cli, cas_root),
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
+        QaCommand::Polish(args) => super::qa_polish::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
+        QaCommand::RapidResponse(args) => super::qa_rapid_response::execute(args, cas_root),
+        QaCommand::AuthorOverride { task, note } => author_override(task, note, cas_root),
         QaCommand::Journeys {
             check: _,
             seed,
@@ -568,8 +620,9 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-/// cas-d0e6: a task's canonical candidate directory, from its id alone.
-fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
+/// A task's artifact directory, from its id alone. Relative roots are the main
+/// checkout's, wherever this runs: the daemon's builder checkout gets cleaned.
+pub(crate) fn candidate_task_dir(cas_root: &Path, task: &str) -> Result<PathBuf> {
     ensure!(
         task.starts_with("cas-")
             && task.len() > 4
@@ -578,20 +631,32 @@ fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBu
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
         "invalid task id {task:?}"
     );
-    let cas_root = cas_root.context("No Cassy project; run cas init first")?;
-    let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     let config = crate::config::Config::load(cas_root)?;
     let artifacts =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let artifacts = if artifacts.is_absolute() {
         artifacts
     } else {
-        project.join(artifacts)
+        cas_root.parent().unwrap_or(cas_root).join(artifacts)
     };
-    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
-        .join(task)
-        .join("candidate");
+    Ok(crate::config::project_factory_artifacts_root(cas_root, &artifacts).join(task))
+}
+
+/// cas-d0e6: a task's canonical candidate directory, from its id alone.
+fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
+    let cas_root = cas_root.context("No Cassy project; run cas init first")?;
+    let candidate_dir = candidate_task_dir(cas_root, task)?.join("candidate");
+    let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     Ok((project, candidate_dir))
+}
+
+/// `candidate` points at the newest build's own revision directory. Callers cite
+/// that directory, which a later build for the task leaves alone.
+fn immutable_candidate_dir(candidate_dir: &Path) -> PathBuf {
+    match (std::fs::read_link(candidate_dir), candidate_dir.parent()) {
+        (Ok(target), Some(task_dir)) => task_dir.join(target),
+        _ => candidate_dir.to_path_buf(),
+    }
 }
 
 fn candidate_path_command(task: &str) -> String {
@@ -603,11 +668,11 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         CandidateCommand::Build { task, rev, plan } => (task, rev, plan),
         CandidateCommand::Path { task } => {
             let (_, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
-            let binary = candidate_dir.join("cas");
+            let binary = immutable_candidate_dir(&candidate_dir).join("cas");
             ensure!(
                 binary.is_file(),
-                "no QA candidate built for {task} yet (expected {}); ask the supervisor to run \
-                 `cas qa candidate build --task {task} --rev <sha>`",
+                "no QA candidate built for {task} yet (expected {}); a worker requests one with \
+                 `factory action=candidate_request task_id={task} revision=<sha>`",
                 binary.display()
             );
             println!("{}", binary.display());
@@ -653,7 +718,8 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     }
     ensure!(
         std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("worker"),
-        "candidate builds are supervisor/operator-owned; ask the supervisor for the exact-tip binary"
+        "a worker never builds a candidate in its own process; request it with \
+         `factory action=candidate_request task_id={task} revision=<sha>`"
     );
     let script = project.join("scripts/qa-candidate-build.py");
     ensure!(
@@ -662,6 +728,7 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
          Use an up-to-date Cassy source checkout, then rerun:\n\
            cas qa candidate build --task {task} \\\n    --rev {revision}"
     );
+    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
     let status = Command::new("python3")
         .arg(script)
         .arg("--repo")
@@ -689,8 +756,8 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         receipt.revision == revision,
         "candidate receipt does not match requested revision"
     );
-    receipt.candidate_dir = layout.candidate_dir;
-    receipt.receipt_file = layout.receipt_file;
+    receipt.candidate_dir = immutable_candidate_dir(&layout.candidate_dir);
+    receipt.receipt_file = receipt.candidate_dir.join("RECEIPT.json");
     if cli.json {
         println!("{}", serde_json::to_string(&receipt)?);
     } else {

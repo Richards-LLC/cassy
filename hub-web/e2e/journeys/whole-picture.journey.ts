@@ -3,25 +3,26 @@ import { test, expect, journeyPart, type Journey } from "./journey";
 import { journeyStamp } from "./clock";
 import type { FleetWorld, Machine, WorkEventWire, WorkWorld } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
+import type { WorkTool, WorkLifecycle, WorkReasoning, WorkChangedFiles } from "../../src/work-events";
 
 // cas-ff22 (hub-web/whole-picture.brief.md): Show work puts the supervisor's
 // thinking, tool calls and task events between its replies, collapsed by
 // default, and each worker's timeline is a tap away in Tasks & progress.
 
 const WORKER = "swift-lark-3";
-const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> = {}): WorkEventWire =>
+const event = (id: string, kind: string, label: string, offsetMs: number, extra: Partial<WorkEventWire> & { tool?: WorkTool; lifecycle?: WorkLifecycle; reasoning?: WorkReasoning; changed_files?: WorkChangedFiles } = {}): WorkEventWire =>
   ({ id, kind, session: PELICAN, agent: PELICAN, at: journeyStamp(offsetMs), label, has_detail: kind !== "task", ...extra });
 
 const work = (): WorkWorld => ({
   supervisor: PELICAN,
   events: [
-    event("t:sup:1:0", "thinking", "Checking the lane", -170_000),
+    event("t:sup:1:0", "thinking", "Checking the lane", -170_000, { reasoning: { summary: "Checking **the lane**", source: "codex_summary" } }),
     event("t:sup:2:0", "tool", "Bash: Run the tests", -160_000, { error: true }),
     event("q:7", "task", "cas-42 parked for merge: Ship the stream", -150_000, { agent: WORKER }),
-    event("t:w:1:0", "tool", "Read: src/limits.rs", -140_000, { agent: WORKER }),
+    event("t:w:1:0", "tool", "Read: src/limits.rs", -400, { agent: WORKER }),
   ],
   // Agent text is data: the markup in this detail must read as text.
-  details: { "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
+  details: { "t:sup:1:0": "## Published summary\n\nCheck **the lane** before shipping.\n\n- Keep `src/limits.rs` readable.\n\n<img src=x onerror=alert(1)>", "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
 });
 
 const fleet = (): FleetWorld => ({
@@ -43,9 +44,74 @@ const history = {
 
 async function openConversation(page: Page, journey: Journey): Promise<void> {
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
 }
+
+test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page, journey }) => {
+  const files = ["hub-web/src/work-rows-view.ts", "hub-web/src/very/long/nested/path/that/stays/readable/on/a/phone/source.ts"];
+  const edits = files.map((path, index) => event(`edit-${index}`, "tool", "Edited file", -160_000 + index, {
+    turn: "edit-turn", tool: { name: "Edit", operation: "edit", targets: [path] },
+    lifecycle: { id: `call-${index}`, stage: "end", outcome: "success" },
+    changed_files: { files: files.slice(0, index + 1).map((path, index) => ({ path, operation: "edit", source_event_id: `edit-${index}`, ...(index === 0 ? { line_counts: { added: 12, removed: 4 } } : {}) })), provenance: "successful_tool_calls", complete: false },
+  }));
+  const patch = `--- a/${files[0]}\n+++ b/${files[0]}\n@@ -1 +1 @@\n-old summary\n+compact edit summary`;
+  const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], history, work: { [PELICAN]: { supervisor: PELICAN, events: edits, details: { "edit-0": patch, "edit-1": "Exact edit input and output <b>as text</b>" } } } });
+  const card = page.getByRole("region", { name: "Tool-reported edits" });
+  // A named section without a heading is still a region with an accessible name.
+  await journey.stage("Scan tool-reported edits without opening the tool log", async () => {
+    await openConversation(page, journey);
+    await page.locator("#conversation-show-work").click();
+    await expect(card).toHaveCount(1);
+    await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "false");
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(0);
+    await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
+    const file = card.getByRole("button", { name: `${files[0]} edit 12 lines added, 4 lines removed in the latest successful edit`, exact: true });
+    await expect(card.locator(".changed-file-count-visual")).toHaveText("+12/−4");
+    await expect(card.getByRole("button", { name: `${files[1]} edit`, exact: true })).toBeVisible();
+    await file.focus(); await page.keyboard.press("Enter");
+    await expect(file).toBeFocused();
+    await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    await expect(page.locator(".work-summary")).toHaveAttribute("aria-expanded", "false");
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest").map(frame => (frame.body as { event_id: string }).event_id)).toEqual(["edit-0"]);
+  });
+  await journey.stage("Offline source evidence waits for reconnect without spinning", async () => {
+    hub.hold(PELICAN); hub.drop(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
+    await card.getByRole("button", { name: `${files[1]} edit`, exact: true }).click();
+    await expect(card.locator(".changed-file-detail").last()).toContainText("Machine offline");
+    await expect(card.locator('[aria-busy="true"]')).toHaveCount(0);
+    expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(1);
+  });
+  await journey.stage("A source without a unified diff stays exact and selectable", async () => {
+    hub.release(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
+    await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+    await expect(card.locator("b")).toHaveCount(0);
+  });
+  for (const width of [1440, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await journey.stage(`Edit evidence fits ${width}px ${colorScheme}`, async () => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.emulateMedia({ colorScheme });
+      await card.scrollIntoViewIfNeeded();
+      await expect(card).toBeVisible();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+      expect(overflow, "no phone-width overflow").toBe(false);
+      await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    });
+  }
+  await journey.stage("Reload preserves the card and file expansion on this device", async () => {
+    await page.reload();
+    const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+    if (!(await send.isVisible())) await page.locator(".conversation-row").filter({ hasText: "cas-src" }).click();
+    await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "true");
+    await expect(card.getByLabel("Unified diff")).toContainText("+compact edit summary");
+    await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+    for (const toggle of await card.locator(".changed-file-toggle").all()) await toggle.click();
+    await card.getByRole("button", { name: "Tool-reported edits · 2 files" }).click();
+    expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("commander.workDisclosure:")))).toEqual([]);
+  });
+});
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`whole picture ${width} ${colorScheme} cas_ff22`, () => {
@@ -74,7 +140,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(blocks).toHaveCount(1);
         const order = await thread.locator(":scope > *").evaluateAll((nodes) => nodes.map((node) => node.classList.contains("work-turn") ? "work" : node.textContent?.includes("parked for merge.") ? "after" : node.textContent?.includes("Starting") ? "before" : "other").filter((kind) => kind !== "other"));
         expect(order).toEqual(["before", "work", "after"]);
-        const summary = blocks.getByRole("button", { name: /Thought, ran 1 tool \(1 failed\)/ });
+        const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
         await expect(summary).toHaveAttribute("aria-expanded", "false");
         await expect(blocks.locator(".work-chip")).toHaveText("cas-42 parked");
         await expect(blocks.locator(".work-row")).toHaveCount(0);
@@ -99,6 +165,25 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(hub.frames.filter((frame) => frame.kind === "WorkEventDetailRequest").map((frame) => (frame.body as { event_id: string }).event_id)).toEqual(["t:sup:2:0"]);
       });
 
+      await journey.stage("Read the published reasoning summary in place", async () => {
+        const row = blocks.locator('[data-event-id="t:sup:1:0"]');
+        const toggle = row.getByRole("button", { name: /Reasoning summary/ });
+        await expect(toggle).toHaveAttribute("aria-expanded", "false");
+        await expect(toggle).toContainText("Checking the lane");
+        await toggle.focus();
+        const before = (await toggle.boundingBox())!.y;
+        await page.keyboard.press("Enter");
+        await expect(row.locator(".work-reasoning-content p strong")).toHaveText("the lane");
+        await expect(row.locator("img")).toHaveCount(0);
+        await expect(toggle).toBeFocused();
+        expect(Math.abs((await toggle.boundingBox())!.y - before)).toBeLessThanOrEqual(1);
+        await row.getByText("Raw summary", { exact: true }).click();
+        await expect(row.locator(".work-reasoning-raw pre")).toContainText("**the lane**");
+        await toggle.click(); await toggle.click();
+        await expect(row.locator(".work-reasoning-raw")).toHaveAttribute("open", "");
+        expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest" && (frame.body as { event_id: string }).event_id === "t:sup:1:0")).toHaveLength(1);
+      });
+
       await journey.stage("New work arrives live without redrawing the thread", async () => {
         const reply = thread.locator(".conversation-turn", { hasText: "Starting the stream review." });
         await reply.evaluate((node) => { (node as HTMLElement & { journeyMark?: boolean }).journeyMark = true; });
@@ -107,10 +192,56 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(await reply.evaluate((node) => (node as HTMLElement & { journeyMark?: boolean }).journeyMark === true), "the earlier reply is the same node").toBe(true);
       });
 
+      await journey.stage("Read typed work scope", async () => {
+        const typed = [
+          event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
+          event("typed-read", "tool", "Read files", -800, { lifecycle: { id: "read", stage: "start" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
+          event("typed-search", "tool", "Find the renderer", -700, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
+          event("typed-command", "tool", "Check the build", -600, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
+          event("typed-edit", "tool", "Update the renderer", -500, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
+          event("typed-other", "tool", "functions.exec: inspect the work", -400, { tool: { name: "functions.exec", operation: "other", targets: [] } }),
+          event("typed-end", "notice", "Turn completed", -300, { has_detail: false, lifecycle: { id: "typed-turn", stage: "end", outcome: "unknown" } }),
+        ];
+        const exact = "Read\n\nInput:\n{\"file\":\"src/a.ts\"}\n\nResult:\nexport const literal = '<script>neverRun()</script>';";
+        for (const row of typed) hub.appendWork(PELICAN, row, row.id === "typed-read" ? exact : `${row.label}\n\nInput:\nraw arguments\n\nResult:\nexact ${row.id} output`);
+        const block = blocks.last();
+        await block.locator(".work-summary").click();
+        await expect(block.getByRole("button", { name: "Read · 3 files", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Search · 7 matches", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Ran command · exit 2 failed", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "Edited 2 files", exact: true })).toBeVisible();
+        await expect(block.getByRole("button", { name: "functions.exec: inspect the work", exact: true })).toBeVisible();
+        await expect(block).not.toContainText("Turn started");
+        await expect(block).not.toContainText("Turn completed");
+        const read = block.getByRole("button", { name: "Read · 3 files", exact: true });
+        const liveGutter = block.locator('[data-event-id="typed-read"] .work-row-gutter');
+        await expect(block.locator(".work-row.is-live")).toHaveCount(1);
+        expect(await read.evaluate(node => node.getBoundingClientRect().height)).toBe(width === 390 ? 44 : 24);
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ forcedColors: "none" });
+        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("work-live-shine");
+        await read.focus(); await page.keyboard.press("Enter");
+        await expect(read).toBeFocused();
+        const detail = block.locator('[data-event-id="typed-read"] .work-detail');
+        await expect(detail.locator(".work-targets li")).toHaveText(["src/a.ts", "src/b.ts", "src/c.ts"]);
+        await expect(detail.locator(".work-record")).toHaveText(exact);
+        await expect(detail.locator("script")).toHaveCount(0);
+        // The same event ID receives new metadata while its detail is open.
+        await detail.focus();
+        hub.appendWork(PELICAN, { ...typed[1]!, lifecycle: { id: "read", stage: "end", outcome: "success" }, tool: { name: "Read", operation: "read", targets: ["src/a.ts"], counts: { files: 1 } } } as WorkEventWire, exact);
+        await expect(block.getByRole("button", { name: "Read · 1 file", exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(detail).toBeFocused();
+        await expect(block.locator(".work-row.is-live")).toHaveCount(0);
+        await expect(detail.locator(".work-record")).toHaveText(exact);
+      });
+
       await journey.stage("Show work stays as set on this device", async () => {
         await page.reload();
         // A phone reopens the conversation it had open; the desktop lists it.
-        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
         const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
         await expect(send.or(row).first()).toBeVisible();
         if (!(await send.isVisible())) await row.click();
@@ -162,7 +293,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
 
       await journey.stage("The timeline follows the worker live", async () => {
-        hub.appendWork(PELICAN, event("t:w:2:0", "tool", "Bash: Run the lane tests", -1_000, { agent: WORKER }));
+        // The initial Read is 400ms before fixture creation. Stamp this
+        // append now so it is newer even without the recorder's stage delay.
+        hub.appendWork(PELICAN, event("t:w:2:0", "tool", "Bash: Run the lane tests", 0, { agent: WORKER }));
         await expect(dialog.locator(".work-row").first()).toContainText("Bash: Run the lane tests");
       });
 
@@ -172,6 +305,61 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(page.locator(`.status-timeline[data-worker="${WORKER}"]`).first()).toBeFocused();
       });
     };
+
+    test(`HUB-J25 live phase ${width} ${colorScheme}`, journeyPart, async ({ page, journey }) => {
+      const world = fleet();
+      world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "setting_up", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
+      const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], multiplex: true, history, fleet: { [PELICAN]: world } });
+      const line = page.getByRole("log").locator(".phase-line");
+      const refresh = async () => page.evaluate(session => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
+      await journey.stage("Read the reported phase without opening Show work", async () => {
+        await openConversation(page, journey);
+        await expect(line).toContainText("Setting up");
+        await expect(line.locator(".phase-clock")).toHaveText(/^\d+:\d{2}$/);
+        const [minutes, seconds] = (await line.locator(".phase-clock").innerText()).split(":").map(Number);
+        expect(minutes! * 60 + seconds!).toBeGreaterThanOrEqual(42);
+        const before = await line.locator(".phase-clock").innerText();
+        await page.clock.runFor(1000);
+        await expect(line.locator(".phase-clock")).not.toHaveText(before);
+        expect(hub.frames.filter(frame => ["WorkEventsRequest", "WorkEventDetailRequest", "ScrollbackRequest"].includes(frame.kind))).toEqual([]);
+      });
+      await journey.stage("Compacting changes live; waiting has no moving dots", async () => {
+        world.supervisor_phase!.lifecycle.phase = "compacting";
+        // Native lifecycle changes need no unrelated fleet event, and Show
+        // work is still off. The existing machine heartbeat owns refresh.
+        await page.clock.runFor(5_000);
+        await expect(line).toContainText("Compacting", { timeout: 5_000 });
+        await page.emulateMedia({ reducedMotion: "reduce", forcedColors: "active" });
+        expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+        world.supervisor_phase!.lifecycle.phase = "waiting_on_you";
+        await refresh(); await expect(line).toContainText("Waiting on you");
+        await expect(line).toHaveAttribute("data-active", "false");
+        expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        await expect(line.locator(".phase-clock")).toHaveCount(0);
+      });
+      await journey.stage("Stale data freezes the observed duration", async () => {
+        world.supervisor_phase!.lifecycle.phase = "compacting";
+        world.supervisor_phase!.stale = true;
+        await refresh(); await expect(line).toContainText("Update stale");
+        await expect(line.locator(".phase-clock")).toHaveText("0:42");
+        await expect(line).toHaveAttribute("data-active", "false");
+      });
+      await journey.stage("A completed boundary and a disconnected machine never look active", async () => {
+        world.supervisor_phase!.stale = false;
+        world.supervisor_phase!.lifecycle = { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" };
+        await refresh(); await expect(line).toContainText("Compacted");
+        await expect(line).not.toContainText("Compacting");
+        await expect(line.locator(".phase-clock")).toHaveCount(0);
+        // The machine hub can stay live while this supervisor's stream is gone.
+        hub.hold(PELICAN); hub.drop(PELICAN);
+        await expect(line).toContainText("Disconnected");
+        await expect(line).toHaveAttribute("data-active", "false");
+        await hub.down("atlas", { sockets: "close" });
+        await expect(line).toContainText("Disconnected");
+        await expect(line).toHaveAttribute("data-active", "false");
+      });
+    });
 
     // One catalog journey (HUB-J25), run as a part per surface and width.
     test(`HUB-J25 show work ${width} ${colorScheme} cas_ff22`, journeyPart, showWork);

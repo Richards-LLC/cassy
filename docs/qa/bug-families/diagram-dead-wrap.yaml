@@ -1,0 +1,4 @@
+title: A rendered Mermaid diagram must not offer a Wrap control that changes nothing, and its source view must keep Wrap
+tasks: [cas-0830]
+invariants: [HUB-J22-GOAL]
+journeys: [HUB-J22]

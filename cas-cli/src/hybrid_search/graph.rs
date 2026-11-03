@@ -415,30 +415,35 @@ mod tests {
 
     #[test]
     fn test_extract_entity_candidates() {
-        // Test capitalized words
-        let query = "What did Alice work on for the Cassy project?";
-        let words: Vec<&str> = query
-            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut candidates = Vec::new();
-        for word in &words {
-            let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if trimmed.len() >= 2
-                && trimmed
-                    .chars()
-                    .next()
-                    .map(|c| c.is_uppercase())
-                    .unwrap_or(false)
-            {
-                candidates.push(trimmed.to_string());
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(cas_store::SqliteEntityStore::open(root.path()).unwrap());
+        let retriever = GraphRetriever::with_defaults(store);
+        for (query, expected) in [
+            (
+                "What did Alice work on for the Cassy project?",
+                vec!["What", "Alice", "Cassy"],
+            ),
+            (
+                "What about rust and python?",
+                vec!["What", "about", "rust", "python"],
+            ),
+            (
+                "Alice Smith works on Project Cassy",
+                vec!["Alice Smith", "Project Cassy"],
+            ),
+            (
+                "Check Alice work, or Bob code; maybe Cassy?",
+                vec!["Check", "Alice", "Bob", "Cassy"],
+            ),
+        ] {
+            let candidates = retriever.extract_entity_candidates(query);
+            for candidate in expected {
+                assert!(
+                    candidates.iter().any(|item| item == candidate),
+                    "{query:?}: missing {candidate:?} in {candidates:?}"
+                );
             }
         }
-
-        assert!(candidates.contains(&"What".to_string()));
-        assert!(candidates.contains(&"Alice".to_string()));
-        assert!(candidates.contains(&"Cassy".to_string()));
     }
 
     #[test]
@@ -570,148 +575,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_spreading_activation_config_custom() {
-        let mut relation_weights = HashMap::new();
-        relation_weights.insert(RelationType::Uses, 1.0);
 
-        let config = SpreadingActivationConfig {
-            initial_activation: 2.0,
-            decay_factor: 0.7,
-            min_activation: 0.1,
-            max_hops: 5,
-            relation_weights,
-        };
-
-        assert_eq!(config.initial_activation, 2.0);
-        assert_eq!(config.decay_factor, 0.7);
-        assert_eq!(config.min_activation, 0.1);
-        assert_eq!(config.max_hops, 5);
-        assert_eq!(config.relation_weights.get(&RelationType::Uses), Some(&1.0));
-    }
-
-    #[test]
-    fn test_graph_retrieval_result() {
-        let result = GraphRetrievalResult {
-            entry_id: "entry-123".to_string(),
-            activation_score: 0.85,
-            contributing_entities: vec![
-                ("entity-1".to_string(), 0.5),
-                ("entity-2".to_string(), 0.35),
-            ],
-            min_hops: 1,
-        };
-
-        assert_eq!(result.entry_id, "entry-123");
-        assert_eq!(result.activation_score, 0.85);
-        assert_eq!(result.contributing_entities.len(), 2);
-        assert_eq!(result.min_hops, 1);
-    }
-
-    #[test]
-    fn test_graph_retrieval_result_zero_hops() {
-        let result = GraphRetrievalResult {
-            entry_id: "direct-entry".to_string(),
-            activation_score: 1.0,
-            contributing_entities: vec![("seed-entity".to_string(), 1.0)],
-            min_hops: 0,
-        };
-
-        assert_eq!(result.min_hops, 0);
-        assert_eq!(result.contributing_entities.len(), 1);
-    }
-
-    #[test]
-    fn test_extract_candidates_lowercase_words() {
-        // Lowercase words longer than 4 chars should be candidates
-        let query = "What about rust and python?";
-        let words: Vec<&str> = query.split_whitespace().collect();
-
-        let mut candidates = Vec::new();
-        for word in &words {
-            let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if trimmed.len() >= 4 {
-                candidates.push(trimmed.to_string());
-            }
-        }
-
-        assert!(candidates.contains(&"What".to_string()));
-        assert!(candidates.contains(&"about".to_string()));
-        assert!(candidates.contains(&"rust".to_string()));
-        assert!(candidates.contains(&"python".to_string()));
-    }
-
-    #[test]
-    fn test_extract_candidates_multi_word() {
-        // Test multi-word entity extraction (consecutive capitalized words)
-        let query = "Alice Smith works on Project Cassy";
-        let words: Vec<&str> = query.split_whitespace().collect();
-
-        let mut multi_word = Vec::new();
-        let mut i = 0;
-        while i < words.len() {
-            let word = words[i].trim_matches(|c: char| !c.is_alphanumeric());
-            if word
-                .chars()
-                .next()
-                .map(|c| c.is_uppercase())
-                .unwrap_or(false)
-            {
-                let mut phrase = word.to_string();
-                let mut j = i + 1;
-                while j < words.len() {
-                    let next = words[j].trim_matches(|c: char| !c.is_alphanumeric());
-                    if next
-                        .chars()
-                        .next()
-                        .map(|c| c.is_uppercase())
-                        .unwrap_or(false)
-                    {
-                        phrase.push(' ');
-                        phrase.push_str(next);
-                        j += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if phrase.contains(' ') {
-                    multi_word.push(phrase);
-                }
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-
-        assert!(multi_word.contains(&"Alice Smith".to_string()));
-        assert!(multi_word.contains(&"Project Cassy".to_string()));
-    }
-
-    #[test]
-    fn test_extract_candidates_with_punctuation() {
-        let query = "Check Alice work, or Bob code; maybe Cassy?";
-        let words: Vec<&str> = query
-            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut candidates = Vec::new();
-        for word in &words {
-            let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if trimmed.len() >= 2
-                && trimmed
-                    .chars()
-                    .next()
-                    .map(|c| c.is_uppercase())
-                    .unwrap_or(false)
-            {
-                candidates.push(trimmed.to_string());
-            }
-        }
-
-        assert!(candidates.contains(&"Check".to_string()));
-        assert!(candidates.contains(&"Alice".to_string()));
-        assert!(candidates.contains(&"Bob".to_string()));
-        assert!(candidates.contains(&"Cassy".to_string()));
-    }
 }

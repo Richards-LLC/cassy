@@ -73,31 +73,74 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     // This is additive evidence for cross-process recipient rendering.
     if agent.role == AgentRole::Supervisor {
         if let Ok(cli) = std::env::var("CAS_FACTORY_SUPERVISOR_CLI") {
-            agent.metadata.insert("supervisor_cli".to_string(), cli);
+            agent
+                .metadata
+                .insert("supervisor_cli".to_string(), cli.clone());
+            // Capture this process's selector while registering. A hub serves
+            // several accounts and must never substitute its own environment.
+            // Remove old provider evidence if a registered role changes CLI.
+            agent.metadata.remove("supervisor_account_dir");
+            agent.metadata.remove("supervisor_account_harness");
+            let selector = match crate::harness_policy::parse_harness(&cli) {
+                Some(cas_mux::SupervisorCli::Claude) => Some(("CLAUDE_CONFIG_DIR", ".claude")),
+                Some(cas_mux::SupervisorCli::Codex) => Some(("CODEX_HOME", ".codex")),
+                _ => None,
+            };
+            if let Some((variable, default)) = selector {
+                let home = dirs::home_dir();
+                let account_dir = std::env::var_os(variable)
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| home.as_ref().map(|home| home.join(default)));
+                let account_dir = account_dir.and_then(|path| {
+                    if let Some(tail) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
+                        home.as_ref().map(|home| home.join(tail))
+                    } else if path.is_absolute() {
+                        Some(path)
+                    } else {
+                        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+                    }
+                });
+                if let Some(account_dir) = account_dir {
+                    agent.metadata.insert(
+                        "supervisor_account_dir".to_string(),
+                        account_dir.to_string_lossy().into_owned(),
+                    );
+                    agent.metadata.insert("supervisor_account_harness".into(), cli);
+                }
+            }
         }
-        if let Ok(account_dir) = std::env::var("CODEX_HOME") {
-            if !account_dir.trim().is_empty() {
-                agent
-                    .metadata
-                    .insert("supervisor_account_dir".to_string(), account_dir);
+    }
+
+    // Never reset a native /model observation to the original launch recipe
+    // during repeated MCP registration, SessionStart or compaction.
+    if let Some(prefix) = crate::agent_model::metadata_prefix(agent.role) {
+        for suffix in ["model", "effort"] {
+            if !agent.metadata.contains_key(&format!("{prefix}_{suffix}_observed"))
+                && let Ok(value) = std::env::var(format!("CAS_FACTORY_{}_{}", prefix.to_uppercase(), suffix.to_uppercase()))
+                && !value.trim().is_empty()
+            {
+                agent.metadata.insert(format!("{prefix}_{suffix}"), value);
             }
         }
     }
 
     let is_worker = agent.role == AgentRole::Worker
-        || std::env::var("CAS_AGENT_ROLE")
-            .map(|role| role.eq_ignore_ascii_case("worker"))
-            .unwrap_or(false);
+        || (agent.role == AgentRole::Standard
+            && std::env::var("CAS_AGENT_ROLE").is_ok_and(|role| role.eq_ignore_ascii_case("worker")));
+    if is_worker && agent.role == AgentRole::Standard {
+        for suffix in ["MODEL", "EFFORT"] {
+            if let Ok(value) = std::env::var(format!("CAS_FACTORY_WORKER_{suffix}"))
+                && !value.trim().is_empty()
+            {
+                agent.metadata.insert(format!("worker_{}", suffix.to_lowercase()), value);
+            }
+        }
+    }
     if !is_worker {
         return;
     }
 
-    if let Ok(model) = std::env::var("CAS_FACTORY_WORKER_MODEL") {
-        agent.metadata.insert("worker_model".to_string(), model);
-    }
-    if let Ok(effort) = std::env::var("CAS_FACTORY_WORKER_EFFORT") {
-        agent.metadata.insert("worker_effort".to_string(), effort);
-    }
     // cas-058f (EPIC cas-8888 Phase 4): persist which harness this worker
     // runs so a separate process (`cas factory is-wedged`/`kill`, which only
     // has the agent-store row to go on) can pick the right transcript
@@ -133,6 +176,65 @@ fn apply_agent_role(agent: &mut Agent, role: AgentRole) {
     }
 }
 
+/// Inherited factory environment identifies a pane, not a nested harness.
+/// Only that pane's registered process or its MCP child may refresh a live
+/// identity. A replacement MCP under the same fingerprinted harness is valid;
+/// a disposable `codex exec` review under a different parent is not.
+pub(crate) fn ensure_factory_process_owner(
+    store: &dyn crate::store::AgentStore,
+    id: &str,
+    incoming_pid: Option<u32>,
+    incoming_ppid: Option<u32>,
+) -> crate::store::Result<()> {
+    let prior = match store.get(id) {
+        Ok(prior) => prior,
+        Err(crate::store::StoreError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if prior.role == AgentRole::Standard || prior.status == AgentStatus::Shutdown {
+        return Ok(());
+    }
+    let liveness = evaluate_liveness(&prior, pid_alive, pid_matches_fingerprint);
+    let process_alive = matches!(&liveness, LivenessOutcome::Alive { .. });
+    let parent = prior.ppid.filter(|&pid| pid > 1).filter(|&pid| {
+        prior
+            .metadata
+            .get(PPID_STARTTIME_KEY)
+            .and_then(|value| value.parse().ok())
+            .is_some_and(|starttime| pid_matches_fingerprint(pid, starttime))
+            // Legacy/unknown harness names (including OpenCode) may have no
+            // parent stamp. The live fingerprinted MCP child can still prove
+            // its exact current parent, without trusting a bare/recycled PPID.
+            || (matches!(&liveness, LivenessOutcome::Alive { fingerprint_checked: true, .. })
+                && prior.pid.and_then(crate::agent_id::get_parent_of_pid) == Some(pid))
+    });
+    let owner_pid = prior.pid.filter(|_| process_alive);
+    if owner_pid.is_none() && parent.is_none() {
+        return Ok(()); // A dead predecessor can be replaced.
+    }
+    if [incoming_pid, incoming_ppid]
+        .into_iter()
+        .flatten()
+        .any(|pid| owner_pid == Some(pid) || parent == Some(pid))
+    {
+        return Ok(());
+    }
+    // A matching process above owns this identity even after a hostname
+    // change. Only a non-matching caller can be refused as another machine.
+    if prior
+        .machine_id
+        .as_deref()
+        .is_some_and(|machine| machine != Agent::get_or_generate_machine_id())
+    {
+        return Err(crate::store::StoreError::Other(format!(
+            "Factory identity {id} belongs to another machine"
+        )));
+    }
+    Err(crate::store::StoreError::Other(format!(
+        "Factory identity {id} belongs to another live harness; nested harnesses must use their own session identity"
+    )))
+}
+
 /// Register while preserving the store's general anti-forgery contract, then
 /// explicitly reconcile a role that came from the harness environment or a
 /// typed server-internal caller. `AgentStore::register` deliberately preserves
@@ -143,7 +245,42 @@ pub(crate) fn register_with_role_reconciliation(
     agent: &Agent,
     configured_role: Option<AgentRole>,
 ) -> crate::store::Result<Agent> {
-    store.register(agent)?;
+    ensure_factory_process_owner(store, &agent.id, agent.pid, agent.ppid)?;
+    let mut agent = agent.clone();
+    if let Ok(prior) = store.get(&agent.id)
+        && prior.role == agent.role
+        && let Some(prefix) = crate::agent_model::metadata_prefix(agent.role)
+    {
+        // cas-9153: a re-registration from a process that lacks the launch
+        // recipe (a hook or `cas` command in the pane) keeps the original
+        // spawn's harness, model, effort and account instead of erasing them.
+        if agent.role == AgentRole::Worker {
+            for key in [
+                "worker_cli",
+                "worker_model",
+                "worker_effort",
+                "worker_account_dir",
+            ] {
+                if !agent.metadata.contains_key(key)
+                    && let Some(value) = prior.metadata.get(key)
+                {
+                    agent.metadata.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        for suffix in ["model", "effort"] {
+            let observed = format!("{prefix}_{suffix}_observed");
+            if prior.metadata.contains_key(&observed) {
+                agent.metadata.insert(observed, "true".into());
+                let key = format!("{prefix}_{suffix}");
+                agent.metadata.remove(&key);
+                if let Some(value) = prior.metadata.get(&key) {
+                    agent.metadata.insert(key, value.clone());
+                }
+            }
+        }
+    }
+    store.register(&agent)?;
     let mut persisted = store.get(&agent.id)?;
     if let Some(role) = configured_role
         && (persisted.role != role
@@ -1815,6 +1952,23 @@ impl EmbeddedDaemon {
 
     /// Handle events from hooks via Unix socket
     async fn handle_socket_event(&self, event: DaemonEvent) -> DaemonResponse {
+        let process_identity = match &event {
+            DaemonEvent::SessionStart {
+                session_id, cc_pid, ..
+            } => Some((session_id, *cc_pid)),
+            DaemonEvent::SessionEnd {
+                session_id, cc_pid: Some(pid),
+            } => Some((session_id, *pid)),
+            _ => None,
+        };
+        if let Some((id, pid)) = process_identity
+            && let Ok(store) = open_agent_store(&self.config.cas_root)
+            && let Err(error) = ensure_factory_process_owner(store.as_ref(), id, Some(pid), None)
+        {
+            return DaemonResponse::Error {
+                message: error.to_string(),
+            };
+        }
         match event {
             DaemonEvent::SessionStart {
                 session_id,
@@ -2002,9 +2156,11 @@ impl EmbeddedDaemon {
         // Only adopt as our own agent if the PID matches our Claude Code parent.
         // Other agents' daemons will discover their agent via PID-based adoption
         // in the heartbeat loop.
-        if is_our_agent {
+        if is_our_agent
+            && let Some(registered_id) = registered_id
+        {
             let mut guard = self.agent_id.write().await;
-            *guard = Some(registered_id.unwrap_or(session_id));
+            *guard = Some(registered_id);
         }
     }
 
@@ -2338,7 +2494,7 @@ impl EmbeddedDaemon {
             // Get sessions to sync (sessions are stored directly, not queued)
             let sessions = get_sessions_for_sync(&cas_root, syncer.queue());
 
-            syncer.sync_with_sessions(
+            let result = syncer.sync_with_sessions(
                 store.as_ref(),
                 task_store.as_ref(),
                 rule_store.as_ref(),
@@ -2349,7 +2505,13 @@ impl EmbeddedDaemon {
                 file_change_store.as_ref(),
                 commit_link_store.as_ref(),
                 &sessions,
-            )
+            );
+            // Paced inside: at most one bounded round per interval. The ledger
+            // is an enhancement, so its failure never fails entity sync.
+            if let Err(error) = syncer.sync_quality_events(false) {
+                tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)");
+            }
+            result
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))?

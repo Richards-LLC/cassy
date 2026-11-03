@@ -911,6 +911,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -1632,6 +1636,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
@@ -2359,6 +2367,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -2760,6 +2772,46 @@ pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
         SupervisorCli::OpenCode => opencode_builtin_skills(),
     }
+}
+
+/// One shipped skill, or one of its resources, on demand: `id` is `<skill>` or
+/// `<skill>/<relative path>`. Workers list only their role skills natively, so
+/// this serves the rest whether or not any project ever synced them.
+pub fn builtin_skill_file(harness: SupervisorCli, id: &str) -> Option<&'static BuiltinFile> {
+    let id = id.trim().trim_matches('/');
+    let entrypoint = format!("skills/{id}/SKILL.md");
+    let resource = format!("skills/{id}");
+    skill_catalog_for_harness(harness)
+        .iter()
+        .find(|file| file.path == entrypoint || file.path == resource)
+}
+
+/// The resource ids `builtin_skill_file` serves beside a skill's entrypoint.
+pub fn builtin_skill_resources(harness: SupervisorCli, skill: &str) -> Vec<&'static str> {
+    let prefix = format!("skills/{}/", skill.trim().trim_matches('/'));
+    skill_catalog_for_harness(harness)
+        .iter()
+        .filter(|file| file.path.starts_with(&prefix) && !file.path.ends_with("/SKILL.md"))
+        .filter_map(|file| file.path.strip_prefix("skills/"))
+        .collect()
+}
+
+/// `(name, description)` for every shipped skill of a harness, sorted by name.
+pub fn builtin_skill_index(harness: SupervisorCli) -> Vec<(&'static str, &'static str)> {
+    let mut index: Vec<_> = skill_catalog_for_harness(harness)
+        .iter()
+        .filter_map(|file| {
+            let name = file.path.strip_prefix("skills/")?.strip_suffix("/SKILL.md")?;
+            let description = file
+                .content
+                .lines()
+                .find_map(|line| line.strip_prefix("description:"))
+                .map_or("", str::trim);
+            Some((name, description))
+        })
+        .collect();
+    index.sort_unstable();
+    index
 }
 
 /// The agent catalog for a harness (cas-cc8c parity helpers).
@@ -4935,6 +4987,19 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label} catalog missing operator-reply.md"));
             assert_eq!(contract.content, source, "{label} catalog source drifted");
         }
+
+        // cas-1e52: Commander renders diagrams, callouts, colored code and
+        // tables, so the shared contract must teach their syntax, not ban it.
+        let contract = include_str!("builtins/skills/cas-supervisor/references/operator-reply.md");
+        // pin: the retired sentence that kept every supervisor to plain bullets.
+        assert!(!contract.contains("Use only the Markdown subset"));
+        // pin: each needle is the syntax hub-web's renderer parses for that form.
+        for form in ["```mermaid", "> [!WARNING]", "```bash", "|---|"] {
+            assert!(
+                contract.contains(form),
+                "operator-reply.md must name the rendered form {form:?}"
+            );
+        }
     }
 
     /// cas-b342, audit D1: every harness installs the one supervisor body. This
@@ -5109,6 +5174,11 @@ This is the body content."#;
             guide.len()
         );
         assert!(
+            guide.len() <= 6_000,
+            "worker guidance needs 2,000B of room under its 8,000B component cap: {}B",
+            guide.len()
+        );
+        assert!(
             headroom >= 1_024,
             "worker_guidance is {} bytes — only {headroom}B remains below the \
              {SESSION_START_BUDGET_BYTES}B SessionStart budget",
@@ -5238,15 +5308,6 @@ This is the body content."#;
         }
     }
 
-    /// The launch contract lives in cas-pty. Worker skills link the on-demand
-    /// discipline file, which carries the assembly proof reference.
-    #[test]
-    // pin: Verify the spawn source still delegates to the shared worker contract; catalog-only checks cannot detect an omitted spawn consumer.
-    fn test_worker_discipline_reference_is_linked_and_assembly_proof_is_named() {
-        let spawn_prompt = include_str!("../../crates/cas-pty/src/pty.rs");
-        assert!(spawn_prompt.contains("WORKER_CONTRACT_ELEMENTS"));
-    }
-
     /// cas-0de3 (EPIC cas-68c2): worker-to-supervisor traffic measured 2,400
     /// chars per message on average (max 6,819) and progress notes ran to
     /// 3,000 chars. The worker builtin now pins a fixed six-field return
@@ -5284,6 +5345,12 @@ This is the body content."#;
             let why = get("skills/cas-why/SKILL.md");
             assert_eq!(why, WHY, "{label} cas-why drifted");
             assert!(is_managed_by_cas(why), "{label} cas-why is unmanaged");
+            // cas-3b9f: the test audit skill ships its SKILL.md and every
+            // reference it links, in every harness.
+            for file in ["SKILL.md", "references/detectors.md", "references/ci-timing.md", "references/ledger.md"] {
+                get(&format!("skills/cas-test-audit/{file}"));
+            }
+            assert!(is_managed_by_cas(get("skills/cas-test-audit/SKILL.md")));
         }
     }
 
@@ -7655,6 +7722,21 @@ This is the body content."#;
             .iter()
             .find(|b| b.path == "skills/cas-supervisor/references/workflow.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
+
+        // pin: shipped guidance must not order another close after merge.
+        assert!(
+            !workflow.content.contains("re-close"),
+            "merge verdict owns parked completion"
+        );
+        let close_gate = BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-worker/references/close-gate.md")
+            .unwrap();
+        // pin: merged deliveries await the verification verdict.
+        assert!(
+            !close_gate.content.contains("re-close or stop"),
+            "merged workers wait for the verdict"
+        );
 
         let phase3 = workflow
             .content

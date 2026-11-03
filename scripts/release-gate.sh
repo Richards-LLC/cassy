@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mechanical, fail-closed release train for an assembled epic worktree.
+# Mechanical, fail-closed validation gate for an assembled epic worktree.
 #
 # The version bump, Cargo.lock refresh, CHANGELOG section, and Slack draft must
 # already be committed on the source branch. This gate proves the tree before
@@ -17,7 +17,7 @@ cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
+    scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
@@ -842,19 +842,6 @@ check_failure_log() {
     [[ "$entries" -gt 0 && "$invalid" -eq 0 ]]
 }
 
-check_assemble_stale_base() {
-    local fixture="scripts/test-release-integration.py"
-    [[ -f "$fixture" ]] || {
-        printf 'assemble-stale-base: missing %s\n' "$fixture"
-        return 1
-    }
-    # Recovery launches factory sweep children.  Keep the supervisor's
-    # identity out of this process boundary so the executable fixture proves
-    # the GH #901 regression cannot be hidden by the invoking shell.
-    release_test_child env \
-        python3 "$fixture"
-}
-
 # NUL-separated candidate files for the version-literals row: tracked files in
 # a git checkout (gitignored build caches are skipped), every file otherwise.
 version_literal_candidates() {
@@ -1638,6 +1625,29 @@ check_changelog_and_versions() {
         printf 'changelog: section [%s] has no bullet\n' "$version"
         return 1
     fi
+    if ! awk '
+        $0 == "## [Unreleased]" { in_unreleased=1; next }
+        in_unreleased && /^## \[/ { exit }
+        in_unreleased && /^### / {
+            category = substr($0, 5)
+            sub(/ — .*/, "", category)
+            shipped = (category ~ /^(Added|Changed|Deprecated|Removed|Fixed|Security)$/)
+            # Match release_report.rs::is_non_shipped_category and the rubric.
+            non_shipped = (tolower(category) ~ /^(doc|test|known limit)/)
+            area = ((shipped || non_shipped) && $0 ~ /^### [^<>]+ — [^<>]+$/)
+            next
+        }
+        in_unreleased && /^- / {
+            if (!area || $0 !~ /^- \*\*[^*][^*]*\*\* — .+$/ \
+                || $0 == "- **Title** — What changed." \
+                || $0 ~ /^- \*\*<[^>]+>\*\* — / \
+                || $0 ~ / — <[^>]+>\.?$/) invalid=1
+        }
+        END { exit(invalid ? 1 : 0) }
+    ' CHANGELOG.md; then
+        printf 'changelog: existing [Unreleased] entries must use a titled category and area format\n'
+        return 1
+    fi
 
     for file in "${release_crates[@]}"; do
         [[ -f "$file" ]] || {
@@ -1826,6 +1836,36 @@ check_fixture_paths_src() {
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
 # not the workflow: route diary threads and runtime release drafts separately.
+draft_has_posted_receipt() {
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+fence = None
+posted = False
+receipt = re.compile(
+    r"\bmessage_id=[0-9]+(?:\.[0-9]+)?\b"
+    r"|https://(?:[A-Za-z0-9-]+\.)?slack\.com/archives/[A-Za-z0-9]+/p[0-9]+\b"
+    r"|\b[0-9]{10}\.[0-9]{6}\b"
+)
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if fence:
+        if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line):
+            fence = None
+    else:
+        opening = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+        elif re.match(r" {0,3}##(?:[ \t]|$)", line):
+            posted = re.fullmatch(r" {0,3}##[ \t]+POSTED[ \t]*", line) is not None
+            continue
+    if posted and receipt.search(line):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 check_release_notes_draft() {
     local -a diary_drafts=() runtime_drafts=()
     local path
@@ -1835,6 +1875,12 @@ check_release_notes_draft() {
     fi
     while IFS= read -r path; do
         [[ -f "$path" ]] || continue
+        # Only a real posting receipt makes this a historical record. Fenced
+        # examples and empty/template POSTED sections remain lintable drafts.
+        if draft_has_posted_receipt "$path"; then
+            printf 'release-notes-draft: skipping posted draft %s\n' "$path"
+            continue
+        fi
         # Runtime releases and harness diaries both use Slack drafts. Headings
         # or a thread filename distinguish the diary workflow from runtime.
         if [[ "$path" == *harness-diary* || "$path" == *-thread.md ]] \
@@ -2075,10 +2121,11 @@ gate_launch() {
 }
 
 # Rows share the gate's process group, so the scratch guardian's signals reach
-# them. Cancelling a row walks its process tree from one ps snapshot: freeze,
-# collect late children, then terminate and resume.
+# them. Freeze each cancelled tree until every observed descendant is stopped;
+# a fixed number of snapshots can miss another generation forked between ps
+# and STOP. Await descendant termination before releasing the row's resources.
 gate_cancel_after() {
-    local after="$1" name pass
+    local after="$1" name
     local -a names=() pids=()
     for name in "${gate_rows[@]}"; do
         if [[ "${row_state[$name]:-}" == running ]] && (( ${row_index[$name]} > after )); then
@@ -2086,24 +2133,73 @@ gate_cancel_after() {
         fi
     done
     [[ "${#names[@]}" -gt 0 ]] || return 0
-    for pass in 1 2; do
-        for name in "${names[@]}"; do
-            mapfile -t -O "${#pids[@]}" pids < <(ps -A -o pid= -o ppid= | awk -v root="${row_pid[$name]}" '
-                { parent[$1] = $2; order[NR] = $1 }
-                END {
-                    keep[root] = 1; print root
-                    for (changed = 1; changed;) {
-                        changed = 0
-                        for (i = 1; i <= NR; i++) if (!(order[i] in keep) && (parent[order[i]] in keep)) {
-                            keep[order[i]] = 1; print order[i]; changed = 1
-                        }
-                    }
-                }')
-        done
-        kill -STOP "${pids[@]}" 2>/dev/null || true
-    done
-    kill -TERM "${pids[@]}" 2>/dev/null || true
-    kill -CONT "${pids[@]}" 2>/dev/null || true
+    for name in "${names[@]}"; do pids+=("${row_pid[$name]}"); done
+    python3 - "${pids[@]}" <<'PY_CANCEL_ROWS'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+
+def snapshot():
+    rows = subprocess.check_output(
+        ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], text=True)
+    return {int(pid): (int(parent), state, started)
+            for line in rows.splitlines()
+            for pid, parent, state, started in [line.split(None, 3)]}
+
+
+def send(pids, sig):
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+processes = snapshot()
+# Retain process lifetimes, including descendants reparented during teardown.
+known = {pid: processes[pid][2] for pid in map(int, sys.argv[1:]) if pid in processes}
+deadline = time.monotonic() + 5
+current = set()
+while known:
+    current = {pid for pid, start in known.items()
+               if pid in processes and processes[pid][2] == start}
+    while True:
+        fresh = {pid for pid, row in processes.items() if row[0] in current} - current
+        if not fresh:
+            break
+        current.update(fresh)
+        known.update((pid, processes[pid][2]) for pid in fresh)
+    if all(processes[pid][1].startswith(("T", "Z", "X")) for pid in current):
+        break
+    send(current, signal.SIGSTOP)
+    if time.monotonic() >= deadline:
+        raise SystemExit("cancelled row tree did not stop within 5s")
+    time.sleep(0.05)
+    processes = snapshot()
+
+send(current, signal.SIGTERM)
+send(current, signal.SIGCONT)
+deadline = time.monotonic() + 5
+escalated = False
+while known:
+    processes = snapshot()
+    # Zombies have terminated; the gate reaps its direct row shells below.
+    known = {pid: start for pid, start in known.items()
+             if pid in processes and processes[pid][2] == start
+             and not processes[pid][1].startswith(("Z", "X"))}
+    if not known:
+        break
+    if time.monotonic() >= deadline:
+        if escalated:
+            raise SystemExit(f"cancelled row PIDs survived KILL: {sorted(known)}")
+        send(known, signal.SIGKILL)
+        escalated = True
+        deadline = time.monotonic() + 5
+    time.sleep(0.05)
+PY_CANCEL_ROWS
     for name in "${names[@]}"; do
         wait "${row_pid[$name]}" 2>/dev/null || true
         gate_account "$name" -1
@@ -2241,9 +2337,6 @@ gate_row publish-toolchain \
 gate_row failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log
-gate_row assemble-stale-base \
-    'python3 scripts/test-release-integration.py (stale origin/main recovery and identity-safe base-only heal)' \
-    check_assemble_stale_base excl=host-tests
 gate_row ancestor-proxy-config \
     'no populated .cas/proxy.toml above this worktree that ancestor-walking tests could read' \
     check_ancestor_proxy_config
@@ -2293,7 +2386,7 @@ gate_row builtin-projections \
     "$cargo_bin nextest run -p cas --test builtin_flavor_drift_test root_managed_projections...; regenerate ledger; git diff --quiet" \
     check_builtin_projections cpu mem=4 excl=host-tests writes-tree
 gate_row changelog-and-versions \
-    'CHANGELOG [Unreleased]/[version] bullet plus six release-train Cargo.toml versions' \
+    'valid existing CHANGELOG [Unreleased] entries, [version] bullet and six release-train Cargo.toml versions' \
     check_changelog_and_versions
 gate_row release-script \
     'scripts/release.sh parses and answers --help (one-command release)' \
@@ -2349,7 +2442,7 @@ fi
 fast_row_fix() {
     case "$1" in
         failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
-        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
+        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section in CHANGELOG.md; group each delivery as ### Added — <area> or ### Fixed — <area>, with a per-delivery - **Title** — description line under [Unreleased]' ;;
         release-script) printf 'make scripts/release.sh pass bash -n and exit 0 on --help' ;;
         release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;

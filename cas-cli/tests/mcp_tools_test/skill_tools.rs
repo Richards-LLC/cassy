@@ -618,18 +618,19 @@ async fn test_skill_update_validation_failure_is_atomic() {
 }
 
 #[tokio::test]
-async fn release_report_builtin_is_discoverable_after_project_sync() {
+async fn builtin_skills_are_discoverable_without_project_sync() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
-    cas::builtins::sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, temp.path())
-        .unwrap();
-    let shown = service
-        .cas_skill_show(Parameters(IdRequest {
-            id: "cas-release-report".into(),
-        }))
-        .await
-        .unwrap();
-    assert!(extract_text(shown).contains("# Release report"));
+    assert!(!temp.path().join(".claude/skills/cas-release-report").exists());
+    let show = |id: &str| {
+        service.cas_skill_show(Parameters(IdRequest { id: id.into() }))
+    };
+    assert!(extract_text(show("cas-release-report").await.unwrap()).contains("# Release report"));
+    let worker = extract_text(show("cas-worker").await.unwrap());
+    assert!(worker.contains("- cas-worker/references/discipline.md"), "{worker}");
+    let resource = extract_text(show("cas-worker/references/discipline.md").await.unwrap());
+    assert!(resource.contains("Source: shipped with Cassy"), "{resource}");
+
     let listed = service
         .cas_skill_list_all(Parameters(LimitRequest {
             scope: "all".into(),
@@ -640,5 +641,17 @@ async fn release_report_builtin_is_discoverable_after_project_sync() {
         }))
         .await
         .unwrap();
-    assert!(extract_text(listed).contains("cas-release-report"));
+    assert!(extract_text(listed).contains("- cas-release-report: "));
+
+    // A project customization keeps precedence over the shipped fallback.
+    let skill_dir = temp.path().join(".claude/skills/cas-release-report");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: cas-release-report\ndescription: Project report\n---\nProject report instructions",
+    )
+    .unwrap();
+    assert!(
+        extract_text(show("cas-release-report").await.unwrap()).contains("Project report instructions")
+    );
 }

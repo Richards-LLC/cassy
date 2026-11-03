@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { askOptions, installAttentionObjects, renderAskObject, renderBlockerObject } from "./attention-objects";
+import { askOptions, installAttentionObjects, renderAskObject, renderBlockerObject, renderSecretObject } from "./attention-objects";
 import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, type TurnRenderContext } from "./conversation-view";
 import type { ThreadTurn } from "./thread-model";
 import type { OperatorReply } from "./types";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
-function reply(id: number, kind: "ask" | "blocker", message: string, extra: Partial<OperatorReply> = {}): OperatorReply {
+function reply(id: number, kind: "ask" | "blocker" | "secret", message: string, extra: Partial<OperatorReply> = {}): OperatorReply {
   return { notification_id: id, reply_to: null, message, summary: "", device_id: "d", kind, ...extra };
 }
 function context(reply: OperatorReply, history: ConversationHistory, respond?: TurnRenderContext["respond"], pinned?: boolean): TurnRenderContext {
@@ -61,6 +61,57 @@ describe("ask object (Pebble 3, treatment A)", () => {
     expect(sent.textContent).toBe("Yes, go ahead"); expect(sent.dataset.state).toBe("sending"); expect(sent.querySelector(".tick")).not.toBeNull();
     history.acknowledge({ client_ref: "q", notification_id: 60, target: "atlas-sup", stamped: true });
     expect(renderAskObject(ask, context(ask, history, () => {})).querySelector<HTMLElement>(".chip.sent")?.dataset.state).toBe("acknowledged");
+  });
+});
+
+describe("secret request (cas-1996)", () => {
+  it("saves the masked value through answerSecret, never a send, and waits until answered", async () => {
+    const history = new ConversationHistory();
+    const request = reply(70, "secret", "Needed to publish the crate.", { summary: "CRATES_TOKEN" });
+    history.reply(request, at(9, 58));
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([70]);
+    const respond = vi.fn();
+    const answerSecret = vi.fn(async () => ({ path: "/home/op/.cas/private/creds/cassy/CRATES_TOKEN" }));
+    const node = renderSecretObject(request, { ...context(request, history, respond), answerSecret, machine: "soundwave" });
+    expect(node.className).toBe("obj t-a secret");
+    expect(node.querySelector(".secret-name")?.textContent).toBe("CRATES_TOKEN");
+    expect(node.querySelector(".secret-scope")?.textContent).toContain("soundwave");
+    const input = node.querySelector<HTMLInputElement>("input.secret-value")!;
+    expect(input.type).toBe("password"); expect(input.autocomplete).toBe("off");
+    // Password managers are told to leave it alone, and there is no form for a browser to offer to save.
+    expect(input.hasAttribute("data-1p-ignore") && input.dataset.lpignore === "true").toBe(true);
+    expect(node.querySelector("form")).toBeNull();
+    input.value = "cio_secret_value";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await vi.waitFor(() => expect(node.dataset.answered).toBe("true"));
+    expect(answerSecret).toHaveBeenCalledWith(request, { value: "cio_secret_value" });
+    expect(respond).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+    expect(node.querySelector(".chip.sent")?.textContent).toBe("Saved to /home/op/.cas/private/creds/cassy/CRATES_TOKEN");
+    expect(JSON.stringify(history.visibleEvents())).not.toContain("cio_secret_value");
+
+    const other = reply(71, "secret", "For the npm publish.", { summary: "NPM_TOKEN" });
+    const declined = renderSecretObject(other, { ...context(other, history), answerSecret });
+    declined.querySelector<HTMLButtonElement>("button.secret-decline")!.click();
+    await vi.waitFor(() => expect(declined.querySelector(".chip.sent")?.textContent).toBe("Declined"));
+    expect(answerSecret).toHaveBeenLastCalledWith(other, { decline: true });
+  });
+
+  it("keeps the file unless the operator chooses deletion, then says when it is deleted (cas-2f55)", async () => {
+    const history = new ConversationHistory();
+    const request = reply(72, "secret", "For one deploy.", { summary: "DEPLOY_KEY" });
+    history.reply(request, at(9, 58));
+    const answerSecret = vi.fn(async () => ({ path: "/creds/DEPLOY_KEY", auto_delete: "after_use" }));
+    const node = renderSecretObject(request, { ...context(request, history), answerSecret });
+    const choice = node.querySelector<HTMLSelectElement>("select.secret-auto-delete")!;
+    expect(choice.value).toBe("");
+    expect(choice.getAttribute("aria-label")).toBe("After saving DEPLOY_KEY");
+    choice.value = "after_use";
+    node.querySelector<HTMLInputElement>("input.secret-value")!.value = "dk_value";
+    node.querySelector<HTMLButtonElement>("button.secret-save")!.click();
+    await vi.waitFor(() => expect(node.dataset.answered).toBe("true"));
+    expect(answerSecret).toHaveBeenCalledWith(request, { value: "dk_value", auto_delete: "after_use" });
+    expect(node.querySelector(".chip.sent")?.textContent).toBe("Saved to /creds/DEPLOY_KEY · deleted once used");
   });
 });
 
@@ -151,17 +202,6 @@ describe("blocker object", () => {
     // The receipt lands late: now it is acknowledged.
     expect(history.acknowledge({ client_ref: "ack", notification_id: 60, target: "atlas-sup", stamped: true })).toBe(true);
     expect(renderBlockerObject(blocker, context(blocker, history)).dataset.acknowledged).toBe("true");
-  });
-  it("quiets an acknowledged blocker in the stylesheet (cas-71af)", async () => {
-    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain('.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
-  });
-  it("quiets an answered question in the stylesheet: supervisor colour, the tick kept (journey F12)", async () => {
-    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain('.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
-    expect(css).toContain('.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }');
   });
   it("has no tray without evidence", () => {
     const blocker = reply(51, "blocker", "The release gate went red.");

@@ -1,0 +1,4 @@
+title: A live work notice newer than a pending page is retained until one visible follow-up read
+tasks: [cas-fc4c]
+invariants: [HUB-J25-GOAL]
+journeys: [HUB-J25]

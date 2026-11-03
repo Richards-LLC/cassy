@@ -12,8 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 
 /// Field names that hold a credential rather than a reference to one.
 ///
@@ -297,25 +296,16 @@ fn the_root_resolver_accepts_a_real_tree_and_rejects_a_bare_directory() {
     let bare = dir.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
 
-    // SAFETY: serialized by the shared test environment lock; restored below.
-    let previous = std::env::var_os("CAS_TEST_WORKSPACE_ROOT");
-    let _lock = test_env_guard::test_env_lock();
-    unsafe { std::env::set_var("CAS_TEST_WORKSPACE_ROOT", &bare) };
+    let mut env = test_env_guard::TestEnvGuard::new();
+    env.set("CAS_TEST_WORKSPACE_ROOT", &bare);
     let resolved_bare = resolve_repo_root();
 
     let shaped = dir.path().join("shaped");
     std::fs::create_dir_all(shaped.join("cas-cli").join("src")).unwrap();
     std::fs::create_dir_all(shaped.join("crates")).unwrap();
-    unsafe { std::env::set_var("CAS_TEST_WORKSPACE_ROOT", &shaped) };
+    env.set("CAS_TEST_WORKSPACE_ROOT", &shaped);
     let resolved_shaped = resolve_repo_root();
 
-    unsafe {
-        match previous {
-            Some(value) => std::env::set_var("CAS_TEST_WORKSPACE_ROOT", value),
-            None => std::env::remove_var("CAS_TEST_WORKSPACE_ROOT"),
-        }
-    }
-    drop(_lock);
 
     assert!(
         resolved_bare.is_none(),

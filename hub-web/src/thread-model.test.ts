@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ConversationHistory, type ConversationEvent } from "./conversation-history";
-import { blockerEvidence, cellTone, clockLabel, coalesceText, dayLabel, foldsAsStatus, messageBlocks, shownTimes, stampLabel, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
+import { blockerEvidence, cellTone, clockLabel, coalesceText, dayLabel, foldsAsStatus, messageBlocks, shownTimes, stampLabel, tableCsv, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
@@ -33,15 +33,15 @@ describe("threadModel", () => {
       .toEqual(["day", "group", "work:between:1", "group"]);
   });
   it("dates any turn time that is not today's (cas-e829)", () => {
-    expect(stampLabel(at(9, 41), NOW)).toBe("09:41");
-    expect(stampLabel(at(17, 20, -1), NOW)).toBe("Sep 20, 17:20");
-    expect(stampLabel(new Date(2025, 11, 31, 23, 5).getTime(), NOW)).toBe("Dec 31 2025, 23:05");
+    expect(stampLabel(at(9, 41), NOW)).toBe("9:41 AM");
+    expect(stampLabel(at(17, 20, -1), NOW)).toBe("Sep 20, 5:20 PM");
+    expect(stampLabel(new Date(2025, 11, 31, 23, 5).getTime(), NOW)).toBe("Dec 31 2025, 11:05 PM");
     expect(stampLabel(undefined, NOW)).toBeUndefined();
     const history = new ConversationHistory();
     history.reply(reply(1, "blocker", "Supervisor missed an update"), at(17, 20, -1));
     history.reply(reply(2, "answer"), at(9, 0));
     const times = threadModel(history.events, { now: NOW }).flatMap((item) => item.type === "group" ? [item.time] : []);
-    expect(times).toEqual(["Sep 20, 17:20", "09:00"]);
+    expect(times).toEqual(["Sep 20, 5:20 PM", "9:00 AM"]);
   });
   it("draws no session line when the thread's own session opens it, and one when another turn precedes it (cas-55a4)", () => {
     const own = new ConversationHistory();
@@ -79,7 +79,7 @@ describe("threadModel", () => {
     history.reply(reply(1, "answer"), at(9, 44));
     history.reply(reply(2, "receipt"), at(9, 47));
     const [, group] = threadModel(history.events, { now: NOW }) as [unknown, ThreadGroup];
-    expect(group.time).toBe("09:47");
+    expect(group.time).toBe("9:47 AM");
   });
   it("coalesces consecutive status turns into one line that counts them and shows the latest", () => {
     const history = new ConversationHistory();
@@ -92,7 +92,7 @@ describe("threadModel", () => {
     expect(items.map((item) => item.type)).toEqual(["day", "group", "coalesce", "group"]);
     const line = items[2];
     if (line.type !== "coalesce") throw new Error("expected coalesce");
-    expect(line.count).toBe(3); expect(line.latest).toBe("gate 11 of 14 targets green"); expect(line.time).toBe("09:55");
+    expect(line.count).toBe(3); expect(line.latest).toBe("gate 11 of 14 targets green"); expect(line.time).toBe("9:55 AM");
     expect(coalesceText(line)).toBe("2 more updates · gate 11 of 14 targets green");
     // A status run splits the supervisor turns around it into separate groups.
     const after = items[3] as ThreadGroup; expect(after.turns[0]).toMatchObject({ first: true, last: true });
@@ -145,6 +145,11 @@ describe("threadModel", () => {
     for (const tick of ["Gate 11 of 14 targets green", "Rebasing", "fetching https://example.test/run?id=4 · 3 of 5"]) {
       expect(foldsAsStatus(tick), tick).toBe(true);
     }
+    // Block Markdown keeps its shape at any length; only inline Markdown fits the quiet line.
+    for (const block of ["> [!WARNING]\n> **Blocked:** the queue is red.", "## Blocked", "- first\n- second"]) {
+      expect(foldsAsStatus(block), block).toBe(false);
+    }
+    expect(foldsAsStatus("**Merged.** Gate 11 of 14 green")).toBe(true);
   });
   it("an ask-bearing status splits a status run and joins the supervisor turns beside it", () => {
     const history = new ConversationHistory();
@@ -186,8 +191,8 @@ describe("threadModel", () => {
     const items = threadModel(history.events, { now: NOW, historyEnd: true });
     expect(items.map((item) => item.type)).toEqual(["history-end", "day", "session", "group", "group", "day", "session", "group"]);
     expect(items.filter((item) => item.type === "session").map((item) => item.label)).toEqual([
-      "session factory-older started 09:00",
-      "session factory-newer started 09:00",
+      "session factory-older started 9:00 AM",
+      "session factory-newer started 9:00 AM",
     ]);
   });
   it("keeps an empty thread in the empty state when the loaded page ends history", () => {
@@ -206,13 +211,32 @@ describe("messageBlocks", () => {
     const blocks = messageBlocks("Yes — pass two is green. Every pack:\n\n| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |\n\nTagged and pushed.");
     expect(blocks).toEqual([
       { type: "text", text: "Yes — pass two is green. Every pack:" },
-      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]] } },
+      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]] }, source: "| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |" },
       { type: "text", text: "Tagged and pushed." },
     ]);
   });
   it("treats a table without a rule as body rows and leaves plain prose alone", () => {
-    expect(messageBlocks("| a | b |\n| c | d |")).toEqual([{ type: "table", table: { header: undefined, rows: [["a", "b"], ["c", "d"]] } }]);
+    // pin: Copy Markdown preserves headerless source and its line breaks exactly.
+    expect(messageBlocks("| a | b |\n| c | d |")).toEqual([{ type: "table", table: { header: undefined, rows: [["a", "b"], ["c", "d"]] }, source: "| a | b |\n| c | d |" }]);
     expect(messageBlocks("just | a pipe in prose")).toEqual([{ type: "text", text: "just | a pipe in prose" }]);
+  });
+  it("keeps escaped pipes in cells and fenced pipe rows in source", () => {
+    const fenced = "````md\r\n| fenced | source |\r\n```\r\n| still | source |\r\n````";
+    const blocks = messageBlocks(`${fenced}\r\n\r\n| command | result |\r\n| --- | --- |\r\n| \`a\\|b\` | pass |\r\n| end\\| | ok |`);
+    expect(blocks[0]).toEqual({ type: "text", text: fenced });
+    expect(blocks[1]).toMatchObject({ type: "table", table: { header: ["command", "result"], rows: [["`a|b`", "pass"], ["end|", "ok"]] } });
+    expect(messageBlocks("~~~\n| not | a table |\n")).toEqual([{ type: "text", text: "~~~\n| not | a table |\n" }]);
+  });
+  it("quotes CSV delimiters, quotes and line breaks without changing cell values", () => {
+    expect(tableCsv([["name", "note"], ['雪, report', 'said "ready"\nnext line'], ["", "pass"]]))
+      .toBe('name,note\r\n"雪, report","said ""ready""\nnext line"\r\n,pass');
+  });
+  it("neutralizes formula-leading CSV cells while keeping Markdown and displayed values (cas-4800)", () => {
+    const rows = [["=cmd", "@x", "+1", "-1", "\t=cmd", "\r=cmd", "plain", 'a,"b"']];
+    expect(tableCsv(rows)).toBe("'=cmd,'@x,'+1,'-1,'\t=cmd,\"'\r=cmd\",plain,\"a,\"\"b\"\"\"");
+    expect(rows).toEqual([["=cmd", "@x", "+1", "-1", "\t=cmd", "\r=cmd", "plain", 'a,"b"']]);
+    const markdown = "| =cmd | @x | +1 | -1 |";
+    expect(messageBlocks(markdown)).toEqual([{ type: "table", source: markdown, table: { rows: [["=cmd", "@x", "+1", "-1"]] } }]);
   });
   it("tones result cells", () => {
     expect(cellTone("pass")).toBe("pass"); expect(cellTone("1 flake")).toBe("flake"); expect(cellTone("failed")).toBe("fail"); expect(cellTone("412")).toBeUndefined();
@@ -242,7 +266,7 @@ describe("clock-skewed live turns show their own time (cas-ac1f)", () => {
     expect(history.events.map((event) => event.kind)).toEqual(["reply", "send"]);
     expect(history.events.at(-1)).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now + 1_000 });
     const groups = threadModel(history.events, { now: now + 1_000 }).filter((item): item is ThreadGroup => item.type === "group");
-    expect(groups.map((group) => [group.side, group.time, group.clockAhead])).toEqual([["supervisor", "12:00", true], ["you", "12:00", false]]);
+    expect(groups.map((group) => [group.side, group.time, group.clockAhead])).toEqual([["supervisor", "12:00 PM", true], ["you", "12:00 PM", false]]);
   });
   it("a send stamped before a live turn keyed ahead of it still sorts after and shows its own time", () => {
     // A browser clock that stepped back: the latest turn's key is ahead of the new send.
@@ -252,7 +276,7 @@ describe("clock-skewed live turns show their own time (cas-ac1f)", () => {
     history.submit("s", "sup", "On it", now);
     expect(history.events.at(-1)).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now });
     const groups = threadModel(history.events, { now: now + 300_000 }).filter((item) => item.type === "group");
-    expect(groups.at(-1)).toMatchObject({ side: "you", time: "12:00" });
+    expect(groups.at(-1)).toMatchObject({ side: "you", time: "12:00 PM" });
   });
 });
 
@@ -274,7 +298,7 @@ describe("thread order is stable under a machine clock ahead, a reconnect and a 
     // live answer from the same machine says so too (F02).
     // cas-d043 H14: the 12:36 answer keeps its own time, not merged under
     // the later arrival and its clock-ahead flag.
-    expect(groups(history, now + 60_000)).toEqual(["supervisor 12:36", "supervisor 13:36 ahead", "you 13:36", "supervisor 13:37 ahead"]);
+    expect(groups(history, now + 60_000)).toEqual(["supervisor 12:36 PM", "supervisor 1:36 PM ahead", "you 1:36 PM", "supervisor 1:37 PM ahead"]);
   });
   it("orders a 13:41 blocker from a clock 5 minutes ahead before the 13:36 session start and shows it at 13:36", () => {
     const history = new ConversationHistory();
@@ -282,7 +306,7 @@ describe("thread order is stable under a machine clock ahead, a reconnect and a 
     history.receive(reply(901, "ask", "Fix or ship?"), now + 5_000, "patient-pelican-9");
     const items = threadModel(history.events, { now: now + 5_000 });
     const shown = items.map((item) => item.type === "group" ? `${item.side} ${item.time}${item.clockAhead ? " ahead" : ""}` : item.type === "session" ? item.label : item.type === "day" ? item.label : item.type);
-    expect(shown).toEqual(["Today", "supervisor 13:36 ahead", "session patient-pelican-9 started 13:36", "supervisor 13:36 ahead"]);
+    expect(shown).toEqual(["Today", "supervisor 1:36 PM ahead", "session patient-pelican-9 started 1:36 PM", "supervisor 1:36 PM ahead"]);
   });
   it("places durable turns in the machine's sequence whatever their stamps and the hydration order", () => {
     const history = new ConversationHistory();
@@ -294,7 +318,7 @@ describe("thread order is stable under a machine clock ahead, a reconnect and a 
     // A few seconds of skew changes nothing on screen, so it earns no hint.
     const slight = new ConversationHistory();
     slight.hydrateReply(durable(5, now + 2_000), now);
-    expect(groups(slight, now)).toEqual(["supervisor 13:36"]);
+    expect(groups(slight, now)).toEqual(["supervisor 1:36 PM"]);
   });
   it("a reload rebuilds the order the visit saw: a day-ahead turn that came first stays above my message and its answer (review F01)", () => {
     const session = "patient-pelican-9";
@@ -325,13 +349,13 @@ describe("thread order is stable under a machine clock ahead, a reconnect and a 
     // Missed during an outage: the answer, stamped by a clock 5 minutes behind.
     history.hydrateReply(durable(11, now - 300_000, { message: "All green." }), now + 60_000);
     expect(order(history)).toEqual(["send:10", "reply:11"]);
-    expect(groups(history, now + 60_000)).toEqual(["you 13:36", "supervisor 13:31"]);
+    expect(groups(history, now + 60_000)).toEqual(["you 1:36 PM", "supervisor 1:31 PM"]);
   });
   it("a turn's shown time does not drift with the render clock", () => {
     const history = new ConversationHistory();
     history.hydrateReply(durable(1, now + 86_400_000), now);
-    expect(groups(history, now)).toEqual(["supervisor 13:36 ahead"]);
-    expect(groups(history, now + 600_000)).toEqual(["supervisor 13:36 ahead"]);
+    expect(groups(history, now)).toEqual(["supervisor 1:36 PM ahead"]);
+    expect(groups(history, now + 600_000)).toEqual(["supervisor 1:36 PM ahead"]);
   });
   it("marks a live turn only once the machine has been seen running ahead (review F02)", () => {
     const history = new ConversationHistory();
@@ -394,17 +418,17 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     reloaded.seedArrivals(record);
     reloaded.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, later);
     reloaded.hydrateSend({ notification_id: 8, target: "sup", text: "On it.", state: "acknowledged", stamped: true, at: iso(at(9, 1) + AHEAD), session: "live" } as never, later);
-    expect(shownLabels(reloaded, later)).toEqual(["09:00", "09:01"]);
+    expect(shownLabels(reloaded, later)).toEqual(["9:00 AM", "9:01 AM"]);
     // Without the record the rebuild shows the machine's own stamp, five
     // minutes ahead of what the visit showed (or the reload's time, when the
     // reload comes sooner than the lead): the defect.
     const forgetful = new ConversationHistory();
     forgetful.currentSession = "live";
     forgetful.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, later);
-    expect(shownLabels(forgetful, later)).toEqual(["09:05"]);
+    expect(shownLabels(forgetful, later)).toEqual(["9:05 AM"]);
     const soon = new ConversationHistory();
     soon.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, at(9, 2));
-    expect(shownLabels(soon, at(9, 2))).toEqual(["09:02"]);
+    expect(shownLabels(soon, at(9, 2))).toEqual(["9:02 AM"]);
   });
 
   it("measures the machine's lead from a live turn, and places a turn never seen by it", () => {
@@ -420,7 +444,7 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     history.seedArrivals(visit.arrivalsRecord());
     history.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, later);
     history.hydrateReply({ ...reply(9, "answer"), at: iso(at(9, 30) + AHEAD), session: "live" } as never, later);
-    expect(shownLabels(history, later)).toEqual(["09:00", "09:30"]);
+    expect(shownLabels(history, later)).toEqual(["9:00 AM", "9:30 AM"]);
   });
 
   it("marks a live turn on a reload exactly as the visit did (cas-9e33)", () => {
@@ -429,31 +453,31 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     const visit = new ConversationHistory();
     visit.currentSession = "live";
     visit.receive(reply(7, "answer"), at(12, 0), "live");
-    expect(marks(visit, at(12, 0))).toEqual(["12:00"]);
+    expect(marks(visit, at(12, 0))).toEqual(["12:00 PM"]);
     expect(visit.arrivalsRecord().live).toEqual({ "r:7": false });
     // The reload, three minutes later, rebuilds it from the machine's stamp, 12:05.
     const reloaded = new ConversationHistory();
     reloaded.currentSession = "live";
     reloaded.seedArrivals(visit.arrivalsRecord());
     reloaded.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 3));
-    expect(marks(reloaded, at(12, 3)), "the reload agrees with the visit").toEqual(["12:00"]);
+    expect(marks(reloaded, at(12, 3)), "the reload agrees with the visit").toEqual(["12:00 PM"]);
     // It still measures the lead, so the next live turn is marked, and that mark survives the next reload too.
     expect(reloaded.arrivalsRecord().skew).toBe(AHEAD);
     reloaded.receive(reply(8, "answer"), at(12, 4), "live");
-    expect(marks(reloaded, at(12, 4))).toEqual(["12:00", "12:04 ahead"]);
+    expect(marks(reloaded, at(12, 4))).toEqual(["12:00 PM", "12:04 PM ahead"]);
     expect(reloaded.arrivalsRecord().live).toEqual({ "r:7": false, "r:8": true });
     const again = new ConversationHistory();
     again.currentSession = "live";
     again.seedArrivals(reloaded.arrivalsRecord());
     again.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 9));
     again.hydrateReply({ ...reply(8, "answer"), at: iso(at(12, 4) + AHEAD), session: "live" } as never, at(12, 9));
-    expect(marks(again, at(12, 9))).toEqual(["12:00", "12:04 ahead"]);
+    expect(marks(again, at(12, 9))).toEqual(["12:00 PM", "12:04 PM ahead"]);
     // A turn never seen live, or a record from before cas-9e33, is still marked from its stamp.
     const legacy = new ConversationHistory();
     legacy.currentSession = "live";
     legacy.seedArrivals({ at: visit.arrivalsRecord().at });
     legacy.hydrateReply({ ...reply(7, "answer"), at: iso(at(12, 0) + AHEAD), session: "live" } as never, at(12, 3));
-    expect(marks(legacy, at(12, 3))).toEqual(["12:00 ahead"]);
+    expect(marks(legacy, at(12, 3))).toEqual(["12:00 PM ahead"]);
   });
 
   it("dates the thread's activity by the time it shows, not the machine's stamp (cas-24fe)", () => {
@@ -480,12 +504,12 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     // First visit at 09:02: an old blocker stamped 09:05 by a clock five minutes ahead shows 09:02.
     const first = new ConversationHistory();
     first.hydrateReply({ ...reply(3, "blocker"), at: iso(at(9, 5)) } as never, at(9, 2));
-    expect(shownLabels(first, at(9, 2))).toEqual(["09:02"]);
+    expect(shownLabels(first, at(9, 2))).toEqual(["9:02 AM"]);
     // Reload at 09:20: it still shows 09:02, not 09:05 or 09:20.
     const second = new ConversationHistory();
     second.seedArrivals(first.arrivalsRecord());
     second.hydrateReply({ ...reply(3, "blocker"), at: iso(at(9, 5)) } as never, at(9, 20));
-    expect(shownLabels(second, at(9, 20))).toEqual(["09:02"]);
+    expect(shownLabels(second, at(9, 20))).toEqual(["9:02 AM"]);
     expect(second.arrivalsRecord().skew, "a turn not seen live measures nothing").toBeUndefined();
   });
 });
@@ -495,8 +519,8 @@ describe("turns minutes apart keep their own time (cas-d043 H14)", () => {
     const at = new Date(2026, 9, 6, 12, 0).getTime();
     const answer = (id: number, when: number): ConversationEvent => ({ kind: "reply", value: reply(id, "answer", `Answer ${id}`), at: when } as ConversationEvent);
     const shown = (events: ConversationEvent[]) => threadModel(events, { now: at + 600_000 }).filter((item) => item.type === "group").map((item) => item.type === "group" ? `${item.turns.length}@${item.time}` : "");
-    expect(shown([answer(1, at), answer(2, at + 8 * 60_000)])).toEqual(["1@12:00", "1@12:08"]);
-    expect(shown([answer(1, at), answer(2, at + 60_000)])).toEqual(["2@12:01"]);
+    expect(shown([answer(1, at), answer(2, at + 8 * 60_000)])).toEqual(["1@12:00 PM", "1@12:08 PM"]);
+    expect(shown([answer(1, at), answer(2, at + 60_000)])).toEqual(["2@12:01 PM"]);
   });
 });
 

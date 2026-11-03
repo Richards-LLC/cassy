@@ -4,6 +4,92 @@ import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { DoubleOptions, Machine } from "./hub-double";
+import { LATEST_RELEASE_URL } from "./hub-double";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+test("HUB-J3 machine versions distinguish installed runtimes, cached updates and the web build", journeyPart, async ({ page, journey }) => {
+  let checks = 0, unavailable = false;
+  await page.route(LATEST_RELEASE_URL, route => {
+    checks++;
+    return unavailable ? route.abort() : route.fulfill({ json: { tag_name: "v3.88.0" } });
+  });
+  const versions = { atlas: "3.9.0", studio: "3.88.0" };
+  const supervisors: Machine[] = [
+    { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude", mcp_version: "3.90.0", installed_version: "3.91.1" })) },
+    { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session, harness: "codex", mcp_version: "3.91.1", installed_version: "3.91.1" })) },
+  ];
+  await journey.hub({ machines: supervisors, paired: ["atlas", "studio"], versions });
+  await journey.open();
+  // seedPaired clears localStorage during fixture setup. Measure the cache
+  // after the real returning-user navigation, independently of that warm-up.
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("commander.latest-release.v1") ?? "null")?.version)).toBe("3.88.0");
+  const initialChecks = checks;
+  const atlas = page.locator('.project-machine-chip[data-project-machine="atlas"]');
+  const studio = page.locator('.project-machine-chip[data-project-machine="studio"]');
+  await expect(atlas).toContainText("Cassy 3.9.0");
+  await expect(atlas).toContainText("Update available → 3.88.0");
+  await expect(studio).toContainText("Cassy 3.88.0");
+  await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+  await expect(page.locator('[title="Web client release and build"]')).toHaveText(/^Web \d+\.\d+\.\d+ · [a-f0-9]{8}$/);
+  const atlasSupervisor = page.locator(`[data-thread-key="atlas:${PELICAN}"] .supervisor-version`);
+  const studioSupervisor = page.locator(`[data-thread-key="studio:${OTTER}"] .supervisor-version`);
+  await journey.stage("Read each supervisor's MCP version and the installed upgrade (cas-8125)", async () => {
+    await expect(atlasSupervisor).toContainText("3.90.0");
+    await expect(atlasSupervisor).toContainText("↑");
+    await expect(atlasSupervisor).toHaveAttribute("title", /3\.91\.1.*Reconnect MCP/);
+    await expect(studioSupervisor).toHaveText("3.91.1");
+    await expect(studioSupervisor).not.toHaveClass(/update-available/);
+  });
+  const captureVersions = async (name: string) => {
+    if (!process.env.VERSION_QA) return;
+    // Preserve the real production DOM and CSS for the strict visual polish
+    // inspector; only asset URLs are inlined, with no replacement markup.
+    mkdirSync(process.env.VERSION_QA, { recursive: true });
+    const css = readFileSync("dist/app.css", "utf8").replace(/url\((?:["']?)([^)'"\s]+\.woff2)(?:["']?)\)/g, (_match, url: string) =>
+      `url(data:font/woff2;base64,${readFileSync(`dist/${url.split("/").at(-1)}`).toString("base64")})`);
+    const html = await page.evaluate(() => {
+      const root = document.documentElement.cloneNode(true) as HTMLElement;
+      root.querySelectorAll("script, link").forEach(node => node.remove());
+      return `<!doctype html>${root.outerHTML}`;
+    });
+    writeFileSync(`${process.env.VERSION_QA}/machine-versions-${name}.html`, html.replace("</head>", `<style>${css}</style></head>`));
+  };
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await journey.stage(`Read installed and available versions at ${width} in ${colorScheme}`, async () => {
+      await expect(atlas).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await expect(page.locator('[title="Web client release and build"]')).toBeVisible();
+    });
+    await captureVersions(`${width}-${colorScheme}`);
+  }
+  await journey.stage("The machine register repeats the installed and target versions", async () => {
+    await page.locator("#paired-machines-toggle").click();
+    await expect(page.locator('[data-machine-id="atlas"] .paired-machine-runtime')).toContainText("Update available → 3.88.0");
+    await expect(page.locator('[data-machine-id="studio"] .paired-machine-runtime')).toHaveText("Cassy 3.88.0");
+    await page.getByRole("button", { name: "Close paired machines" }).click();
+  });
+  await journey.stage("Reloads and unknown machine versions do not invent update warnings or extra checks", async () => {
+    versions.studio = "unknown";
+    supervisors[1]!.sessions[0]!.mcp_version = undefined;
+    await page.reload();
+    await expect(studio).toContainText("Version unknown");
+    await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+    await expect(studioSupervisor).toHaveCount(0);
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    expect(checks).toBe(initialChecks);
+  });
+  await journey.stage("An hourly failed check retains the last known release without retrying on reload", async () => {
+    unavailable = true;
+    await page.clock.fastForward(60 * 60_000 + 1);
+    await expect.poll(() => checks).toBe(initialChecks + 1);
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    await page.reload();
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    expect(checks).toBe(initialChecks + 1);
+  });
+});
 
 // A third machine with a 40-character name (cas-1ca1): its row must ellipsise
 // the name and keep the time stamp readable.
@@ -129,15 +215,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
 
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
-    await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     // cas-865c: the heading and New session share one row; nothing wraps.
     await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
-    // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
-    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
-    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
+    // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse). Rows are titled by project, then machine; the codename is tertiary.
+    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
+    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
+    await expect(list.locator(".conversation-supervisor-name")).toHaveText([PELICAN, OTTER, "quiet-heron-7"]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
@@ -145,7 +231,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("Each row's time is its own session's activity", async () => {
     // cas-6acf: a time comes only from the session's own activity, in words for
     // assistive tech, and never the catalog check every poll refreshes to "now".
-    const lighthouse = list.getByRole("button", { name: /lighthouse/ });
+    const lighthouse = list.getByRole("button", { name: /lighthouse/ }).and(list.locator(".conversation-row"));
     await expect(lighthouse.locator(".conversation-when")).toHaveText("3h");
     await expect(lighthouse).toHaveAccessibleName(/3 hours ago/);
     await expect(lighthouse).not.toHaveAccessibleName(/\b3h\b/);
@@ -168,33 +254,33 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     atlasSession.last_activity_at = journeyStamp(-1_000);
     atlasSession.last_activity = "supervisor → Commander";
     await hub.announceCatalog("atlas");
-    const unopened = list.getByRole("button", { name: /cas-src/ });
+    const unopened = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
     await expect(unopened.getByLabel("1 unread")).toBeVisible();
     await expect(unopened.locator(".conversation-preview")).toContainText("The bank feed for October is ready.");
   });
 
   await journey.stage("Open the conversation, then notice its next reply", async () => {
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toHaveCount(0);
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByLabel("1 unread")).toHaveCount(0);
     // The list is on screen beside the thread, so there is no back step (F17):
     // moving to another conversation is one click on its row.
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByLabel("1 unread")).toBeVisible();
   });
 
   await journey.stage("Find the conversation through the list search", async () => {
     // A project name leaves its conversation as the only row.
     await search.fill("gabber");
-    await expect(list.getByRole("button")).toHaveCount(1);
-    await expect(list.getByRole("button").first()).toContainText("gabber-studio");
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
     // The machine and the supervisor codename find it too.
     await search.fill("atlas");
-    await expect(list.getByRole("button")).toHaveCount(1);
-    await expect(list.getByRole("button").first()).toContainText("cas-src");
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await expect(list.locator(".conversation-row").first()).toContainText("cas-src");
     // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
     // and its unread count side by side, never one drawn over the other. Every
     // point of the count is the count's own, not the hint painted on top.
@@ -212,15 +298,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(await spokenName(hinted), "the row's spoken name").not.toContain("Enter");
     expect(await page.locator(hinted).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
-    await expect(list.getByRole("button")).toHaveCount(1);
-    await expect(list.getByRole("button").first()).toContainText("gabber-studio");
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
     await search.fill("no-such-project");
-    await expect(list.getByRole("button")).toHaveCount(0);
+    await expect(list.locator(".conversation-row")).toHaveCount(0);
     await expect(page.locator("#conversation-empty")).toContainText("No conversation matches “no-such-project”.");
     // Escape brings the whole list back.
     await search.press("Escape");
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     await search.fill("gabber-studio");
     // cas-537f: the row Enter would open is marked, and named to assistive
     // tech as the field's active descendant.
@@ -228,7 +314,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(target).toHaveCount(1);
     await expect(target).toContainText("gabber-studio");
     await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
@@ -236,7 +322,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // cas-537f: opening a result clears the search, as Enter does; the whole
     // list (and every other row's unread count) is back.
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     await expect(search).not.toHaveAttribute("aria-activedescendant");
   });
 
@@ -260,64 +346,42 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.keyboard.press("ControlOrMeta+k");
     await expect(search).toBeFocused();
     await page.keyboard.type("cas-src");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
     await page.keyboard.press("Enter");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
   });
 
-  await journey.stage("A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px", async () => {
-    const row = list.getByRole("button", { name: /lighthouse/ });
-    const clearOfTime = () => row.evaluate((node) => {
-      const name = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
-      const time = node.querySelector(".conversation-when")?.getBoundingClientRect();
-      const label = node.querySelector<HTMLElement>(".conversation-machine-name")!;
-      return { ellipsised: label.scrollWidth > label.clientWidth, clear: !time || name.right <= time.left + 0.5 };
+  await journey.stage("A 40-character machine name wraps in its project header and stays separate from session times", async () => {
+    const project = list.getByRole("group", { name: /^lighthouse ·/ });
+    const chip = project.getByRole("button", { name: "Filter conversations on Forge build box with an unusual hostname, online", exact: true });
+    // Project cards move the machine identity out of the row's timestamp
+    // column. Its complete name wraps in the chip at both viewport widths.
+    const clearOfRows = () => project.evaluate((node) => {
+      const chip = node.querySelector<HTMLElement>(".project-machine-chip")!;
+      const name = chip.getBoundingClientRect();
+      const card = node.getBoundingClientRect();
+      const row = node.querySelector(".conversation-row")!.getBoundingClientRect();
+      return { whole: chip.scrollWidth <= chip.clientWidth + 1, contained: name.left >= card.left && name.right <= card.right, separate: name.bottom <= row.top };
     });
-    // A machine that wraps to its own line never starts it with the separator
-    // dot: the dot sits past the title's left edge, clipped (cas-1ca1 F02).
-    const noLeadingDot = () => list.locator(".conversation-row").evaluateAll((rows) => rows.every((node) => {
-      const title = node.querySelector(".conversation-title")!.getBoundingClientRect();
-      const project = node.querySelector(".conversation-project")!.getBoundingClientRect();
-      const machine = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
-      const dot = node.querySelector(".conversation-sep")!.getBoundingClientRect();
-      const wrapped = machine.top > project.top + 4;
-      return wrapped ? dot.right <= title.left + 0.5 : dot.left >= project.right;
-    }));
-    expect(await noLeadingDot()).toBe(true);
-    // Desktop: the 40-character name ellipsises before the time stamp.
-    await expect(row.locator(".conversation-when")).toBeVisible();
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
-    // cas-7374: the ellipsis is for the resting row only. Reached from the
-    // keyboard, the row shows the whole machine name, wrapped in its title
-    // column, still clear of the time stamp and with no leading dot.
-    await row.focus();
+    await expect(chip).toContainText("Forge build box with an unusual hostname");
+    expect(await clearOfRows()).toEqual({ whole: true, contained: true, separate: true });
+    await chip.focus();
     await page.keyboard.press("Shift+Tab");
     await page.keyboard.press("Tab");
-    await expect(row).toBeFocused();
-    expect(await row.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
-    expect(await clearOfTime()).toEqual({ ellipsised: false, clear: true });
-    expect(await noLeadingDot()).toBe(true);
+    await expect(chip).toBeFocused();
+    await expect(chip).toHaveCSS("outline-style", "solid");
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-focused.png") });
-    await row.evaluate((node) => (node as HTMLElement).blur());
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    // Phone width: the same, with the list as the whole page.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
-    await expect(row).toBeVisible();
+    await expect(chip).toBeVisible();
     await expectOneRowHeading();
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    expect(await noLeadingDot()).toBe(true);
-    // Receipt beside the stage screenshots: the 390 px list with the long name.
+    expect(await clearOfRows()).toEqual({ whole: true, contained: true, separate: true });
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
-    // Back at desktop width with nothing open, after a thread had filled the
-    // context rail: the canvas is the first load's, not an empty 240px column
-    // beside a shifted welcome (journey F15).
     await expect(page.locator(".conversation-welcome")).toBeVisible();
     expect(await welcomeLayout()).toEqual(firstWelcome);
   });
@@ -485,13 +549,13 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // conversation that needs the operator, never the one already open, and
     // the open one says so. gabber-studio gets a reply while cas-src is open
     // (visited once since the reload, so its machine is attached).
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect.poll(() => hub.hasSocket(OTTER)).toBe(true);
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
-    await expect(list.getByRole("button", { name: /gabber-studio/ }).getByLabel("1 unread")).toBeVisible();
+    await expect(list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).getByLabel("1 unread")).toBeVisible();
     await reopen();
     const current = palette.locator('.palette-command[data-palette-current="true"]');
     await expect(current).toHaveCount(1);
@@ -530,11 +594,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette).toBeHidden();
     await page.locator("#paired-machines-close").click();
     await expect(paired).toBeHidden();
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
     // And once more from the other conversation: still closed.
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
   });
@@ -576,7 +640,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     hub.delayAttach("quiet-heron-7", 2_000);
-    await list.getByRole("button", { name: /lighthouse/ }).click();
+    await list.getByRole("button", { name: /lighthouse/ }).and(list.locator(".conversation-row")).click();
     const opening = page.locator(".conversation-pane-slot .conversation-loading");
     await expect(opening).toHaveText("Opening the conversation…");
     // cas-813a: still for the first second, then a quiet pulse.
@@ -690,7 +754,7 @@ test.describe("on a Mac", () => {
       await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
       if (phone) await activate(page, page.getByRole("button", { name: "Close command palette", exact: true }));
       else await page.keyboard.press("Escape");
-      await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }));
+      await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")));
       await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
       await showConversationList(page);
       // The list returns through Back on phone; its
@@ -700,5 +764,133 @@ test.describe("on a Mac", () => {
       await expect(page.locator("body")).not.toContainText("Ctrl K");
       expect(await page.evaluate(() => [...document.querySelectorAll("[title], [placeholder], [aria-label]")].map((node) => `${node.getAttribute("title") ?? ""} ${node.getAttribute("placeholder") ?? ""} ${node.getAttribute("aria-label") ?? ""}`).filter((text) => text.includes("Ctrl K")))).toEqual([]);
     });
+  });
+});
+
+for (const width of [1280, 390]) {
+  test(`HUB-J3 supervisor exit ends the conversation at ${width} (cas-cec1)`, journeyPart, async ({ page, journey }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    const machine: Machine = { ...ATLAS, sessions: [
+      { ...ATLAS.sessions[0]!, workers: ["worker-a", "worker-b", "worker-c"] },
+      { ...ATLAS.sessions[0]!, name: "second-draft", supervisor: "second-draft" },
+    ] };
+    const session = machine.sessions[0]!;
+    const hub = await journey.hub({ machines: [machine], paired: [machine.id] });
+    await journey.open();
+    await page.locator(".conversation-row").first().click();
+    await expect(page.locator("#message-text")).toBeVisible();
+    await journey.stage("Supervisor and workers are live", async () => {
+      await expect(page.locator("#conversation-connection")).toContainText("Live");
+      await page.locator("#message-text").fill("Keep this inactive draft");
+      await showConversationList(page);
+      await page.locator('[data-thread-key="atlas:second-draft"]').click();
+      await page.locator("#message-text").fill("Keep this focused draft");
+      await expect(page.locator("#message-text")).toBeFocused();
+    });
+    machine.sessions[1]!.liveness = "stale_metadata";
+    session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"], unverified: [] };
+    session.liveness = "stale_metadata";
+    session.workers = ["worker-c"];
+    // cas-c095: the hub's events for a deliberate exit, then a crash elsewhere
+    // that proves the stream was read. Only the crash becomes attention.
+    const exitEvents = [
+      { kind: "pane_exited", sequence: 9101, session: session.name, pane_id: session.supervisor, payload: { exit_code: 0, role: "supervisor" } },
+      { kind: "daemon_disconnected", sequence: 9102, session: session.name, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata." } },
+      { kind: "daemon_disconnected", sequence: 9103, session: "another-session", diagnostic: { cause: { kind: "signal", signal: 9, name: "SIGKILL" }, next_action: "Inspect the factory daemon log and session metadata." } },
+    ];
+    await page.evaluate((rows) => {
+      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
+      for (const event of rows) wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
+    }, exitEvents);
+    await expect.poll(() => page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("cas-commander-v1", 2);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const rows = await new Promise<{ id: string }[]>((resolve, reject) => {
+        const request = db.transaction("attention").objectStore("attention").getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return rows.map(row => row.id).filter(id => id.startsWith("atlas:event:")).sort();
+    }), { message: "a deliberate exit files no attention item" }).toEqual(["atlas:event:9103"]);
+    await hub.announceCatalog(machine.id);
+    await journey.stage("Ended sessions leave navigation without retrying (cas-f8ab)", async () => {
+      await expect(page.locator("#conversation-list .conversation-row")).toHaveCount(0);
+      await expect(page.locator(".project-card")).toHaveCount(0);
+      await expect(page.locator("#message-text")).toBeHidden();
+      await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
+      // End evidence and worker accounting remain in the hub's history model.
+      expect(session.ended).toMatchObject({ workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"] });
+      await showConversationList(page);
+      await expect(page.locator(".conversation-row")).toHaveCount(0);
+    });
+    await journey.stage("Focused and inactive drafts remain in Saved messages after reload (cas-45b8)", async () => {
+      const saved = page.getByRole("region", { name: "Saved messages" });
+      const readSavedDrafts = async () => {
+        await expect(saved.locator("article")).toHaveCount(2);
+        for (const details of await saved.locator("details").all()) {
+          if (!await details.evaluate(node => (node as HTMLDetailsElement).open)) await details.locator("summary").click();
+        }
+        await expect(saved).toContainText("Keep this inactive draft");
+        await expect(saved).toContainText("Keep this focused draft");
+      };
+      await readSavedDrafts();
+      await page.reload();
+      await expect(page.locator(".conversation-row")).toHaveCount(0);
+      await readSavedDrafts();
+      // A new supervisor with the same name starts with an empty composer;
+      // the archived words stay reachable beside other live conversations.
+      session.ended = undefined;
+      session.liveness = "live";
+      await hub.announceCatalog(machine.id);
+      await page.locator(".conversation-row").click();
+      await expect(page.locator("#message-text")).toHaveValue("");
+      await showConversationList(page);
+      await readSavedDrafts();
+    });
+  });
+}
+
+// cas-ade2: the register is alphabetical. Two supervisors of one project on
+// two machines trade recency on every update; no card or row ever moves.
+test("HUB-J3 project cards and supervisor rows keep their places while two machines stay active (cas-ade2)", journeyPart, async ({ page, journey }) => {
+  // The catalog lists widget first; the register still puts cas-src first.
+  const atlas: Machine = { ...ATLAS, sessions: [
+    { ...ATLAS.sessions[0]!, name: "amber-otter-5", supervisor: "amber-otter-5", project_dir: "/projects/widget" },
+    { ...ATLAS.sessions[0]!, name: "zesty-heron-3", supervisor: "zesty-heron-3", project_dir: "/projects/cas-src" },
+  ] };
+  const studio: Machine = { ...STUDIO, sessions: [{ ...STUDIO.sessions[0]!, name: "bright-robin-2", supervisor: "bright-robin-2", project_dir: "/projects/cas-src" }] };
+  const stamp = (tick: number) => {
+    // Each update makes a different session the newest, as live work does.
+    atlas.sessions[0]!.last_activity_at = journeyStamp(-30_000 - tick * 1_000);
+    atlas.sessions[1]!.last_activity_at = journeyStamp(tick % 2 ? -1_000 : -90_000);
+    studio.sessions[0]!.last_activity_at = journeyStamp(tick % 2 ? -90_000 : -1_000);
+  };
+  stamp(0);
+  const hub = await journey.hub({ machines: [atlas, studio], paired: ["atlas", "studio"] });
+  await journey.open();
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const layout = () => list.evaluate((nav) => [...nav.querySelectorAll<HTMLElement>(".project-card")].map((card) => [
+    card.querySelector(".project-card-name")?.textContent ?? "",
+    ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((row) => row.dataset.threadKey ?? ""),
+  ]));
+  await journey.stage("Cards sort by project name and rows by supervisor name", async () => {
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    expect(await layout()).toEqual([["cas-src", "studio:bright-robin-2", "atlas:zesty-heron-3"], ["widget", "atlas:amber-otter-5"]]);
+  });
+  const first = await layout();
+  // Tag each rendered row so a re-created or moved node is caught too.
+  await list.evaluate((nav) => nav.querySelectorAll<HTMLElement>(".conversation-row").forEach((row, index) => { (row as unknown as { ade2?: number }).ade2 = index; }));
+  await journey.stage("Repeated activity updates on both machines move nothing", async () => {
+    for (let tick = 1; tick <= 4; tick++) {
+      stamp(tick);
+      await hub.announceCatalog("atlas");
+      await hub.announceCatalog("studio");
+      expect(await layout(), `update ${tick}`).toEqual(first);
+      expect(await list.evaluate((nav) => [...nav.querySelectorAll(".conversation-row")].map((row) => (row as unknown as { ade2?: number }).ade2)), `update ${tick} keeps every row node in place`).toEqual([0, 1, 2]);
+    }
   });
 });

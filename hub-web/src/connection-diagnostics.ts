@@ -1,5 +1,5 @@
 import type { ConnectionSnapshot } from "./connection-state";
-export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "health_http_unavailable" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "hub_auth_store_unavailable" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
+export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "health_http_unavailable" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "clock_skew" | "hub_auth_store_unavailable" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
 export interface CauseEvidence {
   code: ConnectionCause;
   layer: "browser" | "http" | "auth" | "socket" | "session" | "events";
@@ -25,6 +25,7 @@ export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string
   auth_scope_mismatch: { title: "Hub refused the required permission", action: "Approve the required scope on the machine." },
   auth_needs_pairing: { title: "Hub refused this credential", action: "Pair this device again." },
   proof_refused: { title: "Hub refused a fresh proof", action: "Commander retries with the hub's clock. Check this device's clock if it persists." },
+  clock_skew: { title: "Device and machine clocks differ", action: "Check the date and time settings on this device and the machine; Commander only corrects a difference of up to 60 seconds." },
   hub_auth_store_unavailable: { title: "Hub is temporarily unable to check pairings", action: "Commander is retrying by itself; this device's pairing is intact.", detail: "The hub answered 503 auth_store_unavailable because it could not read its pairing store; it did not judge this credential." },
   http_refused: { title: "HTTP request was refused", action: "Check the measured HTTP status and hub diagnostics." },
   socket_closed: { title: "The live link to the machine dropped", action: "Commander reconnects it by itself.", detail: "Terminal socket closed; the HTTP hub may still be healthy." },

@@ -1,0 +1,4 @@
+title: Real disposable launch teardown waits for the daemon and its children and retains state after deletion failure
+tasks: [cas-bb86]
+invariants: [HUB-J13-GOAL]
+journeys: [HUB-J13]

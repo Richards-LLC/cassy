@@ -99,6 +99,9 @@ impl Config {
             value
         };
 
+        if key.starts_with("qa.") {
+            self.prepare_qa_set();
+        }
         match key {
             "accounts.disabled" => {
                 let disabled: Vec<String> = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
@@ -240,6 +243,12 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.stall_threshold_secs = value.parse().map_err(|_| {
                     MemError::Parse(format!("Invalid integer value for factory.stall_threshold_secs: {value}"))
+                })?;
+            }
+            "factory.restart_worker_between_tasks" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.restart_worker_between_tasks = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.restart_worker_between_tasks: {value}"))
                 })?;
             }
             "factory.context_recycle_threshold_percent" => {
@@ -1165,6 +1174,29 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "secrets.destination" => {
+                let value = value.trim();
+                if !(value.is_empty()
+                    || value.starts_with('/')
+                    || value == "~"
+                    || value.starts_with("~/"))
+                {
+                    return Err(MemError::Parse(
+                        "secrets.destination must be an absolute path or start with ~/".into(),
+                    ));
+                }
+                self.secrets.get_or_insert_with(SecretsConfig::default).destination =
+                    (!value.is_empty()).then(|| value.to_string());
+            }
+            "secrets.auto_delete" => {
+                let value = value.trim();
+                let Some(policy) = crate::hub::secret_auto_delete::AutoDelete::parse(value) else {
+                    return Err(MemError::Parse(
+                        "secrets.auto_delete must be off, after_use, or a time from 1m to 30d such as 1h".into(),
+                    ));
+                };
+                self.secrets.get_or_insert_with(SecretsConfig::default).auto_delete = policy.label();
+            }
             // Issues section
             "issues.repo" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);
@@ -1234,30 +1266,6 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
-            "notifications.sound_enabled" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.sound_enabled = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.display_duration_secs" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.display_duration_secs = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
-            }
-            "notifications.max_visible" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.max_visible = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
-            }
             "notifications.on_permission_prompt"
             | "notifications.on_idle_prompt"
             | "notifications.on_auth_success" => {
@@ -1281,114 +1289,6 @@ impl Config {
                     .notifications
                     .get_or_insert_with(NotificationConfig::default);
                 notifications.webhook_url = url.map(|url| url.to_string());
-            }
-            // Notifications.tasks section
-            "notifications.tasks.on_created" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.tasks.on_created = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.tasks.on_started" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.tasks.on_started = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.tasks.on_closed" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.tasks.on_closed = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.tasks.on_updated" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.tasks.on_updated = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            // Notifications.entries section
-            "notifications.entries.on_added" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.entries.on_added = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.entries.on_updated" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.entries.on_updated = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.entries.on_deleted" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.entries.on_deleted = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            // Notifications.rules section
-            "notifications.rules.on_created" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.rules.on_created = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.rules.on_promoted" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.rules.on_promoted = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.rules.on_demoted" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.rules.on_demoted = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            // Notifications.skills section
-            "notifications.skills.on_created" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.skills.on_created = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.skills.on_enabled" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.skills.on_enabled = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "notifications.skills.on_disabled" => {
-                let notifications = self
-                    .notifications
-                    .get_or_insert_with(NotificationConfig::default);
-                notifications.skills.on_disabled = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
             // Agent section
             "agent.name" => {
@@ -1710,6 +1610,9 @@ impl Config {
             _ => {
                 return Err(MemError::Other(format!("Unknown config key: {key}")));
             }
+        }
+        if key.starts_with("qa.") {
+            self.record_qa_key(key);
         }
         Ok(())
     }

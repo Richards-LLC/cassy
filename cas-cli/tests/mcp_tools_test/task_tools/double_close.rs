@@ -123,7 +123,6 @@ async fn test_close_on_already_closed_is_non_destructive() {
             id: id.clone(),
             reason: Some("First closer wins.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -156,7 +155,6 @@ async fn test_close_on_already_closed_is_non_destructive() {
             id: id.clone(),
             reason: Some("Second closer races.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -228,7 +226,6 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
             id: id.clone(),
             reason: Some("Initial close.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -323,7 +320,6 @@ async fn test_racing_close_reports_the_winner_cas_eda0() {
             id: loser_id,
             reason: Some("Loser closes second.".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         })));

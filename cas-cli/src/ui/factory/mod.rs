@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub(crate) use app::provisioning::{provisioner_executable, strip_deleted_suffix};
 pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
 };
@@ -68,6 +69,8 @@ mod client;
 pub(crate) mod daemon;
 mod director;
 pub(crate) use director::effective_stall_threshold_secs;
+#[cfg(test)]
+pub(crate) use director::delivery_marked_ready;
 pub(crate) use director::{enqueue_external_message, external_response_hint};
 pub(crate) mod cgroup;
 mod input;
@@ -77,6 +80,7 @@ pub(crate) mod orphan_gc;
 pub(crate) mod phoenix;
 pub(crate) mod process_groups;
 mod protocol;
+pub mod supervisor_commands;
 pub(crate) mod relay_token;
 pub mod renderer;
 /// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.
@@ -143,15 +147,16 @@ pub use protocol::{
     ClientMessage, ConversationHistoryMessage, ConversationHistoryReply, DaemonMessage, OperatorNotice,
     MessageAttribution, OperatorReplyPayload, OperatorTurnKind, PROTOCOL_VERSION, PaneBootstrap,
     PaneInfo, PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
-    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, daemon_capabilities,
+    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, WorkTool, WorkToolCounts, WorkLifecycle, WorkReasoning,
+    WorkChangedFile, WorkChangedFiles, WorkLineCounts, daemon_capabilities, valid_secret_name,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{
-    SessionInfo, SessionManager, create_metadata, daemon_log_path, daemon_trace_log_path,
+    SessionInfo, SessionManager, SessionEndOutcome, create_metadata, daemon_log_path, daemon_trace_log_path,
     generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
     socket_path, tui_log_path,
 };
-pub(crate) use session::{daemon_identity_is_live, record_daemon_lifecycle};
+pub(crate) use session::{EndedSession, daemon_identity_is_live, record_daemon_lifecycle};
 use std::io;
 use std::path::Path;
 

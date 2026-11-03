@@ -56,7 +56,6 @@ fn close_req(id: &str) -> TaskCloseRequest {
         id: id.to_string(),
         reason: Some("delivered".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }
@@ -70,7 +69,7 @@ async fn close_text(core: &CasCore, id: &str) -> String {
 }
 
 /// A reviewer with a different registered name from the implementer.
-fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
+pub(super) fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
     let id = format!("qa-session-{name}-{}", std::process::id());
     let agents = open_agent_store(cas_dir).unwrap();
     agents
@@ -105,7 +104,7 @@ fn fixture_with_project(
         format!(
             // The implementer's own evidence gate (cas-0cd5) is covered by
             // qa_evidence_gate.rs; these tests exercise the independent pass.
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n{project_config}",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nmode='per_task'\nevidence_gate = false\n{project_config}",
             repo.join("artifacts").display().to_string()
         ),
     )
@@ -131,7 +130,7 @@ fn fixture_with_project(
 }
 
 /// A round's LEDGER.md plus its cas-c3b8 `bundle.json` for `head`.
-fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
+pub(super) fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let ledger = dir.join("LEDGER.md");
     std::fs::write(&ledger, "# independent QA ledger\n").unwrap();
@@ -246,11 +245,40 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
             .unwrap().unwrap().state.is_active());
     }
     std::fs::write(&ledger,
-        "| Journey | Verdict |\n| --- | --- |\n| SEND | NOT EXERCISED: sandbox unavailable |\n| REPLY | PASS — persisted reply read back |\n").unwrap();
+        "cells=2; PASS=1; FAIL=0; NOT EXERCISED=1\nlabels: source-inferred=1; real-build=1\n\
+         | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+         | SEND | compose | sent | sandbox unavailable | NOT EXERCISED: sandbox unavailable | source-inferred | - | - |\n\
+         | REPLY | reply | saved | persisted reply read back | PASS | real-build | LEDGER.md | - |\n").unwrap();
+    let explained = std::fs::read_to_string(&ledger).unwrap();
+    std::fs::write(
+        &ledger,
+        explained.replace("NOT EXERCISED: sandbox unavailable", "NOT EXERCISED"),
+    ).unwrap();
+    let error = service.verification(request()).await
+        .expect_err("bare NOT EXERCISED needs a reason");
+    assert!(
+        error.message.contains("QA RECORD REJECTED") && error.message.contains("reason"),
+        "{}", error.message
+    );
+    std::fs::write(&ledger, explained).unwrap();
     let result = extract_text(service.verification(request()).await.unwrap());
     assert!(result.contains("APPROVAL"), "{result}");
     assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task_id(&cas_dir, &task_id)).unwrap().status,
         TaskStatus::Closed);
+    // The verdict and the journey it exercised are ledger checks; the row it
+    // could not exercise measures nothing.
+    let checks: Vec<_> = cas_store::quality_events_for_task(&cas_dir, &task_id).unwrap().into_iter()
+        .filter_map(|event| match event.payload {
+            cas_store::QualityPayload::CheckRun { check_id, stage, outcome, .. }
+                if matches!(stage, cas_store::CheckStage::Qa | cas_store::CheckStage::Journey) =>
+                Some((check_id, outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checks, [
+        ("qa_pass".to_string(), cas_store::CheckOutcome::Pass),
+        ("journey:REPLY".to_string(), cas_store::CheckOutcome::Pass),
+    ]);
 }
 
 #[tokio::test]
@@ -621,7 +649,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     assert!(approved.contains("APPROVAL"), "{approved}");
     assert!(
         tasks.get(&task_id).unwrap().notes.contains(&format!(
-            "PLATFORM_PROOF qa-bundle: {}",
+            "PLATFORM_PROOF qa-review-bundle: {}",
             repo.join("round-2").join("bundle.json").display()
         )),
         "the approved round's bundle is cited on the delivery"
@@ -689,7 +717,7 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let service = CasService::new(reviewer, None);
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\n").unwrap();
+    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\n").unwrap();
     let record = |issues: serde_json::Value| verification(serde_json::json!({
         "action": "qa_record", "task_id": task_id, "status": "approved",
         "summary": "delivery passes; older defects are tracked separately",
@@ -705,9 +733,12 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert!(!tasks.list(None).unwrap().iter().any(|task| task.labels.iter().any(|label| label == "qa-follow-up")));
 
     let result = extract_text(service.verification(Parameters(record(serde_json::json!([
-        {"id":"F10", "scope":"pre-existing"}, {"id":"F11", "scope":"pre-existing"}
+        {"id":"F10", "scope":"pre-existing"},
+        {"id":"F11", "scope":"pre-existing", "repro":"run the strict capture twice; the contrast differs", "affected":"reviewers reading the capture"},
+        {"id":"F12", "scope":"pre-existing"}
     ])))).await.unwrap());
     assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
+    assert!(result.contains("below the spawn threshold (no repro or affected): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
         .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
     assert_eq!(follow_ups.len(), 1, "F10 already has a task; only F11 is filed");
@@ -717,6 +748,43 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
         .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+}
+
+/// cas-0ad8: through the real task tool. A follow-up naming a verifier finding is
+/// refused until it says how to reproduce it and who it affects.
+#[tokio::test]
+async fn task_create_applies_the_review_spawn_threshold_cas_0ad8() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, _task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let service = CasService::new(core, None);
+    let create = |extra: serde_json::Value| {
+        let mut request = serde_json::json!({
+            "action": "create", "title": "Tighten a check", "risk": "none", "task_type": "task",
+            "description": "Non-blocking verifier findings on the delivery (ver-7e87d441000d).",
+        });
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<cas_mcp::types::TaskRequest>(request).unwrap()
+    };
+    let refused = service
+        .task(Parameters(create(serde_json::json!({}))))
+        .await
+        .expect_err("a follow-up from a finding without repro or affected is refused");
+    assert!(refused.message.contains("SPAWN THRESHOLD"), "{}", refused.message);
+
+    let created = extract_text(
+        service
+            .task(Parameters(create(serde_json::json!({
+                "repro": "run cas x; it prints y", "affected": "the supervisor reading it",
+            }))))
+            .await
+            .unwrap(),
+    );
+    let id = extract_task_id(&created).unwrap().to_string();
+    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+    assert!(task.labels.iter().any(|label| label == "from-finding"), "{:?}", task.labels);
+    assert!(task.notes.contains("Finding origin: verification:ver-7e87d441000d"), "{}", task.notes);
+    assert!(task.notes.contains("Affected: the supervisor reading it"), "{}", task.notes);
 }
 
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
@@ -767,7 +835,7 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
         .unwrap();
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    let pre_existing = "[{\"severity\":\"normal\",\"scope\":\"pre-existing\",\"problem\":\"Footer links fail contrast at 3.1:1. The base build too.\",\"suggestion\":\"use --ink-mid\",\"file\":\"F01.png\"}]";
+    let pre_existing = "[{\"severity\":\"normal\",\"scope\":\"pre-existing\",\"repro\":\"open the footer; contrast measures 3.1:1\",\"affected\":\"low-vision readers of the footer\",\"problem\":\"Footer links fail contrast at 3.1:1. The base build too.\",\"suggestion\":\"use --ink-mid\",\"file\":\"F01.png\"}]";
 
     // Rejecting for the page's older defect alone is refused, and changes nothing.
     let refused = reviewer_service
@@ -1457,6 +1525,9 @@ async fn task_branch_waiver_cas_3288(origin_only: bool) {
             .id,
     );
     tasks.update(&task).unwrap();
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.deliverables.factory_branch_anchor = Some(git(&repo, &["rev-parse", "factory/test-agent"]));
+    tasks.update(&task).unwrap();
     if origin_only {
         git(&repo, &["switch", "-q", "main"]);
         git(&repo, &["branch", "-D", &branch]);
@@ -1527,6 +1598,7 @@ async fn recorded_qa_branch_waiver_cas_3288() {
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
     task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.deliverables.factory_branch_anchor = Some(git(&repo, &["rev-parse", "factory/test-agent"]));
     tasks.update(&task).unwrap();
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let _role = SupervisorRole::enter(&mut test_env);
@@ -1542,6 +1614,144 @@ async fn recorded_qa_branch_waiver_cas_3288() {
         .remove(0);
     assert_eq!(pass.branch, branch);
     assert_eq!(pass.bound_head, head);
+}
+
+/// A legitimate handoff followed by a current-worker repark makes the new
+/// parked lane authoritative even when an older passed QA round names the
+/// retired worker's branch.
+#[tokio::test]
+async fn cas_81937_qa_waiver_binds_to_current_repark_after_handoff() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "main"]);
+    let _retired_worker = reviewer_core(&cas_dir, "bold-sparrow-35");
+    let _reviewer = reviewer_core(&cas_dir, "independent-reviewer");
+    let agents = open_agent_store(&cas_dir).unwrap().list(None).unwrap();
+    let reviewer_id = agents
+        .iter()
+        .find(|agent| agent.name == "independent-reviewer")
+        .unwrap()
+        .id
+        .clone();
+    let retired_id = agents
+        .into_iter()
+        .find(|agent| agent.name == "bold-sparrow-35")
+        .unwrap()
+        .id;
+
+    let retired_branch = "factory/bold-sparrow-35";
+    git(&repo, &["switch", "-q", "-c", retired_branch, "factory/test-agent"]);
+    let retired_head = commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:8px}\n.retired{color:red}\n",
+        "retired worker delivery",
+    );
+    git(&repo, &["push", "-q", "origin", retired_branch]);
+
+    let now = chrono::Utc::now();
+    cas_store::open_qa_pass(
+        &cas_dir,
+        &cas_store::NewQaPass {
+            task_id: &task_id,
+            implementer_agent_id: &retired_id,
+            branch: retired_branch,
+            bound_head: &retired_head,
+            deadline_at: now + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        },
+        now,
+    )
+    .unwrap();
+    cas_store::claim_qa_pass(&cas_dir, &task_id, &reviewer_id, now).unwrap();
+    let old_pass = cas_store::resolve_qa_pass(
+        &cas_dir,
+        &task_id,
+        &reviewer_id,
+        cas::types::QaVerdict::Approved,
+        "retired delivery passed review",
+        None,
+        "/qa/retired/LEDGER.md",
+        now,
+    )
+    .unwrap();
+
+    let current_name = "jolly-panther-11";
+    let _current_worker = reviewer_core(&cas_dir, current_name);
+    let current_id = open_agent_store(&cas_dir)
+        .unwrap()
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == current_name)
+        .unwrap()
+        .id;
+    let current_branch = "factory/jolly-panther-11";
+    git(&repo, &["switch", "-q", "-c", current_branch, retired_branch]);
+    let current_head = commit_file(
+        &repo,
+        "web/composer.css",
+        ".composer{gap:8px}\n.current{color:green}\n",
+        "current worker reparks delivery",
+    );
+    git(&repo, &["push", "-q", "origin", current_branch]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.assignee = Some(current_id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.record_park(
+        Some(retired_branch),
+        Some(&retired_head),
+        Some("bold-sparrow-35"),
+    );
+    task.deliverables.record_park(
+        Some(current_branch),
+        Some(&current_head),
+        Some(current_name),
+    );
+    tasks.update(&task).unwrap();
+
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let _role = SupervisorRole::enter(&mut test_env);
+    let result = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive",
+                "task_id": task_id,
+                "head_sha": current_head,
+                "summary": "reviewed the current worker repark",
+            }))))
+            .await
+            .expect("the exact pushed head on the current repark is waivable"),
+    );
+    assert!(result.contains(&current_head[..8]), "{result}");
+
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 2);
+    let historical = passes.iter().find(|pass| pass.id == old_pass.id).unwrap();
+    assert_eq!(historical, &old_pass, "the passed historical review is immutable");
+    let waiver = passes
+        .iter()
+        .find(|pass| pass.state == cas::types::QaPassState::Waived)
+        .unwrap();
+    assert_eq!(waiver.branch, current_branch);
+    assert_eq!(waiver.bound_head, current_head);
+    let after = tasks.get(&task_id).unwrap();
+    assert_eq!(after.deliverables.parked_branch.as_deref(), Some(current_branch));
+    assert_eq!(
+        after.deliverables.factory_branch_anchor.as_deref(),
+        Some(current_head.as_str())
+    );
+    assert_eq!(after.deliverables.handoff_branches, vec![retired_branch]);
+    assert_eq!(after.deliverables.historical_factory_branch_anchors, vec![retired_head]);
 }
 
 /// Origin advances without updating this checkout's branch or tracking ref.
@@ -1800,6 +2010,11 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     close_text(&core, &task_id).await;
+    let old_qa = qa_task_id(&cas_dir, &task_id);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut child = tasks.get(&old_qa).unwrap();
+    child.priority = cas::types::Priority(0);
+    tasks.update(&child).unwrap();
     let service = CasService::new(core.clone(), None);
 
     let role = SupervisorRole::enter(&mut test_env);
@@ -1822,6 +2037,12 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
     assert!(refused.message.contains("reason"), "{}", refused.message);
     let waived = extract_text(waived.expect("supervisor may waive with a reason"));
     assert!(waived.contains("waived"), "{waived}");
+    assert_eq!(tasks.get(&old_qa).unwrap().status, TaskStatus::Cancelled, "{waived}");
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["merge", "-q", "--ff-only", "factory/test-agent"]);
+    let closed = close_text(&core, &task_id).await;
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::Closed, "{closed}");
+    assert!(!tasks.list_ready().unwrap().iter().any(|task| task.id == old_qa));
 
     let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(
@@ -1850,6 +2071,73 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
         .await
         .expect_err("qa_waive is supervisor-only");
     assert!(worker_waive.message.contains("supervisor-only"), "{}", worker_waive.message);
+}
+
+/// Historical pass transitions may predate child retirement. Repair only this
+/// closed delivery's obsolete work, preserving a child reused by an active round.
+#[tokio::test]
+async fn reconcile_historical_qa_children_is_bounded_and_preserves_replacement_gh1380() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, delivery) = fixture(&mut env);
+    let root = repo.join(".cas");
+    close_text(&core, &delivery).await;
+    let tasks = open_task_store(&root).unwrap();
+    let original = qa_task_id(&root, &delivery);
+    let now = chrono::Utc::now();
+    let branch = "factory/test-agent";
+    // Recreate old store-only transitions, bypassing current lifecycle cleanup.
+    cas_store::waive_qa_pass(&root, &delivery, "old-supervisor", "test-agent", branch,
+        &git(&repo, &["rev-parse", "HEAD"]), "existing historical waiver", now).unwrap();
+    for (index, id) in ["cas-old-waived", "cas-shared-review"].into_iter().enumerate() {
+        let mut child = tasks.get(&original).unwrap();
+        child.id = id.into();
+        child.priority = cas::types::Priority(0);
+        child.notes = "Retain the reviewer's partial findings".into();
+        tasks.add(&child).unwrap();
+        let head = commit_file(&repo, "web/composer.css", &format!(".composer{{gap:{}px}}", index + 10), "historical tip");
+        let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+            task_id: &delivery, implementer_agent_id: "test-agent", branch, bound_head: &head,
+            deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+        }, now).unwrap() else { panic!("new historical round") };
+        cas_store::set_qa_task(&root, &pass.id, id).unwrap();
+        if index == 0 {
+            let waived = cas_store::waive_qa_pass(&root, &delivery, "old-supervisor", "test-agent", branch,
+                &head, "existing historical waiver", now).unwrap();
+            cas_store::set_qa_task(&root, &waived.id, id).unwrap();
+        }
+    }
+    let head = commit_file(&repo, "web/composer.css", ".composer{gap:20px}", "replacement tip");
+    let cas_store::QaPassOpen::Dispatched(active) = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+        task_id: &delivery, implementer_agent_id: "test-agent", branch, bound_head: &head,
+        deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+    }, now).unwrap() else { panic!("active replacement") };
+    cas_store::set_qa_task(&root, &active.id, "cas-shared-review").unwrap();
+    let mut parent = tasks.get(&delivery).unwrap();
+    parent.status = TaskStatus::Closed;
+    tasks.update(&parent).unwrap();
+    let before = cas_store::list_qa_passes(&root, &delivery).unwrap();
+    let request = serde_json::json!({"action":"qa_reconcile", "task_id":delivery, "limit":1});
+    let refused = CasService::new(core, None).verification(Parameters(verification(request.clone())))
+        .await.expect_err("repair requires a registered supervisor");
+    assert!(refused.message.contains("supervisor"), "{refused}");
+    let service = CasService::new(supervisor_core(&root), None);
+    let _role = SupervisorRole::enter(&mut env);
+    for remaining in [1, 0, 0] {
+        let receipt = service.verification(Parameters(verification(request.clone()))).await.unwrap();
+        let count = [original.as_str(), "cas-old-waived"].into_iter()
+            .filter(|id| !tasks.get(id).unwrap().is_terminal()).count();
+        assert_eq!(count, remaining, "{}", extract_text(receipt));
+        assert_eq!(tasks.get("cas-shared-review").unwrap().status, TaskStatus::Open);
+    }
+    for id in [original.as_str(), "cas-old-waived"] {
+        let child = tasks.get(id).unwrap();
+        assert_eq!(child.status, TaskStatus::Cancelled);
+        assert!(child.close_reason.as_deref().unwrap().contains(&delivery));
+        assert!(!tasks.list_ready().unwrap().iter().any(|task| task.id == id));
+    }
+    assert!(tasks.get("cas-old-waived").unwrap().notes.contains("partial findings"));
+    assert_eq!(cas_store::list_qa_passes(&root, &delivery).unwrap(), before,
+        "repair must not change pass identity, evidence, verdicts or waivers");
 }
 
 /// Reject round 1 of the fixture delivery (on `main`) and hand the task back

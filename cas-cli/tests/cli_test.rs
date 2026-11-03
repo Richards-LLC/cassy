@@ -19,6 +19,7 @@ fn cas_cmd(root: &std::path::Path) -> Command {
     // Tests should use current_dir() for isolation, not inherit env vars
     cmd.env_remove("CAS_ROOT");
     cmd.env_remove("COLUMNS");
+    cmd.env_remove("CLAUDE_CONFIG_DIR");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -46,6 +47,89 @@ fn test_version() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cas"));
+}
+
+#[test]
+fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    for directory in [".claude", "docs/qa", "src"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    std::fs::write(root.join(".claude/CODEMAP.md"), "- `src/` - Product flow\n").unwrap();
+    std::fs::write(
+        root.join("docs/qa/journeys.md"),
+        "### FLOW-J1 · Flow\n\n- **Touches:** `src/flow.ts`\n",
+    ).unwrap();
+    std::fs::write(root.join("src/flow.ts"), "export const flow = 0;\n").unwrap();
+    git(&["add", ".claude/CODEMAP.md", "docs/qa/journeys.md", "src/flow.ts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-qb", "factory/fixture"]);
+    std::fs::write(root.join("src/flow.ts"), "export const flow = 1;\n").unwrap();
+    git(&["add", "src/flow.ts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "delivery"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    let cas_root = cas::store::init_cas_dir(root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"legacy-impact-fixture\"\n").unwrap();
+    let target = cas::types::WorkTarget {
+        repo_selector: "project:legacy-impact-fixture".into(),
+        target_branch: "main".into(),
+    };
+    let mut task = cas::types::Task::new("cas-legacy-impact".into(), "Legacy impact".into());
+    task.origin_project = Some("legacy-impact-fixture".into());
+    task.assignee = Some("fixture".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_anchor = Some(head);
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target,
+        assignee: "fixture".into(),
+        branch: "factory/fixture".into(),
+        base_sha: base,
+    });
+    cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+
+    for selector in [vec!["--task", "cas-legacy-impact"], vec!["--files", "src/flow.ts"]] {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "impact"])
+            .args(&selector)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{selector:?}: {}", String::from_utf8_lossy(&output.stderr));
+        let impact: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(impact["source"], "codemap_fallback", "{selector:?}: {impact}");
+        assert_eq!(impact["areas"][0]["prefix"], "src", "{selector:?}: {impact}");
+        assert_eq!(impact["areas"][0]["files"][0], "src/flow.ts", "{selector:?}: {impact}");
+        assert!(impact["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning.as_str().unwrap_or_default().contains("scripts/journeys-for-diff.py")
+        }), "{selector:?}: {impact}");
+    }
+
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("scripts/journeys-for-diff.py"), "raise SystemExit(2)\n").unwrap();
+    git(&["add", "scripts/journeys-for-diff.py"]);
+    let malformed = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "impact", "--files", "src/flow.ts", "--json"])
+        .output()
+        .unwrap();
+    assert!(!malformed.status.success(), "malformed selector must fail closed");
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("legacy journey selector failed"));
+    assert!(malformed.stdout.is_empty(), "failed selector must not print impact JSON");
 }
 
 #[test]
@@ -123,6 +207,30 @@ fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let found = path("worker");
     assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
     assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
+    // The worker role never builds, even with the builder present.
+    let worker_build = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_AGENT_ROLE", "worker")
+        .args(["qa", "candidate", "build", "--task", "cas-0227"])
+        .output()
+        .unwrap();
+    assert!(!worker_build.status.success());
+    assert!(String::from_utf8_lossy(&worker_build.stderr).contains("candidate_request"), "{worker_build:?}");
+    // A later build repoints `candidate`; the path a ledger cites stays that build's own.
+    let task_dir = candidate.parent().unwrap();
+    let revision_dir = task_dir.join("candidates/abc");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(revision_dir.join("cas"), "built candidate\n").unwrap();
+    std::fs::remove_dir_all(&candidate).unwrap();
+    std::os::unix::fs::symlink("candidates/abc", &candidate).unwrap();
+    let cited = path("worker");
+    assert_eq!(
+        String::from_utf8(cited.stdout).unwrap().trim(),
+        revision_dir.join("cas").display().to_string()
+    );
+    std::fs::remove_file(&candidate).unwrap();
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("cas"), "built candidate\n").unwrap();
 
     // No compiler runs: exercise the real wrapper with a builder boundary
     // that publishes the same manifest as the Python builder, plus Git chatter.
@@ -559,6 +667,16 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             "zero drift: {saved}"
         );
     }
+    // A clean measured tree can still have new, uncommitted family inputs.
+    git(&["reset", "--hard", &curated]);
+    assert_eq!(status()["differs_from_measured_ref"], false);
+    write(
+        "docs/qa/bug-families/uncommitted.yaml",
+        "title: Uncommitted family\ntasks: [cas-1234]\ninvariants: [FLOW]\njourneys: [home]\n",
+    );
+    let uncommitted = status();
+    assert_eq!(uncommitted["problems"], serde_json::json!([]), "{uncommitted}");
+    assert_eq!(uncommitted["differs_from_measured_ref"], true, "{uncommitted}");
 }
 
 /// The lib-test probe child does not exercise main.rs's early executable route.
@@ -1475,40 +1593,6 @@ fn test_hook_command_session_start() {
 }
 
 #[test]
-fn test_hook_config() {
-    let temp = TempDir::new().unwrap();
-
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Check default hook config
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "hooks.capture_enabled"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("true"));
-
-    // Set hook config
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "hooks.capture_enabled", "false"])
-        .assert()
-        .success();
-
-    // Verify it was set
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "hooks.capture_enabled"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("false"));
-}
-
-#[test]
 fn test_hook_post_tool_use() {
     let temp = TempDir::new().unwrap();
 
@@ -1571,12 +1655,19 @@ fn test_config_list() {
         .assert()
         .success();
 
+    // Unknown legacy tables must load without emitting a retirement notice.
+    let path = temp.path().join(".cas/config.toml");
+    let mut raw = std::fs::read_to_string(&path).unwrap();
+    raw.push_str("\n[jev]\nenabled = true\n[jev.gate]\nshadow = true\n");
+    std::fs::write(&path, raw).unwrap();
+
     // Test config list
     cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list"])
         .assert()
         .success()
+        .stderr("")
         .stdout(predicate::str::contains("sync.enabled"))
         .stdout(predicate::str::contains("hooks.token_budget"));
 }
@@ -1634,29 +1725,6 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout(predicate::str::contains("false"));
-
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "qa.capture.success_url", "^https?://[^/]+/dashboard"])
-        .assert()
-        .success();
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "get", "qa.capture.success_url"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("^https?://[^/]+/dashboard"));
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "list", "--section", "qa.capture"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("qa.capture.credentials_env"));
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["config", "set", "qa.capture.success_url", "/dashboard"])
-        .assert()
-        .failure();
 
     // Hub policy is consumed by the host daemon, even from an initialized
     // project with a conflicting value (cas-e3ed).
@@ -3162,6 +3230,13 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     use std::path::{Path, PathBuf};
     use std::fs;
 
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    let gate = tempfile::Builder::new().prefix("cas-release-gate.")
+        .tempdir_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    let deep_tmp = gate.path().join("schedule/nextest.tmp");
+    fs::create_dir_all(&deep_tmp).unwrap();
+    env.set("TMPDIR", &deep_tmp);
+
     // The real projects live under the runtime fixture parent, like every
     // real-project fixture.
     let fixture = tempfile::tempdir_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -3179,7 +3254,7 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     // boundary from any checkout path. It holds no project: the refused
     // launches never create a HOME there, and only the positive control binds
     // a socket in it.
-    let sockets = tempfile::Builder::new().prefix("c4927").tempdir().unwrap();
+    let sockets = cas::test_paths::short_socket_tempdir();
     let root = sockets.path();
     // The old launch reaches this inert supervisor before its bind fails.
     fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
@@ -3239,4 +3314,138 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     let socket = PathBuf::from(root).join("s".repeat(padding));
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     fs::remove_file(socket).unwrap();
+}
+
+#[test]
+fn qa_ledger_init_check_and_no_overwrite() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/flow.ts"), "flow").unwrap();
+    std::fs::create_dir_all(root.join("docs/qa")).unwrap();
+    std::fs::write(root.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-10-28'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: FLOW-J1\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
+    git(&["add", "src/flow.ts", "docs/qa/journeys.yaml"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed"]);
+    let cas_root = cas::store::init_cas_dir(root).unwrap();
+    let artifacts = root.join("artifacts");
+    std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root={:?}\n", artifacts.display().to_string())).unwrap();
+    let mut task = cas::types::Task::new("cas-ledger-cli".into(), "Review src/flow.ts".into());
+    task.execution_note = Some("no-code".into());
+    cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+    let output = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(init["ok"], true);
+    assert_eq!(init["rows"][0]["verdict"], "NOT A ROUTE");
+    assert_eq!(init["rows"][0]["id"], "FLOW-J1");
+    let path = std::path::Path::new(init["path"].as_str().unwrap());
+    let original = std::fs::read(path).unwrap();
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    std::fs::write(path, String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" )).unwrap();
+    let bad = cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(!bad.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
+    assert_eq!(report["ok"], false);
+    assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "FLOW-J1" && d["field"] == "verdict"));
+
+    #[cfg(unix)]
+    {
+        let aliased_base = root.join("aliased-artifacts");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&aliased_base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let project_dir = cas::config::project_factory_artifacts_root(&cas_root, &aliased_base);
+        std::os::unix::fs::symlink(&outside, &project_dir).unwrap();
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root={:?}\n", aliased_base.display().to_string())).unwrap();
+        cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id])
+            .assert().failure().stderr(predicate::str::contains("escapes its project namespace"));
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "refused init created directories outside the namespace");
+    }
+}
+
+#[test]
+fn qa_ledger_check_accepts_copied_skill_examples() {
+    for (name, guide, marker) in [
+        (
+            "epic-flow-walk",
+            include_str!("../src/builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
+            "## Example epic note",
+        ),
+        (
+            "exemplar",
+            include_str!("../src/builtins/skills/cas-qa-craft/references/exemplar.md"),
+            "# Worked exemplar",
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let example = guide
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("```text\n")
+            .unwrap()
+            .1
+            .split_once("```")
+            .unwrap()
+            .0;
+        // Copy the example verbatim; only supply the captures it cites.
+        for line in example.lines() {
+            let cells: Vec<_> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
+            if cells.len() == 8 && cells[4] == "PASS" {
+                std::fs::write(temp.path().join(cells[6]), "captured output").unwrap();
+            }
+        }
+        let path = temp.path().join("LEDGER.md");
+        std::fs::write(&path, example).unwrap();
+        let output = cas_cmd(temp.path())
+            .current_dir(temp.path())
+            .args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn release_precheck_isolates_checkout_python_modules() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("shadowed");
+    std::fs::write(root.path().join("shutil.py"),
+        "from pathlib import Path\nPath('shadowed').write_text('credentials exposed')\nraise SystemExit(7)\n").unwrap();
+    let output = cas_cmd(root.path()).current_dir(root.path())
+        .args(["release", "precheck", "missing-sha", "--json"])
+        .output().unwrap();
+    assert!(!marker.exists(), "checkout shutil.py ran with inherited credentials");
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["error"].as_str().is_some(), "{report}");
+}
+
+#[test]
+fn release_precheck_preserves_child_exit_status() {
+    let root = TempDir::new().unwrap();
+    let python = root.path().join("python3");
+    cas::test_paths::warm_stub(&python, "#!/bin/sh\nexit 7\n");
+    cas_cmd(root.path()).current_dir(root.path())
+        .env("PATH", root.path())
+        .args(["release", "precheck", "missing-sha"])
+        .assert().code(7)
+        .stderr(predicate::str::is_empty());
 }

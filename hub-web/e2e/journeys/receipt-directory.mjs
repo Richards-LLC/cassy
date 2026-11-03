@@ -1,6 +1,43 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+
+/** Chapter annotation for native pages with a restrictive style-src policy. */
+export async function showRecordingChapter(page, title, { duration = 1000 } = {}) {
+  const id = `qa-chapter-${randomUUID()}`;
+  await page.evaluate(({ id, title }) => {
+    const host = document.createElement('div');
+    host.id = id;
+    host.setAttribute('aria-hidden', 'true');
+    const root = host.attachShadow({ mode: 'open' });
+    // CSSOM stylesheets work under native style-src 'self', unlike the
+    // <style> inserted by Playwright's showChapter. Never bypass the CSP.
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(`
+      :host { position: fixed; inset: 0; z-index: 2147483647;
+        display: grid; place-items: center; pointer-events: none; }
+      div { box-sizing: border-box; max-width: min(36rem, calc(100vw - 32px));
+        max-height: calc(100vh - 32px); overflow: auto; overflow-wrap: anywhere;
+        padding: 20px 24px; border-radius: var(--radius-pane);
+        border-inline-start: 4px solid var(--accent);
+        background: var(--bg-panel); color: var(--text-hi);
+        font: 600 24px/1.4 var(--font-ui); text-align: center;
+        box-shadow: var(--shadow-overlay); }
+      @media print { :host { display: none; } }
+    `);
+    root.adoptedStyleSheets = [sheet];
+    const caption = document.createElement('div');
+    caption.textContent = title;
+    root.append(caption);
+    document.documentElement.append(host);
+  }, { id, title });
+  try {
+    // Use Node time: journey pages may carry a paused synthetic clock.
+    await new Promise(resolve => setTimeout(resolve, duration));
+  } finally {
+    if (!page.isClosed()) await page.evaluate(id => document.getElementById(id)?.remove(), id);
+  }
+}
 
 // Describe blocks and projects may share a leaf title. Keep a readable prefix,
 // but key the directory by the complete test identity, including long titles.

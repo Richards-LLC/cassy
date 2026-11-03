@@ -39,4 +39,34 @@ Terminal receipts: `terminal-qa: PASS account-resets · 12 runs · 0 fail · 0 w
 
 ## Follow-up: extra usage and long waits (cas-dd77)
 
-Extra usage is spend data, not a reset window; summaries omit it and retain 5h, weekly and existing model-specific weekly windows. Under24h waits round hours up; at24h and later show complete days plus remaining whole hours (47h56m is1d23h). The status-only Codex fallback visits at most256 entries in reverse calendar order, considers newest8 files by mtime and reads256KiB tails; unavailable data remains unknown. Explicit account inventory is unchanged.
+Extra usage is spend data, not a reset window; summaries omit it and retain 5h, weekly and existing model-specific weekly windows. Under24h waits round hours up; at24h and later show complete days plus remaining whole hours (47h56m is1d23h). The status-only Codex fallback traverses day folders in reverse calendar order and sorts each day's rollout names newest-first before the unchanged256-entry sample cap. Within that capped sample it considers newest8 files by mtime and reads256KiB tails; unavailable data remains unknown. Explicit account inventory is unchanged.
+
+## Native Claude capacity
+
+| Field | Contract |
+| --- | --- |
+| First two lines | `cas limits` keeps the existing account-first layout and marks capacity unavailable when Claude Code has not emitted a recent statusline snapshot. |
+| Scannable | 5h and weekly percentages/reset windows retain the shared formatter; source identifies a Claude Code statusline observation from the last 5m. |
+| Readable | Missing, stale, or account-changed snapshots explain why usage is unknown; an expired window never advertises its previous percentage. |
+| Machine output | Existing account/source/windows/detail fields remain; credential values never enter the snapshot or report, and plan is unknown until a supported source supplies it. |
+| Omitted | Cassy never calls the subscription usage endpoint or opens Claude credential contents; cached usage never asserts login acceptance. |
+
+The supported input is Claude Code's `rate_limits.five_hour` and `seven_day`
+statusline JSON, consumed by `cas status-line --with-session`, including factory
+sessions and the account-only statusline outside a project. Only percentages and
+Unix reset instants are selected; raw input is never persisted. A private atomic
+`.cas-claude-usage.json` snapshot belongs to the emitting `CLAUDE_CONFIG_DIR`
+(default `~/.claude`). It expires after 5 minutes and after an account identity
+change. Unconfigured statuslines and idle sessions therefore show unknown usage.
+This change does not initiate model requests or a separate provider login probe.
+
+## Native Claude observations
+
+Generated statuslines use `cas statusline --with-session`, including factory
+sessions. Init/update upgrade the bare command in existing profile and project
+settings without replacing custom profile statuslines. A Claude percentage may
+outlive five minutes only while its known reset remains in the future; expired
+windows and identity changes still clear it. The picker puts `as of 2:10 PM ET`
+beside weekly capacity, before the reset so truncation cannot hide its age.
+Full and compact limits also label the observation. Account/limits JSON carries
+an optional UTC RFC3339 observation instant; it makes no live-capacity claim.

@@ -832,7 +832,15 @@ def row_toolchain(root, row, env):
     cargo = env.get("CARGO", "cargo")
     commands = [[cargo, "--version"], ["rustc", "-Vv"]]
     if row == "release-binary-isa":
-        objdump = "gobjdump" if platform.system() == "Darwin" else "objdump"
+        # Resolve exactly the GNU tool the ISA audit will use, including
+        # Homebrew's keg-only binutils and the OBJDUMP override.
+        try:
+            objdump = subprocess.run(
+                ["bash", "-c", 'source "$1"; release_portable_gnu_objdump',
+                 "assembly-proof", str(root / "scripts/release-portable.sh")],
+                cwd=root, env=env, capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError(f"{row} GNU objdump lookup failed: {error}") from error
         commands += [["cargo-zigbuild", "--version"], [objdump, "--version"]]
     outputs = []
     for command in commands:

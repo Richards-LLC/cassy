@@ -17,7 +17,7 @@
 //! decision so it can no longer drift per call site.
 
 use cas_mux::{InjectOutcome, SupervisorCli};
-use cas_store::WakeAttempt;
+use cas_store::{PromptQueueStore, WakeAttempt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -385,6 +385,7 @@ pub(crate) fn needs_durable_followup(delivered: bool, durable: bool) -> bool {
 /// write or a durable queue wake-time flush. Missing or unreadable state is
 /// uncertainty and deliberately delivers; only positive terminal evidence
 /// suppresses the stale `task start` imperative.
+#[cfg(test)]
 pub(crate) fn assignment_terminal_status(
     cas_dir: &Path,
     prompt: &str,
@@ -437,6 +438,96 @@ pub(crate) fn enqueue_director_prompt(
     )?;
     wake_daemon_after_enqueue(cas_dir);
     Ok(id)
+}
+
+/// Retraction identity must survive a queued director wake's wait for input.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DirectorPromptContext {
+    // Preserve the released delivery tip across queue delays and worker reuse.
+    #[serde(default)]
+    merge_alert: Option<crate::ui::factory::director::MergeAlertEvidence>,
+    retract_worker: Option<String>,
+    retract_task: Option<String>,
+    retract_epic: Option<String>,
+    drop_if_worker_assigned: Option<String>,
+}
+
+/// Persist director wakes with daemon provenance. The source is also the
+/// stable channel used by per-turn ledger attribution; it grants no authority
+/// without the daemon stamp. Keep these rows non-urgent so normal pane/tool
+/// and activity gates apply.
+fn enqueue_director_event(
+    cas_dir: &Path,
+    factory_session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+) -> anyhow::Result<i64> {
+    let context = DirectorPromptContext {
+        merge_alert: prompt.merge_alert.clone(),
+        retract_worker: prompt.retract_worker.clone(),
+        retract_task: prompt.retract_task.clone(),
+        retract_epic: prompt.retract_epic.clone(),
+        drop_if_worker_assigned: prompt.drop_if_worker_assigned.clone(),
+    };
+    let text = format!("{}\n\n<cas-director-prompt>{}</cas-director-prompt>",
+        prompt.text, serde_json::to_string(&context)?);
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_urgent_with_outcome(
+        super::teams::DIRECTOR_AGENT_NAME, &prompt.target, &text, Some(factory_session),
+        Some("Director prompt"), None, false, Some(&cas_store::QueueOrigin::Daemon),
+    )?.id();
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Only a daemon-stamped queue row may use this context for wake authority.
+pub(crate) fn parse_director_prompt(
+    target: &str,
+    text: &str,
+) -> Option<crate::ui::factory::director::Prompt> {
+    let (body, json) = text.rsplit_once("\n\n<cas-director-prompt>")?;
+    let context: DirectorPromptContext =
+        serde_json::from_str(json.strip_suffix("</cas-director-prompt>")?).ok()?;
+    Some(crate::ui::factory::director::Prompt {
+        target: target.into(), text: body.into(),
+        retract_worker: context.retract_worker, retract_task: context.retract_task,
+        retract_epic: context.retract_epic, drop_if_worker_assigned: context.drop_if_worker_assigned,
+        merge_ready: false, merge_alert: context.merge_alert, stall_nudge_task: None, durable_retry: true,
+    })
+}
+
+/// Green director readiness uses the same durable episode as park/manual mail.
+pub(crate) fn enqueue_merge_ready_prompt(
+    cas_dir: &Path,
+    factory_session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+) -> anyhow::Result<i64> {
+    anyhow::ensure!(prompt.is_merge_ready(), "readiness requires typed green intent");
+    let evidence = prompt.merge_alert.as_ref().ok_or_else(|| anyhow::anyhow!("readiness needs delivery evidence"))?;
+    let text = format!("{}\n\n<cas-director-ready>{}</cas-director-ready>",
+        prompt.text, serde_json::to_string(evidence)?);
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_urgent_with_outcome(
+        super::teams::DIRECTOR_AGENT_NAME, &prompt.target, &text, Some(factory_session),
+        Some("Ready to merge"), None, false, Some(&cas_store::QueueOrigin::Daemon),
+    )?.id();
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Restore the immutable director identity for the queue's final live check.
+/// Callers must require daemon provenance before granting it wake authority.
+pub(crate) fn parse_merge_ready_prompt(
+    target: &str, text: &str,
+) -> Option<crate::ui::factory::director::Prompt> {
+    let (body, json) = text.rsplit_once("\n\n<cas-director-ready>")?;
+    let evidence: crate::ui::factory::director::MergeAlertEvidence =
+        serde_json::from_str(json.strip_suffix("</cas-director-ready>")?).ok()?;
+    Some(crate::ui::factory::director::Prompt {
+        retract_task: Some(evidence.task_id.clone()), merge_ready: true, merge_alert: Some(evidence),
+        target: target.into(), text: body.into(), stall_nudge_task: None,
+        retract_worker: None, retract_epic: None, drop_if_worker_assigned: None,
+        durable_retry: true,
+    })
 }
 
 /// Stall nudges always enter the durable lane, even for a ready pane.
@@ -778,6 +869,11 @@ fn provenance_writer() -> &'static ProvenanceWriter {
 /// semantic-message implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CommanderControl {
+    SupervisorCommand {
+        request: crate::ui::factory::supervisor_commands::SupervisorCommandRequest,
+        client_ref: String,
+        attribution: crate::ui::factory::protocol::MessageAttribution,
+    },
     InterruptPane {
         pane_id: String,
     },
@@ -799,6 +895,7 @@ impl CommanderControl {
     pub(super) fn error_prefix(&self) -> &'static str {
         match self {
             Self::InterruptPane { .. } => "targeted interrupt failed",
+            Self::SupervisorCommand { .. } => "supervisor command failed",
             Self::SendMessage { .. } => "semantic message enqueue failed",
         }
     }
@@ -807,6 +904,7 @@ impl CommanderControl {
         match self {
             Self::SendMessage { client_ref, .. } => client_ref.as_deref(),
             Self::InterruptPane { .. } => None,
+            Self::SupervisorCommand { client_ref, .. } => Some(client_ref),
         }
     }
 }
@@ -825,6 +923,19 @@ pub(super) fn commander_control_from_message(
     use crate::ui::factory::protocol::ClientMessage;
 
     match message {
+        ClientMessage::SupervisorCommand { client_ref, attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
+        | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => {
+            use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
+            let request = match message {
+                ClientMessage::SupervisorCommand { command, confirmed, .. } => Request::Run { command: *command, confirmed: *confirmed },
+                ClientMessage::SupervisorCommandStep { key, .. } => Request::Step { key: *key },
+                _ => Request::Status,
+            };
+            let mut attribution = attribution.clone();
+            attribution.operator_verified &= relay_trusted;
+            Some(CommanderControl::SupervisorCommand { request, client_ref: client_ref.clone(), attribution })
+        }
         ClientMessage::InterruptPane { pane_id } => Some(CommanderControl::InterruptPane {
             pane_id: pane_id.clone(),
         }),
@@ -909,6 +1020,7 @@ impl FactoryDaemon {
         control: CommanderControl,
     ) -> anyhow::Result<Option<crate::ui::factory::DaemonMessage>> {
         match control {
+            CommanderControl::SupervisorCommand { request, client_ref, attribution } => self.dispatch_supervisor_command(request, client_ref, attribution).await.map(Some),
             CommanderControl::InterruptPane { pane_id } => {
                 self.interrupt_pane_turn(&pane_id).await?;
                 Ok(None)
@@ -950,6 +1062,7 @@ impl FactoryDaemon {
                             summary.as_deref(),
                             urgent,
                             in_reply_to,
+                            client_ref.as_deref(),
                             &attribution,
                         )?;
                         live_view = Some(self.live_operator_message(outcome.id()));
@@ -984,6 +1097,9 @@ impl FactoryDaemon {
                     );
                 }
                 let receipt = outcome.receipt();
+                if receipt.stamped {
+                    self.queue_jobs.watch_operator_receipt(receipt.notification_id);
+                }
                 if let Some(live_view) = live_view {
                     match live_view {
                         Ok(Some(message)) => self.broadcast_daemon_message(
@@ -1008,6 +1124,7 @@ impl FactoryDaemon {
     /// Enqueue a Commander semantic message through the same durable prompt
     /// queue drained by MCP coordination messages. Delivery therefore reuses
     /// the existing inbox+wake and urgent interrupt-and-redirect machinery.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_attributed_message(
         &self,
         target: &str,
@@ -1015,9 +1132,10 @@ impl FactoryDaemon {
         summary: Option<&str>,
         urgent: bool,
         in_reply_to: Option<i64>,
+        client_ref: Option<&str>,
         attribution: &crate::ui::factory::protocol::MessageAttribution,
     ) -> anyhow::Result<cas_store::EnqueueOutcome> {
-        let outcome = enqueue_commander_message(
+        let outcome = crate::ops::fleet::enqueue_commander_message_with_client_ref(
             self.app.cas_dir(),
             &self.session_name,
             target,
@@ -1025,6 +1143,7 @@ impl FactoryDaemon {
             summary,
             urgent,
             in_reply_to,
+            client_ref,
             attribution,
         )?;
 
@@ -1261,9 +1380,9 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let target = prompt.target.clone();
-        let text = prompt.text.clone();
+        let prompt = prompt.clone();
         store_worker.submit("director prompt enqueue", move || {
-            match enqueue_director_prompt(&cas_dir, &session, &target, &text) {
+            match enqueue_director_event(&cas_dir, &session, &prompt) {
                 Ok(id) => tracing::info!(
                     target: "cas::coordination",
                     stage,
@@ -1473,8 +1592,24 @@ impl FactoryDaemon {
                 }
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
-                let inbox_text =
-                    queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
+                let delivery = if let Some((id, _)) = queued {
+                    let queue = cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?;
+                    Some(queue.recipient_delivery(id, target)?
+                        .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?)
+                } else { None };
+                let reference = match &delivery {
+                    Some(cas_store::RecipientDelivery::Reference(row)
+                        | cas_store::RecipientDelivery::Settled(row)) => Some(row),
+                    _ => None,
+                };
+                // Use the projection for every payload field and for a Teams
+                // failure's PTY fallback, which otherwise resurrects the body.
+                let text = reference.map_or(text, |row| row.prompt.as_str());
+                let summary = reference.map_or(summary, |row| row.summary.as_deref());
+                let inbox_text = queued.map(|(id, body)| {
+                    if reference.is_some() { text.to_string() }
+                    else { claude_teams_inbox_text(text, body, source, id) }
+                });
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = if let Some(native) = completed_native {
                     native.result
@@ -2088,6 +2223,15 @@ mod tests {
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Unattributed));
         }
 
+        let command = ClientMessage::SupervisorCommand {
+            command: crate::ui::factory::supervisor_commands::SupervisorCommand::Finish,
+            client_ref: "cmd-finish".into(), confirmed: true, attribution: commander_attribution(),
+        };
+        for relay in [false, true] {
+            let Some(CommanderControl::SupervisorCommand { attribution, .. }) = commander_control_from_message(&command, relay) else { panic!("command control expected") };
+            assert_eq!(attribution.operator_verified, relay, "Finish must retain only authenticated operator provenance");
+        }
+
         // The hub relay's authenticated connection keeps the hub's verdict.
         let relayed =
             super::super::ws_client::commander_control_from_ws_message(&forged, true).unwrap();
@@ -2468,6 +2612,7 @@ mod tests {
         origin: cas_store::QueueOrigin,
     ) -> cas_store::QueuedPrompt {
         cas_store::QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "true-leopard-45".to_string(),
@@ -2925,6 +3070,23 @@ mod tests {
         assert_eq!(inbox.len(), 6, "{inbox:?}");
         assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
         assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
+
+        // The oversized transport is also subject to recipient state: a poll
+        // in another turn, an ACK or an answer must not recover its old body.
+        queue.poll_named_for_recipient(worker, Some(&session), &[long_id]).unwrap();
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, Some(&long), long_id, &long)
+            .await.unwrap();
+        let repeated = read_inbox().last().unwrap().clone();
+        assert!(!repeated.text.contains(long.trim()), "{repeated:?}");
+        assert!(!repeated.summary.as_deref().unwrap_or_default().contains(long.trim()));
+        assert!(repeated.text.contains("not acknowledged"), "{repeated:?}");
+        queue.acknowledge_for_recipients(long_id, &[worker.into()], None).unwrap();
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, Some(&long), long_id, &long)
+            .await.unwrap();
+        let terminal = read_inbox().last().unwrap().clone();
+        assert!(!terminal.text.contains(long.trim()), "{terminal:?}");
+        assert!(!terminal.summary.as_deref().unwrap_or_default().contains(long.trim()));
+        assert!(terminal.text.contains("acknowledged"), "{terminal:?}");
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

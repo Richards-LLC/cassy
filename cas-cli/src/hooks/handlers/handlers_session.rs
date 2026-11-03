@@ -48,6 +48,9 @@ pub fn handle_session_start(
             "session_start_fired",
             &[
                 ("session_id", input.session_id.as_str()),
+                ("transcript_path", input.transcript_path.as_deref().unwrap_or("")),
+                ("harness", crate::harness_policy::own_harness_from_env().backend().name()),
+                ("source", input.source.as_deref().unwrap_or("unknown")),
                 ("tool_prefix", crate::harness_policy::own_tool_prefix()),
                 (
                     "custom_config_dir",
@@ -130,6 +133,11 @@ pub fn handle_session_start(
             }
         };
 
+        // Persist before notifying the daemon: native model fields belong to
+        // this hook process, and the socket receiver cannot recover them from
+        // its own environment. The daemon still owns its PID/session map.
+        register_directly(&mut stores);
+        crate::agent_model::record_hook(cas_root, "SessionStart", input);
         {
             use crate::mcp::socket::{DaemonEvent, send_event};
             let event = DaemonEvent::SessionStart {
@@ -146,9 +154,7 @@ pub fn handle_session_start(
                     std::env::var("CAS_AGENT_ROLE").ok()
                 ),
                 Err(e) => {
-                    // Daemon socket not available - register directly in database as fallback
-                    eprintln!("cas: Daemon not available ({e}), registering directly");
-                    register_directly(&mut stores);
+                    eprintln!("cas: Daemon not available ({e}); agent registered directly");
                 }
             }
         }
@@ -183,7 +189,8 @@ pub fn handle_session_start(
         // Capture/surface succession before generic orphan cleanup changes task state.
         if agent_role.as_deref() == Some("supervisor") {
             register_directly(&mut stores);
-            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input)) {
+            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input))
+            {
                 Ok(context) => lane_handoff = context,
                 Err(error) => eprintln!("cas: Supervisor handoff unavailable: {error}"),
             }
@@ -215,6 +222,7 @@ pub fn handle_session_start(
     // omits the duplicate bundle.
     let suppress_custom_profile_context =
         crate::hooks::session_start_fallback::is_custom_claude_supervisor()
+            && matches!(input.source.as_deref(), None | Some("startup"))
             && !crate::hooks::session_start_fallback::claim(cas_root, &input.session_id);
     let context_limit = config.context_limit();
 
@@ -264,8 +272,11 @@ pub fn handle_session_start(
     // over-budget payload degrades to counts + remediation command instead of
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
+    let context = resume_context_delta(cas_root, input, context);
     let mut assembler = SessionContextAssembler::new(context);
-    if !lane_handoff.is_empty() { assembler.prepend_protected(lane_handoff); }
+    if !lane_handoff.is_empty() {
+        assembler.prepend_protected(lane_handoff);
+    }
 
     if let Some(warning) = registration_role_warning {
         assembler.append_protected(warning);
@@ -301,7 +312,10 @@ pub fn handle_session_start(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
         ) {
             assembler.prepend_degradable_with_priority(
-                "Factory MCP binary skew", banner.clone(), banner, DegradationPriority::Context,
+                "Factory MCP binary skew",
+                banner.clone(),
+                banner,
+                DegradationPriority::Context,
             );
         }
         if let Some(banner) =
@@ -318,7 +332,9 @@ pub fn handle_session_start(
 
     if let Some(channels) = crate::cli::session_start_channels(cas_root, chrono::Utc::now()) {
         assembler.append_degradable_with_priority(
-            "Configured Slack channels", channels.clone(), channels,
+            "Configured Slack channels",
+            channels.clone(),
+            channels,
             DegradationPriority::Context,
         );
     }
@@ -362,22 +378,9 @@ pub fn handle_session_start(
         );
     }
 
-    // cas-cd54: ambient recall is a degradable, independently hard-bounded
-    // evidence segment. It stays below immutable role guidance and never
-    // competes with safety banners for protected SessionStart bytes.
-    if let Some(packet) =
-        crate::ambient_recall::build_ambient_recall_context(input, cas_root, None, true)
-    {
-        assembler.append_degradable_with_priority(
-            "Ambient recall",
-            packet.full,
-            packet.compact,
-            DegradationPriority::AmbientRecall,
-        );
-    }
-
     let docs_measurement = crate::hooks::handlers::handlers_events::docs_freshness::Measurement::at(
-        Path::new(&input.cwd), cas_root,
+        Path::new(&input.cwd),
+        cas_root,
     );
     if let Some(staleness) =
         crate::hooks::handlers::handlers_events::codemap::evaluate_codemap_at(&docs_measurement)
@@ -403,12 +406,14 @@ pub fn handle_session_start(
     }
 
     {
-        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(&docs_measurement) {
+        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(
+            &docs_measurement,
+        ) {
             // Always append so codemap retains the preview top slot when both
             // modules report high severity.
-            Ok(Some(staleness)) => {
-                assembler.append_protected(docs_measurement.annotate(staleness.format_injection(is_supervisor)))
-            }
+            Ok(Some(staleness)) => assembler.append_protected(
+                docs_measurement.annotate(staleness.format_injection(is_supervisor)),
+            ),
             Ok(None) => {}
             Err(e) => eprintln!("cas: project-overview freshness check failed: {e}"),
         }
@@ -550,6 +555,20 @@ pub fn handle_session_start(
         assembler.append_protected(banner);
     }
 
+    // Native hooks name their harness explicitly; MCP startup uses this
+    // process's own role/harness. `input.source` describes the startup reason
+    // and the MCP path sets it to "codex" even for other harnesses.
+    let is_codex = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+        .map(|harness| harness.eq_ignore_ascii_case("codex"))
+        .unwrap_or_else(|_| {
+            crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Codex
+        });
+    if is_codex {
+        assembler.append_protected(
+            "Codex skills: if the `finish` skill is installed, type `$finish` or say `finish` to wrap up the session.".to_string(),
+        );
+    }
+
     // Render under the aggregate budget before the worktree assertion, which
     // must stay verbatim at the very top of whatever survives.
     let context = assembler.render();
@@ -573,10 +592,12 @@ pub fn handle_session_start(
         HookOutput::with_session_start_context(context.clone())
     };
 
+    // Codex's strict native SessionStart schema accepts neither reloadSkills
+    // nor sessionTitle. Keep these Claude metadata fields off the Codex wire.
     // Emit reloadSkills when skill files have changed since this session last
     // loaded them (cas-f9ad). Best-effort: failure to read/write sentinel/marker
     // files is silently ignored so SessionStart never blocks on I/O errors.
-    let output = if detect_and_mark_skill_drift(cas_root, &input.session_id) {
+    let output = if !is_codex && detect_and_mark_skill_drift(cas_root, &input.session_id) {
         output.with_reload_skills(true)
     } else {
         output
@@ -586,8 +607,8 @@ pub fn handle_session_start(
     // show which worker owns which task at a glance (cas-ae09).
     // Non-factory sessions produce None → field absent → unchanged wire shape.
     let output = match factory_session_title {
-        Some(title) => output.with_session_title(title),
-        None => output,
+        Some(title) if !is_codex => output.with_session_title(title),
+        _ => output,
     };
 
     // Record trace if dev mode is enabled
@@ -621,6 +642,82 @@ pub fn handle_session_start(
     }
 
     Ok(output)
+}
+
+/// Hash only base context; current safety and operational banners are always rebuilt.
+/// Only explicit resume promises retained history. Clear/compact/unknown starts
+/// reload everything. Cache errors fail open, and no recalled text is persisted.
+fn resume_context_delta(cas_root: &Path, input: &HookInput, context: String) -> String {
+    use sha2::{Digest, Sha256};
+    if context.is_empty() || input.session_id.trim().is_empty() {
+        return context;
+    }
+    let role = std::env::var("CAS_AGENT_ROLE").unwrap_or_default();
+    let mut key = Sha256::new();
+    for part in [
+        input.session_id.as_str(),
+        input.cwd.as_str(),
+        crate::harness_policy::own_tool_prefix(),
+        &role,
+        input.permission_mode.as_deref().unwrap_or_default(),
+    ] {
+        key.update(part.len().to_le_bytes());
+        key.update(part.as_bytes());
+    }
+    for root in [Path::new(&input.cwd), cas_root.parent().unwrap_or(cas_root)] {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            match std::fs::read(root.join(name)) {
+                Ok(bytes) => {
+                    key.update(bytes.len().to_le_bytes());
+                    key.update(bytes);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => key.update([0]),
+                Err(_) => return context,
+            }
+        }
+    }
+    let directory = cas_root.join("session-context-fingerprints");
+    let path = directory.join(format!("{:x}.json", key.finalize()));
+    let previous: Vec<String> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut sections = Vec::new();
+    let mut start = 0;
+    for (offset, _) in context.match_indices('\n') {
+        if context[offset + 1..].starts_with("# ") || context[offset + 1..].starts_with("## ") {
+            sections.push(&context[start..offset + 1]);
+            start = offset + 1;
+        }
+    }
+    sections.push(&context[start..]);
+    let fingerprints: Vec<String> = sections
+        .iter()
+        .map(|section| format!("{:x}", Sha256::digest(section.as_bytes())))
+        .collect();
+    let save = || -> std::io::Result<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(&directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        file.write_all(&serde_json::to_vec(&fingerprints)?)?;
+        file.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    if save().is_err() || input.source.as_deref() != Some("resume") || previous.is_empty() {
+        return context;
+    }
+    let changed: String = sections
+        .iter()
+        .zip(&fingerprints)
+        .filter(|(_, fingerprint)| !previous.contains(fingerprint))
+        .map(|(section, _)| *section)
+        .collect();
+    if changed.is_empty() {
+        "Cassy resume: base context unchanged; previously delivered guidance still applies.\n"
+            .into()
+    } else {
+        changed
+    }
 }
 
 fn active_peer_supervisor_banner(cas_root: &Path, current_name: Option<&str>) -> Option<String> {
@@ -733,7 +830,11 @@ mod large_artifact_staging_tests {
         let launched = std::time::SystemTime::now();
         let input = session_input(tmp.path().to_str().unwrap());
         handle_session_start(&input, Some(tmp.path())).unwrap();
-        assert!(crate::factory_hook_canary::fired_since(tmp.path(), "canary-worker-1", launched));
+        assert!(crate::factory_hook_canary::fired_since(
+            tmp.path(),
+            "canary-worker-1",
+            launched
+        ));
 
         let plain = tempfile::tempdir().unwrap();
         env.remove("CAS_FACTORY_MODE");
@@ -881,7 +982,9 @@ mod large_artifact_staging_tests {
         let mut env = staging_env("worker");
         env.set("CAS_FACTORY_SESSION", "d4-session");
         env.set("CAS_AGENT_NAME", "d4-worker");
-        let input = session_input(tmp.path().to_str().unwrap());
+        let mut input = session_input(tmp.path().to_str().unwrap());
+        input.source = Some("compact".into());
+        input.transcript_path = Some("/private/native-session.jsonl".into());
         let _ = handle_session_start(&input, Some(tmp.path()));
         let logs: String = std::fs::read_dir(tmp.path().join("logs"))
             .expect("factory session log dir")
@@ -892,8 +995,12 @@ mod large_artifact_staging_tests {
             .lines()
             .find(|line| line.contains("\"session_start_fired\""))
             .unwrap_or_else(|| panic!("no session_start_fired record: {logs}"));
+        assert!(fired.contains("\"source\":\"compact\""), "{fired}");
         assert!(fired.contains("\"role\":\"worker\""), "{fired}");
         assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
+        let record: serde_json::Value = serde_json::from_str(fired).unwrap();
+        assert_eq!(record["transcript_path"], "/private/native-session.jsonl");
+        assert_eq!(record["harness"], "claude");
         assert!(
             fired.contains("\"session_id\":\"staging-session\""),
             "{fired}"
@@ -1077,7 +1184,8 @@ mod large_artifact_staging_tests {
             "Honor non-goals and layer boundaries",
             "Never block the pane",
             "Checkpoint, never compact",
-            "verification required",
+            "cas qa ledger init",
+            "cas qa ledger check",
             "MERGE REQUIRED",
         ] {
             assert!(
@@ -1085,6 +1193,64 @@ mod large_artifact_staging_tests {
                 "worker SessionStart lost mandatory protected guidance: {required:?}"
             );
         }
+    }
+
+    #[test]
+    fn session_start_resume_replays_only_changed_context_cas_ea0c() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_AGENT_NAME", "resume-worker");
+        let mut input = session_input(tmp.path().to_str().unwrap());
+        input.source = Some("startup".into());
+        let first = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        input.source = Some("resume".into());
+        let resumed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        eprintln!(
+            "SESSION_REPLAY first_bytes={} resume_bytes={}",
+            first.len(),
+            resumed.len()
+        );
+        assert!(
+            resumed.len() < first.len() / 2,
+            "unchanged resume repeats context: {resumed}"
+        );
+        assert!(!resumed.contains("# Factory Worker"));
+
+        // Dynamic safety context must be evaluated even when base guidance is cached.
+        env.set(
+            "CAS_CLONE_PATH",
+            tmp.path().join("other-worktree").to_str().unwrap(),
+        );
+        let warning = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(
+            warning.contains(tmp.path().join("other-worktree").to_str().unwrap()),
+            "resume lost current safety warning: {warning}"
+        );
+        env.remove("CAS_CLONE_PATH");
+
+        // Changed instructions invalidate the retained base, even in the same session.
+        std::fs::write(tmp.path().join("AGENTS.md"), "New project guidance").unwrap();
+        let changed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(changed.contains("# Factory Worker"));
+        for source in ["compact", "clear", "startup"] {
+            input.source = Some(source.into());
+            let reset = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            assert!(
+                reset.contains("# Factory Worker"),
+                "{source} needs a full reload"
+            );
+        }
+        input.source = Some("resume".into());
+        input.session_id = "new-session".into();
+        assert!(
+            additional_context(handle_session_start(&input, Some(tmp.path())).unwrap())
+                .contains("# Factory Worker")
+        );
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        assert!(
+            !additional_context(handle_session_start(&input, Some(tmp.path())).unwrap())
+                .contains("unchanged")
+        );
     }
 
     /// WP2 (audit cas-1660 M30): the assembled SessionStart payload must fit
@@ -1144,11 +1310,41 @@ mod large_artifact_staging_tests {
             })
             .unwrap();
 
-        for (label, role, worker_cli) in [
-            ("plain", None, None),
-            ("worker", Some("worker"), Some("claude")),
-            ("supervisor", Some("supervisor"), Some("codex")),
-            ("codex-worker", Some("worker"), Some("codex")),
+        for (label, role, worker_cli, supervisor_cli, hook_harness, expects_hint) in [
+            ("plain", None, None, None, None, false),
+            ("worker", Some("worker"), Some("claude"), None, None, false),
+            (
+                "supervisor",
+                Some("supervisor"),
+                Some("claude"),
+                Some("codex"),
+                None,
+                true,
+            ),
+            (
+                "codex-worker",
+                Some("worker"),
+                Some("codex"),
+                None,
+                None,
+                true,
+            ),
+            (
+                "claude-supervisor",
+                Some("supervisor"),
+                Some("codex"),
+                Some("claude"),
+                None,
+                false,
+            ),
+            (
+                "claude-hook",
+                Some("worker"),
+                Some("codex"),
+                None,
+                Some("claude"),
+                false,
+            ),
         ] {
             let mut env = staging_env(role.unwrap_or("worker"));
             if role.is_none() {
@@ -1162,6 +1358,14 @@ mod large_artifact_staging_tests {
                 Some(cli) => env.set("CAS_FACTORY_WORKER_CLI", cli),
                 None => env.remove("CAS_FACTORY_WORKER_CLI"),
             }
+            match supervisor_cli {
+                Some(cli) => env.set("CAS_FACTORY_SUPERVISOR_CLI", cli),
+                None => env.remove("CAS_FACTORY_SUPERVISOR_CLI"),
+            }
+            match hook_harness {
+                Some(harness) => env.set("CAS_HOOK_HARNESS", harness),
+                None => env.remove("CAS_HOOK_HARNESS"),
+            }
             let input = HookInput {
                 session_id: format!("budget-session-{label}"),
                 cwd: tmp.path().to_string_lossy().into_owned(),
@@ -1171,6 +1375,23 @@ mod large_artifact_staging_tests {
             };
             let context =
                 additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            // pin: supported invocation must survive the aggregate context budget,
+            // and describe the reader's harness rather than its workers' harness.
+            let hint = context
+                .lines()
+                .find(|line| line.starts_with("Codex skills:"));
+            assert_eq!(
+                hint.is_some(),
+                expects_hint,
+                "{label}: finish hint presence"
+            );
+            if let Some(hint) = hint {
+                assert!(
+                    hint.contains("`$finish`") && hint.contains("say `finish`"),
+                    "{label}: {hint}"
+                );
+                assert!(!hint.contains("/finish"), "{label}: {hint}");
+            }
             assert!(
                 context.len() <= SESSION_START_BUDGET_BYTES,
                 "{label} SessionStart payload is {} bytes, over the {SESSION_START_BUDGET_BYTES}B \
@@ -2770,7 +2991,10 @@ mod worker_worktree_assertion_tests {
 
         let result = build_worker_worktree_assertion(&p, String::new());
         // pin: session-start switch advice preserves the worker branch as one argument.
-        assert!(result.contains("git switch 'factory/worker{a,b}!e'"), "{result}");
+        assert!(
+            result.contains("git switch 'factory/worker{a,b}!e'"),
+            "{result}"
+        );
         assert!(
             result.contains("WRONG BRANCH"),
             "expected WRONG BRANCH warning for 'main': {result}"

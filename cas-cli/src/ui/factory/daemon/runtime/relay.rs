@@ -37,10 +37,28 @@ pub struct RelayClient {
 #[derive(Debug, Default)]
 pub struct PaneBuffer {
     data: VecDeque<u8>,
+    /// Raw stream bytes ever appended; a position in the PTY output.
+    appended: u64,
+    /// Stream position before which the buffer holds a rebuilt snapshot.
+    rebuilt_at: u64,
 }
 
 impl PaneBuffer {
+    /// The current stream position, for [`Self::plain_text_since`].
+    pub(in crate::ui::factory::daemon) fn position(&self) -> u64 {
+        self.appended
+    }
+
+    /// Plain text the pane emitted after `position`. `None` when that output
+    /// was trimmed or replaced by a snapshot, so it cannot be told apart.
+    pub(in crate::ui::factory::daemon) fn plain_text_since(&self, position: u64) -> Option<String> {
+        let len = usize::try_from(self.appended.checked_sub(position)?).ok()?;
+        if position < self.rebuilt_at || len > self.data.len() { return None; }
+        Some(strip_ansi(&self.data.iter().skip(self.data.len() - len).copied().collect::<Vec<_>>()))
+    }
+
     pub(in crate::ui::factory::daemon) fn append(&mut self, bytes: &[u8]) {
+        self.appended += bytes.len() as u64;
         self.data.extend(bytes);
         // Trim from the front if over capacity
         if self.data.len() > PANE_BUFFER_CAPACITY {
@@ -58,6 +76,7 @@ impl PaneBuffer {
     }
 
     pub(in crate::ui::factory::daemon) fn replace_with(&mut self, bytes: Vec<u8>) {
+        self.rebuilt_at = self.appended;
         self.data.clear();
         self.data.extend(bytes);
         if self.data.len() > PANE_BUFFER_CAPACITY {

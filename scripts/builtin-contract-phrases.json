@@ -101,6 +101,14 @@
         {
           "text": "../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
+        },
+        {
+          "text": "references/worker-recovery.md#supervisor-restart",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -333,6 +341,14 @@
         {
           "text": "Do not kill or respawn",
           "reason": "Preserve the operational safety boundary documented by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "## Supervisor restart",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
+        },
+        {
+          "text": "factory action=restart_supervisor",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [],
@@ -356,7 +372,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
         },
         {
-          "text": "read-only backlog visibility — not self-dispatch",
+          "text": "read-only backlog visibility \u2014 not self-dispatch",
           "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
         },
         {
@@ -882,10 +898,6 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
         {
-          "text": "source-inferred",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
-        },
-        {
           "text": "real-build",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
@@ -924,6 +936,14 @@
         {
           "text": "eyewitness/telemetry",
           "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "cas qa ledger init --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
+        },
+        {
+          "text": "cas qa ledger check <path> --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
         }
       ],
       "absent": [],
@@ -1077,7 +1097,7 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains mcp integration."
         },
         {
-          "text": "## Symptom → cause",
+          "text": "## Symptom \u2192 cause",
           "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
         }
       ],
@@ -1456,7 +1476,7 @@
           "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
         },
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1501,7 +1521,7 @@
       ],
       "contains": [
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1859,14 +1879,6 @@
       ],
       "contains": [
         {
-          "text": "id | cell | expected | observed | verdict | label | evidence path | defect task",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "source-inferred",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
-        },
-        {
           "text": "real-build",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
@@ -1891,8 +1903,12 @@
           "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
         },
         {
-          "text": "eyewitness",
-          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+          "text": "cas qa ledger init --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
+        },
+        {
+          "text": "cas qa ledger check <path> --task <id>",
+          "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
         }
       ],
       "absent": [],
@@ -1949,8 +1965,8 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
         },
         {
-          "text": "showChapter",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+          "text": "showRecordingChapter",
+          "reason": "QA chapter examples use the constructed-stylesheet helper compatible with native Commander's style-src policy."
         },
         {
           "text": "toMatchAriaSnapshot",
@@ -2300,7 +2316,7 @@
           "case_sensitive": false
         },
         {
-          "text": "Was → Now",
+          "text": "Was \u2192 Now",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
         },
         {
@@ -2391,7 +2407,7 @@
       ],
       "contains": [
         {
-          "text": "was → now",
+          "text": "was \u2192 now",
           "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
           "case_sensitive": false,
           "unicode_case": true
@@ -3100,6 +3116,10 @@
         {
           "text": "binary.source_evidence_missing",
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
+        },
+        {
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -3478,6 +3498,10 @@
         {
           "text": "binary.source_evidence_missing",
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
+        },
+        {
+          "text": "supervisor exit stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [
@@ -3833,7 +3857,7 @@
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         },
         {
-          "text": "`radius` —",
+          "text": "`radius` \u2014",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         }
       ],
@@ -4236,11 +4260,11 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "30°",
+          "text": "30\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "150°",
+          "text": "150\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
@@ -4445,8 +4469,8 @@
           "reason": "Keep the installed workflow/reference route reachable; epic child demos require evidence before close reason."
         },
         {
-          "text": "status=error",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by epic child demos require evidence before close reason."
+          "text": "status=supervisor_call",
+          "reason": "Route NOT EXERCISED scope questions to the supervisor without resolving the verification dispatch as a failed check."
         }
       ],
       "absent": [],
@@ -4784,6 +4808,10 @@
         {
           "text": "Never restart `cas serve` from the active MCP session.",
           "reason": "Keep recovery outside the process providing the current tools."
+        },
+        {
+          "text": "stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
         }
       ],
       "absent": [

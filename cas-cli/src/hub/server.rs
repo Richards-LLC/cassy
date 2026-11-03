@@ -27,11 +27,24 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "secret_request.rs"]
+mod secret_request;
+#[path = "account_routes.rs"]
+mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
 
+#[path = "dismissed_sessions.rs"]
+mod dismissed_sessions;
+
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
+
+#[derive(Default)]
+struct PublicationState {
+    metadata: MachineMetadata,
+    effective_origins: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct HubState<R: SessionReadModel> {
@@ -41,8 +54,7 @@ pub struct HubState<R: SessionReadModel> {
     connector: DaemonConnector,
     events: MachineEventBus,
     auth: Option<AuthStore>,
-    metadata: MachineMetadata,
-    effective_origins: Vec<String>,
+    publication: Arc<Mutex<PublicationState>>,
     response_transport: TransportSecurity,
     launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant, String)>>>,
     /// Outcomes of recent structured operations by (device, op_id), so a
@@ -76,8 +88,7 @@ impl<R: SessionReadModel> HubState<R> {
             connector,
             events,
             auth: None,
-            metadata: MachineMetadata::default(),
-            effective_origins: Vec::new(),
+            publication: Arc::new(Mutex::new(PublicationState::default())),
             response_transport: TransportSecurity::Plaintext,
             launches: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -109,14 +120,26 @@ impl<R: SessionReadModel> HubState<R> {
         self
     }
 
-    pub fn with_machine_metadata(mut self, metadata: MachineMetadata) -> Self {
-        self.metadata = metadata;
+    pub fn with_machine_metadata(self, metadata: MachineMetadata) -> Self {
+        self.publication.lock().unwrap().metadata = metadata;
         self
     }
 
-    pub fn with_effective_origin(mut self, origin: impl Into<String>) -> Self {
-        self.effective_origins.push(origin.into());
+    pub fn with_effective_origin(self, origin: impl Into<String>) -> Self {
+        self.publication.lock().unwrap().effective_origins.push(origin.into());
         self
+    }
+
+    /// All router clones observe the recovered endpoint and accept its origin.
+    pub(crate) fn publish_tailscale_transport(&self, public_url: &str) {
+        let mut publication = self.publication.lock().unwrap();
+        publication.metadata.transport = super::MachineTransport {
+            kind: "tailscale_serve".to_owned(), public_url: Some(public_url.to_owned()),
+        };
+        let origin = public_url.trim_end_matches('/').to_owned();
+        if !publication.effective_origins.contains(&origin) {
+            publication.effective_origins.push(origin);
+        }
     }
 
     /// Bind response policy to the server-owned listener, never request headers.
@@ -180,6 +203,9 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/account/enrollment",
             post(account_enrollment::<R>).options(preflight::<R>),
         )
+        .route("/v1/accounts", get(account_routes::list::<R>).options(preflight::<R>))
+        .route("/v1/accounts/usage", get(account_routes::check_usage::<R>).options(preflight::<R>))
+        .route("/v1/accounts/operations", post(account_routes::operate::<R>).options(preflight::<R>))
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(
             "/v1/launch/profiles",
@@ -195,6 +221,14 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             get(sessions::<R>)
                 .post(launch_session::<R>)
                 .options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/dismiss",
+            post(dismissed_sessions::dismiss::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/restore",
+            post(dismissed_sessions::restore::<R>).options(preflight::<R>),
         )
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
@@ -229,6 +263,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}/uploads/{upload_id}",
             post(composer_upload::upload::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/secrets/{notification_id}",
+            post(secret_request::answer::<R>).options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route(
@@ -476,10 +514,12 @@ async fn security_headers(
     // are the embedded page's only external origins (`h4_csp_03`).
     // frame-src: Commander frames visual reply pages from the same paired
     // machines (cas-3aff); each page carries its own sandbox policy.
+    // img-src: pending raster attachments use local object URLs. Keep blob:
+    // scoped to images; the composer never previews active SVG/HTML formats.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
             "; frame-src 'self' https: http://127.0.0.1:*",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
@@ -652,6 +692,7 @@ async fn machine<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
+    let metadata = state.publication.lock().unwrap().metadata.clone();
     with_cors(
         Json(MachineResponse {
             schema_version: super::HUB_SCHEMA_VERSION,
@@ -664,9 +705,10 @@ async fn machine<R: SessionReadModel>(
                 "machine_multiplex_v2",
                 "tailscale_serve",
                 "cloud_device_suggestions",
+                "supervisor_commands",
             ],
-            transport: state.metadata.transport,
-            cloud_devices: state.metadata.cloud_devices,
+            transport: metadata.transport,
+            cloud_devices: metadata.cloud_devices,
             default_supervisor_cli: crate::config::Config::load(
                 &crate::store::known_repos::host_cas_dir(),
             )
@@ -683,8 +725,15 @@ async fn machine<R: SessionReadModel>(
     )
 }
 
+#[derive(Deserialize)]
+struct LaunchProfilesQuery {
+    /// The same opaque target as POST /v1/sessions, encoded as JSON.
+    target: Option<String>,
+}
+
 async fn launch_profiles<R: SessionReadModel>(
     State(state): State<HubState<R>>,
+    Query(query): Query<LaunchProfilesQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = authorize(
@@ -697,9 +746,25 @@ async fn launch_profiles<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
+    let project_cas_root = if let Some(target) = query.target {
+        let target = match serde_json::from_str::<super::projects::LaunchTarget>(&target) {
+            Ok(target) => target,
+            Err(error) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+        };
+        // Resolve both known-project and browse targets through the launch
+        // allowlist; a caller never supplies a config path directly.
+        match tokio::task::spawn_blocking(move || super::projects::resolve_launch_target(&target)).await {
+            Ok(Ok(root)) => Some(root.path.join(".cas")),
+            Ok(Err(error)) => return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_target", &error.to_string()), &headers),
+            Err(_) => return with_cors(launch_error(StatusCode::INTERNAL_SERVER_ERROR, "launch_failed", "could not resolve the selected project"), &headers),
+        }
+    } else {
+        None
+    };
+    let claude_root = project_cas_root.clone();
     let (claude, codex, grok) = tokio::join!(
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Claude)),
-        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Codex)),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Claude, claude_root.as_deref())),
+        tokio::task::spawn_blocking(move || super::launch_env::profiles_for_project(cas_mux::SupervisorCli::Codex, project_cas_root.as_deref())),
         tokio::task::spawn_blocking(|| {
             super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
         }),
@@ -846,6 +911,9 @@ struct SessionsResponse {
     /// Browser catalog expiry shares worker_status's fresh-heartbeat band.
     freshness_threshold_secs: i64,
     sessions: Vec<HubSession>,
+    /// Positive stop evidence is separate from navigation. An omitted name
+    /// may be filtered or unknown, and must never retire a live attachment.
+    stopped_sessions: Vec<HubSession>,
 }
 
 #[derive(Serialize)]
@@ -940,16 +1008,29 @@ async fn sessions<R: SessionReadModel>(
         return with_cors(unauthorized_for(&error), &headers);
     }
     match state.catalog.list().await {
-        Ok(sessions) => with_cors(
+        Ok(mut sessions) => {
+            if let Some(auth) = &state.auth {
+                for session in &mut sessions {
+                    match dismissed_sessions::is_dismissed(auth.root(), session) {
+                        Ok(dismissed) => session.dismissed = dismissed,
+                        Err(error) => return internal_error(error),
+                    }
+                }
+            }
+            with_cors(
             Json(SessionsResponse {
                 schema_version: super::HUB_SCHEMA_VERSION,
                 freshness_threshold_secs:
                     crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
+                stopped_sessions: sessions.iter().filter(|session| {
+                    session.ended.is_some() || session.liveness == super::DaemonLiveness::StaleMetadata
+                }).cloned().collect(),
                 sessions: supervisor_sessions(sessions, query.dormant),
             })
             .into_response(),
             &headers,
-        ),
+        )
+        },
         Err(error) => internal_error(error),
     }
 }
@@ -1781,7 +1862,7 @@ mod launch_profile_tests {
                 logged_in: true,
                 is_default: false,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
@@ -1789,7 +1870,7 @@ mod launch_profile_tests {
                 logged_in: false,
                 is_default: true,
                 recommendation: None,
-                usage: None,
+                usage: None, windows: Vec::new(), usage_observed_at: None,
                 exclusion: None,
             },
         ];
@@ -1823,7 +1904,7 @@ mod launch_profile_tests {
             logged_in: true,
             is_default: true,
             recommendation: None,
-            usage: None,
+            usage: None, windows: Vec::new(), usage_observed_at: None,
             exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});
@@ -2131,8 +2212,10 @@ fn systemd_unit_command(
     let mut command = std::process::Command::new("systemd-run");
     command.arg("--user")
         .arg(format!("--unit=cas-factory-{name}"))
+        .arg("--slice=agent.slice")
         .arg("--collect")
         .arg("--property=Type=exec")
+        .arg("--property=Nice=5")
         .arg(format!("--property=StandardError=append:{}", log_path.display()))
         .arg("--property=StandardOutput=null")
         .arg(format!("--working-directory={}", root.display()));
@@ -2341,6 +2424,8 @@ mod launch_tests {
         );
         let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
         assert!(args.contains(&"--unit=cas-factory-demo-1".to_string()));
+        assert!(args.contains(&"--slice=agent.slice".to_string()), "{args:?}");
+        assert!(args.contains(&"--property=Nice=5".to_string()), "{args:?}");
         assert!(args.contains(&"reap-daemon".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--property=KillMode=")));
         assert!(args.contains(&"--setenv=PATH".to_string()));
@@ -2730,16 +2815,16 @@ struct SessionsQuery {
     dormant: bool,
 }
 
-/// The catalog lists every fresh supervisor-led session, including sessions
-/// whose live supervisor has not spawned workers yet; `dormant=1` adds sessions
-/// whose supervisor is not live. A row with no supervisor is never listed:
+/// The catalog lists every running supervisor-led daemon, including dormant
+/// supervisors and supervisors which have not spawned workers yet. Stopped
+/// sessions are never navigation destinations. A row with no supervisor is never listed:
 /// Commander has no one to talk to there (cas-f285 retired `workers=1`, which
 /// only the removed Terminal view's "Show workers" sent).
-pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: bool) -> Vec<HubSession> {
+pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, _reveal_dormant: bool) -> Vec<HubSession> {
     sessions
         .into_iter()
         .filter(|session| {
-            reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
+            session.ended.is_none() && session.liveness == super::DaemonLiveness::Live
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()
@@ -2954,8 +3039,14 @@ async fn proxy_socket(
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
-struct PaneInputPermissionRequired;
+enum ClientPermissionRequired {
+    #[error("This device's pairing is no longer accepted. Pair this device again, then retry.")]
+    Pairing,
+    #[error("This device was paired without supervisor messages. Pair this device again with message:send to send messages.")]
+    MessageSend,
+    #[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
+    PaneInput,
+}
 
 async fn handle_client_message(
     connector: &DaemonConnector,
@@ -2963,12 +3054,28 @@ async fn handle_client_message(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> anyhow::Result<()> {
-    let (store, context) = auth.as_ref().context("authentication required")?;
-    let mut message: ClientMessage = serde_json::from_slice(bytes)?;
-    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
+    let (store, context) = auth.as_ref().ok_or(ClientPermissionRequired::Pairing)?;
     let now = chrono::Utc::now();
+    store.ensure_active_context(context, now).map_err(|failure| {
+        // A failed store read has not judged the credential. Only a rejected
+        // active context proves that pairing again is the next step.
+        if failure.is::<super::AuthStoreUnavailable>() {
+            failure
+        } else {
+            failure.context(ClientPermissionRequired::Pairing)
+        }
+    })?;
+    let mut message: ClientMessage = match serde_json::from_slice(bytes) {
+        Ok(message) => message,
+        Err(error) => {
+            if serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|frame| frame.get("SupervisorCommand").is_some()) {
+                store.audit(Some(context), "denied", "supervisor_command_invalid", Some(Scope::PaneInput), Some(session), now)?;
+            }
+            return Err(error.into());
+        }
+    };
+    let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let read_message = is_pane_read_message(&message);
-    store.ensure_active_context(context, now)?;
     let allowed = if read_message {
         context.has(Scope::PaneRead)
     } else if matches!(&message, ClientMessage::SendMessage { .. }) {
@@ -2990,12 +3097,18 @@ async fn handle_client_message(
             Some(session),
             now,
         )?;
+        if scope == Scope::MessageSend && !context.has(scope) {
+            return Err(ClientPermissionRequired::MessageSend.into());
+        }
         if scope == Scope::PaneInput && !context.has(scope) {
-            return Err(PaneInputPermissionRequired.into());
+            return Err(ClientPermissionRequired::PaneInput.into());
         }
         anyhow::bail!("authorization refused")
     }
-    if let ClientMessage::SendMessage { attribution, .. } = &mut message {
+    if let ClientMessage::SendMessage { attribution, .. }
+        | ClientMessage::SupervisorCommand { attribution, .. }
+        | ClientMessage::SupervisorCommandStatus { attribution, .. }
+        | ClientMessage::SupervisorCommandStep { attribution, .. } = &mut message {
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
         // discarded here, and `operator_verified` is only ever set on this path.
@@ -3025,6 +3138,17 @@ async fn handle_client_message(
             device = %device_id,
             "forwarding Commander conversation history request"
         );
+    }
+    if let ClientMessage::SupervisorCommand { command, confirmed, client_ref, .. } = &message {
+        let action = format!("supervisor_command_{command:?}").to_ascii_lowercase();
+        let detail = Some(serde_json::json!({"client_ref": client_ref, "confirmed": confirmed}).to_string());
+        // A refused unconfirmed command must leave a denied row, not a
+        // dangling "requested" with no outcome.
+        if command.needs_confirmation() && !*confirmed {
+            store.audit_operation(context, "denied", &action, scope, session, detail, now)?;
+            anyhow::bail!("This command needs confirmation.");
+        }
+        store.audit_operation(context, "requested", &action, scope, session, detail, now)?;
     }
     if let Err(error) = connector.send(session, message).await {
         // cas-a0e2: the hub accepted the device and the message, but the
@@ -3083,7 +3207,8 @@ pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
     matches!(
         message,
-        ClientMessage::RequestPaneKeyframe { .. }
+        ClientMessage::SupervisorCommandStatus { .. }
+            | ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
             | ClientMessage::WorkEventsRequest { .. }
@@ -3599,6 +3724,7 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingRefKind {
     Send,
+    SupervisorCommand,
     History,
     /// Not a pending answer: this socket has read a work-events page, so the
     /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
@@ -3618,6 +3744,12 @@ pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRef
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
+        .or_else(|| match serde_json::from_slice::<ClientMessage>(bytes).ok()? {
+            ClientMessage::SupervisorCommand { client_ref, .. }
+            | ClientMessage::SupervisorCommandStatus { client_ref, .. }
+            | ClientMessage::SupervisorCommandStep { client_ref, .. } => Some((client_ref, PendingRefKind::SupervisorCommand)),
+            _ => None,
+        })
 }
 
 /// What the browser is told when the session's daemon upstream could not take
@@ -3635,11 +3767,12 @@ fn is_upstream_unavailable(failure: &anyhow::Error) -> bool {
 
 /// The legacy per-session socket's answer to a failed client message:
 /// `upstream_unavailable` (retryable, cas-a0e2) when the daemon upstream was
-/// missing, otherwise the unchanged `forbidden` refusal.
+/// missing. Pairing and message-scope refusals carry their actionable cause;
+/// a terminal lease refusal retains the legacy `forbidden` answer.
 fn legacy_send_error(failure: &anyhow::Error, client_ref: Option<&str>) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
         let mut error = legacy_forbidden_error(client_ref);
-        describe_pane_input_permission(failure, &mut error);
+        describe_client_permission(failure, &mut error, "error");
         return error;
     }
     let mut error = serde_json::json!({
@@ -3662,7 +3795,7 @@ fn multiplex_send_error(
 ) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
         let mut error = multiplex_forbidden_error(session, client_ref);
-        describe_pane_input_permission(failure, &mut error["error"]);
+        describe_client_permission(failure, &mut error["error"], "code");
         return error;
     }
     let mut error = serde_json::json!({
@@ -3679,11 +3812,18 @@ fn multiplex_send_error(
     error
 }
 
-/// Explain a missing terminal grant without changing the refusal code.
-fn describe_pane_input_permission(failure: &anyhow::Error, error: &mut serde_json::Value) {
-    if failure.is::<PaneInputPermissionRequired>() {
-        error["required_scope"] = serde_json::json!(Scope::PaneInput.as_str());
-        error["message"] = serde_json::json!(PaneInputPermissionRequired.to_string());
+/// Keep authorization's cause through either correlated socket envelope.
+fn describe_client_permission(failure: &anyhow::Error, error: &mut serde_json::Value, code_key: &str) {
+    let Some(permission) = failure.downcast_ref::<ClientPermissionRequired>() else { return; };
+    let (code, scope) = match permission {
+        ClientPermissionRequired::Pairing => ("pairing_required", None),
+        ClientPermissionRequired::MessageSend => ("message_send_required", Some(Scope::MessageSend)),
+        ClientPermissionRequired::PaneInput => ("forbidden", Some(Scope::PaneInput)),
+    };
+    error[code_key] = serde_json::json!(code);
+    error["message"] = serde_json::json!(permission.to_string());
+    if let Some(scope) = scope {
+        error["required_scope"] = serde_json::json!(scope.as_str());
     }
 }
 
@@ -3723,6 +3863,18 @@ pub(crate) fn admit_correlated_daemon_frame(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
+    if let Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) = serde_json::from_slice::<DaemonMessage>(bytes) {
+        let Some((store, context)) = auth else { return false };
+        if context.device_id != receipt.device_id { return false; }
+        if pending.get(&(session.to_owned(), receipt.client_ref.clone())) != Some(&PendingRefKind::SupervisorCommand) { return false; }
+        let detail = serde_json::json!({"client_ref": receipt.client_ref, "command": receipt.command, "phase": receipt.phase}).to_string();
+        if store.audit_operation(context, match receipt.phase {
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Submitted => "submitted",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+        }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
+    }
     match correlate_daemon_frame(pending, session, bytes) {
         Correlation::Refused => false,
         Correlation::Uncorrelated | Correlation::Consumed(None) => true,
@@ -3756,11 +3908,12 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             Some(PendingRefKind::Send) => {
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
-            Some(PendingRefKind::History) => Correlation::Consumed(None),
+            Some(PendingRefKind::History | PendingRefKind::SupervisorCommand) => Correlation::Consumed(None),
             Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
+        Ok(DaemonMessage::SupervisorCommandReceipt { receipt }) => consume(receipt.client_ref, None),
         Ok(DaemonMessage::MessageQueued {
             client_ref,
             notification_id,
@@ -3951,7 +4104,47 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         return;
     }
 
-    let (mut sink, mut source) = socket.split();
+    let (mut wire_sink, mut wire_source) = socket.split();
+    let (sink, mut writes) = tokio::sync::mpsc::channel::<Message>(64);
+    let (reads, mut source) = tokio::sync::mpsc::channel(64);
+    // The transport has no catalog, daemon attach, store or command work.
+    // A subscription can wait seconds on those without preventing this
+    // already-authenticated socket from answering its liveness probe.
+    let transport = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                incoming = wire_source.next() => {
+                    let Some(incoming) = incoming else { break; };
+                    match &incoming {
+                        Ok(Message::Ping(payload)) => {
+                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { break; }
+                            continue;
+                        }
+                        Ok(Message::Text(text)) => {
+                            if let Ok(envelope) = serde_json::from_str::<MachineClientEnvelope>(text)
+                                && envelope.channel == "health"
+                            {
+                                if let Some(ping) = envelope.ping {
+                                    let pong = serde_json::json!({"channel":"health","pong":ping});
+                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
+                                }
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    let ended = matches!(&incoming, Ok(Message::Close(_)) | Err(_));
+                    // Bound command backlog independently of health. Closing
+                    // on overflow preserves command order without silent loss.
+                    if reads.try_send(incoming).is_err() || ended { break; }
+                }
+                outgoing = writes.recv() => {
+                    let Some(outgoing) = outgoing else { break; };
+                    if wire_sink.send(outgoing).await.is_err() { break; }
+                }
+            }
+        }
+    });
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<MachineOutbound>(64);
     let mut subscriptions = std::collections::HashMap::<String, tokio::task::JoinHandle<()>>::new();
     let mut machine_events = state.events.subscribe();
@@ -4014,7 +4207,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }
                 None => break,
             },
-            incoming = source.next() => match incoming {
+            incoming = source.recv() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
                     if sink.send(Message::Pong(payload)).await.is_err() { break; }
                 }
@@ -4030,13 +4223,6 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                         continue;
                     };
-                    if envelope.channel == "health" {
-                        if let Some(ping) = envelope.ping {
-                            let pong = serde_json::json!({"channel":"health","pong":ping});
-                            if sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
-                        }
-                        continue;
-                    }
                     if envelope.channel == "events" && envelope.subscribe {
                         events_subscribed = true;
                         continue;
@@ -4182,6 +4368,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     for (_, handle) in subscriptions {
         handle.abort();
     }
+    transport.abort();
 }
 
 async fn acquire_lease<R: SessionReadModel>(
@@ -4210,7 +4397,7 @@ async fn acquire_lease<R: SessionReadModel>(
             return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({
                 "error": "scope_denied",
                 "required_scope": Scope::PaneInput.as_str(),
-                "message": PaneInputPermissionRequired.to_string(),
+                "message": ClientPermissionRequired::PaneInput.to_string(),
             }))).into_response(), &headers);
         }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
@@ -4382,6 +4569,7 @@ fn request_origin<R: SessionReadModel>(
         .and_then(|value| value.to_str().ok())
         .context("host required")?;
     state
+        .publication.lock().unwrap()
         .effective_origins
         .iter()
         .find(|effective| {
@@ -4748,6 +4936,7 @@ mod machine_protocol_tests {
         let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(
             crate::ui::factory::ConversationHistoryMessage {
                 notification_id: 41,
+                client_ref: None,
                 target: "supervisor".into(),
                 text: "Question".into(),
                 state: "sending".into(),
@@ -4777,7 +4966,7 @@ mod catalog_visibility_tests {
     use super::*;
 
     #[test]
-    fn normal_catalog_requires_fresh_reachable_supervisor() {
+    fn normal_catalog_keeps_running_dormant_daemons() {
         let live = super::super::fixture_session("live");
         let mut dead = live.clone();
         dead.name = "dead".into();
@@ -4788,13 +4977,22 @@ mod catalog_visibility_tests {
         let mut missing = live.clone();
         missing.name = "missing".into();
         missing.liveness = super::super::DaemonLiveness::MissingEndpoint;
-        let all = vec![live, dead, empty, missing];
+        let mut crashed = live.clone();
+        crashed.name = "crashed".into();
+        crashed.liveness = super::super::DaemonLiveness::StaleMetadata;
+        let mut ended = live.clone();
+        ended.name = "ended".into();
+        ended.ended = Some(crate::ui::factory::SessionEndOutcome {
+            at: "2026-11-01T10:00:00Z".into(), reason: "exit".into(),
+            workers_stopped: vec![], orphans: vec![], unverified: vec![],
+        });
+        let all = vec![live, dead, empty, missing, crashed, ended];
         let visible = supervisor_sessions(all.clone(), false);
         assert_eq!(
             visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            vec!["live", "empty"]
+            vec!["live", "dead", "empty"]
         );
-        assert_eq!(supervisor_sessions(all, true).len(), 4);
+        assert_eq!(supervisor_sessions(all, true).iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["live", "dead", "empty"]);
     }
 }
 
@@ -4803,6 +5001,103 @@ mod catalog_visibility_tests {
 mod upstream_unavailable_tests {
     use super::*;
     use crate::hub::SessionMultiplexer;
+
+    #[tokio::test]
+    async fn send_refusal_preserves_pairing_scope_and_lease_causes_cas_5e60() {
+        for (cause, scopes, expected_code, required_scope) in [
+            ("revoked", vec![Scope::MessageSend], "pairing_required", None),
+            ("message-scope", vec![Scope::PaneRead], "message_send_required", Some("message:send")),
+            ("lease", vec![Scope::PaneInput], "forbidden", None),
+        ] {
+            let temp = crate::test_support::private_hub_tempdir();
+            let auth = AuthStore::open(temp.path().join("hub"), "refusal-machine").unwrap();
+            let now = chrono::Utc::now();
+            let scopes = scopes.into_iter().collect();
+            let invitation = auth.mint_pairing("https://controller.example", scopes, now).unwrap();
+            let credential = auth.exchange_pairing(PairingExchange::test_fixture(
+                invitation.token, "refusal-machine", "https://controller.example", invitation.scopes.clone(),
+            ), now).unwrap();
+            let context = AuthContext {
+                device_id: credential.device_id, credential_id: credential.credential_id,
+                device_label: "phone".into(), operator_label: "Operator".into(),
+                controller_origin: "https://controller.example".into(), scopes: invitation.scopes,
+                request_id: "refusal-request".into(),
+            };
+            let frame = if cause == "lease" {
+                serde_json::json!({"SupervisorCommand": {"command": "compact", "confirmed": false, "client_ref": "refused-send"}})
+            } else {
+                serde_json::json!({"SendMessage": {"target": "supervisor", "text": "Keep this message", "summary": "Test", "urgent": false, "client_ref": "refused-send", "attribution": MessageAttribution::default()}})
+            };
+            if cause == "revoked" {
+                auth.revoke_device(&context.device_id, now).unwrap();
+            }
+            let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+            let failure = handle_client_message(&connector, "factory-a", &Some((auth, context)), &serde_json::to_vec(&frame).unwrap())
+                .await.expect_err("refusal must happen before the daemon boundary");
+            assert!(!is_upstream_unavailable(&failure), "{cause}: {failure:#}");
+            let legacy = legacy_send_error(&failure, Some("refused-send"));
+            let multiplex = multiplex_send_error(&failure, "factory-a", Some("refused-send"));
+            // pin: both socket protocols must preserve the refused operation's identity and actionable cause.
+            assert_eq!(legacy["error"], expected_code, "{cause}: {failure:#}");
+            assert_eq!(multiplex["error"]["code"], legacy["error"], "{cause}");
+            assert_eq!(legacy["client_ref"], frame[if cause == "lease" { "SupervisorCommand" } else { "SendMessage" }]["client_ref"]);
+            assert_eq!(multiplex["error"]["client_ref"], legacy["client_ref"]);
+            assert_eq!(legacy["required_scope"].as_str(), required_scope, "{cause}");
+            if cause != "lease" {
+                assert!(legacy["message"].as_str().unwrap().contains("Pair this device again"), "{cause}");
+                assert_eq!(multiplex["error"]["message"], legacy["message"]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_commands_require_control_confirmation_and_private_audited_receipts() {
+        use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase, SupervisorCommandReceipt};
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "command-machine").unwrap();
+        let now = chrono::Utc::now();
+        let scopes: std::collections::BTreeSet<Scope> = [Scope::PaneInput, Scope::PaneRead].into_iter().collect();
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), now).unwrap();
+        let credential = auth.exchange_pairing(PairingExchange::test_fixture(invitation.token, "command-machine", "https://controller.example", scopes.clone()), now).unwrap();
+        let context = AuthContext {
+            device_id: credential.device_id, credential_id: credential.credential_id,
+            device_label: "phone".into(), operator_label: "Operator".into(),
+            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(),
+        };
+        let trusted = Some((auth.clone(), context.clone()));
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let command = |name: &str, confirmed: bool| serde_json::to_vec(&serde_json::json!({
+            "SupervisorCommand": {"command": name, "confirmed": confirmed, "client_ref": "cmd-test"}
+        })).unwrap();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
+        auth.acquire_lease(&context, "command-session", now).unwrap();
+        let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
+        assert!(unconfirmed.to_string().contains("confirmation"));
+        let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&arbitrary));
+        let allowed = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
+        assert!(is_upstream_unavailable(&allowed), "allowlisted leased command did not reach the connector: {allowed:#}");
+
+        let mut pending = PendingRefs::new();
+        pending.insert(("command-session".into(), "cmd-test".into()), PendingRefKind::SupervisorCommand);
+        let mut receipt = SupervisorCommandReceipt { device_id: "another-device".into(), client_ref: "cmd-test".into(), command: SupervisorCommand::Compact,
+            phase: SupervisorCommandPhase::Observed, detail: "Native context reset observed".into(), output: String::new(), interactive: false };
+        let frame = |receipt| serde_json::to_vec(&DaemonMessage::SupervisorCommandReceipt { receipt }).unwrap();
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &frame(receipt.clone())));
+        receipt.device_id = context.device_id;
+        let bytes = frame(receipt);
+        assert!(admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        assert!(!admit_correlated_daemon_frame(&mut pending, "command-session", &trusted, &bytes));
+        let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = audit.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_invalid" && row["outcome"] == "denied"));
+        // cas-7629: the refused unconfirmed Clear is denied, never left as a bare "requested".
+        let clear: Vec<_> = rows.iter().filter(|row| row["action"] == "supervisor_command_clear").map(|row| row["outcome"].as_str().unwrap()).collect();
+        assert_eq!(clear, ["denied"], "{audit}");
+        assert!(rows.iter().any(|row| row["action"] == "supervisor_command_receipt" && row["outcome"] == "observed"));
+    }
 
     /// Semantic sends need message:send alone, even without a pane lease.
     /// They reach the upstream boundary; raw terminal input remains refused.

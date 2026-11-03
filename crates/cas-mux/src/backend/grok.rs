@@ -30,6 +30,7 @@ impl Backend for Grok {
     }
 
     fn build_worker_config(&self, launch: WorkerLaunchConfig<'_>) -> PtyConfig {
+        let cwd = launch.cwd.clone();
         let mut config = PtyConfig::grok(
             launch.name,
             "worker",
@@ -48,7 +49,25 @@ impl Backend for Grok {
             None,
             launch.cas_root,
         );
+        // Grok skips project skills in an untrusted folder and resolves a
+        // non-interactive launch to untrusted. Per launch, not the shared trust
+        // store, and only in a Cassy-created worker checkout, which is what
+        // Claude and Codex already record as trusted. A user's own Grok session
+        // never comes through here.
+        if super::skill_catalog::is_cassy_worktree(&cwd) {
+            config.env.push(("GROK_FOLDER_TRUST".to_string(), "false".to_string()));
+        }
         config
+    }
+
+    fn prepare_worker_catalog(&self, cwd: &std::path::Path) {
+        let home = std::env::var_os("GROK_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".grok")));
+        let Some(home) = home else { return };
+        if let Err(error) = super::skill_catalog::prepare_grok_project_skills(cwd, &home) {
+            tracing::warn!(%error, cwd = %cwd.display(), "Grok worker skill projection failed; full listing kept");
+        }
     }
 
     fn build_supervisor_config(&self, launch: SupervisorLaunchConfig<'_>) -> PtyConfig {

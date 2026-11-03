@@ -42,24 +42,31 @@ queue run's critical path was its preflight job:
 The full local gate ran on `f084dd7b5`, tree `f1bab7758`. The merge-queue tree
 and the landed merge commit `863c42f54` have the same tree, `f1bab7758`. The
 queue's 17 minutes re-validated bytes that the release gate had already
-validated in full. The PR run had also validated them: it records a
-`pr-validated-tree-<tree>` artifact when its lanes pass.
+validated in full. At the time, the PR lanes also validated them and recorded
+a `pr-validated-tree-<tree>` artifact. That legacy producer has since been
+removed: protected PRs now emit admission contexts, and the canonical queue
+tree receives the full validation.
 
-`scripts/check-ci-tree-validation.sh` already reuses that artifact, but only
-for main pushes after the merge (`run-heavy=false` on `push` to
-`refs/heads/main`). It never applies to a `merge_group` run.
+`scripts/check-ci-tree-validation.sh` now delegates to
+`scripts/check-ci-merge-queue-validation.sh`. On a main push it accepts the
+successful queue's exact-tree `merge-queue-validated-tree-<tree>` receipt
+(`run-heavy=false`). Missing, failed or ambiguous queue evidence runs the
+checks. It does not accept the removed PR marker or reuse PR admission as
+full validation.
 
 ## Can a validated-tree receipt be reused in the queue?
 
-Yes, with the same evidence rule the main-push dedupe uses. A release PR's
-queue tree equals its head tree whenever the PR is up to date with main. That
-holds by construction for `release/<ver>`, because the cut rebases it onto
-main. So on `merge_group`, `check-ci-tree-validation.sh` could look up
-`pr-validated-tree-<HEAD^{tree}>`. Given a completed, successful
-`pull_request` run for that tree, the required contexts could report success
-without re-running the preflight and suite shards. That was the upper bound, about 17 of
-the queue's 19.4 minutes on 3.47.0. The full gate runs no Commander journeys, so
-the implementation below keeps them, and the real saving is smaller.
+Yes, when trusted evidence proves the exact queue tree and covers the checks
+being reused. A release PR that is up to date with main can have the same tree
+as its queue entry; the validator checks the tree rather than inferring this
+from a branch name. The original investigation proposed PR-artifact reuse,
+but that is not an active proof source now. PR admission alone cannot skip
+queue validation. The implementation below uses a full-gate status naming
+the proven tree instead.
+
+The historical upper bound was about 17 of the queue's 19.4 minutes on
+3.47.0. The full gate runs no Commander journeys, so the implementation below
+keeps them unless separately proven, and the real saving is smaller.
 
 Constraints for the implementation:
 
@@ -67,7 +74,7 @@ Constraints for the implementation:
   ref. A deduplicated job reports success and names the prior run. It never
   skips the context.
 - Any missing or ambiguous evidence keeps the full run: an expired artifact,
-  an API error, a non-PR run, or a different tree. This mirrors the main-push
+  an API error, an unsuccessful validating workflow, or a different tree. This mirrors the main-push
   dedupe.
 - A queue entry batched behind another PR has a different tree, so it gets no
   receipt and runs in full. This is the case the queue exists for.
@@ -101,3 +108,31 @@ that receipt, the queue runs the journeys as before.
   park refuses a tip without it wherever the fast rows ship. Tonight a version
   literal (cas-7aa5) and, earlier, cas-ca55's literal each cost a CI round;
   locally the same rows take about a minute.
+
+## Archive dependency cache maintenance
+
+The hosted suite archive and advisory main cache producer share the explicit
+`fast-validation-suite-build` cache identity. Their profile is defined once in
+`ci.yml`, visible during cache lookup and compilation: dev/test debug info is
+zero and stripping removes debug info. The cache action retains compiler,
+Cargo manifest/lock, toolchain and configuration fingerprints. It caches
+compatible dependencies; queue runs still compile the current workspace and
+execute the existing suite. A cache hit is never a test receipt.
+
+After a main push reuses successful queue validation, the advisory producer
+restores that same dependency key. An exact hit skips only the priming compile;
+a partial hit, miss or absent hit output performs the normal archive build to
+seed main's cache. It does not run the suite or upload another archive. The
+producer is outside the required validation dependency graph, can fail without
+failing validation, and stops after twenty minutes. It is disabled when the
+queue uses the isolated self-hosted route. A normal main validation can also
+save this key; hosted queue, tag, scheduled and manual runs restore without
+saving it to their own refs.
+
+The measured pre-change sample had eight cache misses in twelve queue runs.
+The latest cold archive job took 13.87 minutes, including 12.37 minutes in its
+build step. These are baseline measurements from the queue speed plan
+`art-1b84b905`, not a measured saving from cache priming. Completion evidence
+must name a real main-scoped cache entry and a later queue log restoring its
+key; until a version containing this change reaches main, that final
+cross-ref restoration remains unmeasured.

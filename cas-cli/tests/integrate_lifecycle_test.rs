@@ -27,8 +27,7 @@ use std::path::PathBuf;
 
 use cas::cli::integrate::vercel;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 use test_env_guard::TestEnvGuard;
 
 /// Resolve the fixture script relative to the cas-cli crate root.

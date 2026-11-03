@@ -261,6 +261,12 @@ mod m282_epic_split_decisions;
 mod m283_agent_session_ends;
 mod m286_epic_split_releases;
 mod m287_usage_limit_episodes;
+mod m288_worker_task_queues;
+mod m289_drop_recording_index;
+mod m290_quality_events;
+mod m291_verification_status_detail;
+mod m292_quality_turns;
+mod m293_verification_duration_source;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -559,6 +565,12 @@ pub const MIGRATIONS: &[Migration] = &[
     m283_agent_session_ends::MIGRATION,
     m286_epic_split_releases::MIGRATION,
     m287_usage_limit_episodes::MIGRATION,
+    m288_worker_task_queues::MIGRATION,
+    m289_drop_recording_index::MIGRATION,
+    m290_quality_events::MIGRATION,
+    m291_verification_status_detail::MIGRATION,
+    m292_quality_turns::MIGRATION,
+    m293_verification_duration_source::MIGRATION,
 ];
 
 #[cfg(test)]

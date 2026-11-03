@@ -504,11 +504,11 @@ run_guard() {
     cat "$output"
 }
 
-hit_output="$(run_guard hit)"
-require_text "$hit_output" 'run-heavy=false' 'matching successful PR receipt skips heavy work'
-require_text "$hit_output" 'prior-run-url=https://example.test/actions/runs/123' 'matching receipt exposes the prior run URL'
-require_text "$(<"$guard_tmp/gh.log")" "pr-validated-tree-$guard_tree" 'tree lookup queries the exact current Git tree'
-for mode in miss wrong-event error; do
+hit_output="$(run_guard merge-hit)"
+require_text "$hit_output" 'run-heavy=false' 'matching successful queue receipt skips heavy work'
+require_text "$hit_output" 'prior-run-url=https://example.test/actions/runs/789' 'matching receipt exposes the queue run URL'
+require_text "$(<"$guard_tmp/gh.log")" "merge-queue-validated-tree-$guard_tree" 'heavy lookup queries the exact current Git tree'
+for mode in miss hit merge-in-progress merge-wrong-event error; do
     output_path="$(run_guard "$mode")"
     require_text "$output_path" 'run-heavy=true' "$mode receipt evidence fails closed to heavy work"
     require_absent "$output_path" 'run-heavy=false' "$mode receipt evidence never dedupes"

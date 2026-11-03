@@ -9,7 +9,7 @@ use crate::ui::theme::Icons;
 /// Heading level controlling visual prominence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// Primary heading: bold accent with separator bars (═══ TITLE ═══)
+    /// Primary heading: bold terminal foreground with locale-aware separator bars
     H1,
     /// Secondary heading: bold primary text
     H2,
@@ -75,16 +75,12 @@ impl Renderable for Header {
 
         match self.level {
             Level::H1 => {
-                if fmt.is_styled() {
-                    let bar = Icons::SEPARATOR_DOUBLE;
-                    let color = fmt.theme().palette.accent;
-                    fmt.write_bold_colored(
-                        &format!("{bar}{bar}{bar} {display_text} {bar}{bar}{bar}"),
-                        color,
-                    )?;
+                let bar = if fmt.is_styled() && fmt.unicode() {
+                    Icons::SEPARATOR_DOUBLE
                 } else {
-                    fmt.write_raw(&format!("=== {display_text} ==="))?;
-                }
+                    "="
+                };
+                fmt.write_bold_plain(&format!("{bar}{bar}{bar} {display_text} {bar}{bar}{bar}"))?;
             }
             Level::H2 => {
                 if fmt.is_styled() {
@@ -118,6 +114,28 @@ mod tests {
         }
         let output = String::from_utf8(buf).unwrap();
         assert_eq!(output, "=== Tasks ===\n");
+
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        for lang_only in [false, true] {
+            if lang_only {
+                env.remove("LC_ALL");
+                env.remove("LC_CTYPE");
+                env.set("LANG", "C");
+            }
+            let mut buf = Vec::new();
+            Header::h1("Tasks")
+                .render(&mut Formatter::styled(
+                    &mut buf,
+                    ActiveTheme::default_dark(),
+                ))
+                .unwrap();
+            assert_eq!(
+                crate::ui::components::test_helpers::strip_ansi_codes(
+                    &String::from_utf8(buf).unwrap()
+                ),
+                "=== Tasks ===\n"
+            );
+        }
     }
 
     #[test]
@@ -158,15 +176,18 @@ mod tests {
 
     #[test]
     fn test_h1_styled() {
-        let theme = ActiveTheme::default_dark();
-        let mut buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut buf, theme);
-            Header::h1("Tasks").render(&mut fmt).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        for theme in [ActiveTheme::default_dark(), ActiveTheme::default_light()] {
+            let mut buf = Vec::new();
+            Header::h1("Tasks")
+                .render(&mut Formatter::styled(&mut buf, theme))
+                .unwrap();
+            // Bold only: terminal foreground stays readable on any background.
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\x1b[1m═══ Tasks ═══\x1b[0m\n"
+            );
         }
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Tasks"));
-        assert!(output.contains("\x1b["));
     }
 
     #[test]

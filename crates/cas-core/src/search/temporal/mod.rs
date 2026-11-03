@@ -68,7 +68,10 @@ impl TimePeriod {
     /// Create a period for a specific day
     pub fn day(date: NaiveDate) -> Self {
         let start = date.and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let end = date.and_hms_opt(23, 59, 59).unwrap().and_utc();
+        let end = date
+            .and_hms_nano_opt(23, 59, 59, 999_999_999)
+            .unwrap()
+            .and_utc();
         Self { start, end }
     }
 
@@ -89,7 +92,10 @@ impl TimePeriod {
 
     /// Create a period for the last N days
     pub fn last_days(days: i64) -> Self {
-        let end = Utc::now();
+        Self::last_days_at(days, Utc::now())
+    }
+
+    fn last_days_at(days: i64, end: DateTime<Utc>) -> Self {
         let start = end - Duration::days(days);
         Self { start, end }
     }
@@ -292,19 +298,24 @@ impl TemporalQuery {
     /// - "since 2025-01-01"
     /// - "between 2025-01-01 and 2025-01-31"
     pub fn parse(text: &str) -> Option<Self> {
+        Self::parse_at(text, Utc::now())
+    }
+
+    /// Parse relative periods against one caller-supplied clock snapshot.
+    fn parse_at(text: &str, now: DateTime<Utc>) -> Option<Self> {
         let text = text.trim().to_lowercase();
 
         // "today"
         if text == "today" {
             return Some(Self {
-                period: TimePeriod::day(Utc::now().date_naive()),
+                period: TimePeriod::day(now.date_naive()),
                 description: "today".to_string(),
             });
         }
 
         // "yesterday"
         if text == "yesterday" {
-            let yesterday = Utc::now().date_naive().pred_opt()?;
+            let yesterday = now.date_naive().pred_opt()?;
             return Some(Self {
                 period: TimePeriod::day(yesterday),
                 description: "yesterday".to_string(),
@@ -314,7 +325,7 @@ impl TemporalQuery {
         // "last week"
         if text == "last week" {
             return Some(Self {
-                period: TimePeriod::last_weeks(1),
+                period: TimePeriod::last_days_at(7, now),
                 description: "last week".to_string(),
             });
         }
@@ -322,7 +333,7 @@ impl TemporalQuery {
         // "last month"
         if text == "last month" {
             return Some(Self {
-                period: TimePeriod::last_months(1),
+                period: TimePeriod::last_days_at(30, now),
                 description: "last month".to_string(),
             });
         }
@@ -330,7 +341,7 @@ impl TemporalQuery {
         // "last year"
         if text == "last year" {
             return Some(Self {
-                period: TimePeriod::last_days(365),
+                period: TimePeriod::last_days_at(365, now),
                 description: "last year".to_string(),
             });
         }
@@ -338,14 +349,13 @@ impl TemporalQuery {
         // "recently" - last 7 days
         if text == "recently" {
             return Some(Self {
-                period: TimePeriod::last_days(7),
+                period: TimePeriod::last_days_at(7, now),
                 description: "recently".to_string(),
             });
         }
 
         // "this week" - from start of current week to now
         if text == "this week" {
-            let now = Utc::now();
             let weekday = now.weekday().num_days_from_monday() as i64;
             let start = now - Duration::days(weekday);
             let start = start.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
@@ -357,7 +367,6 @@ impl TemporalQuery {
 
         // "this month" - from start of current month to now
         if text == "this month" {
-            let now = Utc::now();
             let start = now
                 .date_naive()
                 .with_day(1)?
@@ -371,7 +380,6 @@ impl TemporalQuery {
 
         // "this year" - from start of current year to now
         if text == "this year" {
-            let now = Utc::now();
             let start_date = NaiveDate::from_ymd_opt(now.date_naive().year(), 1, 1)?;
             let start = start_date.and_hms_opt(0, 0, 0)?.and_utc();
             return Some(Self {
@@ -397,7 +405,7 @@ impl TemporalQuery {
                 };
 
                 // "N days ago" means a point in time, so create a 1-day window around that point
-                let target = Utc::now() - Duration::days(days);
+                let target = now - Duration::days(days);
                 let start = target - Duration::hours(12);
                 let end = target + Duration::hours(12);
 
@@ -413,7 +421,7 @@ impl TemporalQuery {
             let num_str = text.strip_prefix("last ")?.strip_suffix(" days")?;
             let days: i64 = num_str.parse().ok()?;
             return Some(Self {
-                period: TimePeriod::last_days(days),
+                period: TimePeriod::last_days_at(days, now),
                 description: format!("last {days} days"),
             });
         }
@@ -423,7 +431,7 @@ impl TemporalQuery {
             let num_str = text.strip_prefix("last ")?.strip_suffix(" weeks")?;
             let weeks: i64 = num_str.parse().ok()?;
             return Some(Self {
-                period: TimePeriod::last_weeks(weeks),
+                period: TimePeriod::last_days_at(weeks * 7, now),
                 description: format!("last {weeks} weeks"),
             });
         }
@@ -486,7 +494,7 @@ impl TemporalQuery {
             let date_str = text.strip_prefix("since ")?;
             if let Some(date) = parse_date_flexible(date_str) {
                 return Some(Self {
-                    period: TimePeriod::new(date.and_hms_opt(0, 0, 0)?.and_utc(), Utc::now()),
+                    period: TimePeriod::new(date.and_hms_opt(0, 0, 0)?.and_utc(), now),
                     description: format!("since {date_str}"),
                 });
             }

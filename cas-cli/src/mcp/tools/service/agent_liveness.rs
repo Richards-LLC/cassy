@@ -175,6 +175,7 @@ pub fn is_live_factory_worker(agent: &Agent) -> bool {
 /// cas-e98e AC3 phantom-pane rule: keep when still registering (no rows) or
 /// any matching row is supervision-live; drop when every matching row is
 /// non-live (dead process + stale/shutdown registry).
+#[cfg(test)]
 pub fn should_keep_worker_pane<'a>(
     name: &str,
     agents: impl IntoIterator<Item = &'a Agent>,

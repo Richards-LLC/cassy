@@ -593,7 +593,6 @@ async fn close_releases_and_other_repositories_never_collide() {
             id: "cas-p003".into(),
             reason: Some("spike answered".into()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -804,7 +803,6 @@ async fn close_does_not_wait_on_slow_cloud_releases_cas_c55f_978d() {
             id: "cas-f003".into(),
             reason: Some("spike answered".into()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -892,8 +890,21 @@ async fn an_unreachable_cloud_falls_back_to_the_local_lease_with_a_warning() {
     let alpha = machine(&endpoint, PROJECT, "alpha-sup");
     alpha.put_task("cas-p007", TaskType::Task);
     let started = start(&alpha.core, "cas-p007", false).await.expect("local lease still works");
-    assert!(started.to_lowercase().contains("peer"), "{started}");
-    assert!(started.to_lowercase().contains("unreachable"), "{started}");
+    // Start-only warnings are saved before the brief response is budgeted.
+    // Long fixture paths can defer the complete advisory; follow the public
+    // recovery route instead of depending on the host's temporary-path length.
+    let service = cas::mcp::CasService::new(alpha.core.clone(), None);
+    let notes = extract_text(service.task(Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+        serde_json::json!({"action": "notes", "id": "cas-p007", "full": true}),
+    ).unwrap())).await.unwrap());
+    assert!(notes.contains("PEERS NOT CHECKED") && notes.contains("unreachable"), "{notes}");
+    assert!(started.len() <= 2_000, "{} bytes: {started}", started.len());
+    if !started.contains("PEERS NOT CHECKED") {
+        assert!(started.contains("Start advisories exceed"), "{started}");
+        assert!(started.contains("task notes id=cas-p007"), "{started}");
+    } else {
+        assert!(started.contains("unreachable"), "{started}");
+    }
     assert!(
         open_agent_store(&alpha.cas_dir).unwrap().get_lease("cas-p007").unwrap().is_some(),
         "{started}"

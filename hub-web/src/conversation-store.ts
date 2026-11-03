@@ -163,15 +163,23 @@ export function purgeConversations(storage: EnumerableStorage | undefined, machi
 }
 
 /** A conversation composer draft (cas-7752). */
-export type Draft = { text: string; caret: number };
+export type Draft = {
+  text: string;
+  caret: number;
+  /** Stable across reloads; legacy drafts acquire one when next saved. */
+  id?: string;
+  /** The hub's session start identity, never just its reusable name. */
+  sessionStartedAt?: string;
+};
 
 /** A stored draft, or undefined when blank or malformed; the caret is clamped to the text. */
 export function validDraft(raw: unknown): Draft | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const { text, caret } = raw as { text?: unknown; caret?: unknown };
+  const { text, caret, id, sessionStartedAt } = raw as { text?: unknown; caret?: unknown; id?: unknown; sessionStartedAt?: unknown };
   if (typeof text !== "string" || !text.trim()) return undefined;
   const at = typeof caret === "number" && Number.isFinite(caret) ? Math.max(0, Math.min(Math.trunc(caret), text.length)) : text.length;
-  return { text, caret: at };
+  return { text, caret: at, ...(typeof id === "string" && id.length > 0 && id.length <= 128 ? { id } : {}),
+    ...(typeof sessionStartedAt === "string" && sessionStartedAt.length > 0 && sessionStartedAt.length <= 128 ? { sessionStartedAt } : {}) };
 }
 
 /**
@@ -220,6 +228,7 @@ export type PendingSend = {
   replyTo?: number;
   error?: string;
   session?: string;
+  sessionStartedAt?: string;
 };
 
 const PENDING_STATES = new Set<PendingSend["state"]>(["held", "sending", "unconfirmed", "error"]);
@@ -237,7 +246,7 @@ const finite = (value: unknown): number | undefined => (typeof value === "number
 /** One stored unsettled message, or undefined when malformed. */
 export function validPendingSend(raw: unknown): PendingSend | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const { id, target, text, state, at, heldAt, sentAt, replyTo, error, session } = raw as Record<string, unknown>;
+  const { id, target, text, state, at, heldAt, sentAt, replyTo, error, session, sessionStartedAt } = raw as Record<string, unknown>;
   if (typeof id !== "string" || !id || typeof target !== "string" || typeof text !== "string" || !text.trim()) return undefined;
   const B = PENDING_SEND_BOUNDS;
   if (id.length > B.id || target.length > B.target || text.length > B.text) return undefined;
@@ -252,6 +261,7 @@ export function validPendingSend(raw: unknown): PendingSend | undefined {
     ...(finite(replyTo) === undefined ? {} : { replyTo: finite(replyTo) }),
     ...(typeof error === "string" ? { error } : {}),
     ...(typeof session === "string" ? { session } : {}),
+    ...(typeof sessionStartedAt === "string" && sessionStartedAt.length > 0 && sessionStartedAt.length <= 128 ? { sessionStartedAt } : {}),
   };
 }
 
@@ -361,7 +371,7 @@ export function validCachedSession(raw: unknown): HubSession | undefined {
   if (!name || supervisor === undefined || !liveness || !LIVENESS.has(liveness)) return undefined;
   if (!Array.isArray(row.workers) || !row.workers.every((worker) => typeof worker === "string")) return undefined;
   const session: HubSession = { name, supervisor, workers: [...(row.workers as string[])], liveness: liveness as HubSession["liveness"] };
-  for (const key of ["project_dir", "epic_id", "last_activity_at", "last_activity", "started_at", "cloud_project_id"] as const) {
+  for (const key of ["project_dir", "epic_id", "last_activity_at", "last_activity", "started_at", "cloud_project_id", "mcp_version", "installed_version"] as const) {
     const value = text(key);
     if (value !== undefined) session[key] = value;
   }

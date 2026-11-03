@@ -524,6 +524,7 @@ mod tests {
 
     #[test]
     fn header_h1_styled_dark() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut tf = TestFormatter::dark();
         Header::h1("Cassy Doctor").render(&mut tf.fmt()).unwrap();
         insta::assert_snapshot!(tf.output_plain());

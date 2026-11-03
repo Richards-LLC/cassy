@@ -12,11 +12,12 @@ for (const dir of ['src', 'public']) {
   }
 }
 for (const file of ['index.html', 'vite.config.ts', 'package-lock.json']) digest.update(readFileSync(join(root, file)));
-const hubBuild = digest.digest('hex').slice(0, 8);
+const hubVersion = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, "../cas-cli/Cargo.toml"), "utf8"))![1];
+const hubBuild = digest.update(hubVersion).digest('hex').slice(0, 8);
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
-  define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
+  define: { __HUB_BUILD__: JSON.stringify(hubBuild), __HUB_VERSION__: JSON.stringify(hubVersion) },
   base: "/commander/",
   plugins: [{
     name: "rich-content-licenses",
@@ -24,6 +25,10 @@ export default defineConfig({
     renderChunk: {
       order: "post",
       handler(code, chunk) {
+        if (chunk.name === "emoji-picker") {
+          const license = readFileSync(join(root, "licenses/emojibase-MIT.txt"), "utf8");
+          return { code: `${code}\n/*! Emojibase data\n${license}\n*/\n`, map: null };
+        }
         if (chunk.name !== "rich-diagram") return null;
         // Append after minification, before hashing: legal text stays in this
         // lazy chunk and adds no legal-comment bytes to first paint.
@@ -50,9 +55,10 @@ export default defineConfig({
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
           if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash:8].js";
-          if (name === "rich-content.css") return "chunk-rich-content-[hash:8].css";
-          if (name === "composer-uploads.css") return "chunk-composer-uploads-[hash:8].css";
-          if (name.endsWith(".css")) return "app.css";
+          // Vite names the HTML entry's stylesheet index.css. Only that
+          // entry owns app.css; every lazy stylesheet uses the hub chunk route.
+          if (name === "index.css") return "app.css";
+          if (name.endsWith(".css")) return `chunk-${name.slice(0, -4).replace(/[^A-Za-z0-9_-]/g, "-")}-[hash:8].css`;
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";
           if (name.endsWith("JetBrainsMono-latin-wght.woff2")) return "jetbrains-mono.woff2";

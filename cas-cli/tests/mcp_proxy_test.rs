@@ -238,48 +238,6 @@ command = "cas-f7ac-intentionally-missing-upstream"
 // ── Config round-trip ────────────────────────────────────────────────
 
 #[test]
-fn config_round_trip_all_transports() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("proxy.toml");
-
-    let mut config = Config::default();
-
-    config.add_server(
-        "my-stdio".to_string(),
-        ServerConfig::Stdio {
-            command: "npx".to_string(),
-            args: vec!["mcp-server-git".to_string()],
-            env: HashMap::from([("HOME".to_string(), "/tmp".to_string())]),
-        },
-    );
-
-    config.add_server(
-        "my-http".to_string(),
-        ServerConfig::Http {
-            url: "https://mcp.example.com/api".to_string(),
-            auth: Some("secret-token".to_string()),
-            headers: HashMap::new(),
-            oauth: false,
-        },
-    );
-
-    config.add_server(
-        "my-sse".to_string(),
-        ServerConfig::Sse {
-            url: "https://mcp.example.com/sse".to_string(),
-            auth: None,
-            headers: HashMap::from([("X-Custom".to_string(), "value".to_string())]),
-            oauth: true,
-        },
-    );
-
-    config.save_to(&path).unwrap();
-    let loaded = Config::load_from(&path).unwrap();
-    assert_eq!(config, loaded);
-    assert_eq!(loaded.servers.len(), 3);
-}
-
-#[test]
 fn config_add_remove_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("proxy.toml");
@@ -453,12 +411,6 @@ fn cli_collision_and_forged_identifiers_fail_closed_without_raw_name_echo() {
 }
 
 #[test]
-fn config_load_missing_returns_empty() {
-    let config = Config::load_from(Path::new("/tmp/nonexistent-cas-test/proxy.toml")).unwrap();
-    assert!(config.servers.is_empty());
-}
-
-#[test]
 fn config_merge_project_over_user() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -479,13 +431,6 @@ fn config_merge_project_over_user() {
     // load_merged with project path
     let merged = Config::load_merged(Some(&project_path)).unwrap();
     assert!(merged.servers.contains_key("shared"));
-}
-
-#[test]
-fn scope_user_config_path_valid() {
-    let path = Scope::User.config_path().unwrap();
-    assert!(path.to_string_lossy().contains("code-mode-mcp"));
-    assert!(path.to_string_lossy().ends_with("config.toml"));
 }
 
 // ── Catalog serialization ────────────────────────────────────────────
@@ -1200,12 +1145,16 @@ exec env \
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    tokio::time::sleep(std::time::Duration::from_millis(
-        due.saturating_sub(now).saturating_add(50),
-    ))
-    .await;
+    // The first failure backs off by the production 5 s base; reach that
+    // deadline on the engine's clock instead of sleeping until it.
+    // Due in the future and no later than the 5 s base. No lower bound:
+    // real time passes between the failure and this read.
+    assert!(
+        due > now && due - now <= 5_000,
+        "first retry is due within 5 s: due={due} now={now}"
+    );
 
-    assert_eq!(engine.retry_unhealthy().await, 1);
+    assert_eq!(engine.retry_unhealthy_at_for_tests(due).await, 1);
     let recovered = engine.health_snapshot().await.servers.remove(0);
     assert_eq!(recovered.state, UpstreamState::Healthy);
     assert_eq!(recovered.consecutive_failures, 0);

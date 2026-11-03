@@ -56,7 +56,6 @@ fn close_req(id: &str) -> TaskCloseRequest {
         id: id.to_string(),
         reason: Some("delivered".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }
@@ -85,7 +84,7 @@ fn fixture(test_env: &mut TestEnvGuard, delivered: &[(&str, &str)], demo: &str) 
     std::fs::write(
         repo.join(".cas").join("config.toml"),
         format!(
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nindependent_pass = false\n",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nmode='per_task'\nindependent_pass = false\n",
             artifacts.display().to_string()
         ),
     )
@@ -204,6 +203,451 @@ impl Fx {
 }
 
 #[tokio::test]
+async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source_alias_cas_ad505() {
+    use super::independent_qa::{reviewer_core, round_evidence};
+    use cas::mcp::CasService;
+    use cas_mcp::types::VerificationRequest;
+
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        body.replace("independent_pass = false", "independent_pass = true"),
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let producer = fx.write_bundle(&head);
+    // Keep the original citation: on macOS TempDir spells it /var, while
+    // publication records /private/var. Save the canonical spelling before
+    // hiding the source so peer restores exercise both identities below.
+    let canonical_producer = producer.canonicalize().unwrap();
+    // Real cas-qa-craft/journey bundles mix path fields with descriptive
+    // metadata in files.parts. Shared pairs live alongside qa/, inside task.
+    let pairs_dir = fx.artifacts.join(TASK).join("pairs");
+    std::fs::create_dir_all(&pairs_dir).unwrap();
+    for name in ["before.png", "before.jpg", "after.png", "after.jpg"] {
+        std::fs::write(pairs_dir.join(name), name).unwrap();
+    }
+    let capture = |side: &str| {
+        serde_json::json!({
+            "png": format!("{side}.png"), "jpg": format!("{side}.jpg"),
+            "sha256": cas::artifacts::digest_file(&pairs_dir.join(format!("{side}.png"))).unwrap().0,
+            "jpg_sha256": cas::artifacts::digest_file(&pairs_dir.join(format!("{side}.jpg"))).unwrap().0
+        })
+    };
+    std::fs::write(
+        pairs_dir.join("pairs.json"),
+        serde_json::json!({
+            "schema": 1, "task_id": TASK, "head_sha": head,
+            "pairs": [{"id": "M01", "before": capture("before"), "after": capture("after")}],
+            "unpaired": [{"id": "M02", "after": capture("after")}],
+            "findings": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&producer).unwrap()).unwrap();
+    manifest["pairs_status"] = "partial".into();
+    manifest["files"]["pairs"] = "../pairs/pairs.json".into();
+    manifest["files"]["parts"] = serde_json::json!([{
+        "title": "Composer spacing", "project": "desktop", "title_path": ["composer", "spacing"],
+        "verdict": "PASS", "label": "real-build",
+        "receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"
+    }]);
+    std::fs::write(&producer, manifest.to_string()).unwrap();
+    let producer_bytes = std::fs::read(&producer).unwrap();
+    // Pin a distinct source timestamp so fetch-time mtimes cannot masquerade
+    // as the capture's freshness when restoring the archive.
+    let captured_at = git(&fx.repo, &["show", "-s", "--format=%ct", &head])
+        .parse::<u64>()
+        .unwrap()
+        + 3600;
+    std::fs::File::options()
+        .write(true)
+        .open(producer.parent().unwrap().join("trace.zip"))
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(captured_at)),
+        )
+        .unwrap();
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    let qa_task = pass.qa_task_id.unwrap();
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    reviewer
+        .cas_task_start(Parameters(IdRequest {
+            id: qa_task.clone(),
+        }))
+        .await
+        .unwrap();
+    // GH #1403: the reviewer owns a different task root, with no
+    // /independent-qa/ segment for the old path heuristic to recognize.
+    let reviewer_dir = fx.artifacts.join(&qa_task).join("qa");
+    let ledger = round_evidence(&reviewer_dir, TASK, &head);
+    let reviewer_bundle = reviewer_dir.join("bundle.json");
+    let reviewer_bytes = std::fs::read(&reviewer_bundle).unwrap();
+    let service = CasService::new(reviewer, None);
+    let request: VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "qa_record", "task_id": TASK, "status": "approved",
+        "summary": format!("Independent review; qa-bundle: {}", reviewer_bundle.display()),
+        "ledger_path": ledger.display().to_string(),
+    }))
+    .unwrap();
+    let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());
+    assert!(recorded.contains("APPROVAL"), "{recorded}");
+
+    // cas-2850: the canonical qa_record verdict must travel with the task,
+    // rather than making a second host dispatch the same review again.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let blobs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<
+        String,
+        (serde_json::Value, Vec<u8>),
+    >::new()));
+    let storage = blobs.clone();
+    let endpoint = server.uri();
+    Mock::given(wiremock::matchers::path_regex("^/(api/artifacts|objects)"))
+        .respond_with(move |request: &wiremock::Request| {
+            let route = request.url.path();
+            let mut blobs = storage.lock().unwrap();
+            if route == "/api/artifacts/begin" {
+                let metadata: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let id = format!("blob-{}", blobs.len());
+                blobs.insert(id.clone(), (metadata, Vec::new()));
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "upload_url": format!("{endpoint}/objects/{id}"),
+                    "required_headers": {}
+                }));
+            }
+            if let Some(id) = route.strip_prefix("/objects/") {
+                let (_, bytes) = blobs.get_mut(id).unwrap();
+                if request.method == "PUT" {
+                    *bytes = request.body.clone();
+                }
+                return ResponseTemplate::new(200).set_body_bytes(bytes.clone());
+            }
+            let id = route.split('/').nth(3).unwrap();
+            let (metadata, _) = blobs.get(id).unwrap();
+            if route.ends_with("/url") {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": id, "url": format!("{endpoint}/objects/{id}"),
+                    "name": metadata["name"], "mime": metadata["mime"],
+                    "size_bytes": metadata["size_bytes"]
+                }));
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null}))
+        })
+        .mount(&server)
+        .await;
+    let artifact_store = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let published_bundle = cas::artifacts::publish(
+        &cas::artifacts::PublishContext {
+            store: &artifact_store,
+            roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &fx.artifacts, TASK),
+            task_id: TASK.into(),
+            cloud: Some(cas::artifacts::cloud::ArtifactUploadClient::new(
+                &server.uri(),
+                "test-token",
+            )),
+        },
+        &producer,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            published_bundle.disposition,
+            cas::artifacts::PublishDisposition::Committed { .. }
+        ),
+        "{:?}",
+        published_bundle.disposition
+    );
+    assert_eq!(published_bundle.source, canonical_producer);
+    // A peer cannot see any producer files. Merely fetching bundle.json is
+    // insufficient: its trace and all relative evidence must travel too.
+    let hidden = producer.parent().unwrap().with_extension("source-only");
+    std::fs::rename(producer.parent().unwrap(), &hidden).unwrap();
+    let hidden_pairs = pairs_dir.with_extension("source-only");
+    std::fs::rename(&pairs_dir, &hidden_pairs).unwrap();
+    let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+    assert!(
+        published
+            .notes
+            .lines()
+            .any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")),
+        "closure receipt missing: {}",
+        published.notes
+    );
+    published.origin_project = Some("qa-peer-project".into());
+    // One invalid owner snapshot must neither suppress later good snapshots
+    // for this delivery nor abort the rest of a personal/team pull batch.
+    let mut invalid: serde_json::Value = serde_json::from_str(
+        published
+            .notes
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("QA_PASS_PROOF: "))
+            .unwrap(),
+    )
+    .unwrap();
+    invalid["pass"]["id"] = "qapass-invalid".into();
+    invalid["pass"]["reviewer_agent_id"] = invalid["pass"]["implementer_agent_id"].clone();
+    published.notes = format!("QA_PASS_PROOF: {invalid}\n\n{}", published.notes);
+    let mut later_task = cas::types::Task::new("cas-later-row".into(), "Unrelated next row".into());
+    later_task.origin_project = published.origin_project.clone();
+    published.updated_at += chrono::Duration::hours(1);
+    for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [published, later_task], "pulled_at": "2026-10-28T12:00:00Z",
+                "team_id": "qa-peer-team", "status": "ok"
+            })))
+            .mount(&server)
+            .await;
+    }
+    for (team, newer_local) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (peer, peer_core) = setup_cas(&mut env);
+        let root = peer.path().join(".cas");
+        std::fs::write(root.join("config.toml"), format!(
+            "[project]\ncanonical_id = \"qa-peer-project\"\n[verification]\nenabled = false\n[factory]\nartifacts_root = {:?}\n[qa]\nindependent_pass = true\n",
+            peer.path().join("artifacts").display().to_string()
+        )).unwrap();
+        std::fs::write(
+            root.join("cloud.json"),
+            serde_json::json!({
+                "endpoint": server.uri(), "token": "test-token"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        git(peer.path(), &["init", "-q", "-b", "main"]);
+        git(
+            peer.path(),
+            &["fetch", "-q", fx.repo.to_str().unwrap(), "main"],
+        );
+        git(peer.path(), &["reset", "-q", "--hard", "FETCH_HEAD"]);
+        git(
+            peer.path(),
+            &[
+                "fetch",
+                "-q",
+                fx.repo.to_str().unwrap(),
+                "factory/test-agent",
+            ],
+        );
+        git(peer.path(), &["branch", "factory/test-agent", "FETCH_HEAD"]);
+        git(
+            peer.path(),
+            &["merge", "-q", "--ff-only", "factory/test-agent"],
+        );
+        std::fs::write(peer.path().join(".git/info/exclude"), "/.cas/\n").unwrap();
+        let tasks = cas::store::open_task_store_local(&root).unwrap();
+        if newer_local {
+            let mut local = published.clone();
+            local.notes.clear();
+            local.title = "Newer peer merge metadata".into();
+            local.deliverables.green_merge_commit = Some(head.clone());
+            local.updated_at += chrono::Duration::hours(2);
+            tasks.add(&local).unwrap();
+        }
+        let queue = std::sync::Arc::new(cas::cloud::SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let syncer = cas::cloud::CloudSyncer::new_for_project(
+            queue,
+            cas::cloud::CloudConfig {
+                endpoint: server.uri(),
+                token: Some("test-token".into()),
+                ..Default::default()
+            },
+            cas::cloud::CloudSyncerConfig::default(),
+            "qa-peer-project".into(),
+            &root,
+        );
+        let entries = cas::store::open_store_local(&root).unwrap();
+        let rules = cas::store::open_rule_store_local(&root).unwrap();
+        let skills = cas::store::open_skill_store_local(&root).unwrap();
+        let result = if team {
+            syncer.pull_team(
+                "qa-peer-team",
+                "qa-peer-project",
+                &*entries,
+                &*tasks,
+                &*rules,
+                &*skills,
+            )
+        } else {
+            syncer.pull(
+                &*entries,
+                &*tasks,
+                &*rules,
+                &*skills,
+                &*cas::store::open_spec_store(&root).unwrap(),
+                &*cas::store::open_event_store(&root).unwrap(),
+                &*cas::store::open_prompt_store(&root).unwrap(),
+                &*cas::store::open_file_change_store(&root).unwrap(),
+                &*cas::store::open_commit_link_store(&root).unwrap(),
+            )
+        }
+        .unwrap();
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(
+            result.errors[0].contains("qapass-invalid"),
+            "{:?}",
+            result.errors
+        );
+        assert_eq!(
+            tasks.get("cas-later-row").unwrap().title,
+            "Unrelated next row"
+        );
+        assert!(!tasks.get(TASK).unwrap().notes.contains("qapass-invalid"));
+        if newer_local {
+            assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata");
+        }
+        if team {
+            // Team pulls exercise an exact canonical citation; personal
+            // pulls retain the original platform alias. Neither source exists.
+            let mut task = tasks.get(TASK).unwrap();
+            task.notes
+                .push_str(&format!("\nqa-bundle: {}", canonical_producer.display()));
+            tasks.update(&task).unwrap();
+        }
+        assert!(
+            tasks
+                .get(TASK)
+                .unwrap()
+                .notes
+                .lines()
+                .any(|line| line.starts_with("QA_EVIDENCE_PROOF: ")),
+            "peer lost closure receipt: {}",
+            tasks.get(TASK).unwrap().notes
+        );
+        let closed = close_text(&peer_core, TASK).await;
+        assert_eq!(
+            tasks.get(TASK).unwrap().status,
+            TaskStatus::Closed,
+            "team={team}: the real close gate lost the peer verdict: {closed}"
+        );
+        let notes = tasks.get(TASK).unwrap().notes;
+        let restored = notes
+            .lines()
+            .rev()
+            .find_map(|line| line.split_once("QA evidence bundle accepted: "))
+            .unwrap()
+            .1
+            .split(" (head ")
+            .next()
+            .unwrap();
+        let restored_trace = Path::new(restored).parent().unwrap().join("trace.zip");
+        assert_eq!(
+            std::fs::metadata(restored_trace)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            captured_at
+        );
+        // A second real close with the same immutable closure must reuse its
+        // validated restore location instead of leaving another copy behind.
+        let restored = PathBuf::from(restored);
+        let mut retry = tasks.get(TASK).unwrap();
+        retry.status = TaskStatus::AwaitingMerge;
+        retry.closed_at = None;
+        tasks.update(&retry).unwrap();
+        let closed_again = close_text(&peer_core, TASK).await;
+        assert_eq!(
+            tasks.get(TASK).unwrap().status,
+            TaskStatus::Closed,
+            "{closed_again}"
+        );
+        let restored_again = tasks
+            .get(TASK)
+            .unwrap()
+            .notes
+            .lines()
+            .rev()
+            .find_map(|line| line.split_once("QA evidence bundle accepted: "))
+            .unwrap()
+            .1
+            .split(" (head ")
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(Path::new(&restored_again), restored);
+        let restore_root = restored
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(restore_root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("qa-restored-"))
+                .count(),
+            1
+        );
+        let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
+        assert_eq!(rounds.len(), 1, "the peer must retain the existing round");
+        assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
+    }
+
+    std::fs::rename(&hidden, producer.parent().unwrap()).unwrap();
+    std::fs::rename(&hidden_pairs, &pairs_dir).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(
+        &fx.repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge reviewed delivery",
+            "factory/test-agent",
+        ],
+    );
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let closed = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+    assert_eq!(
+        cas::qa_evidence::cited_bundle_path(&fx.notes()).as_deref(),
+        producer.to_str()
+    );
+    assert!(
+        fx.notes()
+            .contains(&format!("qa-review-bundle: {}", reviewer_bundle.display()))
+    );
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(pass.ledger_path.as_deref(), ledger.to_str());
+    assert_eq!(pass.bound_head, head);
+    assert_eq!(std::fs::read(&producer).unwrap(), producer_bytes);
+    assert_eq!(std::fs::read(&reviewer_bundle).unwrap(), reviewer_bytes);
+}
+
+#[tokio::test]
 async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_daa6() {
     for changed_diff in [true, false] {
         let mut env = TestEnvGuard::temp_home();
@@ -254,7 +698,10 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
             .to_string(),
         )
         .unwrap();
-        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
+        task.notes = format!(
+            "[now] 🧪 PLATFORM_PROOF qa-review-bundle: {}",
+            bundle.display()
+        );
         tasks.update(&task).unwrap();
         let now = chrono::Utc::now();
         cas_store::open_qa_pass(
@@ -288,7 +735,11 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         if changed_diff {
             // The final CSS patch still matches; an earlier unreviewed
             // change must fail the aggregate comparison.
-            std::fs::write(fx.repo.join("web/composer.js"), "export const ready = false;\n").unwrap();
+            std::fs::write(
+                fx.repo.join("web/composer.js"),
+                "export const ready = false;\n",
+            )
+            .unwrap();
             git(&fx.repo, &["add", "web/composer.js"]);
             git(&fx.repo, &["commit", "-q", "--amend", "--no-edit"]);
         }
@@ -485,10 +936,134 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
     );
 }
 
+/// GH #1373: a required docs-only correction must not strand API evidence
+/// on the declined code commit. Exercise request_changes, restart, push and
+/// the actual close gate, with stale/unrelated evidence as negative controls.
+#[tokio::test]
+async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("app/api/widgets.ts", "export const status = 400;\n")],
+        "",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        config_text.replace(
+            "independent_pass = false",
+            "independent_pass = false\napi_paths = ['app/api/**']",
+        ),
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let branch = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        &fx.repo,
+        &["init", "-q", "--bare", remote.path().to_str().unwrap()],
+    );
+    git(
+        &fx.repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&fx.repo, &["push", "-q", "origin", "main", &branch]);
+    let original = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let artifacts = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let write_ledger = |head: &str| {
+        std::fs::write(artifacts.join("LEDGER.md"), format!(
+            "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
+             cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n\
+             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | LEDGER.md | - |\n\
+             request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
+        )).unwrap();
+        std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
+    };
+    write_ledger(&original);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(anchor(&fx), Some(original.clone()));
+
+    let supervisor = cas_6f10_supervisor(&fx);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    supervisor
+        .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: "Keep the API fix and add the required regression case before re-delivery"
+                .into(),
+        }))
+        .await
+        .unwrap();
+    env.remove("CAS_AGENT_ROLE");
+    fx.core
+        .cas_task_start(Parameters(IdRequest { id: TASK.into() }))
+        .await
+        .unwrap();
+    let corrected = commit_file(
+        &fx.repo,
+        "docs/qa/journeys.yaml",
+        r#"version: 1
+updated: "2026-10-28"
+invariants:
+  INV-API:
+    statement: Invalid widget input returns HTTP 400
+    check: POST invalid input and read the response
+    bug: {task: cas-ev01}
+journeys:
+  - id: API-WIDGETS
+    name: Reject invalid widget input
+    status: live
+    entry: {url: /api/widgets, trigger: POST}
+    steps: [post invalid input, read response]
+    owners: [app/api/widgets.ts]
+    invariants: [INV-API]
+    traffic: {share_pct: 100, basis: requests}
+"#,
+    );
+    git(&fx.repo, &["push", "-q", "origin", &branch]);
+    assert_eq!(
+        git(&fx.repo, &["rev-parse", &format!("origin/{branch}")]),
+        corrected
+    );
+    let unrelated = git(
+        &fx.repo,
+        &["commit-tree", "main^{tree}", "-m", "unrelated root"],
+    );
+
+    for (head, accepted) in [(&original, false), (&unrelated, false), (&corrected, true)] {
+        write_ledger(head);
+        let result = close_text(&fx.core, TASK).await;
+        if accepted {
+            assert!(result.contains("MERGE REQUIRED"), "{result}");
+            assert!(!result.contains("QA EVIDENCE REJECTED"), "{result}");
+            assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{result}");
+            assert_eq!(anchor(&fx), Some(corrected.clone()), "{result}");
+            assert!(
+                fx.notes()
+                    .contains("API HTTP transcript and contract diff accepted"),
+                "{}",
+                fx.notes()
+            );
+        } else {
+            assert!(
+                result.contains("API transcript head_sha does not match the delivered commit"),
+                "head={head}: {result}"
+            );
+            assert_eq!(fx.status(), TaskStatus::InProgress, "{result}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
@@ -579,10 +1154,7 @@ journeys:
                 "steps: [open, compose]",
                 "steps: [open, compose]\n    spec: e2e/composer.spec.ts\n    spec_status: planned",
             ),
-            "changed kind" => registry.replace(
-                "status: live",
-                "status: live\n    kind: browser",
-            ),
+            "changed kind" => registry.replace("status: live", "status: live\n    kind: browser"),
             "changed safety policy" => registry.replace(
                 "journeys:\n",
                 "safety: {mode: staging, protected_credentials: [DATABASE_PASSWORD]}\njourneys:\n",
@@ -649,7 +1221,10 @@ journeys:
             .lines()
             .find(|line| line.contains("QA evidence rebind"))
             .expect("close records why the earlier trace still covers this delivery");
-        assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
+        assert!(
+            rebind.contains(&head) && rebind.contains(&rebound),
+            "{rebind}"
+        );
         for path in paths {
             assert!(rebind.contains(path), "missing {path}: {rebind}");
         }
@@ -671,16 +1246,26 @@ journeys:
 #[tokio::test]
 async fn close_ignores_pre_task_skip_without_recorded_base_cas_be50() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[
-        ("tests/unrelated.spec.ts", "test.skip('unrelated', () => {});\n"),
-        ("docs/guide.md", "# This delivery\n"),
-    ], "");
+    let fx = fixture(
+        &mut env,
+        &[
+            (
+                "tests/unrelated.spec.ts",
+                "test.skip('unrelated', () => {});\n",
+            ),
+            ("docs/guide.md", "# This delivery\n"),
+        ],
+        "",
+    );
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
-    task.created_at = chrono::DateTime::parse_from_rfc3339(
-        &git(&fx.repo, &["show", "-s", "--format=%cI", "HEAD^"])
-    ).unwrap().with_timezone(&chrono::Utc);
+    task.created_at = chrono::DateTime::parse_from_rfc3339(&git(
+        &fx.repo,
+        &["show", "-s", "--format=%cI", "HEAD^"],
+    ))
+    .unwrap()
+    .with_timezone(&chrono::Utc);
     tasks.update(&task).unwrap();
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--ff-only", &head]);
@@ -695,7 +1280,11 @@ async fn close_ignores_pre_task_skip_without_recorded_base_cas_be50() {
 #[tokio::test]
 async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env, &[("docs/guide.md", "# Guide\n")], "Read the guide");
+    let fx = fixture(
+        &mut test_env,
+        &[("docs/guide.md", "# Guide\n")],
+        "Read the guide",
+    );
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
@@ -705,7 +1294,8 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 #[tokio::test]
 async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
@@ -720,11 +1310,13 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
         "{refused}"
     );
 
+    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
+    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
-        "| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let parked = close_text(&fx.core, TASK).await;
@@ -734,15 +1326,18 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
 #[tokio::test]
 async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
+    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
+    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
-        "M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | -\n",
+        ledger_rows(&"M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | -\n"),
     )
     .unwrap();
 
@@ -758,7 +1353,8 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
 #[tokio::test]
 async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[(
             "hub-web/e2e/generated/fleet.spec.ts",
             "import { test } from \"@playwright/test\";\ntest(\"fleet\", async () => {\n  test.fixme(true, \"verdict disagrees\");\n});\n",
@@ -796,7 +1392,8 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
 #[tokio::test]
 async fn evidence_gate_can_be_disabled_per_project() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
@@ -821,15 +1418,19 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
         "crates/cas-mux/src/pane/style.rs",
         "crates/cas-mux/src/pane/snapshot.rs",
     ] {
-        let fx = fixture(&mut test_env,
+        let fx = fixture(
+            &mut test_env,
             &[(surface, "pub fn draw() {}\n")],
             "Run cas status; the table fits 80 columns",
         );
         let task_dir = fx.artifacts.join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+        std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+        std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
         std::fs::write(
             task_dir.join("LEDGER.md"),
-            "| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n",
+            ledger_rows(&"| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n"),
         )
         .unwrap();
 
@@ -858,18 +1459,47 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
     // Historical input and winsize changes share these mixed-purpose files;
     // a stdout capture cannot exercise their interactive pane transitions.
     for paths in [
-        vec!["cas-cli/src/ui/factory/app/sidecar_and_selection.rs", "cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "crates/cas-mux/src/pane/mod.rs"],
-        vec!["cas-cli/src/ui/factory/app/mod.rs", "cas-cli/src/ui/factory/daemon/runtime/output.rs", "crates/cas-pty/src/pty.rs"],
+        vec![
+            "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+            "cas-cli/src/ui/factory/daemon/runtime/client_input.rs",
+            "crates/cas-mux/src/pane/mod.rs",
+        ],
+        vec![
+            "cas-cli/src/ui/factory/app/mod.rs",
+            "cas-cli/src/ui/factory/daemon/runtime/output.rs",
+            "crates/cas-pty/src/pty.rs",
+        ],
     ] {
-        let delivered: Vec<_> = paths.iter().map(|path| (*path, "pub fn interaction() {}\n")).collect();
-        let fx = fixture(&mut test_env, &delivered, "Run the real factory; click and resize a pane");
+        let delivered: Vec<_> = paths
+            .iter()
+            .map(|path| (*path, "pub fn interaction() {}\n"))
+            .collect();
+        let fx = fixture(
+            &mut test_env,
+            &delivered,
+            "Run the real factory; click and resize a pane",
+        );
         let task_dir = fx.artifacts.join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+        std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+        std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
         let ledger = task_dir.join("LEDGER.md");
-        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n").unwrap();
+        std::fs::write(
+            &ledger,
+            ledger_rows(&"| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n"),
+        )
+        .unwrap();
         let refused = close_text(&fx.core, TASK).await;
-        assert!(refused.contains("no row with verdict PASS and label real-build"), "{refused}");
-        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n").unwrap();
+        assert!(
+            refused.contains("no row with verdict PASS and label real-build"),
+            "{refused}"
+        );
+        std::fs::write(
+            &ledger,
+            ledger_rows(&"| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n"),
+        )
+        .unwrap();
         let parked = close_text(&fx.core, TASK).await;
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
         assert!(fx.notes().contains("QA evidence ledger accepted"));
@@ -880,15 +1510,33 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
 #[tokio::test]
 async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env, &[
-        ("cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "pub fn click() {}\n"),
-        ("cas-cli/src/cli/status.rs", "pub fn status() { println!(\"Ready\"); }\n"),
-    ], "Run the factory and cas status");
+    let fx = fixture(
+        &mut test_env,
+        &[
+            (
+                "cas-cli/src/ui/factory/daemon/runtime/client_input.rs",
+                "pub fn click() {}\n",
+            ),
+            (
+                "cas-cli/src/cli/status.rs",
+                "pub fn status() { println!(\"Ready\"); }\n",
+            ),
+        ],
+        "Run the factory and cas status",
+    );
     let task_dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&task_dir).unwrap();
-    std::fs::write(task_dir.join("LEDGER.md"), "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n").unwrap();
+    std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
+    std::fs::write(
+        task_dir.join("LEDGER.md"),
+        ledger_rows(&"| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n"),
+    )
+    .unwrap();
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("terminal-qa receipt is missing"), "{refused}");
+    assert!(
+        refused.contains("terminal-qa receipt is missing"),
+        "{refused}"
+    );
     let report = task_dir.join("terminal-qa/cas-status/report.md");
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, "terminal-qa: PASS cas-status · 11 runs · 0 fail\n").unwrap();
@@ -898,7 +1546,8 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
 #[tokio::test]
 async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
@@ -949,7 +1598,12 @@ fn start_next_task_on_the_lane(fx: &Fx, id: &str, status: TaskStatus, path: &str
     tasks.add(&next).unwrap();
     cas::store::open_agent_store(&cas_dir)
         .unwrap()
-        .try_claim(id, &format!("test-session-{}", std::process::id()), 600, Some("start"))
+        .try_claim(
+            id,
+            &format!("test-session-{}", std::process::id()),
+            600,
+            Some("start"),
+        )
         .unwrap();
     commit_file(&fx.repo, path, "// next task\n")
 }
@@ -965,7 +1619,17 @@ fn anchor(fx: &Fx) -> Option<String> {
 
 fn merge_into_main(fx: &Fx, commit: &str) {
     git(&fx.repo, &["checkout", "-q", "main"]);
-    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge parked delivery", commit]);
+    git(
+        &fx.repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge parked delivery",
+            commit,
+        ],
+    );
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
 }
 
@@ -987,10 +1651,22 @@ async fn close_against_batch_squash(
     tasks.update(&task).unwrap();
 
     git(&fx.repo, &["checkout", "-q", "-b", "batch/qa"]);
-    commit_file(&fx.repo, "web/SiblingDrawer.vue", "<template>Sibling</template>\n");
+    commit_file(
+        &fx.repo,
+        "web/SiblingDrawer.vue",
+        "<template>Sibling</template>\n",
+    );
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "--squash", "batch/qa"]);
-    git(&fx.repo, &["commit", "-q", "-m", &format!("{TASK}: squash integration batch")]);
+    git(
+        &fx.repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            &format!("{TASK}: squash integration batch"),
+        ],
+    );
     let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
 
@@ -1010,13 +1686,19 @@ async fn batch_squash_receipt_keeps_docs_only_qa_scope_cas_e5b1() {
     for status in [TaskStatus::AwaitingMerge, TaskStatus::Blocked] {
         let mut env = TestEnvGuard::temp_home();
         let (fx, text, head) =
-            close_against_batch_squash(&mut env, &[("DESIGN.md", "Document the layout\n")], status).await;
+            close_against_batch_squash(&mut env, &[("DESIGN.md", "Document the layout\n")], status)
+                .await;
         assert_eq!(fx.status(), TaskStatus::Closed, "{status:?}: {text}");
         assert_eq!(anchor(&fx).as_deref(), Some(head.as_str()));
         assert!(!text.contains("SiblingDrawer.vue"), "{status:?}: {text}");
-        assert!(!fx.notes().contains("QA evidence bundle accepted"), "{}", fx.notes());
         assert!(
-            fx.notes().contains(&format!("QA evidence scoped to delivery anchor {head}")),
+            !fx.notes().contains("QA evidence bundle accepted"),
+            "{}",
+            fx.notes()
+        );
+        assert!(
+            fx.notes()
+                .contains(&format!("QA evidence scoped to delivery anchor {head}")),
             "{}",
             fx.notes()
         );
@@ -1042,12 +1724,13 @@ async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
 
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
 /// same lane and commits B's work. A pre-merge retry must not move A's anchor
-/// onto B's commit, and once X merges A's plain re-close judges X — not the
-/// lane tip — so it closes without an override.
+/// onto B's commit and names the ignored advance. Once X merges, A's plain
+/// re-close judges X — not the lane tip — so it closes without an override.
 #[tokio::test]
 async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_lane_cas_ba4a() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
+    let fx = fixture(
+        &mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
@@ -1058,11 +1741,21 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
     assert_eq!(anchor(&fx).as_deref(), Some(parked_at.as_str()));
 
-    for (id, status) in [("cas-b0b1", TaskStatus::Open), ("cas-b0b2", TaskStatus::Blocked)] {
+    for (id, status) in [
+        ("cas-b0b1", TaskStatus::Open),
+        ("cas-b0b2", TaskStatus::Blocked),
+    ] {
         let lane_tip =
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
-        assert!(retry.contains("MERGE REQUIRED"), "{status:?}: {retry}");
+        assert!(retry.contains("PARK REFUSED"), "{status:?}: {retry}");
+        assert!(retry.contains("cas-b0b1") && retry.contains("own branch")
+            && !retry.contains("request changes"),
+            "the first untagged next-task lease must supply the remedy: {status:?}: {retry}");
+        for boundary in [&parked_at, &lane_tip] {
+            assert!(retry.contains(boundary), "missing {boundary}: {retry}");
+        }
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{retry}");
         assert!(!retry.contains("stale"), "{status:?}: {retry}");
         assert_eq!(
             anchor(&fx).as_deref(),
@@ -1088,8 +1781,14 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     let cas_dir = fx.repo.join(".cas");
     let agent_id = format!("test-session-{}", std::process::id());
     let agents = cas::store::open_agent_store(&cas_dir).unwrap();
-    agents.try_claim(TASK, &agent_id, 600, Some("start A")).unwrap();
-    let parked_at = commit_file(&fx.repo, "crates/widget/src/composer.rs", "pub fn composer() {}\n");
+    agents
+        .try_claim(TASK, &agent_id, 600, Some("start A"))
+        .unwrap();
+    let parked_at = commit_file(
+        &fx.repo,
+        "crates/widget/src/composer.rs",
+        "pub fn composer() {}\n",
+    );
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();
     task.risk = vec![cas::types::TaskRisk::BlastRadius];
@@ -1099,7 +1798,12 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     tasks.update(&task).unwrap();
     agents.release_lease(TASK, &agent_id).unwrap();
 
-    start_next_task_on_the_lane(&fx, "cas-b0b3", TaskStatus::Blocked, "crates/widget/src/other.rs");
+    start_next_task_on_the_lane(
+        &fx,
+        "cas-b0b3",
+        TaskStatus::Blocked,
+        "crates/widget/src/other.rs",
+    );
     merge_into_main(&fx, &parked_at);
 
     let closed = close_text(&fx.core, TASK).await;
@@ -1144,9 +1848,11 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     agents.update(&worker).unwrap();
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     std::fs::write(
         dir.join("LEDGER.md"),
-        "| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n",
+        ledger_rows(&"| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n"),
     )
     .unwrap();
     assert!(
@@ -1188,7 +1894,9 @@ async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | served tip | pending deployment | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner | - |\n").unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
+    std::fs::write(dir.join("LEDGER.md"), ledger_rows(&"| M01 | staging GET | served tip | pending deployment | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner | - |\n")).unwrap();
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
@@ -1210,8 +1918,10 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
     );
     let dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("qa")).unwrap();
+    std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     for owner in ["unregistered", "test-agent"] {
-        std::fs::write(dir.join("LEDGER.md"), format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n")).unwrap();
+        std::fs::write(dir.join("LEDGER.md"), ledger_rows(&format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n"))).unwrap();
         let refused = close_text(&fx.core, TASK).await;
         assert!(
             refused.contains("must identify one registered supervisor"),
@@ -1221,7 +1931,7 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
         assert!(!fx.notes().contains("POST-DEPLOY OBLIGATION"));
     }
     let _supervisor = cas_6f10_supervisor(&fx);
-    std::fs::write(dir.join("LEDGER.md"), "| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n").unwrap();
+    std::fs::write(dir.join("LEDGER.md"), ledger_rows(&"| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n")).unwrap();
     assert!(
         close_text(&fx.core, TASK)
             .await
@@ -1311,7 +2021,10 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
     std::fs::write(fx.repo.join("src/more.rs"), "pub fn more() {}\n").unwrap();
     git(&fx.repo, &["add", "src/more.rs"]);
-    git(&fx.repo, &["commit", "-q", "-m", &format!("fix: review round ({TASK})")]);
+    git(
+        &fx.repo,
+        &["commit", "-q", "-m", &format!("fix: review round ({TASK})")],
+    );
     let tip = git(&fx.repo, &["rev-parse", "HEAD"]);
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
@@ -1339,11 +2052,17 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     };
     waive(&anchor, "Only the stale anchor is waived");
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("QA evidence ledger is missing"), "{refused}");
+    assert!(
+        refused.contains("QA evidence ledger is missing"),
+        "{refused}"
+    );
     assert!(!fx.notes().contains("QA evidence ledger waived"));
     waive(&tip, "Delivered tip waived");
     let closed = close_text(&fx.core, TASK).await;
-    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    assert!(
+        !closed.contains("QA evidence ledger is missing"),
+        "{closed}"
+    );
     let notes = fx.notes();
     assert!(
         notes.contains(&format!("QA evidence ledger waived: head={tip}"))
@@ -1388,7 +2107,10 @@ async fn cas_4575_released_shared_branch_keeps_its_recorded_head() {
     )
     .unwrap();
     let closed = close_text(&fx.core, TASK).await;
-    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    assert!(
+        !closed.contains("QA evidence ledger is missing"),
+        "{closed}"
+    );
     assert!(
         fx.notes()
             .contains(&format!("QA evidence ledger waived: head={anchor}")),
@@ -1408,15 +2130,26 @@ async fn waive_bundle_tip_cas_06f5(fx: &Fx, env: &mut TestEnvGuard) -> String {
     agents.update(&worker).unwrap();
     let remote = tempfile::tempdir().unwrap();
     git(remote.path(), &["init", "-q", "--bare"]);
-    git(&fx.repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(
+        &fx.repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
     git(&fx.repo, &["push", "-q", "origin", "factory/test-agent"]);
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     let service = cas::mcp::CasService::new(cas_6f10_supervisor(fx), None);
     env.set("CAS_AGENT_ROLE", "supervisor");
-    let waived = extract_text(service.verification(Parameters(serde_json::from_value(serde_json::json!({
-        "action": "qa_waive", "task_id": TASK, "head_sha": head,
-        "summary": "Operator reviewed this exact web delivery",
-    })).unwrap())).await.unwrap());
+    let waived = extract_text(
+        service
+            .verification(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "qa_waive", "task_id": TASK, "head_sha": head,
+                    "summary": "Operator reviewed this exact web delivery",
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap(),
+    );
     env.remove("CAS_AGENT_ROLE");
     assert!(waived.contains("waived"), "{waived}");
     // The remote only needs to live through the explicit-tip validation.
@@ -1426,13 +2159,24 @@ async fn waive_bundle_tip_cas_06f5(fx: &Fx, env: &mut TestEnvGuard) -> String {
 #[tokio::test]
 async fn exact_bundle_waiver_allows_worker_close_cas_06f5() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer");
+    let fx = fixture(
+        &mut env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer",
+    );
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("QA evidence bundle is not cited"), "{refused}");
+    assert!(
+        refused.contains("QA evidence bundle is not cited"),
+        "{refused}"
+    );
     let head = waive_bundle_tip_cas_06f5(&fx, &mut env).await;
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(fx.notes().contains("QA evidence bundle waived"), "{}", fx.notes());
+    assert!(
+        fx.notes().contains("QA evidence bundle waived"),
+        "{}",
+        fx.notes()
+    );
     assert!(!fx.notes().contains("qa-bundle:"));
     merge_into_main(&fx, &head);
     let closed = close_text(&fx.core, TASK).await;
@@ -1443,12 +2187,19 @@ async fn exact_bundle_waiver_allows_worker_close_cas_06f5() {
 #[tokio::test]
 async fn bundle_waiver_rejects_worker_next_tip_cas_06f5() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer");
+    let fx = fixture(
+        &mut env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer",
+    );
     let head = waive_bundle_tip_cas_06f5(&fx, &mut env).await;
     let changed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
     assert_ne!(changed, head);
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("QA evidence bundle is not cited"), "{refused}");
+    assert!(
+        refused.contains("QA evidence bundle is not cited"),
+        "{refused}"
+    );
     assert_eq!(fx.status(), TaskStatus::InProgress);
     assert!(!fx.notes().contains("QA evidence bundle waived"));
 }
@@ -1456,12 +2207,40 @@ async fn bundle_waiver_rejects_worker_next_tip_cas_06f5() {
 #[tokio::test]
 async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env, &[
-        ("web/composer.css", ".composer{gap:8px}\n"),
-        ("tests/test.spec.ts", "test.only('feature', () => {});\n"),
-    ], "Open the composer");
+    let fx = fixture(
+        &mut env,
+        &[
+            ("web/composer.css", ".composer{gap:8px}\n"),
+            ("tests/test.spec.ts", "test.only('feature', () => {});\n"),
+        ],
+        "Open the composer",
+    );
     waive_bundle_tip_cas_06f5(&fx, &mut env).await;
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("adds test skip/focus markers"), "{refused}");
+    assert!(
+        refused.contains("adds test skip/focus markers"),
+        "{refused}"
+    );
     assert_eq!(fx.status(), TaskStatus::InProgress);
+}
+
+
+fn ledger_rows(rows: &str) -> String {
+    // These fixtures all describe a demo: keep three honest unrun conditions.
+    let rows = format!("{rows}| M02 | invalid input | clear refusal | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n| M03 | boundary | bounded | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n| M04 | adjacent | stable | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n");
+    let mut labels = std::collections::BTreeMap::<&str, usize>::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut n = 0;
+    for row in rows.lines().filter(|line| !line.trim().is_empty()) {
+        let cells: Vec<_> = row.trim().trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() == 8 && cells[0] != "id" {
+            n += 1;
+            *counts.entry(cells[4].split(':').next().unwrap()).or_default() += 1;
+            *labels.entry(cells[5]).or_default() += 1;
+        }
+    }
+    format!("cells={n}; PASS={}; FAIL={}; NOT EXERCISED={}\nlabels: {}\n{}\n{}",
+        counts.get("PASS").unwrap_or(&0), counts.get("FAIL").unwrap_or(&0), counts.get("NOT EXERCISED").unwrap_or(&0),
+        labels.iter().map(|(key,n)| format!("{key}={n}")).collect::<Vec<_>>().join("; "),
+        cas::qa_ledger::HEADER, rows)
 }

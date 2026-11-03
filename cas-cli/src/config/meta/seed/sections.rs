@@ -58,19 +58,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         .insert("code", "Background code indexing for semantic search");
     registry
         .section_descriptions
-        .insert("notifications", "TUI notification settings");
-    registry
-        .section_descriptions
-        .insert("notifications.tasks", "Task notification events");
-    registry
-        .section_descriptions
-        .insert("notifications.entries", "Entry/memory notification events");
-    registry
-        .section_descriptions
-        .insert("notifications.rules", "Rule notification events");
-    registry
-        .section_descriptions
-        .insert("notifications.skills", "Skill notification events");
+        .insert("notifications", "Hook notification settings");
     registry
         .section_descriptions
         .insert("coordination", "Agent coordination mode settings");

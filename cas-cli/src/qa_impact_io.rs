@@ -4,6 +4,8 @@ use crate::qa_registry::Registry;
 use anyhow::{Context, anyhow, ensure};
 use std::process::Command;
 
+const LEGACY_SELECTOR_PATH: &str = "scripts/journeys-for-diff.py";
+
 /// Proven catalog/registry drift, distinct from unavailable snapshot inputs.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -124,6 +126,18 @@ impl<'a> Snapshot<'a> {
             Err(error) => Err(error).with_context(|| format!("read {path}")),
         }
     }
+
+    fn registry(&self, path: &str) -> Result<Option<Registry>> {
+        if self.head.is_none() {
+            // Include new family files in working-tree previews, just like new
+            // registry content; committed snapshots use only their own inventory.
+            if !self.root.join(path).try_exists()? {
+                return Ok(None);
+            }
+            return crate::qa_registry::load(&self.root.join(path)).map(Some);
+        }
+        crate::qa_registry::load_with(path, &self.paths, |path| self.read(path))
+    }
 }
 
 pub(super) fn analyze(
@@ -137,18 +151,19 @@ pub(super) fn analyze(
     let before = base
         .map(|base| Snapshot::new(repo, Some(base)))
         .transpose()?;
-    let registry = tree
-        .read(&qa.registry.path)?
-        .map(|text| crate::qa_registry::parse(&text))
-        .transpose()?;
+    let registry = tree.registry(&qa.registry.path)?;
     let previous = before
         .as_ref()
-        .map(|tree| tree.read(&qa.registry.path))
-        .transpose()?
-        .flatten()
-        .and_then(|text| crate::qa_registry::parse(&text).ok());
+        .and_then(|tree| tree.registry(&qa.registry.path).ok().flatten());
     let codemap = tree.read(".claude/CODEMAP.md")?;
     let overview_present = tree.read("docs/PRODUCT_OVERVIEW.md")?.is_some();
+    let needs_legacy_selector = registry.is_none()
+        || registry.as_ref().is_some_and(|registry| {
+            registry.selection == crate::qa_registry::Selection::LegacyCatalog
+        });
+    let selector_present = needs_legacy_selector
+        && tree.paths.iter().any(|path| path == LEGACY_SELECTOR_PATH)
+        && tree.read(LEGACY_SELECTOR_PATH)?.is_some();
     let selected = if let Some(registry) = registry
         .as_ref()
         .filter(|r| r.selection == crate::qa_registry::Selection::LegacyCatalog)
@@ -157,11 +172,17 @@ pub(super) fn analyze(
             tree.read("docs/qa/journeys.md")?.is_some(),
             "legacy_catalog selection requires docs/qa/journeys.md"
         );
+        ensure!(
+            selector_present,
+            "legacy_catalog selection requires committed {LEGACY_SELECTOR_PATH}; commit that selector or set selection: globs in {}",
+            qa.registry.path
+        );
         let paths = changes
             .iter()
             .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
             .filter(|path| {
-                !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
+                journey_input(path)
+                    && !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
             })
             .collect::<Vec<_>>();
         let ids = catalog_ids(&tree, &paths, base)?;
@@ -197,7 +218,10 @@ pub(super) fn analyze(
                 .filter(|p| !old.problems.contains(p))
                 .cloned()
                 .collect();
-        } else if changes.iter().any(|c| c.file == qa.registry.path) {
+        } else if changes
+            .iter()
+            .any(|c| crate::qa_registry::is_registry_input(&qa.registry.path, &c.file))
+        {
             report.registry.errors_from_diff = validation.problems.clone();
         }
         if !validation.problems.is_empty() {
@@ -207,41 +231,47 @@ pub(super) fn analyze(
             ));
         }
     } else if let Some(catalog) = tree.read("docs/qa/journeys.md")? {
-        let paths: Vec<String> = changes
-            .iter()
-            .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
-            .collect();
-        let ids = legacy_ids(&tree, &paths)?;
-        report.source = "legacy_catalog".into();
-        report.areas.clear();
         report
             .warnings
             .retain(|w| !w.starts_with("No journey registry:"));
-        report.warnings.push("No journey registry: using the legacy catalog; invariants, traffic and per-file ownership are unavailable. Run cas qa journeys --seed.".into());
-        let metadata = legacy_metadata(&catalog);
-        for id in ids {
-            let journey = metadata
+        if selector_present {
+            let paths: Vec<String> = changes
                 .iter()
-                .find(|j| j.id == id)
-                .ok_or_else(|| anyhow!("legacy selector returned unknown journey {id}"))?;
-            report.journeys.push(JourneyImpact {
-                id,
-                name: journey.name.clone().unwrap_or_else(|| journey.id.clone()),
-                status: "live".into(),
-                kind: None,
-                share_pct: None,
-                basis: None,
-                entry: journey.entry.clone(),
-                env_status: BTreeMap::new(),
-                invariants: vec![],
-                fixtures: vec![],
-                spec: journey.spec.clone(),
-                known_failure: None,
-                matches: vec![],
-                evidence_required: evidence_required(journey, None),
-            });
+                .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
+                .collect();
+            let ids = legacy_ids(&tree, &paths)?;
+            report.source = "legacy_catalog".into();
+            report.areas.clear();
+            report.warnings.push("No journey registry: using the legacy catalog; invariants, traffic and per-file ownership are unavailable. Run cas qa journeys --seed.".into());
+            let metadata = legacy_metadata(&catalog);
+            for id in ids {
+                let journey = metadata
+                    .iter()
+                    .find(|j| j.id == id)
+                    .ok_or_else(|| anyhow!("legacy selector returned unknown journey {id}"))?;
+                report.journeys.push(JourneyImpact {
+                    id,
+                    name: journey.name.clone().unwrap_or_else(|| journey.id.clone()),
+                    status: "live".into(),
+                    kind: None,
+                    share_pct: None,
+                    basis: None,
+                    entry: journey.entry.clone(),
+                    env_status: BTreeMap::new(),
+                    invariants: vec![],
+                    fixtures: vec![],
+                    spec: journey.spec.clone(),
+                    known_failure: None,
+                    matches: vec![],
+                    evidence_required: evidence_required(journey, None),
+                });
+            }
+            sort_journeys(&mut report.journeys);
+        } else {
+            report.warnings.push(format!(
+                "Legacy catalog has no committed {LEGACY_SELECTOR_PATH}: impact is by CODEMAP area only. Commit that selector or run cas qa journeys --seed."
+            ));
         }
-        sort_journeys(&mut report.journeys);
     }
     let mut warnings = Vec::new();
     let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);

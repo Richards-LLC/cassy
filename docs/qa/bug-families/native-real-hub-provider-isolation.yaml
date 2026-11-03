@@ -1,0 +1,4 @@
+title: Native launch fixtures keep provider lookup and account state inside private HOME, consume bracketed CR submissions, and clean up only captured child identities
+tasks: [cas-8dcc]
+invariants: [HUB-J13-GOAL]
+journeys: [HUB-J13]

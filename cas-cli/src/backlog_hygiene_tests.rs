@@ -37,8 +37,18 @@ fn delivered_open_names_the_commit_that_delivered_it() {
         task("cas-c3", TaskStatus::Closed, TaskType::Task, 1),
         task("cas-e4", TaskStatus::Open, TaskType::Epic, 1),
         task("cas-f5", TaskStatus::AwaitingMerge, TaskType::Bug, 1),
+        task("cas-r1", TaskStatus::Open, TaskType::Task, 1),
+        task("cas-r2", TaskStatus::Open, TaskType::Task, 1),
+        task("cas-r3", TaskStatus::Open, TaskType::Task, 1),
+        task("cas-r4", TaskStatus::Open, TaskType::Task, 1),
     ];
     let commits = vec![
+        commit("re-landed", "fix(cas-r4): restore the delivery", 0),
+        commit("revert-only", "revert(cas-r1): withdraw the delivery", 0),
+        commit("git-revert-only", "Revert \"feat(cas-r2): original delivery\"", 0),
+        commit("reverted", "revert(cas-r3): withdraw the delivery", 0),
+        commit("older-revert", "revert(cas-r4): withdraw the delivery", 1),
+        commit("older-delivery", "feat(cas-r3): original delivery", 1),
         commit("1111111111111111111111111111111111111111", "fix(cas-a1): the actual fix", 2),
         commit("2222222222222222222222222222222222222222", "test(cas-a1): red first", 3),
         commit("3333333333333333333333333333333333333333", "fix(cas-c3): already closed", 2),
@@ -48,11 +58,20 @@ fn delivered_open_names_the_commit_that_delivered_it() {
     ];
     let found = delivered_open(&tasks, &commits);
     let ids: Vec<&str> = found.iter().map(|f| f.task_id.as_str()).collect();
-    assert_eq!(ids, vec!["cas-a1", "cas-f5"], "{found:#?}");
+    assert_eq!(ids, vec!["cas-a1", "cas-f5", "cas-r4"], "{found:#?}");
     // The newest subject-matching commit is the evidence; the rest count.
     assert_eq!(found[0].commit.sha, "1111111111111111111111111111111111111111");
     assert_eq!(found[0].more_commits, 1);
     assert_eq!(found[1].status, "awaiting_merge");
+    assert_eq!(found[2].commit.sha, "re-landed");
+    let reverted = reverted_open(&tasks, &commits);
+    assert_eq!(reverted.iter().map(|f| f.task_id.as_str()).collect::<Vec<_>>(),
+        vec!["cas-r1", "cas-r2", "cas-r3"]);
+    let only_reverted = BacklogReport { reverted, ..BacklogReport::default() };
+    assert!(!only_reverted.is_clean());
+    let (text, _) = session_start_block(&only_reverted).unwrap();
+    assert!(text.contains("delivered then reverted"), "{text}");
+    assert!(!text.contains("commit_receipt=") && !text.contains("task action=close"), "{text}");
 }
 
 /// Kind 2: an open epic with children, all ended, is finished; an epic with
@@ -156,7 +175,25 @@ fn scan_reads_the_default_branch_and_the_task_store() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-d1): delivered long ago"]);
+    std::fs::write(repo.join("feature.txt"), "base\n").unwrap();
+    std::fs::write(repo.join("old.txt"), "rename me\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "initial tree"]);
+    std::fs::write(repo.join("feature.txt"), "task delivery\n").unwrap();
+    std::fs::write(repo.join("added.txt"), "new delivery\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "feat(cas-r1): implemented"]);
+    git(repo, &["mv", "old.txt", "renamed.txt"]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-r1): second delivery commit"]);
+    // A rollback need not name the task or use Git's generated revert subject.
+    std::fs::write(repo.join("feature.txt"), "base\n").unwrap();
+    std::fs::remove_file(repo.join("added.txt")).unwrap();
+    git(repo, &["mv", "renamed.txt", "old.txt"]);
+    git(repo, &["commit", "-q", "-am", "restore the earlier feature tree"]);
+    // Unrelated work keeps the whole target tree distinct from the old base.
+    std::fs::write(repo.join("other.txt"), "normal delivery\n").unwrap();
+    git(repo, &["add", "other.txt"]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-d1): delivered long ago"]);
     git(repo, &["switch", "-q", "-c", "side"]);
     git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-s1): only on a side branch"]);
     git(repo, &["switch", "-q", "main"]);
@@ -164,6 +201,7 @@ fn scan_reads_the_default_branch_and_the_task_store() {
     let store = crate::store::open_task_store_local(&cas_root).unwrap();
     for (id, task_type) in [
         ("cas-d1", TaskType::Task),
+        ("cas-r1", TaskType::Task),
         ("cas-s1", TaskType::Task),
         ("cas-e1", TaskType::Epic),
         ("cas-c1", TaskType::Task),
@@ -186,6 +224,26 @@ fn scan_reads_the_default_branch_and_the_task_store() {
     assert_eq!(report.finished_epics.len(), 1);
     assert_eq!(report.finished_epics[0].epic_id, "cas-e1");
     assert!(report.idle.is_empty());
+    let (text, _) = session_start_block(&report).unwrap();
+    assert!(text.contains("delivered then reverted") && text.contains("cas-r1"), "{text}");
+    assert!(!text.contains("task action=close id=cas-r1"), "{text}");
+
+    // Later normal delivery restores the receipt. Partial restoration of
+    // task paths must not be labelled a complete rollback either.
+    std::fs::write(repo.join("feature.txt"), "delivered again\n").unwrap();
+    git(repo, &["commit", "-q", "-am", "fix(cas-r1): re-deliver"]);
+    let report = scan(&cas_root, Utc::now()).unwrap();
+    assert_eq!(report.delivered.len(), 2);
+    assert!(report.reverted.is_empty());
+
+    // An unverifiable candidate cannot retain a close suggestion.
+    let mut unknown = BacklogReport { delivered: vec![DeliveredOpen {
+        commit: commit(&"f".repeat(40), "fix(cas-r1): missing history", 0),
+        ..report.delivered[1].clone()
+    }], ..BacklogReport::default() };
+    let missing = vec![unknown.delivered[0].commit.clone()];
+    assert!(verify_delivery_trees(repo, "main", &missing, &mut unknown, CitationBudget::DOCTOR).is_err());
+    assert!(unknown.delivered.is_empty());
 }
 
 /// Without a git repository kind 1 is unknown, said so, and kinds 2 and 3
@@ -209,6 +267,7 @@ fn sample_report() -> BacklogReport {
     BacklogReport {
         default_ref: Some("origin/main".into()),
         delivery_unknown: None,
+        reverted: vec![],
         delivered: (0..7)
             .map(|n| DeliveredOpen {
                 task_id: format!("cas-d{n}"),

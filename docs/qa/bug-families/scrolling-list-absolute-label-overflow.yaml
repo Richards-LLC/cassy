@@ -1,0 +1,4 @@
+title: Absolute accessibility labels in long project lists must use the scrolling navigation as their containing block
+tasks: [cas-2a07]
+invariants: [HUB-J3-LIST-SCROLL-BOUNDS]
+journeys: [HUB-J1, HUB-J3]

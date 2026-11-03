@@ -57,6 +57,19 @@ where
     runtime.block_on(future)
 }
 
+/// Build a future on the heap so awaiting it costs the caller a pointer.
+///
+/// An unoptimized `async fn` reserves poll-frame space for every child future it
+/// constructs, on every branch, whether or not that branch runs. That includes
+/// `Box::pin(child()).await`, whose temporary lives in the caller. Constructing
+/// the child inside this function's frame instead returns that space before the
+/// child is ever polled. Use it where nested awaits threaten a worker's 2 MiB
+/// stack; `supervisor_merge_through_close_stays_under_stack_budget_cas_6a57`
+/// measures the deepest such path.
+pub fn heap_future<F: Future>(build: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(build())
+}
+
 /// Progress tracking for long-running operations
 #[derive(Debug, Clone)]
 pub struct Progress {

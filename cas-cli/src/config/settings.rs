@@ -130,7 +130,7 @@ impl SlackConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HubTransportMode {
-    /// Try Tailscale Serve; interactive failure warns, macOS service failure retries.
+    /// Try Tailscale Serve; every failure keeps loopback while publication retries in background.
     #[default]
     Auto,
     /// Refuse startup unless Tailscale Serve publishes successfully.
@@ -158,6 +158,24 @@ impl HubTransportMode {
         Ok(())
     }
 }
+
+/// Where Commander saves a secret the operator pastes for an agent
+/// (cas-1996). Lives at `[secrets]` in a project's `.cas/config.toml`, with a
+/// user default in `~/.cas/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// Folder for saved secrets. `~` expands to the home directory and
+    /// `<project>` to the project folder's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// When a saved secret is deleted unless the card chooses otherwise:
+    /// `off` (default), `after_use`, or a time such as `1h` (cas-2f55).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<String>,
+}
+
+/// The built-in `secrets.destination`.
+pub const DEFAULT_SECRETS_DESTINATION: &str = "~/.cas/private/creds/<project>";
 
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -366,6 +384,11 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_id: Option<String>,
 
+    /// Human project name for Commander (e.g. `Cassy`). When absent,
+    /// Commander shows the project's folder name, never `canonical_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
     /// Cloud-provided aliases mirrored by the project identity cache. Keeping
     /// this field in the typed config prevents a normal config save from
     /// dropping aliases written by the cloud sync path.
@@ -458,13 +481,9 @@ impl Default for TasksConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QaMode {
-    #[default]
     PerTask,
+    #[default]
     Batch,
-}
-
-impl QaMode {
-    pub fn is_per_task(&self) -> bool { *self == Self::PerTask }
 }
 
 impl std::fmt::Display for QaMode {
@@ -541,7 +560,7 @@ pub struct QaConfig {
     pub post_release: Option<crate::qa_post_release::PostReleaseConfig>,
 
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
-    #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
+    #[serde(default)]
     pub mode: QaMode,
     /// Labels that opt a task into the non-empty `demo_statement` creation gate.
     #[serde(default = "default_user_facing_labels")]
@@ -583,7 +602,7 @@ pub struct QaConfig {
     pub user_facing_paths: Vec<String>,
 
     /// Non-rendered API/server paths; HTTP transcript and contract diff QA.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub api_paths: Vec<String>,
 
     /// cas-619f: minutes one independent QA round may take before it times
@@ -611,7 +630,7 @@ pub struct QaConfig {
 
     /// cas-d5c1: environment variable names that must point at a readable
     /// file in the reviewer's environment (the path only; never read).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub preflight_env_files: Vec<String>,
 
     /// cas-d5c1: project-relative command that checks, and may replenish,
@@ -624,7 +643,7 @@ pub struct QaConfig {
     /// authenticated runs may stand in for a local build in a QA evidence
     /// bundle when local auth is impossible. The bundle must still record
     /// the reason and prove the deployment served the delivered commit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub deployed_origins: Vec<String>,
 
     /// cas-d5c1: seconds the preflight hook may run.
@@ -706,7 +725,7 @@ impl Default for QaConfig {
         Self {
             capture: None,
             post_release: None,
-            mode: QaMode::PerTask,
+            mode: QaMode::default(),
             registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
@@ -805,6 +824,14 @@ impl BuildGuardConfig {
         }
         limits
     }
+}
+
+/// Release policy for automatic task-boundary restarts. Serde, defaults and
+/// registry metadata derive from this one value.
+pub(crate) const DEFAULT_RESTART_WORKER_BETWEEN_TASKS: bool = false;
+
+fn default_restart_worker_between_tasks() -> bool {
+    DEFAULT_RESTART_WORKER_BETWEEN_TASKS
 }
 
 /// Factory mode configuration for supervisor task assignment
@@ -1008,9 +1035,13 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
-    /// Context-window occupancy percentage at which an idle worker status row
-    /// recommends in-place recycling. Codex reports the actual model window;
-    /// no recommendation is emitted when that window is unavailable.
+    /// Whether to recycle between queued tasks. Independent of context notices.
+    #[serde(default = "default_restart_worker_between_tasks")]
+    pub restart_worker_between_tasks: bool,
+
+    /// Context occupancy threshold for worker MCP notices and idle status
+    /// recycle recommendations. Only harness-reported windows yield a percent;
+    /// unavailable accounting is explicitly unknown.
     #[serde(default = "default_context_recycle_threshold_percent")]
     pub context_recycle_threshold_percent: u8,
 
@@ -1292,6 +1323,7 @@ impl Default for FactoryConfig {
             prompt_transcript_retention_days: default_prompt_transcript_retention_days(),
             supervisor_queue_retention_days: default_supervisor_queue_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
+            restart_worker_between_tasks: default_restart_worker_between_tasks(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
@@ -1491,40 +1523,12 @@ impl Default for CodeConfig {
     }
 }
 
-/// Notification configuration for TUI alerts and hook notifications
+/// Notification configuration for hook notifications
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationConfig {
     /// Master switch for notifications
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Play terminal bell on new notifications
-    #[serde(default = "default_true")]
-    pub sound_enabled: bool,
-
-    /// How long to display notifications (seconds)
-    #[serde(default = "default_display_duration")]
-    pub display_duration_secs: u64,
-
-    /// Maximum notifications to display at once
-    #[serde(default = "default_max_visible")]
-    pub max_visible: usize,
-
-    /// Task notification settings
-    #[serde(default)]
-    pub tasks: TaskNotifications,
-
-    /// Entry/memory notification settings
-    #[serde(default)]
-    pub entries: EntryNotifications,
-
-    /// Rule notification settings
-    #[serde(default)]
-    pub rules: RuleNotifications,
-
-    /// Skill notification settings
-    #[serde(default)]
-    pub skills: SkillNotifications,
 
     // === Hook notification settings (for Notification hook) ===
     /// Notify on permission prompts (Claude needs user approval)
@@ -1542,142 +1546,62 @@ pub struct NotificationConfig {
     /// Optional webhook URL for Slack/Discord integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
-}
 
-/// Task-specific notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskNotifications {
-    /// Notify when a task is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a task is started
-    #[serde(default = "default_true")]
-    pub on_started: bool,
-
-    /// Notify when a task is closed
-    #[serde(default = "default_true")]
-    pub on_closed: bool,
-
-    /// Notify when a task is updated (off by default - too noisy)
-    #[serde(default)]
-    pub on_updated: bool,
-}
-
-impl Default for TaskNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_started: true,
-            on_closed: true,
-            on_updated: false,
-        }
-    }
-}
-
-/// Entry/memory notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntryNotifications {
-    /// Notify when an entry is added
-    #[serde(default = "default_true")]
-    pub on_added: bool,
-
-    /// Notify when an entry is updated (off by default)
-    #[serde(default)]
-    pub on_updated: bool,
-
-    /// Notify when an entry is deleted
-    #[serde(default = "default_true")]
-    pub on_deleted: bool,
-}
-
-impl Default for EntryNotifications {
-    fn default() -> Self {
-        Self {
-            on_added: true,
-            on_updated: false,
-            on_deleted: true,
-        }
-    }
-}
-
-/// Rule notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleNotifications {
-    /// Notify when a rule is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a rule is promoted to Proven
-    #[serde(default = "default_true")]
-    pub on_promoted: bool,
-
-    /// Notify when a rule is demoted (off by default)
-    #[serde(default)]
-    pub on_demoted: bool,
-}
-
-impl Default for RuleNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_promoted: true,
-            on_demoted: false,
-        }
-    }
-}
-
-/// Skill notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillNotifications {
-    /// Notify when a skill is created
-    #[serde(default = "default_true")]
-    pub on_created: bool,
-
-    /// Notify when a skill is enabled
-    #[serde(default = "default_true")]
-    pub on_enabled: bool,
-
-    /// Notify when a skill is disabled (off by default)
-    #[serde(default)]
-    pub on_disabled: bool,
-}
-
-impl Default for SkillNotifications {
-    fn default() -> Self {
-        Self {
-            on_created: true,
-            on_enabled: true,
-            on_disabled: false,
-        }
-    }
-}
-
-fn default_display_duration() -> u64 {
-    5 // 5 seconds
-}
-
-fn default_max_visible() -> usize {
-    3
+    /// Retired TUI pop-up keys. The pop-up pipeline that read them never ran
+    /// (no notifier was ever installed), so they were removed. They are still
+    /// accepted so older config files load: they are ignored, noted once by
+    /// `Config::load`, and dropped on the next save.
+    #[serde(default, rename = "sound_enabled", skip_serializing)]
+    pub(crate) retired_sound_enabled: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "display_duration_secs", skip_serializing)]
+    pub(crate) retired_display_duration_secs: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "max_visible", skip_serializing)]
+    pub(crate) retired_max_visible: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tasks", skip_serializing)]
+    pub(crate) retired_tasks: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "entries", skip_serializing)]
+    pub(crate) retired_entries: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "rules", skip_serializing)]
+    pub(crate) retired_rules: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "skills", skip_serializing)]
+    pub(crate) retired_skills: Option<serde::de::IgnoredAny>,
 }
 
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sound_enabled: true,
-            display_duration_secs: default_display_duration(),
-            max_visible: default_max_visible(),
-            tasks: TaskNotifications::default(),
-            entries: EntryNotifications::default(),
-            rules: RuleNotifications::default(),
-            skills: SkillNotifications::default(),
             // Hook notification settings (disabled by default)
             on_permission_prompt: false,
             on_idle_prompt: false,
             on_auth_success: false,
             webhook_url: None,
+            retired_sound_enabled: None,
+            retired_display_duration_secs: None,
+            retired_max_visible: None,
+            retired_tasks: None,
+            retired_entries: None,
+            retired_rules: None,
+            retired_skills: None,
         }
+    }
+}
+
+impl NotificationConfig {
+    /// Retired `[notifications]` keys this config file still carries.
+    pub(crate) fn retired_keys(&self) -> Vec<&'static str> {
+        [
+            ("sound_enabled", self.retired_sound_enabled.is_some()),
+            ("display_duration_secs", self.retired_display_duration_secs.is_some()),
+            ("max_visible", self.retired_max_visible.is_some()),
+            ("tasks", self.retired_tasks.is_some()),
+            ("entries", self.retired_entries.is_some()),
+            ("rules", self.retired_rules.is_some()),
+            ("skills", self.retired_skills.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect()
     }
 }
 
@@ -2352,11 +2276,15 @@ mod tests {
 
     #[test]
     fn factory_config_context_recycle_threshold_is_configurable() {
-        let toml_str = "[factory]\ncontext_recycle_threshold_percent = 90\n";
+        let toml_str = "[factory]\ncontext_recycle_threshold_percent = 90\nrestart_worker_between_tasks = true\n";
         let parsed: std::collections::HashMap<String, FactoryConfig> =
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.context_recycle_threshold_percent, 90);
+        assert!(fc.restart_worker_between_tasks);
+        assert!(!FactoryConfig::default().restart_worker_between_tasks);
+        let legacy: FactoryConfig = toml::from_str("").unwrap();
+        assert!(!legacy.restart_worker_between_tasks);
         assert_eq!(
             FactoryConfig::default().context_recycle_threshold_percent,
             80

@@ -82,6 +82,7 @@ impl std::fmt::Display for NamedRefusal {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClaimedDelivery {
     pub id: String,
+    pub occurrence_id: Option<String>,
     pub event_kind: Option<String>,
     pub delivery_generation: u64,
     pub lease_token: String,
@@ -234,11 +235,10 @@ pub(crate) struct ReaderIo<'a> {
 
 /// The reader's in-memory state for one daemon process.
 pub(crate) struct VioletReader {
-    default_session: String,
+    /// This reader claims for one registration in one local factory session.
+    session: String,
     /// The don't-type-twice guard: every delivery typed by this process.
     typed: HashSet<String>,
-    /// delivery.id → local session (cas-c186 binds; default otherwise).
-    sessions: HashMap<String, String>,
     /// Set when Cloud says this registration is superseded; no more claims.
     pub(crate) stopped: Option<NamedRefusal>,
     registration_id: Option<String>,
@@ -252,11 +252,10 @@ pub(crate) struct VioletReader {
 }
 
 impl VioletReader {
-    pub(crate) fn new(default_session: impl Into<String>) -> Self {
+    pub(crate) fn new(session: impl Into<String>) -> Self {
         Self {
-            default_session: default_session.into(),
+            session: session.into(),
             typed: HashSet::new(),
-            sessions: HashMap::new(),
             stopped: None,
             registration_id: None,
             recovered_for: None,
@@ -264,14 +263,6 @@ impl VioletReader {
             activations: None,
             activation_read_this_tick: false,
         }
-    }
-
-    pub(crate) fn bind_session(&mut self, delivery_id: &str, session: &str) {
-        self.sessions.insert(delivery_id.to_string(), session.to_string());
-    }
-
-    pub(crate) fn session_for(&self, delivery_id: &str) -> &str {
-        self.sessions.get(delivery_id).map_or(self.default_session.as_str(), String::as_str)
     }
 
     /// True once Cloud has answered for a managed binding (a completed claim or
@@ -527,7 +518,7 @@ impl VioletReader {
             Some("resume") => self.walk(port, actor, delivery, io, now),
             Some("recovery_notice") => {
                 self.typed.insert(delivery.id.clone());
-                io.typer.notice_into(self.session_for(&delivery.id), delivery)?;
+                io.typer.notice_into(&self.session, delivery)?;
                 receipt(port, actor, delivery, "consumed", now).map(|()| Walked::Typed)
             }
             mode => Err(NamedRefusal::new("invalid_response", format!("unknown recovery mode {mode:?}"))),
@@ -556,7 +547,7 @@ impl VioletReader {
         }
         receipt(port, actor, delivery, "dispatch_uncertain", now)?;
         self.typed.insert(delivery.id.clone());
-        io.typer.type_into(self.session_for(&delivery.id), delivery, &text)?;
+        io.typer.type_into(&self.session, delivery, &text)?;
         receipt(port, actor, delivery, "consumed", now).map(|()| Walked::Typed)
     }
 
@@ -640,6 +631,10 @@ fn delivery_path(id: &str, action: &str) -> Result<String, NamedRefusal> {
 fn parse_delivery(item: &Value) -> Option<ClaimedDelivery> {
     Some(ClaimedDelivery {
         id: item["delivery"]["id"].as_str()?.to_string(),
+        occurrence_id: item["delivery"]["occurrence_id"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .map(|id| id.to_string()),
         event_kind: item["delivery"]["event_kind"].as_str().map(str::to_string),
         delivery_generation: item["delivery"]["delivery_generation"].as_u64()?,
         // Recover listings carry no lease: their admissions are already acked.
@@ -714,7 +709,19 @@ impl PromptQueueTyper<'_> {
         // the legacy numeric carrier is unchanged for its other producers.
         let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
         let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
-        prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), text);
+        let delivery_id = crate::prompt_revalidation::xml_attribute_value(&delivery.id);
+        let identity = match &delivery.occurrence_id {
+            Some(occurrence_id) => {
+                let reply_hint = if mention {
+                    "For a reply to this claimed mention, pass this occurrence_id to coordination reply_intent; never use the Slack message timestamp.\n"
+                } else {
+                    ""
+                };
+                format!("Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}\n{reply_hint}")
+            }
+            None => format!("Claimed delivery_id={delivery_id}\n"),
+        };
+        prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), &format!("{identity}{text}"));
         self.0
             .enqueue_idempotent_urgent(
                 &format!("violet-activity:{channel}"),

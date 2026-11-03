@@ -41,10 +41,6 @@ fn test_registry_has_all_sections() {
     assert!(sections.contains(&"history"));
     assert!(sections.contains(&"dev"));
     assert!(sections.contains(&"notifications"));
-    assert!(sections.contains(&"notifications.tasks"));
-    assert!(sections.contains(&"notifications.entries"));
-    assert!(sections.contains(&"notifications.rules"));
-    assert!(sections.contains(&"notifications.skills"));
     // New sections
     assert!(sections.contains(&"coordination"));
     assert!(sections.contains(&"lease"));

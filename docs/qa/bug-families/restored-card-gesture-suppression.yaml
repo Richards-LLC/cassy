@@ -1,0 +1,4 @@
+title: A cached refused card must accept a fresh Edit gesture immediately after swipe dismissal and restoration
+tasks: [cas-f722]
+invariants: [HUB-J5-GOAL]
+journeys: [HUB-J5]

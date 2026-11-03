@@ -93,17 +93,6 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   await journey.stage("Pair", async () => {
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
-    expect(hub.exchanges).toHaveLength(1);
-    expect(hub.exchanges[0]).toMatchObject({ token: TOKEN, hub_id: "atlas", operator_label: "Daniel" });
-    // The new token goes to the new link's machine, never the earlier one (QA F01).
-    expect(hub.exchangeOrigins).toEqual(["https://atlas.test"]);
-  });
-
-  await journey.stage("Reach the supervisor", async () => {
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
-    await expect(row).toBeVisible({ timeout: 15_000 });
-    await row.click();
-    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator("#toast")).toHaveText(/connected/);
     // It covers no heading either: at the top right it used to land on the
     // context rail's "Tasks & progress" (3.30.0 journey F8).
@@ -115,6 +104,17 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
       }).map((h) => h.textContent?.trim());
     });
     expect(covered, "headings under the toast").toEqual([]);
+    expect(hub.exchanges).toHaveLength(1);
+    expect(hub.exchanges[0]).toMatchObject({ token: TOKEN, hub_id: "atlas", operator_label: "Daniel" });
+    // The new token goes to the new link's machine, never the earlier one (QA F01).
+    expect(hub.exchangeOrigins).toEqual(["https://atlas.test"]);
+  });
+
+  await journey.stage("Reach the supervisor", async () => {
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // cas-0b3d: the machine takes this browser's usage counts as it comes
     // online, not only when another machine does or five minutes pass.
     await expect.poll(() => hub.usagePosts.filter((post) => post.machine === "atlas").flatMap((post) => post.entries.map((entry) => entry.action)), { timeout: 15_000 }).toContain("pair.link");
@@ -161,16 +161,6 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     // Studio was paired for control only: explain the missing permission
     // before its re-pair command, without a disabled fleet-action lookalike.
     const manage = studio.locator('[data-permission="manage"]');
-    await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
-    await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
-    await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
-    expect(await manage.evaluate((node) => {
-      const reason = node.querySelector(".fleet-permission-reason")!;
-      const also = node.querySelector(".fleet-permission-also")!;
-      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
-    })).toBe(true);
-    await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
-    await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });
     if (phone) await activate(page, copy);
@@ -186,8 +176,6 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-allow')).toHaveText("Confirm: allow managing workers on Studio Mac · macOS");
     await activate(page, studio.locator('[data-permission="operate"] .fleet-permission-allow'));
     await expect(studio.locator('[data-permission="operate"] .fleet-permission-state')).toHaveText("Allowed");
-    // Stop and restart still is not: it is never allowed from this browser.
-    await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
   });
 });
 

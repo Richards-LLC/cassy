@@ -1,7 +1,7 @@
 use crate::support::*;
 use cas::mcp::tools::TaskReopenRequest;
 use cas::store::{
-    open_agent_store, open_event_store, open_recording_store, open_supervisor_queue_store,
+    open_agent_store, open_event_store, open_supervisor_queue_store,
     open_task_store, open_verification_store,
 };
 use cas::types::{
@@ -36,7 +36,6 @@ impl ClosedFixture {
             .expect("register exact proof supervisor");
         open_supervisor_queue_store(&cas_dir).expect("supervisor outbox schema");
         open_event_store(&cas_dir).expect("event schema");
-        open_recording_store(&cas_dir).expect("recording schema");
 
         let mut old_epic = Task::new(
             format!("cas-old-epic-{suffix}"),

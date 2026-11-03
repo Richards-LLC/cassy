@@ -109,12 +109,21 @@ pub(crate) fn owned_verification_wait(
     task_id: &str,
     recipient: &str,
 ) -> Option<String> {
-    use cas_types::{AgentRole, TaskStatus, VerificationDispatchState};
+    owned_verification_wait_at(cas_dir, task_id, recipient, chrono::Utc::now())
+}
+
+pub(crate) fn owned_verification_wait_at(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    recipient: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    use cas_types::{AgentRole, VerificationDispatchState};
     let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id).ok()??;
     if !matches!(
         dispatch.state,
         VerificationDispatchState::Pending | VerificationDispatchState::Claimed
-    ) || dispatch.deadline_at <= chrono::Utc::now()
+    ) || dispatch.deadline_at <= now
     {
         return None;
     }
@@ -130,6 +139,59 @@ pub(crate) fn owned_verification_wait(
     if recipient.role != AgentRole::Supervisor || recipient.id != dispatch.owner_agent_id {
         return None;
     }
+    blocked_only_by_verification_wait(cas_dir, task_id, &dispatch.id).then_some(dispatch.id)
+}
+
+/// A blocker episode survives activity writes, supervisor turns and daemon
+/// restarts. A new hold, status transition, assignee or verification cycle is a
+/// new episode. Legacy tasks without a hold use their durable status event.
+pub(crate) fn alert_episode(
+    cas_dir: &std::path::Path,
+    task: &Task,
+) -> Result<(chrono::DateTime<chrono::Utc>, String), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let hold = read(tasks.as_ref(), &task.id)?;
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, &task.id)
+        .map_err(|e| e.to_string())?
+        .filter(|dispatch| blocked_only_by_verification_wait(cas_dir, &task.id, &dispatch.id));
+    let start = if let Some(hold) = hold {
+        hold.when
+    } else if let Some(dispatch) = &dispatch {
+        dispatch.requested_at
+    } else {
+        let events = crate::store::open_event_store(cas_dir).map_err(|e| e.to_string())?;
+        events.list_for_entity(cas_types::EventEntityType::Task, &task.id, 256)
+            .map_err(|e| e.to_string())?.into_iter()
+            .find(|event| event.event_type == cas_types::EventType::TaskBlocked)
+            .map(|event| event.created_at).unwrap_or(task.created_at)
+    };
+    let key = serde_json::json!([
+        task.assignee,
+        start.to_rfc3339(),
+        dispatch.map(|dispatch| dispatch.id)
+    ])
+    .to_string();
+    Ok((start, key))
+}
+
+/// cas-7fc3: whether `task_id` is Blocked by nothing but the exact
+/// verification-wait note for `dispatch_id`. Dependency blockers, external
+/// dependencies, an independent hold or any other blocker note all mean a
+/// different gate holds the task.
+pub(crate) fn blocked_only_by_verification_wait(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    dispatch_id: &str,
+) -> bool {
+    blocked_only_by_verification_wait_inner(cas_dir, task_id, dispatch_id).unwrap_or(false)
+}
+
+fn blocked_only_by_verification_wait_inner(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    dispatch_id: &str,
+) -> Option<bool> {
+    use cas_types::TaskStatus;
     let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
     let task = tasks.get(task_id).ok()?;
     if task.status != TaskStatus::Blocked
@@ -140,28 +202,39 @@ pub(crate) fn owned_verification_wait(
             .ok()?
             .is_empty()
     {
-        return None;
+        return Some(false);
     }
     // cas-16e1: a wait is the exact system-authored sentence for this
     // dispatch, never any text that merely mentions it.
-    let wait = verification_wait_note(&dispatch.id);
+    let wait = verification_wait_note(dispatch_id);
     let is_wait = |reason: &str| reason.trim() == wait;
     let hold = read(tasks.as_ref(), task_id).ok()?;
     if hold.as_ref().is_some_and(|hold| {
-        hold.reason != "Task explicitly set to status=blocked." && !is_wait(&hold.reason)
+        hold.reason != "Task explicitly set to status=blocked."
+            && !is_any_verification_wait_note(&hold.reason)
     }) {
-        return None;
+        return Some(false);
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    let blockers = blocker_notes(notes);
-    if blockers.iter().any(|reason| !is_wait(reason))
-        || (!blockers.iter().any(|reason| is_wait(reason))
-            && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))
-    {
-        return None;
-    }
-    Some(dispatch.id)
+    // cas-7fc3: only blocker notes written in this dispatch's cycle can hold
+    // it. An earlier, answered blocker ("need credentials") and a wait note
+    // for an earlier dispatch both belong to finished cycles. Note stamps are
+    // UTC minutes, so the bound is the request minute.
+    let since = cas_store::get_verification_dispatch(cas_dir, dispatch_id)
+        .ok()
+        .map(|dispatch| dispatch.requested_at.format("%Y-%m-%d %H:%M").to_string());
+    let blockers: Vec<String> = blocker_note_entries(notes)
+        .into_iter()
+        .filter(|(stamp, _)| since.as_deref().is_none_or(|since| stamp.as_str() >= since))
+        .map(|(_, reason)| reason)
+        .filter(|reason| is_wait(reason) || !is_any_verification_wait_note(reason))
+        .collect();
+    Some(
+        !(blockers.iter().any(|reason| !is_wait(reason))
+            || (!blockers.iter().any(|reason| is_wait(reason))
+                && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))),
+    )
 }
 
 /// cas-16e1: the one note a worker records to wait, blocked, on a pending
@@ -170,9 +243,20 @@ pub(crate) fn verification_wait_note(dispatch_id: &str) -> String {
     format!("Verification required: exact dispatch {dispatch_id} must record a verdict before close.")
 }
 
+/// Whether `reason` is exactly a [`verification_wait_note`] for some single
+/// dispatch id, as opposed to free text that merely mentions one.
+fn is_any_verification_wait_note(reason: &str) -> bool {
+    reason
+        .trim()
+        .strip_prefix("Verification required: exact dispatch ")
+        .and_then(|rest| rest.strip_suffix(" must record a verdict before close."))
+        .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+}
+
 /// The full text of every blocker note, across all of its lines. A note
 /// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
-fn blocker_notes(notes: &str) -> Vec<String> {
+/// Each entry is returned with its `YYYY-MM-DD HH:MM` stamp.
+fn blocker_note_entries(notes: &str) -> Vec<(String, String)> {
     let starts_entry = |line: &str| {
         let bytes = line.as_bytes();
         bytes.len() > 19 && bytes[0] == b'[' && bytes[17] == b']' && bytes[18] == b' '
@@ -189,7 +273,10 @@ fn blocker_notes(notes: &str) -> Vec<String> {
         }
     }
     entries.into_iter()
-        .filter_map(|entry| entry.get(19..)?.strip_prefix("🚫 BLOCKER").map(|body| body.trim().to_string()))
+        .filter_map(|entry| {
+            let body = entry.get(19..)?.strip_prefix("🚫 BLOCKER")?.trim().to_string();
+            Some((entry.get(1..17)?.to_string(), body))
+        })
         .collect()
 }
 
@@ -274,7 +361,11 @@ mod tests {
         ] {
             let mut task = store.get("cas-9efb-test").unwrap();
             task.status = TaskStatus::Blocked;
-            task.notes = format!("[2026-10-26 21:30] 🚫 BLOCKER {note}");
+            // cas-7fc3: notes count from the dispatch's request minute on.
+            task.notes = format!(
+                "[{}] 🚫 BLOCKER {note}",
+                dispatch.requested_at.format("%Y-%m-%d %H:%M")
+            );
             store.update(&task).unwrap();
             assert_eq!(
                 super::owned_verification_wait(&cas_dir, "cas-9efb-test", "lead-id").is_some(), quiet,

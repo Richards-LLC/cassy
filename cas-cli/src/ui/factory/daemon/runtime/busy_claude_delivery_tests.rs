@@ -40,11 +40,7 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
     .unwrap();
     daemon.app.mux.set_worker_cli(cas_mux::SupervisorCli::Claude);
     daemon.app.adopt_worker_pane_for_test(pane);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    for pane in daemon.app.mux.panes_mut() {
-        pane.drain_output();
-    }
-    let bytes = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
+    let bytes = super::provisioning_tests::await_ready_fixture_pane(daemon, WORKER).await;
     daemon.last_pane_output_bytes.insert(WORKER.into(), bytes);
     daemon.pane_silent_since.insert(WORKER.into(), Instant::now());
     assert!(daemon.app.mux.pane_ready_for_injection(WORKER));

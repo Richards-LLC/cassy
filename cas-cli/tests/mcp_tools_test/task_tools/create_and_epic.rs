@@ -84,7 +84,11 @@ async fn test_task_create_and_start() {
         id: task_id.to_string(),
     };
     let start_result = service
-        .cas_task_start(Parameters(start_req))
+        .cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: start_req.id,
+            brief: Some(false),
+            force: None,
+        }))
         .await
         .expect("task_start should succeed");
 
@@ -479,6 +483,10 @@ async fn test_task_create_with_light_depth_shows_light() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))
@@ -507,6 +515,10 @@ async fn test_task_create_without_depth_defaults_to_deep() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))
@@ -585,6 +597,10 @@ async fn test_task_update_depth_to_light() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))
@@ -835,8 +851,23 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
+    std::fs::write(
+        repo.join(".cas/config.toml"),
+        "[project]\ncanonical_id = \"cas-1630-fixture\"\n",
+    )
+    .unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    // Pin a SHA with letters in SHA[..9]; decimal-only prefixes are treated as run IDs.
+    std::fs::write(repo.join(".gitignore"), "/.cas/\n").unwrap();
+    test_env.set("GIT_AUTHOR_NAME", "Test");
+    test_env.set("GIT_AUTHOR_EMAIL", "test@test.com");
+    test_env.set("GIT_COMMITTER_NAME", "Test");
+    test_env.set("GIT_COMMITTER_EMAIL", "test@test.com");
+    test_env.set("GIT_AUTHOR_DATE", "1700000192 +0000");
+    test_env.set("GIT_COMMITTER_DATE", "1700000192 +0000");
     init_repo_with_commit(repo);
     let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
+    assert_eq!(v56_tip, "8cdb386e4f461e0492a16cc5ef4fac74e681daa5");
     let v57 = extract_task_id(&extract_text(
         service
             .cas_task_create(Parameters(epic_create_request("Burn Down V57")))

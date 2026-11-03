@@ -1,0 +1,4 @@
+title: A requested conversation resumes when a live daemon replaces its ended catalog entry, without retrying or sending while ended
+tasks: [cas-5049]
+invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
+journeys: [HUB-J11]

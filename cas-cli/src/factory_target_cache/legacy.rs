@@ -47,6 +47,10 @@ impl Snapshot {
     pub(super) fn admissible(&self) -> bool {
         self.safe
     }
+    pub(super) fn root_identity(&self) -> Option<(u64, u64)> {
+        self.directories.iter().find(|(path, _, _)| path.as_os_str().is_empty())
+            .map(|(_, identity, _)| *identity)
+    }
     // Cargo locks serialize artifact writes. Directory stamps detect changes
     // to the tree/lock set without stat-ing every artifact again.
     fn unchanged(&self, cache: &Path) -> bool {

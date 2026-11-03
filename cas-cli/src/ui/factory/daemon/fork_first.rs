@@ -603,6 +603,7 @@ impl DaemonInitPhase {
             urgent_injects: Default::default(),
             operator_refresh_requested: false,
             send_receipts: super::runtime::send_dedupe::SendReceipts::default(),
+            supervisor_commands: Default::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),

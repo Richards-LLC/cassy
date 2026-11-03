@@ -6,6 +6,11 @@ use clap::{Args, Subcommand, ValueEnum};
 use crate::accounts::{self, Provider};
 use crate::cli::Cli;
 
+const MACOS_SHELL_NOTE: &str = "macOS: idle /bin/zsh, /bin/bash and /bin/sh shells can hide account selectors.
+Close shells that export CLAUDE_CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR
+or CODEX_HOME before renaming or removing this account.
+Readable process environments and registered agents are still checked.";
+
 #[derive(Args, Debug, Clone)]
 pub struct AccountsArgs {
     #[command(subcommand)]
@@ -17,6 +22,7 @@ pub enum AccountsCommand {
     /// List Claude and Codex subscriptions, usage, resets and login findings
     List,
     /// Permanently delete a named account (shared base items stay intact)
+    #[command(after_help = MACOS_SHELL_NOTE)]
     Remove {
         /// Folder alias or email; use claude:<name> or codex:<name> if ambiguous
         account: String,
@@ -25,6 +31,7 @@ pub enum AccountsCommand {
         yes: bool,
     },
     /// Move a named account to a new folder alias
+    #[command(after_help = MACOS_SHELL_NOTE)]
     Rename { account: String, new_name: String },
     /// Keep a login but exclude it from automatic account selection
     Disable { account: String },

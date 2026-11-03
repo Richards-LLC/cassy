@@ -40,6 +40,92 @@ fn commit(repo: &Path) -> String {
     git(repo, &["rev-parse", "HEAD"])
 }
 
+fn commander_delivery_impact(selection: &str, paths: &[&str]) -> (Impact, crate::qa_pass::QaEligibility) {
+    let temp = repo();
+    let repo = temp.path();
+    write(
+        repo,
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/journeys-for-diff.py"
+        )),
+    );
+    write(
+        repo,
+        "docs/qa/journeys.md",
+        "## hub-web\n\n### HUB-J1 · Reply\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/reply.ts`\n- **Suite:** `hub-web/e2e/reply.journey.ts`\n",
+    );
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        &"version: 1\nupdated: '2026-10-30'\nselection: legacy_catalog\nsurfaces: ['hub-web/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: HUB-J1\n    status: live\n    entry: {url: /commander/, trigger: Open}\n    steps: [Arrive]\n    owners: ['hub-web/**']\n    invariants: [INV]\n".replace("selection: legacy_catalog", &format!("selection: {selection}")),
+    );
+    write(repo, "hub-web/src/reply.ts", "export const reply = true;");
+    write(
+        repo,
+        "hub-web/e2e/reply.journey.ts",
+        "test('HUB-J1 reply', () => {});",
+    );
+    for path in paths {
+        write(repo, path, "{}");
+    }
+    let head = commit(repo);
+    let qa = QaConfig::default();
+    let report = analyze(
+        repo,
+        &qa,
+        &paths
+            .iter()
+            .map(|path| Change::modified(*path))
+            .collect::<Vec<_>>(),
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert!(report.registry.valid, "{:?}", report.warnings);
+    let files = paths
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<Vec<_>>();
+    let journeys = report
+        .journeys
+        .iter()
+        .map(|journey| journey.id.clone())
+        .collect::<Vec<_>>();
+    let eligibility = crate::qa_pass::user_facing_reasons(
+        &crate::types::Task::new("cas-fixture".into(), "Delivery".into()),
+        &qa,
+        Some(&files),
+        &journeys,
+    );
+    (report, eligibility)
+}
+
+#[test]
+fn qa_impact_test_only_delivery_is_not_user_facing_cas_63e9() {
+    for selection in ["legacy_catalog", "globs"] {
+        let (report, eligibility) = commander_delivery_impact(selection, &[
+            "hub-web/test-fixtures/vitest-stability/package.json",
+            "hub-web/test-fixtures/vitest-stability/package-lock.json",
+            "hub-web/test-fixtures/vitest-stability/reply.test.mjs",
+            "hub-web/e2e/fixtures/reply.json",
+        ]);
+        assert!(report.journeys.is_empty(), "{selection}: {:?}", report.journeys);
+        assert!(report.unowned.iter().all(|file| !file.surface), "{:?}", report.unowned);
+        assert!(!eligibility.is_eligible(), "{eligibility:?}");
+    }
+}
+
+#[test]
+fn qa_impact_product_source_delivery_is_user_facing_cas_63e9() {
+    for selection in ["legacy_catalog", "globs"] {
+        let (report, eligibility) = commander_delivery_impact(selection, &["hub-web/src/new-view.ts"]);
+        assert_eq!(report.journeys.iter().map(|journey| journey.id.as_str()).collect::<Vec<_>>(), ["HUB-J1"], "{selection}");
+        assert!(eligibility.is_eligible(), "{eligibility:?}");
+    }
+}
+
 #[test]
 fn qa_impact_orders_status_share_id_and_ignores_paths() {
     use clap::Parser;
@@ -359,12 +445,13 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
     );
     let mut catalog =
         String::from("## hub-web\n\n- **Surface-wide:** `hub-web/src/styles.css`\n\n");
-    let mut yaml = String::from(
-        "version: 1\nupdated: '2026-10-21'\nselection: legacy_catalog\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n",
+    let daemon = "cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs";
+    let mut yaml = format!(
+        "version: 1\nupdated: '2026-10-21'\nselection: legacy_catalog\nowner_groups:\n  runtime: {{description: Shared daemon, globs: ['{daemon}']}}\ninvariants:\n  INV: {{statement: Arrived, check: Read state}}\njourneys:\n",
     );
     for (id, name) in [("HUB-J1", "reply"), ("HUB-J2", "theme")] {
         catalog.push_str(&format!("### {id} · {name}\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/{name}.ts`\n- **Suite:** `hub-web/e2e/{name}.journey.ts`\n\n"));
-        yaml.push_str(&format!("  - id: {id}\n    name: Curated {name}\n    status: live\n    entry: {{url: /commander/, trigger: Open}}\n    steps: [Arrive]\n    owners: ['hub-web/src/{name}.ts', 'hub-web/src/styles.css']\n    invariants: [INV]\n    traffic: {{share_pct: null}}\n    spec: hub-web/e2e/{name}.journey.ts\n"));
+        yaml.push_str(&format!("  - id: {id}\n    name: Curated {name}\n    status: live\n    entry: {{url: /commander/, trigger: Open}}\n    steps: [Arrive]\n    owners: ['hub-web/src/{name}.ts', 'hub-web/src/styles.css']\n    owner_groups: [runtime]\n    invariants: [INV]\n    traffic: {{share_pct: null}}\n    spec: hub-web/e2e/{name}.journey.ts\n"));
         write(
             repo,
             &format!("hub-web/src/{name}.ts"),
@@ -378,6 +465,7 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
     }
     write(repo, "docs/qa/journeys.md", &catalog);
     write(repo, crate::qa_registry::DEFAULT_PATH, &yaml);
+    write(repo, daemon, "fn run_reminder_scan() {}\n");
     write(repo, "hub-web/src/leaf.ts", "export const leaf = 1;");
     write(
         repo,
@@ -395,6 +483,7 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
         "hub-web/src/styles.css",
         ".reply-card { color: red; }\n.theme-card { color: green; }\n",
     );
+    write(repo, daemon, "fn run_reminder_scan() { reconcile(); }\n");
     let head = commit(repo);
     // Both the selector and its data must come from the reviewed head.
     write(
@@ -402,7 +491,11 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
         "scripts/journeys-for-diff.py",
         "raise Exception('checkout drift')",
     );
-    for path in ["hub-web/src/styles.css", "hub-web/src/leaf.ts"] {
+    for (path, expected) in [
+        ("hub-web/src/styles.css", &["HUB-J1"][..]),
+        ("hub-web/src/leaf.ts", &["HUB-J1"][..]),
+        (daemon, &[][..]),
+    ] {
         let report = analyze(
             repo,
             &QaConfig::default(),
@@ -419,11 +512,19 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
                 .iter()
                 .map(|j| j.id.as_str())
                 .collect::<Vec<_>>(),
-            ["HUB-J1"],
+            expected,
             "{path}"
         );
-        assert_eq!(report.journeys[0].name, "Curated reply");
-        assert_eq!(report.journeys[0].invariants[0].id, "INV");
+        if let Some(journey) = report.journeys.first() {
+            assert_eq!(journey.name, "Curated reply");
+            assert_eq!(journey.invariants[0].id, "INV");
+        } else {
+            // cas-3b77: registry ownership must not hide a changed daemon
+            // file when the semantic selector excludes all of its journeys.
+            assert_eq!(report.unowned.iter().map(|file| file.file.as_str()).collect::<Vec<_>>(), [daemon]);
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["unowned"][0]["file"], daemon);
+        }
     }
 }
 
@@ -437,6 +538,53 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         );
         return;
     }
+    // Grow the catalog without refreshing the historical merge captures.
+    // Keep the mutation in a private repository, including the selector's inputs.
+    let snapshot = tempfile::tempdir().unwrap();
+    git(
+        root,
+        &[
+            "clone",
+            "--quiet",
+            "--shared",
+            "--no-checkout",
+            ".",
+            snapshot.path().to_str().unwrap(),
+        ],
+    );
+    let root = snapshot.path();
+    // Only the catalog and registry need working files. Keep the full index
+    // for registry validation; both selectors read other inputs from Git HEAD.
+    git(root, &["sparse-checkout", "set", "--no-cone", "/docs/qa/"]);
+    git(root, &["checkout", "--quiet", "HEAD"]);
+    let catalog = std::fs::read_to_string(root.join("docs/qa/journeys.md")).unwrap();
+    let (_, template) = catalog.rsplit_once("\n### ").unwrap();
+    let template_id = template.split(" · ").next().unwrap();
+    let added_id = "HUB-J9999";
+    write(
+        root,
+        "docs/qa/journeys.md",
+        &format!("{catalog}\n### {}", template.replace(template_id, added_id)),
+    );
+    // Edit only the main file; the combined loader also includes family files
+    // that must remain in their own files when this fixture writes the registry.
+    let mut registry = crate::qa_registry::parse(
+        &std::fs::read_to_string(root.join(crate::qa_registry::DEFAULT_PATH)).unwrap(),
+    ).unwrap();
+    let mut added = registry
+        .journeys
+        .iter()
+        .find(|j| j.id == template_id)
+        .unwrap()
+        .clone();
+    added.id = added_id.into();
+    registry.journeys.push(added);
+    write(
+        root,
+        crate::qa_registry::DEFAULT_PATH,
+        &serde_yaml::to_string(&registry).unwrap(),
+    );
+    let head = commit(root);
     let validation =
         crate::qa_registry::check(root, Path::new(crate::qa_registry::DEFAULT_PATH)).unwrap();
     assert!(validation.problems.is_empty(), "{:?}", validation.problems);
@@ -448,27 +596,34 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
     );
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/commander-merge-diffs.json")).unwrap();
-    let head = git(root, &["rev-parse", "HEAD"]);
     let mut selected_source_merges = 0;
+    let mut selected_added_journey = false;
+    let mut selections = std::collections::BTreeMap::new();
     for diff in fixture["diffs"].as_array().unwrap() {
         // Replay real merge path sets against the migrated catalog at this head.
         // Original revisions are provenance, not a dependency on deep CI history.
+        // Captured IDs are historical; the current catalog supplies expectations.
         let files = diff["files"]
             .as_array()
             .unwrap()
             .iter()
             .map(|path| path.as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
-        let legacy =
-            crate::qa_evidence::journeys::journeys_for_paths_at(root, &head, &files).unwrap();
-        let report = analyze(
-            root,
-            &QaConfig::default(),
-            &files.iter().map(Change::modified).collect::<Vec<_>>(),
-            None,
-            Some(&head),
-        )
-        .unwrap();
+        // Reuse the independent oracle/report pair for duplicate inputs at
+        // this immutable head, while keeping every historical merge assertion.
+        let (legacy, report) = selections.entry(files.clone()).or_insert_with(|| {
+            let legacy =
+                crate::qa_evidence::journeys::journeys_for_paths_at(root, &head, &files).unwrap();
+            let report = analyze(
+                root,
+                &QaConfig::default(),
+                &files.iter().map(Change::modified).collect::<Vec<_>>(),
+                None,
+                Some(&head),
+            )
+            .unwrap();
+            (legacy, report)
+        });
         assert_eq!(report.source, "registry");
         assert!(report.registry.valid);
         let ids = report
@@ -476,6 +631,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             .iter()
             .map(|j| j.id.as_str())
             .collect::<Vec<_>>();
+        selected_added_journey |= ids.contains(&added_id);
         if !ids.is_empty()
             && files
                 .iter()
@@ -483,17 +639,27 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         {
             selected_source_merges += 1;
         }
-        assert_eq!(ids, legacy, "merge {}", diff["head"]);
-        assert_eq!(
-            serde_json::to_value(ids).unwrap(),
-            diff["journeys"],
-            "captured legacy IDs for {}",
-            diff["head"]
-        );
+        assert_eq!(ids, *legacy, "merge {}", diff["head"]);
     }
     assert!(
         selected_source_merges > 0,
         "parity needs a production source merge that selects journeys"
+    );
+    assert!(
+        selected_added_journey,
+        "parity must exercise catalog growth"
+    );
+    let secondary_suite = analyze(
+        root,
+        &QaConfig::default(),
+        &[Change::modified("hub-web/e2e/journeys/phone-host-line.journey.ts")],
+        None,
+        Some(&head),
+    ).unwrap();
+    assert_eq!(
+        secondary_suite.journeys.iter().map(|journey| journey.id.as_str()).collect::<Vec<_>>(),
+        ["HUB-J3"],
+        "additional_specs suites retain their registered journey selection"
     );
 }
 

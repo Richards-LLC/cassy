@@ -5,7 +5,7 @@ impl Config {
         let cloud = self.cloud.clone().unwrap_or_default();
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
-        let qa = self.qa.clone().unwrap_or_default();
+        let qa = self.resolved_qa();
         let dev = self.dev.clone().unwrap_or_default();
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
@@ -246,6 +246,10 @@ impl Config {
             (
                 "factory.stall_threshold_secs".to_string(),
                 factory.stall_threshold_secs.to_string(),
+            ),
+            (
+                "factory.restart_worker_between_tasks".to_string(),
+                factory.restart_worker_between_tasks.to_string(),
             ),
             (
                 "factory.context_recycle_threshold_percent".to_string(),
@@ -523,6 +527,14 @@ impl Config {
             ("issues.components.cassy".to_string(), issue_repos.cassy),
             ("issues.components.violet".to_string(), issue_repos.violet),
             ("issues.components.cloud".to_string(), issue_repos.cloud),
+            (
+                "secrets.destination".to_string(),
+                self.get("secrets.destination").unwrap_or_default(),
+            ),
+            (
+                "secrets.auto_delete".to_string(),
+                self.get("secrets.auto_delete").unwrap_or_default(),
+            ),
             // History section
             (
                 "history.github_repo".to_string(),
@@ -532,74 +544,6 @@ impl Config {
             (
                 "notifications.enabled".to_string(),
                 notifications.enabled.to_string(),
-            ),
-            (
-                "notifications.sound_enabled".to_string(),
-                notifications.sound_enabled.to_string(),
-            ),
-            (
-                "notifications.display_duration_secs".to_string(),
-                notifications.display_duration_secs.to_string(),
-            ),
-            (
-                "notifications.max_visible".to_string(),
-                notifications.max_visible.to_string(),
-            ),
-            // Notifications.tasks section
-            (
-                "notifications.tasks.on_created".to_string(),
-                notifications.tasks.on_created.to_string(),
-            ),
-            (
-                "notifications.tasks.on_started".to_string(),
-                notifications.tasks.on_started.to_string(),
-            ),
-            (
-                "notifications.tasks.on_closed".to_string(),
-                notifications.tasks.on_closed.to_string(),
-            ),
-            (
-                "notifications.tasks.on_updated".to_string(),
-                notifications.tasks.on_updated.to_string(),
-            ),
-            // Notifications.entries section
-            (
-                "notifications.entries.on_added".to_string(),
-                notifications.entries.on_added.to_string(),
-            ),
-            (
-                "notifications.entries.on_updated".to_string(),
-                notifications.entries.on_updated.to_string(),
-            ),
-            (
-                "notifications.entries.on_deleted".to_string(),
-                notifications.entries.on_deleted.to_string(),
-            ),
-            // Notifications.rules section
-            (
-                "notifications.rules.on_created".to_string(),
-                notifications.rules.on_created.to_string(),
-            ),
-            (
-                "notifications.rules.on_promoted".to_string(),
-                notifications.rules.on_promoted.to_string(),
-            ),
-            (
-                "notifications.rules.on_demoted".to_string(),
-                notifications.rules.on_demoted.to_string(),
-            ),
-            // Notifications.skills section
-            (
-                "notifications.skills.on_created".to_string(),
-                notifications.skills.on_created.to_string(),
-            ),
-            (
-                "notifications.skills.on_enabled".to_string(),
-                notifications.skills.on_enabled.to_string(),
-            ),
-            (
-                "notifications.skills.on_disabled".to_string(),
-                notifications.skills.on_disabled.to_string(),
             ),
             // Agent section
             (
@@ -885,22 +829,9 @@ impl Config {
         ]
     }
 
-    /// Get notification config with defaults
-    pub fn notifications(&self) -> NotificationConfig {
-        self.notifications.clone().unwrap_or_default()
-    }
-
     /// Get skill validation sandbox policy with defaults.
     pub fn skill_validation(&self) -> SkillValidationConfig {
         self.skill_validation.clone().unwrap_or_default()
-    }
-
-    /// Check if notifications are enabled
-    pub fn notifications_enabled(&self) -> bool {
-        self.notifications
-            .as_ref()
-            .map(|n| n.enabled)
-            .unwrap_or(true)
     }
 
     /// Get agent config with defaults
@@ -930,7 +861,7 @@ impl Config {
 
     /// Get QA gate configuration with defaults.
     pub fn qa(&self) -> QaConfig {
-        self.qa.clone().unwrap_or_default()
+        self.resolved_qa()
     }
 
     /// Get worktrees config with defaults

@@ -22,7 +22,19 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// A task read from a project the bearer is allowed to see. Keep the scope
+/// beside its notes so a proof cannot be detached from its owner.
+pub(crate) struct ScopedTaskNotes {
+    pub team_id: Option<String>,
+    pub project_id: String,
+    pub notes: String,
+}
+
+const MAX_PROOF_SCOPES: usize = 32;
+const MAX_PROOF_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const PROOF_LOOKUP_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Matches the other cloud clients in this module tree.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -313,6 +325,130 @@ impl fmt::Debug for ArtifactUploadClient {
 }
 
 impl ArtifactUploadClient {
+    /// Read one named task in every visible project, with a fixed read budget.
+    /// A failed scope makes the result incomplete; callers must not interpret
+    /// it as proof that the artifact is absent.
+    pub(crate) fn visible_task_notes(&self, task_id: &str) -> Result<Vec<ScopedTaskNotes>, String> {
+        if task_id.is_empty()
+            || !task_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err("invalid task id".into());
+        }
+        let deadline = Instant::now() + PROOF_LOOKUP_DEADLINE;
+        let mut projects_url =
+            url::Url::parse(&self.endpoint).map_err(|_| "invalid Cloud endpoint".to_string())?;
+        projects_url.set_path("/api/account/projects");
+        let listing = self
+            .proof_get_json(&projects_url, deadline)?
+            .ok_or_else(|| "visible project list is unavailable".to_string())?;
+        let projects = listing
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "visible project list is malformed".to_string())?;
+        if projects.len() > MAX_PROOF_SCOPES {
+            return Err("visible project list exceeds the bounded lookup scope".into());
+        }
+        let mut scopes = std::collections::BTreeSet::new();
+        for project in projects {
+            let project_id = project
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "visible project has no canonical id".to_string())?;
+            let team_id = match project.get("team_id") {
+                Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+                None | Some(serde_json::Value::Null) => None,
+                _ => return Err("visible project has invalid team id".into()),
+            };
+            let expected_scope = if team_id.is_some() {
+                "team"
+            } else {
+                "personal"
+            };
+            if project.get("scope").and_then(serde_json::Value::as_str) != Some(expected_scope) {
+                return Err("visible project has inconsistent scope".into());
+            }
+            scopes.insert((team_id, project_id.to_string()));
+        }
+        let mut matches = Vec::new();
+        for (team_id, project_id) in scopes {
+            let mut url = url::Url::parse(&self.endpoint)
+                .map_err(|_| "invalid Cloud endpoint".to_string())?;
+            {
+                let mut path = url
+                    .path_segments_mut()
+                    .map_err(|_| "invalid Cloud endpoint".to_string())?;
+                path.clear().push("api");
+                if let Some(team_id) = &team_id {
+                    path.push("teams").push(team_id);
+                }
+                path.push("sync").push("tasks").push(task_id);
+            }
+            url.query_pairs_mut().append_pair("project_id", &project_id);
+            let Some(row) = self.proof_get_json(&url, deadline)? else {
+                continue;
+            };
+            if row.get("id").and_then(serde_json::Value::as_str) != Some(task_id) {
+                return Err("scoped task response has a different id".into());
+            }
+            if row
+                .get("origin_project")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|origin| origin != project_id)
+            {
+                return Err("scoped task response has a different project".into());
+            }
+            let notes = row
+                .get("notes")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "scoped task response has no notes".to_string())?;
+            matches.push(ScopedTaskNotes {
+                team_id,
+                project_id,
+                notes: notes.to_string(),
+            });
+        }
+        Ok(matches)
+    }
+
+    fn proof_get_json(
+        &self,
+        url: &url::Url,
+        deadline: Instant,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| "artifact metadata lookup deadline exceeded".to_string())?;
+        // Metadata reads carry the bearer. A redirect must never send it to
+        // a location supplied by a response, even when Cloud is misconfigured.
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let response = agent
+            .get(url.as_str())
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(remaining.min(self.timeout))
+            .call();
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(_) => return Err("scoped artifact metadata read was denied or incomplete".into()),
+        };
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .take(MAX_PROOF_RESPONSE_BYTES + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| "scoped artifact metadata response could not be read".to_string())?;
+        if body.len() as u64 > MAX_PROOF_RESPONSE_BYTES {
+            return Err("scoped artifact metadata response exceeds size limit".into());
+        }
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|_| "scoped artifact metadata response is malformed".into())
+    }
+
     /// Endpoint and token are parameters so tests can point the client at a
     /// mock server without touching process environment.
     pub fn new(endpoint: &str, token: &str) -> Self {
@@ -422,7 +558,11 @@ impl ArtifactUploadClient {
         // ureq replaces headers case-sensitively. Do not first add an
         // inferred Content-Type alongside Cloud's differently-cased signed
         // header; the object store must receive exactly the signed value.
-        if !begun.required_headers.keys().any(|name| name.eq_ignore_ascii_case("content-type")) {
+        if !begun
+            .required_headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-type"))
+        {
             request = request.set("Content-Type", &validate_upload_mime(mime)?);
         }
         for (name, value) in &begun.required_headers {

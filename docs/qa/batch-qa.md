@@ -1,13 +1,26 @@
 # One staging walk per batch
 
-Projects can opt into batch QA with `cas config set qa.mode batch`. The default,
-`per_task`, keeps the existing evidence bundle and independent QA behavior.
-The setting is operator-owned. No background process is added.
+Batch QA is the built-in default for fresh projects and new machines.
+Opt into per-delivery evidence and independent QA with
+`cas config set qa.mode per_task`. QA keys resolve per key from project
+`.cas/config.toml`, then user `~/.cas/config.toml`, then built-in defaults.
+An unreadable or invalid user QA config warns and is ignored; invalid project
+config still reports its error. The setting is operator-owned. No background
+process is added.
 
 In batch mode, an implementer's pre-merge close still checks added test skip
 and focus markers, then parks the delivery with evidence deferred. Cassy does
 not automatically dispatch a per-task QA pass. A supervisor can still request
-one explicitly with `verification action=qa_request`.
+one explicitly with `verification action=qa_request`. A pending or failed explicit
+round still binds: re-parking a changed tip opens the next round. A logged
+waiver ends that per-task obligation; deferred batch evidence is still owed.
+
+Once per release, at the frozen tip after the fix-diff re-review, the supervisor
+builds a candidate, walks the combined batch matrix and records the reviewed
+revision.
+After the published ledger and `verification action=batch_receipt` cover the
+listed delivery anchors, close those deliveries. Until that receipt exists,
+a deferred delivery reports "waiting for batch receipt".
 
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. After merging the batch to its configured staging
@@ -24,6 +37,40 @@ factory branch owners and exact Git actors on delivery anchor history also
 count as implementers after reassignment. Integration and verification alone
 do not count as implementation.
 
+QA and closes can run on different machines. Recording a receipt adds a
+reserved `QA_BATCH_RECEIPT_PROOF:` line to each listed task, and task sync
+copies it into the other machine's receipt store, so either machine's close
+gate and `verification show id=<qab-id>` accept it. The ledger file stays on
+the machine that recorded it: the peer accepts the SHA-256 and size checked
+there, and still byte-checks a ledger that is published locally. The
+independent-author check runs against the closing machine's own record of who
+implemented each task.
+
+A release verdict uses the same action with `verification_type=release`: one
+review of the assembled tip, whose published report names every delivery. It rides
+task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
+owned by release review, its exact-anchor coverage also satisfies deferred
+batch debt. It does not replace general QA evidence, Tier 2 probes or a
+dedicated review. A verdict recorded after an expired dispatch supersedes
+that old wait; live or newer dispatches and rejected verdicts retain authority.
+
+Name who walked the ledger in `ledger_author` (agent id or name). For every
+listed tier 1 or tier 2 task, that author must be outside the same
+implementation lineage: a QA reviewer, a verifier, or a worker on this or
+another machine that did not deliver it. An unregistered author is recorded
+with role `external`. The receipt stores the author's id and role, and close
+rechecks them, so an author who later joins the lineage no longer satisfies
+it. A worker's own tests and captures remain its proof but never count as
+independent QA; a passed QA round whose reviewer joins the lineage is refused
+the same way. Tier 0 deliveries (docs and tests only) are not gated. Only the
+operator overrides, from their own terminal, with
+`cas qa author-override <task> --note "<why>"`. The command refuses agent
+sessions, the PreToolUse hook refuses agent shells that run it, and the record
+lives in `.cas/operator/qa-author-overrides.toml`, which agents may not write.
+A task note never overrides, because the delivering worker can write notes on
+its own task. The receipt keeps the operator's words and the task gets an audit
+note.
+
 Use the verification MCP tool:
 
 ```json
@@ -32,7 +79,8 @@ Use the verification MCP tool:
   "task_ids": ["cas-a123", "cas-b456", "cas-c789"],
   "staging_sha": "<full 40-hex deployed staging commit>",
   "ledger_artifact_id": "art-1234abcd",
-  "ledger_path": "/absolute/path/STAGING-LEDGER.md"
+  "ledger_path": "/absolute/path/STAGING-LEDGER.md",
+  "ledger_author": "qa-reviewer-name"
 }
 ```
 
@@ -43,6 +91,18 @@ the delivery target when staging is the integration destination. A SHA on an
 unrelated branch does not establish containment. Containment uses the merge
 gate's local-or-origin rule, so a stale origin does not hide local integration.
 Refresh target refs before recording.
+
+After an evidence-only `request_changes` and restart, the active anchor may
+be empty while the delivery remains in recorded history. Receipt recording,
+status and close use the latest historical anchor in that case. An active
+anchor always takes precedence; an invalid active or latest historical anchor
+does not fall back to older records or a mutable branch tip. All staging,
+target, independent-recorder and published-ledger checks still apply. Close
+recovery supplies `commit_receipt` naming that exact historical anchor; a later
+integrated correction cannot inherit its approval without a new active parked
+anchor and matching QA. This
+recovers delivery identity for QA; it does not restore declined merge authority
+or clear deferred evidence without its receipt or passed independent round.
 
 The runtime verifies nonempty UTF-8 ledger bytes against the published
 artifact's size and SHA-256. It stores an immutable receipt with project,
@@ -56,12 +116,18 @@ Each listed task can then close without a per-task `qa-bundle:` note or an
 automatic independent pass. `verification action=qa_status task_id=<id>`
 shows its valid batch receipt, and task notes retain the receipt citation.
 Keep the published ledger file available and unchanged for subsequent closes.
+When a valid batch receipt or covering passed independent QA round already
+reviews the delivery, close uses that review's canonical evidence rather than
+rechecking the producer ledger against a newer matrix grammar. Historical
+producer evidence stays unchanged. Without valid coverage, existing producer
+ledgers still undergo the current format check before verification dispatch.
 Changed ledger bytes, a new delivery anchor, a different project, a target
 that does not contain reviewed staging, or an omitted task cannot reuse it. Corrections require a new
 published ledger and receipt; existing receipts cannot be edited.
 
 An integrated task without a receipt follows the normal evidence gate. A task
-that deferred evidence at park must have a valid listed receipt or a passed
+that deferred evidence at park must have a valid listed receipt (including a
+covering release verdict for release-owned Tier 1 work) or a passed
 explicit independent QA round covering its current delivery anchor before it
 can close. Pending, failed or older-tip rounds do not clear this debt. The
 obligation survives changes to surface classification, gate settings and
@@ -76,3 +142,12 @@ available.
 
 Batch receipts and deferred obligations are local project records in
 `.cas/cas.db` (migration 276). They do not create a cloud synchronization lane.
+
+A successor supervisor's startup recovery list spans all review tiers, rather
+than only release-owned Tier 1 deliveries. Each integrated, content-preserved
+project delivery without a live review or adverse verdict shows its current
+hold and a close action. Tier 0 still passes mechanical gates; dedicated
+reviews retain their own verdicts, and Tier 2 still needs an adversarial probe.
+CI overrides remain subject to independent QA. Close rechecks these gates; appearing in recovery never approves or closes a delivery.
+Unreadable verification metadata skips and reports that row while preserving
+the other recovery actions and the inherited supervisor handoff.

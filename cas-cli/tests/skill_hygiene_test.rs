@@ -35,6 +35,10 @@ fn ct2_p1_skill_one_message_per_event() {
         "send one `merge_request=true` message",
         "do not send a separate prose summary or ACK before",
         "wait for the supervisor's",
+        "summary or echo the close relay",
+        "send no follow-up update",
+        "Don't re-close or block on it",
+        "Stay available after handoff",
     ] {
         assert!(
             skill.contains(phrase),

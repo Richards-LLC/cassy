@@ -1,5 +1,6 @@
-//! Shared read model for Claude and Codex accounts. No credentials leave this
-//! module or the limits adapter. Legacy folder aliases remain launch keys;
+//! Shared read model for Claude and Codex accounts. Identity comes only from
+//! non-credential metadata; login and capacity come from official binary output.
+//! Unknown provider fields remain absent. Legacy folder aliases remain launch keys;
 //! display names are presentation only. Consumers should require `LoggedIn`,
 //! known usage, and their own flag policy before automatically choosing an account.
 
@@ -83,28 +84,20 @@ pub struct Account {
     pub display_name: String,
     /// Typed provider account/workspace identity, or an explicit email fallback.
     pub identity: Option<AccountIdentity>,
-    /// Subscription tier from credentials/claims or the usage API, if known.
+    /// Subscription tier from provider metadata or native usage output, if known.
     pub plan: Option<String>,
     /// Current probe result, with explicit rejection and missing-login states.
     pub login_state: LoginState,
     /// Empty means usage unknown, not zero usage.
     pub windows: Vec<UsageWindow>,
+    /// When native capacity was observed; absent means no accepted observation.
+    pub usage_observed_at: Option<DateTime<Utc>>,
     /// Independent findings; selection policies decide which to exclude.
     pub flags: AccountFlags,
 }
 
 fn json_file(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-}
-
-fn codex_claims(auth: &serde_json::Value) -> Option<serde_json::Value> {
-    use base64::Engine as _;
-    let token = auth.pointer("/tokens/id_token")?.as_str()?;
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
 }
 
 fn string_at(value: &serde_json::Value, pointer: &str) -> Option<String> {
@@ -138,33 +131,11 @@ fn metadata(
                     email: None,
                 })
             });
-            let plan = json_file(&folder.join(provider.credentials()))
-                .and_then(|value| string_at(&value, "/claudeAiOauth/subscriptionType"));
-            (identity, plan)
+            (identity, None) // Never load Claude secret-bearing credential JSON.
         }
-        Provider::Codex => {
-            let auth = json_file(&folder.join(provider.credentials())).unwrap_or_default();
-            let claims = codex_claims(&auth).unwrap_or_default();
-            let account = string_at(&auth, "/tokens/account_id")
-                .or_else(|| string_at(&auth, "/account_id"))
-                .or_else(|| {
-                    string_at(
-                        &claims,
-                        "/https:~1~1api.openai.com~1auth/chatgpt_account_id",
-                    )
-                });
-            let identity = account.map(|account| {
-                let workspace = string_at(&auth, "/tokens/workspace_id")
-                    .or_else(|| string_at(&auth, "/workspace_id"));
-                AccountIdentity {
-                    account_id: Some(account),
-                    workspace_id: workspace,
-                    email: None,
-                }
-            });
-            let plan = string_at(&claims, "/https:~1~1api.openai.com~1auth/chatgpt_plan_type");
-            (identity, plan)
-        }
+        // Codex publishes capacity/plan in native rollout metadata, but no
+        // demonstrated non-secret email/account/workspace identity source.
+        Provider::Codex => (None, None),
     }
 }
 
@@ -197,6 +168,7 @@ pub(crate) fn account(provider: Provider, home: &Path, folder: PathBuf) -> Accou
         identity,
         plan,
         windows: Vec::new(),
+        usage_observed_at: None,
         login_state: if never {
             LoginState::NeverLoggedIn
         } else {
@@ -338,43 +310,6 @@ fn refresh(accounts: &mut [Account]) {
     mark_duplicates_and_order(accounts);
 }
 
-/// Refresh picker capacity through the same identity-sharing path as the list.
-pub(crate) fn picker_usage_summaries(
-    provider: Provider,
-    folders: Vec<(String, PathBuf)>,
-    deadline: Duration,
-) -> std::collections::HashMap<String, String> {
-    let mut rows: Vec<_> = folders
-        .into_iter()
-        .map(|(name, folder)| {
-            let home = folder.parent().unwrap_or(Path::new("/"));
-            let mut row = account(provider, home, folder.clone());
-            row.name = name;
-            row
-        })
-        .collect();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let until = Instant::now() + deadline;
-    for (i, row) in rows.iter().enumerate() {
-        let sender = sender.clone();
-        let folder = row.folder.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send((
-                i,
-                None,
-                Some(crate::cli::limits::account_usage(provider, &folder)),
-            ));
-        });
-    }
-    drop(sender);
-    receive_updates(&mut rows, receiver, until);
-    rows.into_iter()
-        .filter_map(|row| {
-            crate::cli::limits::summarize_windows(&row.windows).map(|summary| (row.name, summary))
-        })
-        .collect()
-}
-
 type ProbeUpdate = (
     usize,
     Option<LoginState>,
@@ -433,6 +368,7 @@ fn receive_updates(
             if let Some(own) = &mut usage[i] {
                 own.plan = snapshot.plan.clone();
                 own.windows = snapshot.windows.clone();
+                own.observed_at = snapshot.observed_at;
             } else {
                 usage[i] = Some(snapshot.clone());
             }
@@ -449,6 +385,7 @@ fn receive_updates(
             } else if snapshot.authenticated {
                 set_login(a, LoginState::LoggedIn);
             }
+            a.usage_observed_at = snapshot.observed_at;
             a.windows = snapshot.windows;
         }
     }
@@ -457,6 +394,17 @@ fn receive_updates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_plan_does_not_come_from_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(".claude-fixture");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"fixture-only","subscriptionType":"max"}}"#).unwrap();
+        let row = account(Provider::Claude, home.path(), folder);
+        assert!(row.plan.is_none(), "credential contents must not supply plan metadata");
+    }
 
     #[test]
     fn deadline_keeps_completed_usage_and_leaves_pending_accounts_unknown() {
@@ -534,11 +482,15 @@ mod tests {
                 let row = rows.iter().find(|a| a.name == name).unwrap();
                 assert_eq!(
                     row.flags.duplicate_of.is_some(),
-                    duplicate,
+                    duplicate && provider == Provider::Claude,
                     "{provider:?}/{name}"
                 );
-                assert_eq!(row.display_name, email);
+                assert_eq!(row.display_name, if provider == Provider::Claude { email } else { name });
                 let identity = serde_json::to_value(&row.identity).unwrap();
+                if provider == Provider::Codex {
+                    assert!(row.email.is_none() && identity.is_null(), "secret-only metadata stays unknown");
+                    continue;
+                }
                 assert!(
                     identity.is_object(),
                     "identity must be structured, not JSON text"

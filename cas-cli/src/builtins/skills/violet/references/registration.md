@@ -79,6 +79,7 @@ Use the endpoint printed by `cas integrate violet` for `<HUB_MCP_URL>` in the re
 allowlist = [
   "violet.violet_read",
   "violet.violet_post",
+  "violet.violet_reconcile_reply",
 ]
 
 [servers.violet]
@@ -119,9 +120,9 @@ machine. A checkout with no `.cas/proxy.toml` inherits the machine-level hub
 server and allowlist; a checkout with its own file uses that file's allowlist
 as the dispatch policy. If `mcp_search` for `server:violet` returns no
 tools while the machine registration is healthy, run `cas doctor` in that
-checkout and add the exact `violet.violet_read` and
-`violet.violet_post` entries it prints before restarting `cas serve`.
-Do not copy a token into the project file. Verify the fresh worker sees both
+checkout and add the exact `violet.violet_read`, `violet.violet_post` and
+`violet.violet_reconcile_reply` entries it prints before restarting `cas serve`.
+Do not copy a token into the project file. Verify the fresh worker sees all three
 tools before starting a release posting run.
 
 ## Codex
@@ -180,7 +181,7 @@ no base64 passes through the model. Codes are in
 ## Verify without leaking
 
 - Check tool names, not connection status. An authenticated `tools/list` showing
-  `violet_read` and `violet_post` is the proof; deprecated aliases may also
+  `violet_read`, `violet_post` and `violet_reconcile_reply` is the proof; deprecated aliases may also
   appear; `Connected` is not.
 - A missing bearer must return HTTP 401 with no tool names. Separate an empty
   variable from a wrong one by recording header state only, as

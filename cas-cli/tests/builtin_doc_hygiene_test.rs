@@ -657,6 +657,11 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "skills/cas-qa-craft/references/evidence-ledger.md",
+        "journey",
+        "Names the registry-backed journey IDs prefilled by cas qa ledger init.",
+    ),
+    (
         "skills/cas-codebase-design/references/design-it-twice.md",
         "leverage",
         "Architecture term for caller benefit used to compare the proposed interfaces.",
@@ -675,6 +680,11 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "skills/cas-cut-release/SKILL.md",
         "journey",
         "Names the journey-eval QA command and required release evidence.",
+    ),
+    (
+        "skills/cas-supervisor/references/workflow.md",
+        "journey",
+        "Names the registry-backed QA journeys each verification tier walks.",
     ),
     (
         "skills/cas-cut-release/references/failure-log.md",
@@ -935,5 +945,38 @@ fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
         failures.is_empty(),
         "builtin text contracts failed:\n{}",
         failures.join("\n")
+    );
+}
+
+/// cas-1c1f: a supervisor's plain pane exit shuts its whole factory down, so no
+/// shipped text may present one as something its workers outlive. Only
+/// `factory action=restart_supervisor` spares them (cas-b492).
+#[test]
+fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
+    let unsafe_claim = regex::RegexBuilder::new(
+        r"fresh supervisor session|restart (?:the|each|your)(?: affected)? supervisor session|recycle affected sessions|workers? keeps? running in (?:their|its) own panes?|workers? survives? (?:a|the|your) supervisor restart",
+    )
+    .case_insensitive(true)
+    .build()
+    .unwrap();
+    let mut violations = Vec::new();
+    let mut inspect = |source: &str, path: &str, content: &str| {
+        for hit in unsafe_claim.find_iter(content) {
+            violations.push(format!("{source} {path}: {:?}", hit.as_str()));
+        }
+    };
+    for (catalog_name, catalog) in shipped_catalogs() {
+        for file in catalog {
+            inspect(catalog_name, file.path, file.content);
+        }
+    }
+    for job in MAINTENANCE_JOBS {
+        inspect("MAINTENANCE_JOBS", job.name, job.body);
+    }
+    assert!(
+        violations.is_empty(),
+        "a plain supervisor exit stops every worker; name that cost, the MCP reconnect \
+         route and restart_supervisor instead:\n{}",
+        violations.join("\n")
     );
 }

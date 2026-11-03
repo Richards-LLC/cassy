@@ -12,25 +12,36 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
   await page.addInitScript(() => { Math.random = () => 0.5; });
   await hub.install();
   let blocked = false;
+  let blockedRequests = 0;
   await page.route("https://atlas.test/v1/**", route => {
     // Chrome exposes a blocked preflight/LNA request as an opaque fetch
     // rejection. The credential-free health check can still succeed.
-    if (blocked && new URL(route.request().url()).pathname !== "/v1/health") return route.abort("failed");
+    if (blocked && new URL(route.request().url()).pathname !== "/v1/health") {
+      blockedRequests++;
+      return route.abort("failed");
+    }
     return route.fallback();
   });
   await page.goto("./");
   await hub.seedPaired();
   await clock.start();
   await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   const header = page.locator("#conversation-connection");
   await expect(header).toHaveText(" · Live");
+  const pairingExchanges = hub.exchanges.length;
   await journey.stage("A blocked authenticated route keeps the active pairing and retries", async () => {
     blocked = true;
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
     await clock.advance(1_000);
-    await expect(header).toHaveText(" · Reconnecting");
+    // cas-ee74: an opaque HTTP failure does not condemn a machine whose
+    // independent transport/health still responds. Recovery may already be
+    // Live at this tick; the contract is retained pairing, not a mandatory
+    // dwell in Reconnecting. Prove the blocked route was actually exercised.
+    expect(blockedRequests).toBeGreaterThan(0);
+    await expect(header).toHaveText(/^ · (Live|Reconnecting)$/);
+    expect(hub.exchanges).toHaveLength(pairingExchanges);
     await expect(page.getByText(/needs pairing|was revoked|no longer paired/i).filter({ visible: true })).toHaveCount(0);
   });
   await journey.stage("Once the browser allows the route, the conversation comes back by itself", async () => {
@@ -54,6 +65,7 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
       return page.getByRole("log").getByText("The connection recovered.", { exact: true }).isVisible();
     }).toBe(true);
     expect(hub.sends).toHaveLength(1);
+    expect(hub.exchanges).toHaveLength(pairingExchanges);
     expect(errors).toEqual([]);
   });
 });

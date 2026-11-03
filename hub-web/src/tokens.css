@@ -78,7 +78,8 @@
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -200,7 +201,8 @@
     --color-verdict: #A9B3FF;
     --color-action: #A9B3FF;
     --color-focus: #A9B3FF;
-    --state-idle: #9AA1AF;
+    --state-idle: #3E8A63;
+    --state-off: #9AA1AF;
     --color-series-neutral: #9AA1AF;
     --canvas: #12141A;
     --panel: #191C24;
@@ -322,7 +324,8 @@ html[data-scheme="light"] {
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -443,7 +446,8 @@ html[data-scheme="dark"] {
   --color-verdict: #A9B3FF;
   --color-action: #A9B3FF;
   --color-focus: #A9B3FF;
-  --state-idle: #9AA1AF;
+  --state-idle: #3E8A63;
+  --state-off: #9AA1AF;
   --color-series-neutral: #9AA1AF;
   --canvas: #12141A;
   --panel: #191C24;
@@ -671,6 +675,7 @@ html[data-scheme="dark"] .machine-accent-4 {
   --color-verdict: #A9B3FF;
   --color-action: #A9B3FF;
   --color-focus: #A9B3FF;
-  --state-idle: #9AA1AF;
+  --state-idle: #3E8A63;
+  --state-off: #9AA1AF;
   --color-series-neutral: #9AA1AF;
 }

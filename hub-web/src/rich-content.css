@@ -15,3 +15,9 @@
 .rich-media > p { padding: 12px; font: 13px/1.4 var(--font-ui); text-align: center; }
 .rich-attachment { min-width: 0; max-width: 100%; }
 .rich-attachment > .sheet { width: 100%; box-sizing: border-box; }
+.thread .plate.attachment-thumbnail { display: grid; place-items: center; width: 48px; height: 48px; padding: 0; overflow: hidden; background: var(--sheet-bg); color: var(--ink); }
+.thread .plate.attachment-thumbnail.thumbnail-failed { background: var(--crit-bg); color: var(--crit-fg); }
+.rich-thumbnail > img { object-fit: cover; }
+.rich-thumbnail > p { display: none; }
+.preview-note { display: block; color: var(--ink-mid); font: var(--weight-regular) 12px/1.4 var(--font-ui); }
+.bub > .rich-attachment + .sheet, .bub > .sheet + .rich-attachment, .bub > .rich-attachment + .rich-attachment { margin-top: var(--space-2); }

@@ -12,7 +12,16 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
-1. Start from the code-done epic branch. CHANGELOG `[Unreleased]` holds the
+Release prep checklist: compare the locked `@playwright/test` version in
+`hub-web/package-lock.json` with `npm view @playwright/test version` (run from
+the checkout). Flag **more than one minor behind** in the prep notes; a major
+gap also needs review. Upgrade and refresh Playwright guidance before the cut,
+or record the supervisor's explicit deferral. After an upgrade, regenerate
+agents in scratch with `npx playwright init-agents --loop=<harness>` and review
+them against `cas-playwright-debug`'s healer guard before adopting any changes.
+
+1. Start from the epic branch only after closeout is complete: one full review,
+   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` holds the
    release entries. `scripts/release.sh --next-version` prints the version and
    the draft path; write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
@@ -42,9 +51,12 @@ macOS: compile-checked and launch-tested; suite runs on Linux.
    run's archives by tree id, runs the ISA audit and the operator launch smoke
    on the packaged Linux and macOS assets, creates the annotated tag and the
    GitHub release, and dispatches the install-path proof. The host installs
-   within a minute through the `cassy-install-on-publish` timer (set it up
-   once per host with `scripts/install-on-publish.sh --install`), and the
-   notes print one timer, PR opened to installed; confirm: `cas --version`.
+   through the `cassy-install-on-publish` systemd user timer on Linux or the
+   `dev.cassy.install-on-publish` LaunchAgent on macOS (set it up once per host
+   with `scripts/install-on-publish.sh --install`). While the user session is
+   active it checks every minute; after a successful update and version check,
+   the notes record the first host's actual install time and PR opened to
+   installed timer. Confirm the local version with `cas --version`.
 6. Off the clock: fill the draft checksums with
    `release-published-receipt.sh --write-draft`, post through the Violet hub
    (`cas-release-notes`; never a personal Slack route), and publish the report

@@ -46,37 +46,117 @@ class CandidateVersionTests(unittest.TestCase):
             git("config", "user.email", "fixture@example.invalid")
             (repo / "cas-cli").mkdir()
             (repo / "cas-cli/Cargo.toml").write_text('[package]\nversion = "9.99.7"\n')
+            (repo / "cas-cli/src").mkdir()
+            (repo / "cas-cli/src/main.rs").write_text('fn main() {}\n')
+            (repo / 'hub-web/src').mkdir(parents=True)
+            (repo / 'hub-web/dist').mkdir()
+            (repo / 'scripts').mkdir()
+            import shutil
+            shutil.copy2(Path(__file__).with_name('journey_dist.py'),repo/'scripts/journey_dist.py')
+            for name, content in [('index.html','<link href="app.css">'),('app.js','fixture app'),('app.css','.old {}')]:
+                (repo/'hub-web/dist'/name).write_text(content)
+            (repo/'hub-web/src/app.css').write_text('.old {}')
             git("add", ".")
             git("commit", "-qm", "fixture")
+            (repo/'hub-web/src/app.css').write_text('.supervisor-version { color: green; }')
+            git('add','hub-web/src/app.css')
+            git('commit','-qm','source-only Commander change')
             revision = git("rev-parse", "HEAD")
             version = f"cas 9.99.7 ({revision[:7]} 2026-10-21)"
             binary = root / "binary"
-            binary.write_text(f"#!{sys.executable}\n" + f"print({version!r})\n" + """
-import json, os
+            binary.write_text(f"#!{sys.executable}\n" + f"VERSION = {version!r}\n" + """
+import json, os, sys
 from pathlib import Path
-source = Path(json.loads(Path(os.environ['FIXTURE_TARGET_RECORD']).read_text())['target']) / 'debug/cas'
-replacement = source.with_name('cas-replacement')
-replacement.write_bytes(b'concurrent build replaced the source binary')
-os.replace(replacement, source)
+assets = EMBEDDED_FIXTURE
+if '--version' in sys.argv:
+    print(VERSION)
+    source = Path(json.loads(Path(os.environ['FIXTURE_TARGET_RECORD']).read_text())['target']) / 'debug/cas'
+    replacement = source.with_name('cas-replacement')
+    replacement.write_bytes(b'concurrent build replaced the source binary')
+    os.replace(replacement, source)
+elif sys.argv[1] == 'hub':
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_GET(self):
+            routes = {'/':'index.html','/commander':'index.html','/commander/':'index.html',
+                      '/commander/app.js':'app.js','/commander/app.css':'app.css'}
+            key = routes.get(self.path)
+            if key not in assets:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(assets[key].encode())
+    server = HTTPServer(('127.0.0.1',0),Handler)
+    record = Path(os.environ['HOME'])/'.cas/hub/process.json'
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({'pid':os.getpid(),'port':server.server_port}))
+    server.serve_forever()
 """)
             binary.chmod(0o700)
             target_record = root / "target-record"
             compiler = tools / "cargo"
             compiler.write_text(f"#!{sys.executable}\n" + """
-import json, os, shutil
+import json, os, hashlib, subprocess
 from pathlib import Path
 out = Path(os.environ['CARGO_TARGET_DIR'])
 (out / 'debug').mkdir(parents=True, exist_ok=True)
-shutil.copy2(os.environ['FIXTURE_BINARY'], out / 'debug/cas')
+dist = Path.cwd()/'hub-web/dist'
+assets = {p.name:p.read_text() for p in dist.iterdir() if p.is_file()}
+if os.environ.get('FIXTURE_STALE'):
+    assets['app.css'] = '.old {}'
+body = Path(os.environ['FIXTURE_BINARY']).read_text().replace('EMBEDDED_FIXTURE',repr(assets))
+# Model build.rs's real Git dirty check rather than always stamping a clean version.
+if os.environ.get('FIXTURE_DIRTY_SOURCE'):
+    with Path('cas-cli/src/main.rs').open('a') as source:
+        source.write('// source changed during build\\n')
+if subprocess.run(['git','diff','--quiet','HEAD']).returncode:
+    body = body.replace(' 2026-10-21)', '-dirty 2026-10-21)')
+(out/'debug/cas').write_text(body)
+(out/'debug/cas').chmod(0o700)
 Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
-    'target': str(out), 'owner': (out / os.environ['FIXTURE_TARGET_OWNER']).is_file()
+    'target': str(out), 'owner': (out / os.environ['FIXTURE_TARGET_OWNER']).is_file(),
+    'sha256':hashlib.sha256(body.encode()).hexdigest()
 }))
 """)
             compiler.chmod(0o700)
+            npm = tools/'npm'
+            npm.write_text(f'#!{sys.executable}\n'+'''
+import shutil,sys
+from pathlib import Path
+if sys.argv[1]=='run':
+    out=Path(sys.argv[sys.argv.index('--outDir')+1])
+    shutil.copytree('dist',out)
+    (out/'app.css').write_bytes(Path('src/app.css').read_bytes())
+''')
+            npm.chmod(0o700)
             legacy = repo / "target"
             legacy.mkdir()
             (legacy / "review-only").write_bytes(b"unmanaged output")
             destination = root / "artifacts/candidate"
+            # A build killed mid-compile never unwinds; one still running survives.
+            def hold_scratch(name):
+                holder = subprocess.Popen([sys.executable, '-c', f'''
+import signal, subprocess, sys
+sys.path.insert(0, {str(Path(__file__).parent)!r})
+import release_scratch
+owned = release_scratch.OwnedDirectory({str(scratch.name + ".qa-candidate-" + name)!r}, {str(scratch.parent)!r})
+subprocess.check_call(["git", "-C", {str(repo)!r}, "worktree", "add", "-q", "--detach", str(owned.path / "checkout"), "HEAD"])
+(owned.path / "target").mkdir()
+print(owned.path, flush=True)
+signal.pause()
+'''], stdout=subprocess.PIPE, text=True)
+                self.addCleanup(holder.wait)
+                self.addCleanup(holder.kill)
+                return holder, Path(holder.stdout.readline().strip())
+            killed, abandoned = hold_scratch('killed-')
+            running, retained = hold_scratch('running-')
+            killed.kill()
+            killed.wait()
+            stage = root / 'artifacts/.candidate-killed'
+            stage.mkdir(parents=True)
+            (stage / 'cas').write_bytes(b'partial binary')
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
                        FIXTURE_BINARY=str(binary), FIXTURE_TARGET_RECORD=str(target_record),
                        FIXTURE_TARGET_OWNER=candidate['release_scratch'].OWNER)
@@ -86,12 +166,54 @@ Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
                  mock.patch.object(candidate['release_env'], 'resolve_zig',
                                    return_value=SimpleNamespace(path=str(binary), source='fixture')):
                 result = candidate['build'](repo, revision, destination)
+                self.assertFalse(abandoned.exists(), 'the next build sweeps a killed build')
+                self.assertFalse(stage.exists(), 'the next build sweeps its partial publication')
+                self.assertNotIn(str(abandoned), git('worktree', 'list', '--porcelain'))
+                self.assertTrue(retained.exists(), 'a held lease keeps a running build')
+                self.assertIn(str(retained), git('worktree', 'list', '--porcelain'))
+                receipt = json.loads((destination/'RECEIPT.json').read_text())
+                self.assertEqual(receipt['web']['source_sha'],revision)
+                self.assertEqual(receipt['web']['dist_sha256'],receipt['web']['served_dist_sha256'])
+                original = (destination/'RECEIPT.json').read_bytes()
+                cited = destination.resolve()/'cas'
+                cited_bytes = cited.read_bytes()
+                self.assertEqual(result['candidate_dir'],str(cited.parent))
+                self.assertEqual(cited.parent.name,revision)
+                # A later proof build for the task leaves a cited candidate alone.
+                git('commit','-q','--allow-empty','-m','later proof')
+                later = git('rev-parse','HEAD')
+                later_binary = root/'later-binary'
+                later_binary.write_text(binary.read_text().replace(revision[:7],later[:7]))
+                later_binary.chmod(0o700)
+                with mock.patch.dict(os.environ,{'FIXTURE_STALE':'1','FIXTURE_BINARY':str(later_binary)}), \
+                     self.assertRaisesRegex(ValueError,'served.*digest'):
+                    candidate['build'](repo,later,destination)
+                self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                # A source change during the compile stamps -dirty, and the candidate is refused.
+                with mock.patch.dict(os.environ,{'FIXTURE_DIRTY_SOURCE':'1','FIXTURE_BINARY':str(later_binary)}), \
+                     self.assertRaisesRegex(ValueError,'unexpected format.*-dirty'):
+                    candidate['build'](repo,later,destination)
+                self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                record_before = target_record.read_bytes()
+                with mock.patch.dict(os.environ,{'FIXTURE_BINARY':str(later_binary)}):
+                    candidate['build'](repo,later,destination)
+                self.assertEqual(destination.resolve().name,later)
+                self.assertEqual(cited.read_bytes(),cited_bytes)
+                # Asking again for a published revision reuses it without a compile.
+                target_record.unlink()
+                again = candidate['build'](repo,revision,destination)
+                self.assertFalse(target_record.exists())
+                self.assertEqual(again['candidate_dir'],str(cited.parent))
+                self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
+                self.assertEqual(destination.resolve(),cited.parent)
+                target_record.write_bytes(record_before)
             record = json.loads(target_record.read_text())
             target = Path(record['target'])
             self.assertTrue(target.is_relative_to(scratch.parent), str(target))
             self.assertTrue(record['owner'], 'compiler target must hold bounded-cache provenance')
             self.assertFalse(target.exists(), 'candidate output must be pruned after artifact copy')
-            self.assertEqual((destination / 'cas').read_bytes(), binary.read_bytes())
+            self.assertIn(b'.supervisor-version', (destination/'cas').read_bytes())
+            self.assertEqual(git('diff','--','hub-web/dist'),'')
             self.assertEqual(result['version'], version)
             # pin: SHA256 is the public receipt field for the published candidate bytes.
             self.assertEqual(json.loads((destination / 'RECEIPT.json').read_text())['sha256'],

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { planSupervisorSend } from "./supervisor-message";
+import { visibleCatalog, sessionReachable } from "./worker-visibility";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +77,24 @@ function said(id: number, kind: OperatorTurnKind, message: string): OperatorRepl
   return { notification_id: id, reply_to: null, message, summary: "", device_id: "d", kind };
 }
 
+it("preserves literal emoji text in sent bubbles, list previews and waiting questions", () => {
+  const text = "Ready <script> & 👍🏽 👩🏽‍💻 🇯🇵";
+  openShell();
+  const history = new ConversationHistory();
+  history.submit("emoji", "patient-pelican-9", text, at(9, 0));
+  history.reply(said(1, "blocker", text), at(9, 1));
+  const view = new ConversationView(document, history, { supervisor: "patient-pelican-9", header: false });
+  document.body.append(view.element); view.update();
+  syncContextRail(document, { history, progress: false, attention: 0 });
+  const list = document.createElement("div");
+  new ConversationList().render(list, [{ key: "atlas:s", machineId: "atlas", session: "s", supervisor: "patient-pelican-9", host: "Atlas", freshness: "now", connection: "Live", preview: text, attention: 0, selected: false }], () => {});
+  for (const node of [view.element.querySelector('.bub'), list.querySelector('.conversation-preview'), document.querySelector('.context-text')]) {
+    expect(node?.textContent).toContain(text);
+    expect([...node!.querySelectorAll('.emoji-text')].map(span => span.textContent)).toEqual(["👍🏽", "👩🏽‍💻", "🇯🇵"]);
+    expect(node!.querySelector('script')).toBeNull();
+  }
+});
+
 describe("only real asks and blockers wait on the operator (cas-0546 condition 3)", () => {
   beforeEach(() => { document.body.replaceChildren(); });
 
@@ -132,4 +152,44 @@ describe("only real asks and blockers wait on the operator (cas-0546 condition 3
     expect(list.querySelector<HTMLElement>(".conversation-row")!.dataset.waiting).toBe("true");
     expect(list.querySelector(".conversation-flag")?.getAttribute("aria-label")).toBe("2 waiting for you");
   });
+});
+
+it("ends the thread, row and composer together after the supervisor exits, naming surviving workers", () => {
+  const ended = {
+    at: new Date(2026, 9, 28, 11, 24).toISOString(),
+    reason: "prompt_input_exit",
+    workers_stopped: ["worker-a", "worker-b"],
+    orphans: ["worker-c"],
+    unverified: ["worker-d"],
+  };
+  const composer = document.createElement("section");
+  composer.innerHTML = '<textarea id="message-text"></textarea><button id="message-send">Send</button><p id="message-status"></p>';
+  const grid = document.createElement("section");
+  const model = { selected: true, supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", machineId: "atlas", loaded: true, paired: true, launch: "ready" as const, ended };
+  const shell = arrangeConversationShell(document, model, { grid, composer });
+  const options = { supervisor: "patient-pelican-9", header: false, sessionEnd: () => ended };
+  const view = new ConversationView(document, new ConversationHistory(), options);
+  ensureConversationStage(grid).append(view.element);
+  document.body.replaceChildren(shell);
+  view.update();
+
+  expect(shell.querySelector("#conversation-connection")?.textContent).toContain("Ended");
+  expect(view.element.textContent).toContain("Session ended");
+  expect(view.element.textContent).toContain("/exit");
+  expect(view.element.textContent).toMatch(/2 workers stopped at 11:24\s*AM/);
+  expect(view.element.textContent).toContain("worker-c");
+  expect(view.element.textContent).toContain("Stop not verified: worker-d");
+  expect(composer.querySelector<HTMLButtonElement>("#message-send")!.disabled).toBe(true);
+  expect(composer.textContent).toMatch(/session ended.*New session/is);
+
+  const container = document.createElement("div");
+  shell.append(container);
+  const row = { key: "atlas:s", machineId: "atlas", session: "s", supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", freshness: "just now", connection: "Live", preview: "Working", attention: 0, selected: true, ended };
+  new ConversationList().render(container, [row], () => {});
+  expect(container.textContent).toContain("Ended");
+  expect(container.textContent).not.toContain("Working");
+  const session = { name: "s", supervisor: "patient-pelican-9", workers: ["worker-c"], liveness: "stale_metadata" as const, ended };
+  expect(visibleCatalog([session])).toEqual([]);
+  expect(sessionReachable(session)).toBe(false);
+  expect(planSupervisorSend({ text: "Continue", ended: true, machineLabel: "Atlas", session: "s", supervisor: session.supervisor, daemonAttach: true, scopes: ["message-send"], leaseHeldByMe: true, leaseControllerLabel: undefined })).toMatchObject({ kind: "blocked", block: "ended" });
 });

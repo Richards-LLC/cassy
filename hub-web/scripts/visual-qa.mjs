@@ -13,7 +13,7 @@ export const FIXTURE_NAMES = [
   "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence", "conversation-terminal",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
-  "conversation-rich-content", "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
+  "conversation-code-frames", "conversation-rich-content", "conversation-attachment", "conversation-sent-attachment", "conversation-attachment-failure", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard", "conversation-upload-progress", "conversation-upload-refusal",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
   "conversations-session-end-error",
@@ -56,6 +56,8 @@ export const FIXTURE_NAMES = [
   "launch-account-unavailable",
   "launch-account-default-out",
   "launch-grant-command",
+  "accounts",
+  "accounts-read-only",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

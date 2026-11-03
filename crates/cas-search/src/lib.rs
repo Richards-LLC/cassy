@@ -15,17 +15,10 @@
 //! - [`VectorStore`] - Vector storage and similarity search
 //! - [`TextIndex`] - Full-text (BM25) search index
 //!
-//! # Score Utilities
-//!
-//! The [`scorer`] module provides utilities for:
-//! - Score normalization (min-max, percentile)
-//! - Score combination (weighted, RRF)
-//! - Similarity metrics (cosine, euclidean)
-//!
 //! # Example
 //!
 //! ```rust,ignore
-//! use cas_search::{Bm25Index, SearchDocument, VectorStore, TextIndex, scorer};
+//! use cas_search::{Bm25Index, SearchDocument, VectorStore, TextIndex};
 //!
 //! // Implement SearchDocument for your types
 //! struct MyDoc { /* ... */ }
@@ -35,9 +28,6 @@
 //! let index = Bm25Index::in_memory()?;
 //! index.index(&my_doc)?;
 //! let results = index.search("query", 10)?;
-//!
-//! // Combine BM25 and semantic scores
-//! let combined = scorer::combine_weighted(&bm25_scores, &semantic_scores, 0.4, 0.6);
 //! ```
 
 pub mod bm25;
@@ -46,9 +36,6 @@ pub mod document;
 pub mod error;
 pub mod grep;
 pub mod lmdb_store;
-pub mod metrics;
-pub mod parallel;
-pub mod scorer;
 pub mod traits;
 
 // Re-export core types
@@ -64,28 +51,8 @@ pub use bm25::AsyncBm25Index;
 #[cfg(feature = "parallel")]
 pub use traits::{AsyncEmbedder, AsyncTextIndex, AsyncVectorStore};
 
-// Re-export scorer utilities
-pub use scorer::{
-    calibrate, combine_weighted, cosine_similarity, distance_to_similarity, euclidean_distance,
-    normalize_min_max, normalize_percentile, reciprocal_rank_fusion,
-};
-
 // Re-export grep types
 pub use grep::{GrepMatch, GrepOptions, GrepSearch};
-
-// Re-export metrics types
-pub use metrics::{
-    LatencyTimer, MethodComparison, MethodMetrics, MetricsStore, ResultFeedback, SearchEvent,
-    SearchMethod, generate_event_id,
-};
-
-// Re-export parallel search utilities
-pub use parallel::{
-    ChannelTimer, ParallelCoordinator, ParallelResult, ParallelStats, timed_search,
-};
-
-#[cfg(feature = "parallel")]
-pub use parallel::{ParallelExecutor, SearchTask};
 
 // Re-export external crates for consumers
 /// Re-export heed for vector storage backends

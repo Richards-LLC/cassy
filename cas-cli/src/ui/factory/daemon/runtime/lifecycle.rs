@@ -5,6 +5,8 @@ use crate::ui::factory::daemon::imports::*;
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// How often the loop runs while an urgent inject is settling (cas-786a6).
 const URGENT_INJECT_POLL_MS: u64 = 25;
+/// Cleanup gets the same grace as the director shutdown drain, never forever.
+const WORKER_CLEANUP_EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Stable identity for one alarm episode, independent of delivery retries.
 /// Session scope belongs to the caller's outer key. Tuple encoding prevents
@@ -119,10 +121,6 @@ fn page_operator_for_idle_supervisor(
     }
 }
 
-/// How far back an expired verification dispatch is still escalated, so an
-/// upgrade does not page for old history.
-const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
-
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -140,14 +138,22 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
-    let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
-    let expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
+    let since = now - chrono::Duration::hours(
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
+    );
+    let mut expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
         Ok(expired) => expired,
         Err(error) => {
             tracing::warn!(%error, "cas-7456: expired verification dispatches unavailable");
             return 0;
         }
     };
+    // A close retry may already have persisted TimedOut. That dispatch still
+    // owns its one expiry relay, but a finished task no longer needs recovery.
+    let tasks = crate::store::open_task_store_local(cas_dir).ok();
+    expired.retain(|dispatch| !tasks.as_ref().is_some_and(|tasks| {
+        tasks.get(&dispatch.task_id).is_ok_and(|task| task.is_terminal())
+    }));
     let session = std::env::var("CAS_FACTORY_SESSION").ok();
     let supervisor_queue = crate::store::open_supervisor_queue_store(cas_dir).ok();
     let woken = |dispatch: &&cas_types::VerificationDispatch| {
@@ -307,6 +313,17 @@ fn enqueue_worker_attention_relay_for_episode(
     let subject = task_id
         .map(|task| serde_json::json!([worker, task]).to_string())
         .unwrap_or_else(|| worker.to_string());
+    let episode_key = attention_episode_key(kind, &subject, episode_start);
+    if kind == "worker_stalled" {
+        crate::quality_ledger::intervention(
+            cas_dir,
+            cas_store::InterventionKind::StaleAlert,
+            format!("stale_alert|{episode_key}"),
+            task_id,
+            Some(worker),
+            None,
+        );
+    }
     enqueue_worker_attention_relay_detail(
         cas_dir,
         kind,
@@ -314,10 +331,9 @@ fn enqueue_worker_attention_relay_for_episode(
         task_id,
         elapsed_secs,
         &detail,
-        &attention_episode_key(kind, &subject, episode_start),
+        &episode_key,
     )
 }
-
 
 
 /// Persist one confirmed worker stoppage through the same durable supervisor
@@ -379,6 +395,7 @@ pub(super) fn enqueue_worker_unavailable_relay(
 /// cas-2ffe (GH #915): several workers' harnesses exited within the
 /// correlation window. One wake names every worker and its exit status, keyed
 /// on the first exit so a retry or daemon restart cannot repeat it.
+#[cfg(test)]
 pub(super) fn enqueue_correlated_worker_deaths_relay(
     cas_dir: &std::path::Path,
     group: &[super::queue_and_events::ObservedWorkerExit],
@@ -627,6 +644,11 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
+    crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
+        task_id: task_id.into(), pr_number, failed_run_id,
+        occurrence: occurrence.into(), failing_job: failing_job.map(str::to_string),
+    }, chrono::Utc::now());
+
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
@@ -816,6 +838,18 @@ fn enqueue_delivery_pr_merged_wake(
 ) -> Result<(), String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
+
+    crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
+        natural_key: format!("merge_queue|{task_id}|{pr_number}|{merge_commit}"),
+        check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
+        stage: cas_store::CheckStage::Queue,
+        outcome: cas_store::CheckOutcome::Pass,
+        task_id: Some(task_id),
+        sha: Some(merge_commit),
+        minutes: None,
+        link: None,
+        actor: None,
+    });
 
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
@@ -1808,7 +1842,7 @@ mod worker_attention_tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "dispatch-expiry-test");
         let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
-        for id in ["cas-b4d8", "cas-ancient", "cas-due-later"] {
+        for id in ["cas-b4d8", "cas-ancient", "cas-due-later", "cas-finished"] {
             tasks.add(&cas_types::Task::new(id.into(), id.into())).unwrap();
         }
         let now = chrono::Utc::now();
@@ -1818,12 +1852,19 @@ mod worker_attention_tests {
         };
         let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
         dispatch("cas-ancient", now - chrono::Duration::hours(30));
+        dispatch("cas-missing", now - chrono::Duration::minutes(3));
         dispatch("cas-due-later", now + chrono::Duration::minutes(10));
+        dispatch("cas-finished", now - chrono::Duration::minutes(1));
+        cas_store::timeout_verification_dispatch(&cas_dir, "cas-finished", now).unwrap();
+        let mut finished = tasks.get("cas-finished").unwrap();
+        finished.status = cas_types::TaskStatus::Closed;
+        tasks.update(&finished).unwrap();
 
-        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 2);
         escalate_expired_verification_dispatches(&cas_dir, now);
         let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
+        assert_eq!(rows.len(), 2, "one wake per expired dispatch, including a task absent locally: {rows:?}");
+        assert!(rows.iter().any(|row| row.prompt.contains("cas-missing")));
         assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
         // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
         assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
@@ -1978,6 +2019,15 @@ mod worker_attention_tests {
                 && row.prompt.contains("limited-codex")
                 && row.prompt.contains("terminal unavailable state")
         }));
+        // Only the escalated stall is an intervention, and replays are one row.
+        let alerts = cas_store::quality_interventions_since(
+            &cas_dir,
+            cas_store::InterventionKind::StaleAlert,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].task_id.as_deref(), Some("cas-d4ae"));
     }
 
     /// cas-2ffe (GH #915): three simultaneous harness exits reach the
@@ -2976,6 +3026,24 @@ mod worker_attention_tests {
                 .count(),
             1
         );
+        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
+        // A replayed ejection is one failure; the later merge is the pass.
+        let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
+            .unwrap()
+            .into_iter()
+            .map(|event| match event.payload {
+                cas_store::QualityPayload::CheckRun {
+                    stage: cas_store::CheckStage::Queue,
+                    outcome,
+                    ..
+                } => outcome,
+                other => panic!("not a queue check: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
+        );
     }
 
     #[test]
@@ -3286,6 +3354,7 @@ impl FactoryDaemon {
             urgent_injects: Default::default(),
             operator_refresh_requested: false,
             send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
+            supervisor_commands: Default::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
@@ -3477,6 +3546,11 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // A worker's candidate request builds here, with no supervisor turn.
+        let _candidate_queue = crate::factory_candidate_queue::spawn_runner(
+            self.app.cas_dir().to_path_buf(),
+            std::sync::Arc::clone(&self.shutdown),
+        );
         // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
         // and coalesced; input echo is drawn at once. The caps are read once,
         // before this thread becomes a lane.
@@ -3494,6 +3568,7 @@ impl FactoryDaemon {
         // cas-786a6: the loop's prompt-queue handle is opened (schema init
         // once) before this thread becomes a lane, and claims a previous
         // daemon never handed off are released.
+        self.app.resume_deferred_worker_cleanups();
         self.release_orphaned_claims_at_start();
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
@@ -3638,7 +3713,9 @@ impl FactoryDaemon {
                     let outcome = self.apply_spawn_queue_reset(&request);
                     loop_progress.record_reset(outcome);
                 }
+                self.take_supervisor_restart_request();
             }
+            self.advance_supervisor_restart().await;
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
             // Completion-driven acceptance; the ingress owns the 100ms cadence.
@@ -3648,9 +3725,7 @@ impl FactoryDaemon {
 
             // Process pending spawns (non-blocking: git ops run on background thread)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);
-            if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
-                self.process_pending_spawns().await;
-            }
+            self.process_worker_control_tick().await;
 
             // Periodic Cassy data refresh
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
@@ -3696,7 +3771,15 @@ impl FactoryDaemon {
                             watched_branches.insert(branch);
                         }
                     }
+                    let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        // Durable merge intents are independent of reminders and
+                        // model turns. Run normal admission on the blocking pool.
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::factory_ci_retry::retry_pending(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "CI merge retry scan failed");
+                        }
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let supervisor_prs =
                             super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
@@ -3871,6 +3954,18 @@ impl FactoryDaemon {
                 let tick_interval_ms = last_refresh.elapsed().as_secs_f64() * 1000.0;
                 if refresh_due {
                     last_refresh = std::time::Instant::now();
+                    // cas-1b4d: a closed rapid-response window back-fills its
+                    // skipped checks; the store work runs off this loop.
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    if cas_dir.join(crate::rapid_response::STATE_FILE).exists() {
+                        let supervisor = self.app.supervisor_name().to_string();
+                        let session = self.session_name.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::queue_and_events::backfill_closed_rapid_response_windows(
+                                &cas_dir, &supervisor, &session,
+                            )
+                        });
+                    }
                 }
                 // cas-ee9ab: the director reads run on a background thread.
                 // This pass starts one when due and applies whichever read
@@ -4223,6 +4318,9 @@ impl FactoryDaemon {
             &mut director_refresh, store_worker, Duration::from_secs(10),
         ).await;
         drop(director_refresh);
+        // Keep warning writes alive while exit waits for owned filesystem jobs.
+        // At the deadline, unfinished jobs detach with durable recovery intents.
+        self.finish_worker_cleanup_jobs_for_exit(WORKER_CLEANUP_EXIT_BUDGET).await;
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled
@@ -4274,7 +4372,34 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    /// Cleanup on shutdown
+    /// Run the worker-action phase of one real control-loop pass.
+    async fn process_worker_control_tick(&mut self) {
+        // Incoming cleanup intents are independent of the spawn FIFO. Poll
+        // their small metadata queue even when the daemon has no other work.
+        if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
+            // This path already polls before processing the spawn FIFO.
+            self.process_pending_spawns().await;
+        } else {
+            self.poll_worker_cleanup_jobs_at(Instant::now());
+        }
+    }
+
+    /// Drain owned cleanup without letting a hung job prevent daemon teardown.
+    async fn finish_worker_cleanup_jobs_for_exit(&mut self, budget: Duration) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + budget;
+        while self.app.worker_cleanup_threads_running() {
+            self.poll_worker_cleanup_jobs_at(Instant::now());
+            if self.app.worker_cleanup_threads_running() {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() { return self.app.detach_unfinished_worker_cleanups(); }
+                tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+            }
+        }
+        self.app.join_worker_worktree_cleanups();
+        Vec::new()
+    }
+
+    /// Release daemon-owned resources and end this factory session.
     async fn cleanup(&mut self) -> anyhow::Result<()> {
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
@@ -4314,20 +4439,54 @@ impl FactoryDaemon {
         // Kill all PTY process groups. Snapshot worker PGIDs first so their
         // durable ownership records can be removed only after death is
         // confirmed; any survivor stays visible to gc_report.
-        let worker_process_groups: Vec<u32> = self
-            .app
-            .worker_names()
-            .iter()
-            .filter_map(|name| self.app.mux.pane_process_group_id(name))
-            .collect();
+        let worker_names = self.app.worker_names().to_vec();
+        let ownership = crate::ui::factory::process_groups::list(self.app.cas_dir())
+            .unwrap_or_default().into_iter()
+            .filter(|record| record.factory_session == self.session_name)
+            .collect::<Vec<_>>();
+        let mut ended = crate::ui::factory::session::SessionEndOutcome {
+            at: String::new(), reason: "unknown".into(),
+            workers_stopped: Vec::new(), orphans: Vec::new(), unverified: Vec::new(),
+        };
+        // Hooks may already have unregistered the supervisor; retain their original reason.
+        if let Ok(store) = cas_store::SqliteAgentStore::open(self.app.cas_dir())
+            && let Ok(rows) = store.recent_session_ends(&cas_types::Agent::get_or_generate_machine_id(), 100)
+            && let Ok(bytes) = std::fs::read(crate::ui::factory::session::metadata_path(&self.session_name))
+            && let Ok(metadata) = serde_json::from_slice::<crate::ui::factory::protocol::SessionMetadata>(&bytes)
+            && let Some(row) = rows.into_iter().find(|row| row.factory_session.as_deref() == Some(self.session_name.as_str())
+                && row.name == self.app.supervisor_name()
+                && crate::ui::factory::session::supervisor_end_is_current(
+                    &metadata, self.app.mux.pane_process_group_id(self.app.supervisor_name()),
+                    row.pid, row.pid_starttime, &row.registered_at))
+        {
+            ended.reason = row.reason;
+        }
         self.app.mux.kill_all();
-        for pgid in worker_process_groups {
-            self.app.untrack_worker_process_group_if_gone(pgid).await;
+        for record in &ownership {
+            self.app.untrack_worker_process_group_if_gone(record.pgid).await;
+        }
+        let mut names = worker_names;
+        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
+        names.sort(); names.dedup();
+        for name in names {
+            let records: Vec<_> = ownership.iter().filter(|record| record.worker_name == name).collect();
+            use crate::ui::factory::process_groups::{ProcessGroupStatus, status};
+            if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
+                ended.orphans.push(name);
+            } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
+                ended.workers_stopped.push(name);
+            } else {
+                ended.unverified.push(name);
+            }
+        }
+        ended.at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = self.session_manager.record_ended(&self.session_name, ended) {
+            tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
 
-        // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
-        // reminders before their agents are unregistered.
-        self.app.rearm_held_reminders_at_shutdown(&self.session_name);
+        // A shutdown ends every hold; cancel worker reminders before their
+        // agents are unregistered.
+        self.app.cancel_worker_reminders_at_shutdown(&self.session_name);
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
@@ -4398,6 +4557,7 @@ impl FactoryDaemon {
 impl FactoryDaemon {
     /// One loop pass's share of the two-second director refresh (cas-ee9ab).
     /// Returns true when a director read was applied.
+    #[cfg(test)]
     pub(super) async fn director_refresh_pass(
         &mut self,
         refresh: &mut super::director_refresh::DirectorRefresh,
@@ -4417,12 +4577,18 @@ impl FactoryDaemon {
         loop_progress: &super::loop_watchdog::LoopProgress,
         tick_interval_ms: f64,
     ) -> bool {
+        // Dynamic spawns and recycles also change the durable session roster,
+        // even when the director has no lifecycle events to deliver.
+        self.flush_epic_focus_write(store_worker);
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
         let cas_dir = self.app.cas_dir().to_path_buf();
         for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
             self.finish_merge_alert_inbox(completed).await;
         }
+        self.relay_jobs.submit_worker_task_queue_reconciliation(
+            &mut self.queue_jobs, self.app.cas_dir().to_path_buf(), self.session_name.clone(),
+        );
         self.relay_jobs.submit_external_work_reconciliation(
             &mut self.queue_jobs,
             move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),
@@ -4632,13 +4798,30 @@ impl FactoryDaemon {
         // the actionable cases through the durable supervisor
         // wake lane before ordinary prompt injection.
         // GH #1165: on the store worker, in event order.
-        if !delivery_events.is_empty() {
+        let blocked_tasks: Vec<_> = self.app.director_data().ready_tasks.iter()
+            .filter(|task| task.status == cas_types::TaskStatus::Blocked
+                && task.assignee.as_deref().is_some_and(|assignee| {
+                    let name = self.app.director_data().agent_id_to_name.get(assignee).map(String::as_str).unwrap_or(assignee);
+                    self.app.worker_names().iter().any(|worker| worker == name)
+                }))
+            .filter(|_| self.app.auto_prompt_enabled() && self.app.auto_prompt_config().on_task_blocked)
+            .map(|task| task.id.clone()).collect();
+        if !delivery_events.is_empty() || !blocked_tasks.is_empty() {
             let cas_dir = self.app.cas_dir().to_path_buf();
             let events = delivery_events
                 .iter()
                 .map(|event| (event.clone(), self.app.worker_attention_episode_start(event)))
                 .collect::<Vec<_>>();
             store_worker.submit("worker attention relays", move || {
+                // Reconcile even on a quiet refresh: an owned dispatch can
+                // expire without another worker turn or a status transition.
+                for task in &blocked_tasks {
+                    if let Err(error) = crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert(
+                        &cas_dir, task, chrono::Utc::now(),
+                    ) {
+                        tracing::warn!(task_id = %task, %error, "blocked lifecycle reconciliation failed");
+                    }
+                }
                 for (event, episode_start) in &events {
                     enqueue_worker_attention_relay_for_episode(&cas_dir, event, *episode_start);
                 }
@@ -4843,6 +5026,15 @@ impl FactoryDaemon {
 
     /// Hand the latest epic-focus write to the store worker (cas-5e72).
     pub(super) fn flush_epic_focus_write(&mut self, store_worker: &super::store_worker::StoreWorker) {
+        if let Some((path, workers)) = self.app.take_worker_roster_write() {
+            store_worker.submit("worker roster metadata", move || {
+                if let Err(error) = crate::ui::factory::app::update_session_metadata_at(&path, |metadata| {
+                    metadata.workers = workers;
+                }) {
+                    tracing::warn!(%error, "failed to persist worker roster");
+                }
+            });
+        }
         if let Some((path, epic_id)) = self.app.take_epic_focus_write() {
             store_worker.submit("epic focus metadata", move || {
                 crate::ui::factory::app::persist_epic_focus_at(&path, epic_id.as_deref());
@@ -4852,8 +5044,8 @@ impl FactoryDaemon {
 
     /// Route one revalidated director prompt to its recipient: a stall nudge
     /// to the durable queue, an assignment through the assignment row, an
-    /// unready pane through the queue, and everything else straight to the
-    /// recipient's inbox or PTY.
+    /// supervisor wake through the queue, an unready worker pane through the
+    /// queue, and other worker messages to the recipient's inbox or PTY.
     ///
     /// `assignment` is the assignment state read off the loop with the
     /// prompt's re-check (cas-4491f). `None` reads it here: only the paths
@@ -4867,6 +5059,19 @@ impl FactoryDaemon {
         assignment: Option<crate::ui::factory::app::AssignmentRead>,
     ) {
         use crate::ui::factory::app::AssignmentRead;
+        // A green delivery has one durable reservation shared with later park
+        // and manual merge requests. Never bypass that queue via direct PTY or
+        // native inbox transport. Red/unknown decision prompts keep their lane.
+        if prompt.is_merge_ready() {
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            store_worker.submit("director merge readiness", move || {
+                if let Err(error) = super::delivery::enqueue_merge_ready_prompt(&cas_dir, &session, &prompt) {
+                    tracing::warn!(%error, "director merge readiness enqueue failed");
+                }
+            });
+            return;
+        }
         // A routine nudge has one queryable row and uses the queue's
         // busy-recipient gate. Never write it directly into a Teams inbox.
         if let Some(task_id) = prompt.stall_nudge_task.clone() {
@@ -4948,7 +5153,10 @@ impl FactoryDaemon {
             }
             AssignmentRead::NotAssignment | AssignmentRead::Unavailable | AssignmentRead::Unread => {}
         }
-        // cas-ae6d (GH #100): a loss-intolerant prompt (today:
+        // Every supervisor director wake needs one attributed row, including
+        // a ready Claude inbox. The queue owns normal busy/draft gating and
+        // re-checks retraction context after any delivery delay.
+        // cas-ae6d (GH #100): a loss-intolerant worker prompt (today:
         // the assignment wake-up) bound for a PTY pane that is
         // not ready for injection goes to the durable
         // prompt_queue instead of being written into a pane
@@ -4963,7 +5171,8 @@ impl FactoryDaemon {
         // cas-4491f: the queue write runs on the store worker. A write that
         // fails there is logged; injecting into a pane that is not ready
         // would only be swallowed by its startup input buffer.
-        if crate::supervisor_message_wakes::quiet(&prompt.text)
+        if prompt.target == "supervisor" || prompt.target == self.app.supervisor_name()
+            || crate::supervisor_message_wakes::quiet(&prompt.text)
             || self.route_director_prompt_to_queue(&prompt)
         {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
@@ -5037,12 +5246,75 @@ fn log_dropped_stale_prompt(prompt: &crate::ui::factory::director::Prompt) {
 mod stall_nudge_routing_rework_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn director_supervisor_wakes_are_queued_attributed_and_draft_gated() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture_for, typed_once};
+        if !fixture_child(concat!(module_path!(), "::director_supervisor_wakes_are_queued_attributed_and_draft_gated").split_once("::").unwrap().1) {
+            return;
+        }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let (root, mut daemon) = fixture_for(cli).await;
+            let name = daemon.app.supervisor_name().to_string();
+            let prompt = crate::ui::factory::director::Prompt {
+                target: "supervisor".into(), text: "Director: review the waiting worker".into(),
+                merge_ready: false, merge_alert: None, stall_nudge_task: None,
+                retract_worker: None, retract_task: None, retract_epic: None,
+                drop_if_worker_assigned: None, durable_retry: false,
+            };
+            let store_worker = super::super::store_worker::global();
+            daemon.inject_director_prompt(prompt.clone(), &[], Instant::now(), store_worker, None).await;
+            assert!(store_worker.wait_idle(Duration::from_secs(5)));
+            let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "every director wake needs a durable row, including ready panes");
+            let row = &rows[0];
+            // pin: the persisted director channel is the turn ledger's attribution contract.
+            assert_eq!(row.source, "director");
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert_eq!(row.factory_session.as_deref(), Some(daemon.session_name.as_str()));
+            assert!(!row.urgent, "director wakes must honour the normal gate");
+            use super::super::queue_and_events::WakeSender;
+            assert!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, &name, &row.source, &row.prompt).is_some());
+            assert!(FactoryDaemon::supervisor_wake_class(&WakeSender::Unstamped, &name, &row.source, &row.prompt).is_none());
+
+            daemon.app.mux.get(&name).unwrap().deliver_user_input(b"draft", cas_mux::UserInputKind::KeyStream).await.unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+            assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_none(), "protected draft holds the wake");
+            assert!(daemon.app.mux.get(&name).unwrap().is_composer_dirty());
+            daemon.app.mux.get(&name).unwrap().deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
+            let typed = typed_once(&root, &mut daemon, "Director: review the waiting worker").await;
+            assert!(typed.contains(&row.id.to_string()), "turn carries the queue id for attribution: {typed}");
+            assert!(queue.message_delivery_report(row.id).unwrap().unwrap().delivered_at.is_some());
+
+            // A delay may outlive an idle-worker premise. The same queue
+            // selection must withdraw it rather than waking on stale state.
+            let mut stale = prompt;
+            stale.text = "Director: taskless worker needs an assignment".into();
+            stale.drop_if_worker_assigned = Some("assigned-worker".into());
+            daemon.inject_director_prompt(stale, &[], Instant::now(), store_worker, None).await;
+            assert!(store_worker.wait_idle(Duration::from_secs(5)));
+            let pending = queue.peek_all(10).unwrap();
+            assert_eq!(pending.len(), 1);
+            let mut task = cas_types::Task::new("cas-9fb4-test".into(), "assigned during queue delay".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            task.assignee = Some("assigned-worker".into());
+            crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap().add(&task).unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+            let report = queue.message_delivery_report(pending[0].id).unwrap().unwrap();
+            assert_eq!(report.pending_reason, Some(cas_store::PendingReason::SupersededStale));
+            assert!(report.delivered_at.is_none());
+        }
+    }
+
     #[test]
     fn stalled_nudge_lifecycle_routes_missing_episode_durably_and_ignores_other_prompts() {
         let root = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
         let mut prompt = crate::ui::factory::director::Prompt {
-            merge_alert: None,
+            merge_ready: false, merge_alert: None,
             target: "worker".into(), text: "quiet".into(), stall_nudge_task: Some("cas-unknown".into()),
             retract_worker: None, retract_task: None, retract_epic: None,
             drop_if_worker_assigned: None, durable_retry: true,
@@ -5070,6 +5342,53 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 
 #[cfg(test)]
 mod communication_summary_tests {
+    #[tokio::test]
+    async fn idle_control_ticks_adopt_staged_cleanup_cas_70a2() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut agent = cas_types::Agent::new("idle-cleanup-id".into(), "idle-cleanup".into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.status = cas_types::AgentStatus::Shutdown;
+        agent.pid = Some(i32::MAX as u32);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
+        agent.metadata.insert("clone_path".into(), root.join("worktrees/idle-cleanup").display().to_string());
+        agents.register(&agent).unwrap();
+        crate::mcp::tools::service::factory_ops::retire_dead_worker_for_shutdown(&root, &agent.name, None).unwrap();
+        let incoming = root.join("worker-cleanups/incoming");
+        assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 1);
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        assert!(daemon.pending_spawns.is_empty() && daemon.spawn_task.is_none());
+        assert!(!daemon.app.worker_worktree_cleanups_pending());
+        for _ in 0..3 { daemon.process_worker_control_tick().await; }
+        let remaining = std::fs::read_dir(incoming).unwrap().count();
+        daemon.app.join_worker_worktree_cleanups();
+        assert_eq!(remaining, 0, "an idle daemon must adopt the intent within three control ticks");
+    }
+
+    #[tokio::test]
+    async fn held_cleanup_cannot_hold_daemon_exit_past_budget_cas_af63() {
+        use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        daemon.app.register_worker_cleanup(WorkerCleanupJob::new("held-worker".into(), std::thread::spawn(move || {
+            let _ = held.recv();
+            CrashCleanupOutcome { worktree: None }
+        })));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            daemon.finish_worker_cleanup_jobs_for_exit(std::time::Duration::from_millis(100))).await;
+        let still_reserved = daemon.app.crash_cleanup_pending("held-worker");
+        drop(release);
+        daemon.app.join_worker_worktree_cleanups();
+        assert!(result.is_ok(), "held cleanup exceeded the daemon exit budget");
+        assert_eq!(result.unwrap(), vec!["held-worker"]);
+        assert!(still_reserved, "detaching must not allow name reuse during teardown");
+    }
+
     #[tokio::test]
     async fn cas_7e24_factory_session_end_persists_summary() {
         let project = tempfile::tempdir().unwrap();

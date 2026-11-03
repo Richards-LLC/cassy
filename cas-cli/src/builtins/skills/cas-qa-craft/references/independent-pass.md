@@ -1,7 +1,7 @@
 # Independent QA and polish pass
 
-Use this when you started a `qa-pass` task. Cassy creates one when a
-user-facing delivery parks for merge. You are the second pair of eyes: you
+Use this when you started a `qa-pass` task. Cassy creates one on an explicit
+QA request or when a user-facing `qa.mode=per_task` delivery parks for merge. You are the second pair of eyes: you
 did not build this change, and Cassy refuses the implementer here. Judge the
 running product the way a customer meets it, and judge what the delivery
 changed: the pages, controls and journeys its diff touches, and its acceptance
@@ -12,7 +12,20 @@ invariant that covers it. Do not fix anything.
 The task description names the delivery, its branch and exact tip, the base
 branch, the reasons the pass applies, the ledger directory, and the deadline.
 The time box is `qa.pass_timeout_mins`, 45 minutes by default. An honest
-incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED`.
+incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED: <reason>`.
+
+## Batch default
+
+`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+For batch work, capture before/after evidence during implementation. The supervisor
+builds one candidate per release at the exact frozen tip and walks one combined matrix.
+Publish the PASS ledger, then record `verification action=batch_receipt` with
+`task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
+(a non-implementer). Every listed
+task's delivery anchor must be contained in that reviewed target commit. Close
+after the receipt covers those anchors. A deferred close reports "waiting for
+batch receipt" until then. Explicit `qa_request` reviews use the procedure below.
 
 ## 1. Build the exact tip
 
@@ -30,7 +43,7 @@ command, the URL, and `npx playwright --version` in the ledger header. Where
 the build guard refuses you a compile (a factory agent cannot build Rust), run
 the immutable candidate the supervisor provides for `<bound_head>` instead, named as
 [evidence-ledger](evidence-ledger.md) requires. A missing binary is not the
-delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED`.
+delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED: <reason>`.
 Reuse an existing candidate with verified identity before requesting another
 build. On a correction, run affected independent cells and cite unaffected
 prior rows with their actual executed revision; current-round bundle and
@@ -121,6 +134,8 @@ For example, cas-1073's `am-deal-to-quote-3` required preserving the chosen
 quote From address after a 409 split-conflict response; resetting it to the
 recommended sender was unmet even though base did the same. Record only
 qualifying pre-existing findings in step 5; do not count them toward the verdict.
+A finding outside the frozen release scope goes in the ledger's next-board list and
+does not fail the round, unless it loses data or hides state.
 
 ## 4. Polish
 
@@ -183,8 +198,15 @@ matching local run (see step 4). The files, all listed in `bundle.json`:
 - `trace-actions.txt`: the output of `npx playwright trace actions`
 - `receipt.webm`, only for `visual_change: true`: start it with
   `page.screencast.start({ path, size: page.viewportSize() })` and
-  `showActions`, and add one `showChapter('F01 …', { duration: 1000 })` per
-  finding; omit screencast and chapter calls for non-visual changes
+  `showActions`, and add one
+  `showRecordingChapter(page, 'F01 …', { duration: 1000 })` per finding. For
+  other projects, copy the self-contained constructed-stylesheet helper from
+  the [worked example](evidence-bundle.md#worked-example) into the evidence spec.
+  Commander-only, in the Cassy source checkout: import that helper from
+  `hub-web/e2e/journeys/receipt-directory.mjs`, adjusting the spec's relative
+  path. That repository file is not installed in other projects. Both routes
+  preserve `style-src 'self'`. Omit screencast and chapter calls for non-visual
+  changes
 - `final.aria.yml` and `final.aria.json`
 - `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`
 - `visual-qa/` and `visual-qa.stdout`
@@ -202,8 +224,10 @@ Write `<ledger-dir>/LEDGER.md` beside `bundle.json`. It has these sections:
   `| # | Path | Viewport · scheme | Expected | Actual | Severity | Evidence |`
 - **Polish:** the rubric table, the checklist, and the
   `visual-qa.mjs --strict` verdict line (plus the base run's, when scoped).
-- **Pre-existing:** every defect the base build shares, with its evidence and
-  the follow-up task Cassy filed for it. Say "none" when there are none.
+- **Pre-existing:** every defect the base build shares, with its evidence, and
+  the follow-up Cassy filed for any that carries `repro` (steps or command, plus
+  the wrong output) and `affected` (who acts on it today). Say "none" when there
+  are none.
 
 Every finding cites a `trace action N` **and** its `F0N.png`. A finding
 without both is not a finding. Recording the verdict cites the bundle on the
@@ -225,26 +249,29 @@ states the same bar, so decide by it, not by impression:
 - a required mode that was not proven: forced colors, reduced motion and more
   contrast count only when the capture shows `matchMedia(...)` matching, and
   keyboard-only must reach and complete the demo's primary action. An unrun
-  mode is `NOT EXERCISED`, never PASS.
+  mode is `NOT EXERCISED: <reason>`, never PASS.
 
 Record each finding classified as pre-existing under §3 in the ledger and pass
-it to `qa_record` with `"scope": "pre-existing"`. Cassy files each one as a
-follow-up task linked to the delivery and lists the new task ids in the verdict.
-A rejection whose every issue is pre-existing is refused.
+it to `qa_record` with `"scope": "pre-existing"`. Cassy files one as a follow-up
+linked to the delivery only when it also carries `repro` and `affected`, and
+lists the new task ids in the verdict. The rest stay in the verdict. A rejection
+whose every issue is pre-existing is refused.
 
-Otherwise approve. List Normal and Note findings in the summary so the
-supervisor can turn them into follow-ups.
+Otherwise approve. List Normal and Note findings in the summary; they stay in the
+verdict for the release's polish sweep.
 
 ```text
 verification action=qa_record task_id=<delivery> status=approved|rejected \
   summary="<one line: verdict and the top findings>" \
   issues='[{"severity":"high","problem":"...","suggestion":"...","file":"<screenshot>"},
-          {"severity":"normal","scope":"pre-existing","problem":"...","file":"<screenshot>"}]' \
+          {"severity":"normal","scope":"pre-existing","problem":"...","file":"<screenshot>","repro":"<steps and wrong output>","affected":"<who acts on it today>"}]' \
   ledger_path=<ledger-dir>/LEDGER.md
 ```
 
 A rejection sends the delivery back to its implementer with your ledger. The
-next park opens a new round. Recording the verdict also closes your QA task,
+next park opens a new round. In a release batch round there is no next round: list
+every failing row in one ledger; the supervisor batches the fix and asks for a
+re-walk of those rows only. Recording the verdict also closes your QA task,
 and it cannot be revised. If you change your mind after recording, do not
 record again. Message the supervisor with `blocker=true`, ask for
 `request_changes` on the delivery, and name the finding.

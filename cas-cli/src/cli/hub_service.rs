@@ -876,8 +876,9 @@ fn service_https_port(definition: &str) -> u16 {
 /// Bring an installed unit's restart policy up to the current template
 /// (cas-621ec) without touching anything else in it: binary, ports,
 /// publication flags and any operator edits survive. It also adds the hub's
-/// `LimitNOFILE` when absent (cas-6cc6). Returns `None` when the unit already
-/// carries both, or has no `[Service]` section to amend.
+/// `LimitNOFILE` (cas-6cc6) and resource reservations (cas-93356) when absent.
+/// Explicit operator values survive. Returns `None` when the unit already
+/// carries these policies, or has no `[Service]` section to amend.
 fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let desired = format!("RestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}");
     let has_policy = definition.lines().any(|line| line.trim() == desired);
@@ -885,7 +886,19 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let has_limit = definition
         .lines()
         .any(|line| line.trim_start().starts_with("LimitNOFILE="));
-    if has_policy && has_limit {
+    // Older Cassy units hid stderr from journalctl. Keep operator-selected
+    // destinations; only replace the exact setting our template generated.
+    let legacy_stderr = "StandardError=append:%h/.cas/hub/hub.log";
+    let has_legacy_stderr = definition.lines().any(|line| line.trim() == legacy_stderr);
+    let missing_resources = ["CPUWeight=1000", "MemoryLow=1G"]
+        .into_iter()
+        .filter(|setting| {
+            let key = format!("{}=", setting.split_once('=').expect("resource setting").0);
+            !definition.lines().any(|line| line.trim_start().starts_with(&key))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if has_policy && has_limit && missing_resources.is_empty() && !has_legacy_stderr {
         return None;
     }
     let mut lines = Vec::new();
@@ -895,7 +908,11 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
         if !has_policy && line.trim_start().starts_with("RestartForceExitStatus=") {
             continue;
         }
-        lines.push(line.to_owned());
+        lines.push(if line.trim() == legacy_stderr {
+            "StandardError=journal".to_owned()
+        } else {
+            line.to_owned()
+        });
         if !inserted && line.trim_start().starts_with("Restart=") {
             lines.push(desired.clone());
             inserted = true;
@@ -907,11 +924,15 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
         lines.insert(service + 1, "Restart=on-failure".to_owned());
     }
     if !has_limit {
-        // Before the log lines, as in the template, so operator lines after
-        // RestartSec stay adjacent.
+        // Before resource reservations and logs, as in the template, so
+        // operator lines after RestartSec stay adjacent.
         let at = lines
             .iter()
-            .position(|line| line.trim_start().starts_with("StandardOutput="))
+            .position(|line| {
+                ["CPUWeight=", "MemoryLow=", "StandardOutput="]
+                    .iter()
+                    .any(|key| line.trim_start().starts_with(*key))
+            })
             .or_else(|| {
                 lines
                     .iter()
@@ -920,6 +941,15 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
             })?;
         lines.insert(at, format!("LimitNOFILE={HUB_FILE_LIMIT}"));
     }
+    if !missing_resources.is_empty() {
+        let at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("StandardOutput="))
+            .or_else(|| {
+                lines.iter().position(|line| line.starts_with("LimitNOFILE=")).map(|at| at + 1)
+            })?;
+        lines.splice(at..at, missing_resources);
+    }
     let mut upgraded = lines.join("\n");
     if definition.ends_with('\n') {
         upgraded.push('\n');
@@ -927,7 +957,7 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     Some(upgraded)
 }
 
-/// Rewrite an installed systemd unit whose restart policy predates the
+/// Rewrite an installed systemd unit whose service policy predates the
 /// current template. `daemon-reload` applies the new policy to the running
 /// service without restarting it. Returns whether the unit changed.
 fn refresh_systemd_unit(path: &Path) -> Result<bool> {
@@ -984,6 +1014,78 @@ fn refresh_installed_service_at(
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
     }
+}
+
+/// A hotfix pin written by `scripts/hub-pin.sh`.
+#[derive(Debug, serde::Deserialize)]
+struct HubPinReceipt {
+    slot: PathBuf,
+}
+
+/// Move a hotfixed hub onto the release this update just installed (cas-93356).
+/// Runs before the drift check, which would otherwise refuse the pinned bytes.
+/// Returns true when the pin moved, so the hub must restart even at an equal
+/// version: a hotfix and a release can share one. Only the exact managed path
+/// with a matching receipt moves; any other symlink is still binary drift.
+pub(crate) fn advance_managed_hub_pin() -> Result<bool> {
+    if native_platform() != ServicePlatform::Systemd {
+        return Ok(false);
+    }
+    let home = dirs::home_dir().context("cannot resolve home directory")?;
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"))
+        .join("cassy");
+    let installed = super::update::strip_deleted_suffix(std::env::current_exe()?);
+    advance_managed_hub_pin_at(
+        &home.join(".local/lib/cassy/hub/current"),
+        &state,
+        &installed,
+    )
+}
+
+fn advance_managed_hub_pin_at(current: &Path, state: &Path, installed: &Path) -> Result<bool> {
+    advance_managed_hub_pin_after_check(current, state, installed, || {})
+}
+
+/// `before_lock` is where another pin operation can finish; tests use it to do so.
+fn advance_managed_hub_pin_after_check(
+    current: &Path,
+    state: &Path,
+    installed: &Path,
+    before_lock: impl FnOnce(),
+) -> Result<bool> {
+    let receipt_path = state.join("hub-pin.json");
+    let pin_is_current = || -> Result<bool> {
+        let Ok(receipt) = fs::read_to_string(&receipt_path) else {
+            return Ok(false);
+        };
+        let receipt: HubPinReceipt =
+            serde_json::from_str(&receipt).context("hub pin receipt is unreadable")?;
+        Ok(fs::read_link(current).ok().as_deref() == Some(receipt.slot.as_path()))
+    };
+    if !pin_is_current()? {
+        return Ok(false);
+    }
+    before_lock();
+    // The same lock `hub-pin.sh` takes around activate and rollback.
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("hub-pin.lock"))
+        .context("open hub pin lock")?;
+    fs2::FileExt::try_lock_exclusive(&lock).context("another hub pin operation is running")?;
+    if !pin_is_current()? {
+        return Ok(false);
+    }
+    let parent = current.parent().context("hub pin path has no parent")?;
+    let temporary = parent.join(format!(".current.{}.tmp", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    std::os::unix::fs::symlink(installed, &temporary).context("create hub pin link")?;
+    fs::rename(&temporary, current).context("advance hub pin")?;
+    fs::remove_file(&receipt_path).context("clear hub pin receipt")?;
+    Ok(true)
 }
 
 /// A service restart reuses the manager's executable, not the updating CLI.
@@ -1557,7 +1659,10 @@ fn service_port() -> u16 {
         std::env::var(LAUNCHD_TEST_PORT_ENV)
             .ok()
             .and_then(|port| port.parse().ok())
-            .filter(|port| *port != 0)
+            // Linux fixture services allocate when they bind, avoiding a
+            // sampled port's close/rebind race. launchd still requires a fixed
+            // non-default port, enforced by validate_launchd_test_label.
+            .filter(|port| cfg!(target_os = "linux") || *port != 0)
             .unwrap_or(DEFAULT_HUB_PORT)
     } else {
         DEFAULT_HUB_PORT
@@ -1992,7 +2097,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nCPUWeight=1000\nMemoryLow=1G\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -2741,7 +2846,7 @@ exit 0
         assert!(!unit.to_ascii_lowercase().contains("token"));
         assert!(!unit.contains("credentials"));
         assert!(unit.contains("StandardOutput=append:%h/.cas/hub/hub.log"));
-        assert!(unit.contains("StandardError=append:%h/.cas/hub/hub.log"));
+        assert!(unit.contains("StandardError=journal"));
     }
 
     /// The unit as generated before cas-621ec, with `Restart=on-failure` only.
@@ -2779,6 +2884,9 @@ exit 0
     fn legacy_systemd_unit_upgrades_to_the_current_template() {
         let upgraded =
             upgrade_systemd_restart_policy(LEGACY_SYSTEMD_UNIT).expect("legacy unit needs upgrade");
+        let service = service_lines(&upgraded);
+        assert!(service.contains(&"CPUWeight=1000"), "{upgraded}");
+        assert!(service.contains(&"MemoryLow=1G"), "{upgraded}");
         assert_eq!(
             upgraded,
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
@@ -2796,6 +2904,14 @@ exit 0
             upgrade_systemd_restart_policy(&pre_limit).as_deref(),
             Some(current.as_str())
         );
+        let pre_journal = current.replace("StandardError=journal", "StandardError=append:%h/.cas/hub/hub.log");
+        assert_eq!(upgrade_systemd_restart_policy(&pre_journal).as_deref(), Some(current.as_str()));
+        let pre_isolation = current.replace("CPUWeight=1000\nMemoryLow=1G\n", "");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&pre_isolation).as_deref(),
+            Some(current.as_str()),
+            "existing units also acquire the hub resource reservation"
+        );
         assert_eq!(
             upgrade_systemd_restart_policy(&systemd_unit(
                 Path::new("/opt/cas/bin/cas"),
@@ -2811,9 +2927,16 @@ exit 0
     fn systemd_restart_upgrade_preserves_operator_edits_and_replaces_stale_lists() {
         let edited = LEGACY_SYSTEMD_UNIT.replace(
             "RestartSec=3\n",
-            "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n",
+            "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\nCPUWeight=80\nMemoryLow=2G\n",
         );
+        let edited = edited.replace("StandardError=append:%h/.cas/hub/hub.log", "StandardError=journal+console");
         let upgraded = upgrade_systemd_restart_policy(&edited).unwrap();
+        assert!(upgraded.contains("StandardError=journal+console"));
+        let service = service_lines(&upgraded);
+        assert!(service.contains(&"CPUWeight=80"), "{upgraded}");
+        assert!(service.contains(&"MemoryLow=2G"), "{upgraded}");
+        assert!(!service.contains(&"CPUWeight=1000"), "{upgraded}");
+        assert!(!service.contains(&"MemoryLow=1G"), "{upgraded}");
         assert!(upgraded.contains("RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n"));
         assert!(upgraded.contains(
             "Restart=on-failure\nRestartForceExitStatus=SIGHUP SIGINT SIGPIPE\nRestartSec=10\n"
@@ -2931,6 +3054,68 @@ exit 0
 
         assert!(!service_file_requests_tailscale(&loopback).unwrap());
         assert!(service_file_requests_tailscale(&published).unwrap());
+    }
+
+    /// cas-93356: `cas update` moves a hotfixed hub to the new release and clears
+    /// the pin, so the drift check passes. A link it cannot prove is its own stays
+    /// put, and that drift check still refuses it.
+    #[test]
+    fn update_advances_only_a_proven_hub_pin_cas_93356() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("bin/cas");
+        let slot = dir.path().join("hub/versions/abc/cas");
+        let other = dir.path().join("elsewhere/cas");
+        for binary in [&installed, &slot, &other] {
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            fs::write(binary, "binary").unwrap();
+        }
+        let current = dir.path().join("hub/current");
+        let state = dir.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let receipt = state.join("hub-pin.json");
+        let unit = format!("[Service]\nExecStart={} hub serve\n", current.display());
+
+        std::os::unix::fs::symlink(&other, &current).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "no receipt");
+        fs::write(&receipt, serde_json::json!({"slot": slot}).to_string()).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "receipt names another target");
+        assert_eq!(fs::read_link(&current).unwrap(), other);
+        assert!(receipt.exists());
+        assert!(require_installed_service_binary(ServicePlatform::Systemd, &unit, &installed).is_err());
+
+        fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(&slot, &current).unwrap();
+        assert!(advance_managed_hub_pin_at(&current, &state, &installed).unwrap());
+        assert_eq!(fs::read_link(&current).unwrap(), installed);
+        assert!(!receipt.exists(), "the update clears the hotfix pin");
+        require_installed_service_binary(ServicePlatform::Systemd, &unit, &installed).unwrap();
+        assert!(!advance_managed_hub_pin_at(&current, &state, &installed).unwrap(), "nothing left to advance");
+    }
+
+    /// cas-889c: a rollback that finishes between the first check and the lock
+    /// has already decided where the hub runs; the update must not overwrite it.
+    #[test]
+    fn update_rechecks_the_hub_pin_under_the_lock_cas_889c() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("versions/abc/cas");
+        let rolled_back = dir.path().join("released/cas");
+        let installed = dir.path().join("bin/cas");
+        let current = dir.path().join("current");
+        let state = dir.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let receipt = state.join("hub-pin.json");
+        fs::write(&receipt, serde_json::json!({"slot": slot}).to_string()).unwrap();
+        std::os::unix::fs::symlink(&slot, &current).unwrap();
+
+        let advanced = advance_managed_hub_pin_after_check(&current, &state, &installed, || {
+            fs::remove_file(&current).unwrap();
+            std::os::unix::fs::symlink(&rolled_back, &current).unwrap();
+            fs::remove_file(&receipt).unwrap();
+        })
+        .unwrap();
+
+        assert!(!advanced);
+        assert_eq!(fs::read_link(&current).unwrap(), rolled_back);
     }
 
     #[test]

@@ -11,6 +11,66 @@
 //! - every suggested call is one the recipient can make;
 //! - free text from the caller (a close reason) is never re-fenced.
 
+use sha2::Digest as _;
+
+/// Persist a full routine receipt under its content hash and return a compact
+/// reference. The create-only path makes the detail immutable.
+pub(crate) fn compact_receipt(
+    cas_root: &std::path::Path,
+    configured_artifacts_root: Option<&str>,
+    task_id: &str,
+    kind: &str,
+    summary: &str,
+    detail: &str,
+) -> Result<String, String> {
+    let digest = hex::encode(sha2::Sha256::digest(detail.as_bytes()));
+    let paths = crate::config::resolved_factory_artifact_paths(cas_root, configured_artifacts_root);
+    let dir = paths.task_dirs(task_id)[0].join("receipts");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("could not create receipt detail directory: {error}"))?;
+    let path = dir.join(format!("{kind}-{digest}.txt"));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(detail.as_bytes())
+                .map_err(|error| format!("could not persist receipt detail: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("could not sync receipt detail: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&path)
+                .map_err(|error| format!("could not verify existing receipt detail: {error}"))?;
+            if existing != detail.as_bytes() {
+                return Err("content-addressed receipt detail did not match its path".into());
+            }
+        }
+        Err(error) => return Err(format!("could not persist receipt detail: {error}")),
+    }
+    Ok(format!(
+        "{summary}\nDetails: {} (SHA-256 {digest})",
+        path.display()
+    ))
+}
+
+/// Keep advisory upkeep in the existing receipt channel. Failure to write the
+/// file leaves the task's durable upkeep notes as the fallback, never a nag.
+pub(crate) fn upkeep_receipt(
+    cas_root: &std::path::Path,
+    configured_artifacts_root: Option<&str>,
+    task_id: &str,
+    kind: &str,
+    visible: String,
+    notices: &[String],
+) -> String {
+    if notices.is_empty() { return visible; }
+    let detail = format!("{visible}\n\n{}", notices.join("\n"));
+    compact_receipt(cas_root, configured_artifacts_root, task_id, kind, &visible, &detail)
+        .unwrap_or_else(|error| {
+            tracing::warn!(task_id, %error, "upkeep receipt detail unavailable; retained in task notes");
+            visible
+        })
+}
+
 /// What the timed-out verification cycle was bound to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum VerificationTimeout<'a> {
@@ -91,11 +151,12 @@ pub(crate) fn upkeep_message(
     warnings: &[String],
     caller_prefix: &str,
 ) -> String {
-    let warnings = if warnings.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", warnings.join("\n"))
-    };
+    // Routine documentation advisories remain in the note/receipt writer.
+    // Keep analysis context that explains an actual blocking finding.
+    let warnings = warnings.iter()
+        .filter(|warning| !warning.starts_with("UPKEEP ADVISORY G5")
+            && !warning.contains("attributed delivery base unavailable"))
+        .map(|warning| format!("\n{warning}")).collect::<String>();
     format!(
         "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
@@ -170,6 +231,13 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
          may the assigned worker start a fresh cycle."
+    )
+}
+
+/// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
+pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
+    format!(
+        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. Close is retried after that; the worker has nothing to do."
     )
 }
 
@@ -284,8 +352,43 @@ pub(crate) fn verifier_spawn_denial(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
+
+    #[test]
+    fn close_receipt_is_compact_and_references_immutable_details() {
+        let root = tempdir().unwrap();
+        let detail = "Closed task cas-x; verification passed; full diagnostic payload.";
+        let short = compact_receipt(
+            root.path(),
+            Some(root.path().to_str().unwrap()),
+            "cas-x",
+            "close",
+            "Closed task cas-x; delivery abc123; target epic/x; next: none.",
+            detail,
+        )
+        .unwrap();
+        assert!(short.len() < 800, "{short}");
+        let (path, digest) = short
+            .split_once("Details: ")
+            .unwrap()
+            .1
+            .split_once(" (SHA-256 ")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
+        assert_eq!(digest.trim_end_matches(')'), hex::encode(sha2::Sha256::digest(detail.as_bytes())));
+        assert!(compact_receipt(
+            root.path(),
+            Some(root.path().to_str().unwrap()),
+            "cas-x",
+            "close",
+            "retry",
+            detail
+        )
+        .is_ok());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), detail);
+    }
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.

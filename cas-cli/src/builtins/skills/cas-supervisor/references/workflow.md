@@ -43,6 +43,10 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
 4. Review task scope and dependencies
 
+**Spawn threshold for review findings.** Read a verifier's `Improvements (non-blocking)` and warning issues, and leave them in the verdict. File a follow-up only when a finding shows reproduced, observable wrong behaviour that affects someone today. With three or more findings under that bar, note them together on the task and file nothing. A worker may fix a nit in its own lane before merge; a nit never reopens or extends a merged task. `task action=create` enforces this: a follow-up from a finding (`finding_origin`, a QA or verifier caller, or text naming one) needs `repro` and `affected`. A P0/P1 bug you or the operator observed directly is exempt. An epic with at least 5 completed reviews whose follow-ups from findings reach 0.5 per review over its last 10 sends you one notice and shows the ratio in `epic_status`. At release prep, run `cas qa polish --epic <id>` to list warnings by file, then batch them into one polish task for that release or drop them.
+
+**Verification tiers.** Close records the tier on the task. Tier 0 (only docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys) has no independent verifier; CI and the mechanical gates still apply. Tier 1 is one verifier per release in `qa.mode=batch`: merging opens no dispatch, and one review of the assembled tip closes them all once `verification action=batch_receipt verification_type=release` records its report, which must name every delivery. With `qa.mode=per_task`, `force-verifier` or an unmeasurable diff, the delivery gets its own verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, merge-queue and close-gate code) always keeps its own verifier and adds an adversarial probe, even when the release verdict names it. QA follows the same tiers, including batch rounds: Tier 0 walks no journeys and needs no ledger row, Tier 1 walks the impacted journeys, and Tier 2 needs an `Adversarial probe:` row in the task ledger. To force a verifier on a Tier 0 task, add the `force-verifier` label before close.
+
 **Standalone follow-up work (no EPIC needed).** An EPIC is for a body of work broken into
 tasks. When an epic has closed and one loose task turns up — a follow-up, a late bug, a
 one-off — do NOT create a single-child epic to satisfy the spawn gate. Create the task and
@@ -69,6 +73,9 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+
+`qa.user_facing_labels` require `demo_statement` before creation/assignment:
+`As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
 
 Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md)
 without being told; the brief adds only the target project when it is not the
@@ -152,7 +159,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
    ```
 
 <!-- markdownlint-disable-next-line MD029 -->
-6. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
+6. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Wait for a concrete event with `coordination remind remind_event=...` or the harness background-task completion notice. Timers are for real deadlines and admission retries; never poll for inbox or status updates.
 
 ### Resuming an Existing EPIC
 
@@ -196,13 +203,18 @@ factory action=worktree_merge id=<worker> task_id=<task-id>
 
 `worktree_merge` admits a lane on its CI state and the merge preflight's
 conflict and dirt checks. It runs no local release rows and needs no compile
-receipt. The worker's pre-push hook runs the fast rows; park has already read
-their receipt and a test receipt in each changed crate, and `CAS_LANE_SLIM=true`
-drops the lane copies. The merge queue
+receipt. CI runs the fast rows once per lane; the worker's pre-push hook gives
+early feedback. Park reads a test receipt in each changed crate, without
+trusting local fast-row receipts or exceptions. `CAS_LANE_SLIM=true` omits broad
+Rust tests from lanes. The merge queue
 is the Rust compile and suite proof. Rust merges still use the detached venue's
 clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource
+
+A green push alone is not ready: a test-first checkpoint can be green and
+incomplete. The role's readiness triggers require a completed delivery. Keep CI
+and QA gates; pending/red CI needs override authority and a reason.
 
 Finish delivered work before expanding noncritical work. Apply this closure
 pass every turn, including startup and simultaneous worker completions:
@@ -251,6 +263,11 @@ evidence; verify they name the delivered commit and affected scope. The full
 Rust build and suite run once, at the Phase 4 final gate: the merge queue where
 base has one, otherwise local assembly.
 
+For public surfaces, score distinctiveness, fit and hierarchy 1–5 using
+cas-codebase-design before merge; the floor is 4/5. Record exceptions/remedies.
+A script used on several platforms needs more than Linux proof unless a fixture
+covers the difference.
+
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
    tests that still pin the old contract before landing the lane. For example:
@@ -285,7 +302,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. Merge on `READY TO MERGE` or any evidence that the delivery tip is pushed and required lane CI is green. Never wait for park, `awaiting_merge`, or a merge request, including when a close gate refused park. The merge needs no worker action. Drain ready merges before free-form user replies.
+1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). Drain ready merges before free-form user replies.
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before
@@ -297,10 +314,10 @@ end-of-lane, once the worker is done with that worktree.
    annotated with `cas-allow-skip: <reason>`.
    **User-facing delivery? Independent QA first (cas-619f).** When the park reports
    `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
-   not the implementer, on the taste recipe:
-   `factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
+   not the implementer, on the account with the most room, using the cheapest recipe that has passed this kind of review:
+   `factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
-   `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
+   `git merge factory/<worker>`, and task close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
    `verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `verification action=qa_status task_id=<task-id>`.
@@ -315,7 +332,7 @@ end-of-lane, once the worker is done with that worktree.
    ```
 
    The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
-4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself and opens the verification dispatch at the merge commit. Run the verifier on that dispatch and send the worker nothing. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
+4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself. A Tier 1 delivery in `qa.mode=batch` then waits for the release verdict with no dispatch. Any other delivery opens the verification dispatch at the merge commit: run the verifier on it and send the worker nothing. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
 
 If the merge is rejected on review rather than landed, the sanctioned exit from
@@ -382,13 +399,13 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
 
 - Workers set status to blocked and add a blocker note
 - Help resolve or reassign the task
-- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After a worker's close, verify it stayed closed before proceeding — a stale `status=blocked` update can overwrite the close. If a closed task comes back, note the race on the task and message the worker to re-close.
+- **Reopened task:** Read its current state and findings before acting; the merge verdict owns completion.
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
 
 - Merge each parked lane (`worktree_merge`) in one response turn
-- Message each worker to re-close its own task
+- Let each merge verdict close the task or return findings
 - Apply the closure pass before reassigning workers
 
 ### Supervisor-run fixture scripts
@@ -398,9 +415,64 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
 1. The script checks the target host against the allowed environment and exits otherwise, refuses on a colliding record instead of overwriting it, writes its outputs mode 600 under the task artifact directory, and prints sanitized errors with no secrets or tokens.
 2. The supervisor reviews the script against those four guards, runs it from the worker's worktree (the shared checkout may lack the file), and sends the worker the output path.
 
+## Batch QA
+
+Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+One round per release, after the fix-diff re-review: build a candidate at the exact
+frozen tip, walk the combined matrix and publish its PASS ledger. Report every
+failing row in that one ledger. Fix them in one batch and re-walk only those rows,
+once; a row still failing is reverted and moves to the next release unless it loses
+operator data. Record `verification action=batch_receipt`
+with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and
+`ledger_author`, who walked it and did not implement a listed task; every listed
+delivery anchor must be contained in that reviewed target commit. Then close those
+deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
+remain available.
+
+A round runs once, at the frozen tip. A lane not merged at freeze ships in the next
+release.
+
+Scope freezes when closeout starts. A new finding goes to the next board unless it
+loses data, hides state or hurts someone today. A fix for something hurting the
+operator ships alone with `scripts/release.sh --hotfix`.
+
+## Interim queue precheck
+
+Until the hosted precheck (cas-298f) ships, the supervisor runs this diagnostic
+in a new, clean checkout at the reviewed or corrected SHA. Replace the
+source path, destination and SHA below; the destination must not exist. Use the normal shell
+with Node, Cargo/nextest and Chromium system dependencies available:
+
+```bash
+set -e
+precheck_source=/absolute/path/to/cassy
+precheck_dir=/absolute/path/to/precheck
+precheck_sha=FULL_COMMIT_SHA
+git clone --no-hardlinks "$precheck_source" "$precheck_dir"
+cd "$precheck_dir"
+git checkout --detach "$precheck_sha"
+npm ci
+npm --prefix hub-web ci
+export PATH="$PWD/hub-web/node_modules/.bin:$PATH"
+export NODE_PATH="$PWD/hub-web/node_modules"
+export PLAYWRIGHT_BROWSERS_PATH="$PWD/target/playwright-browsers"
+(cd hub-web && npx --no-install playwright install chromium)
+node -e 'require("fs").accessSync(require("@playwright/test").chromium.executablePath())'
+cargo nextest run --workspace --no-fail-fast
+make -C cas-cli test-ci-tiers
+```
+
+Retain both test logs and their exit codes at that SHA. This is the interim
+precheck, not final merged-tree proof; the queue still owns that proof.
+Do not substitute `assembly-proof.py`: its scrubbed environment cannot resolve
+Playwright or browser installations outside `/home` on soundwave. cas-298f
+replaces this manual precheck when its hosted command is available.
+
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
+   Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Run targeted tests and journeys selected by the diff inside this loop. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 3), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
 3. Run the final assembled-tree gate. This is the epic's single build + test:
    targeted worker tests complement one full assembly gate run
@@ -413,8 +485,7 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
    With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
-   with `scripts/assembly-proof.py` that gate, and the opt-in diagnostic after a
-   failed queue run, is
+   with `scripts/assembly-proof.py` that gate is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
    nextest in the worktree and archive-mode in a plain clone. Both use their
    own `<worktree>/target`, seeding immutable dependencies from the worker
@@ -428,12 +499,12 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
    reference the epic's integration proof; worker closes carry targeted receipts alongside it.
-4. Turn any final-gate failure or review gap that needs worker action into a
-   bounded epic-child fix-round task before messaging a worker. Put the finding,
-   required fix, acceptance criteria, and proof command in the task description;
+4. Put all findings from the review, precheck and QA that need worker action into
+   one batch: a bounded epic-child fix-round task per worker, started together. Put
+   the finding, required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After the fix lands, rerun the final assembled-tree gate on the new tip:
-   re-enqueue the PR, or for a local gate capture the real exit code and record
+5. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. After the fix
+   lands, rerun the final assembled-tree gate on the new tip: re-enqueue the PR, or for a local gate capture the real exit code and record
    a fresh `ASSEMBLY_PROOF` for it:
 
    ```bash

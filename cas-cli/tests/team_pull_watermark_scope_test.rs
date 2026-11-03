@@ -468,8 +468,7 @@ async fn old_global_per_team_key_is_deleted_on_first_new_write() {
     }
 }
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 
 /// Exercise the actual purge dry-run command: it must use the active scope
 /// without rewriting either watermark or deleting any row.

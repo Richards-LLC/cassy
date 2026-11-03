@@ -55,7 +55,8 @@
 //! unsets or clears `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, so the role gates
 //! that read them see the role the factory gave the agent. That hook refusal
 //! is the control for those role gates, which include `cas update`'s worker
-//! restriction, `restart_spawn_queue` and `supervisor_override`.
+//! restriction, `restart_spawn_queue`, `restart_supervisor` and
+//! `supervisor_override`.
 //!
 //! The gates themselves still read the environment. Overriding it from the
 //! process's cgroup was rejected, because a worker's own test harnesses run
@@ -652,6 +653,11 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // cas-d58d: the operator's privacy rule for same-repo peers; `team`
     // admits other users' supervisors again.
     "peers.same_repo_scope",
+    // cas-1996: an agent pointing the destination into a tracked or shared
+    // folder would publish the secrets the operator pastes in Commander.
+    "secrets.destination",
+    // cas-2f55: whether pasted secrets are deleted is the operator's choice.
+    "secrets.auto_delete",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
@@ -753,6 +759,13 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
         },
         Commands::Factory(factory) if factory.command.is_none() => {
             Some("Launching a factory (`cas factory`)")
+        }
+        Commands::Qa(crate::cli::qa::QaCommand::RapidResponse(args)) => match args.command {
+            crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
+            _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
+        },
+        Commands::Qa(crate::cli::qa::QaCommand::AuthorOverride { .. }) => {
+            Some("Overriding the independent QA author rule (`cas qa author-override`)")
         }
         _ => None,
     }
@@ -1097,6 +1110,10 @@ mod tests {
             "factory",
             "factory --workers 3",
             "--verbose factory -w 2",
+            "qa rapid-response enable cas-ep1c --for 2h --reason outage --rollback revert",
+            "qa rapid-response disable cas-ep1c",
+            "qa rapid-response review-migration cas-de11 --note checked",
+            "qa author-override cas-de11 --note accepted",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),
@@ -1109,6 +1126,7 @@ mod tests {
             "task list",
             "hub",
             "config get factory.write_roots",
+            "qa rapid-response status",
         ] {
             assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }
@@ -1241,7 +1259,7 @@ mod tests {
             ("factory.worker_denied_clis", ""),
             ("factory.worker_denied_mcp_tools", ""),
             ("qa.evidence_gate", "false"),
-            ("qa.mode", "batch"),
+            ("qa.mode", "per_task"),
             ("release.claude_account_allowlist", "agent@example.com"),
             ("peers.same_repo_scope", "own"),
         ] {

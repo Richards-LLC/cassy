@@ -1,5 +1,13 @@
 # Details — Evidence, Sync and Resume
 
+- [Read-only evidence](#read-only-evidence)
+- [Requested sync](#requested-sync)
+- [Task fields](#task-fields)
+- [Resume state](#resume-state)
+- [Credentials and routing](#credentials-and-routing)
+- [Batch QA](#batch-qa)
+- [Worker peer lane](#worker-peer-lane)
+
 Read for a report/evidence task, a requested sync or a context-resume handoff.
 `ready` and `available` provide read-only backlog visibility — not self-dispatch.
 The task/coordination schemas supply exact fields and valid actions; use
@@ -72,7 +80,12 @@ Load `task` and `coordination`. For an assigned QA-pass task, also load
 task_id=<delivery-id>` and the round's ledger. Recording closes the QA task;
 implementation-task close verification remains supervisor-owned.
 `server_start`/`server_list`/`server_stop` (owned servers only) are the assigned
-server exception, with `cas-servers`. Fleet, merges, cleanup and database control
+server exception, with `cas-servers`. `factory action=candidate_request
+task_id=<own-task> revision=<full-sha>` is the candidate exception; never ask the
+supervisor for a candidate the daemon can build, and never run Cargo for one. A refusal
+names why. Where the daemon cannot sandbox a build (not Linux, or no working `bwrap`),
+the refusal says so; then ask the supervisor, who runs `cas qa candidate build` directly.
+Fleet, merges, cleanup and database control
 belong to the supervisor even where the runtime exposes them.
 
 Operational bugs use `cas config get issues.repo` and
@@ -82,3 +95,22 @@ task note. Use the supervisor's filing reference for public-safe reports.
 Put long evidence in the configured task artifacts directory; for peer proofs,
 follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs);
 message and note schemas enforce the traffic limits.
+
+## Batch QA
+
+`qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
+Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+A batch park defers evidence and opens no automatic per-task round, including
+when older waived rounds exist. Capture visual before/after evidence while
+building. The supervisor owns the release's one epic-tip candidate, shared PASS ledger
+and `verification action=batch_receipt` listing delivery anchors. Close deferred
+deliveries after that receipt exists; "waiting for batch receipt" is a pending
+obligation. Explicit `qa_request` reviews remain available.
+
+## Worker peer lane
+
+- Worker peer lane: `coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
+  reaches only a registered worker in the same factory session. Cassy also sends a copy
+  to that session's supervisor. Use this narrow lane for collision
+  warnings, not general chat or cross-session contact; send task status, blockers
+  and handoffs to `target=supervisor`.

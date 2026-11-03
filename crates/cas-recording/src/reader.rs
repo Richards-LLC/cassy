@@ -663,8 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seek_performance() {
-        // This test verifies that seeking is fast (not a strict benchmark)
+    async fn test_repeated_seeks_return_the_latest_keyframe_before_each_target() {
         let dir = TempDir::new().unwrap();
         let config = WriterConfig {
             recordings_dir: dir.path().to_path_buf(),
@@ -697,18 +696,31 @@ mod tests {
 
         let reader = RecordingReader::open(&file_path).unwrap();
 
-        // Measure seek time
-        let start = std::time::Instant::now();
-        for _ in 0..1000 {
-            let _ = reader.seek_to(50);
+        // Exercise a broad set of targets repeatedly, checking the seek
+        // contract against a simple linear reference instead of a host-speed
+        // budget. This still catches wrong index ordering and boundary picks.
+        let entries = &reader.keyframe_index().entries;
+        let duration = reader.duration_ms();
+        let max_comparisons =
+            (entries.len() + 1).next_power_of_two().trailing_zeros() as usize + 1;
+        for n in 0..1_000_u64 {
+            let target = n * duration / 999;
+            let expected = entries
+                .iter()
+                .rev()
+                .find(|entry| entry.timestamp_ms <= target)
+                .or_else(|| entries.first())
+                .map_or(0, |entry| entry.timestamp_ms);
+            let position = reader.seek_to(target).unwrap();
+            assert_eq!(position.timestamp_ms, expected, "target {target}ms");
+            let comparisons = reader
+                .keyframe_index()
+                .find_keyframe_comparison_count(target);
+            assert!(
+                comparisons <= max_comparisons,
+                "seek index inspected {comparisons} of {} entries for {target}ms; bound {max_comparisons}",
+                entries.len()
+            );
         }
-        let elapsed = start.elapsed();
-
-        // 1000 seeks should complete in well under 100ms
-        assert!(
-            elapsed.as_millis() < 100,
-            "1000 seeks took {}ms, expected <100ms",
-            elapsed.as_millis()
-        );
     }
 }

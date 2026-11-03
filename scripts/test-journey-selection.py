@@ -130,6 +130,24 @@ class SelectionTests(unittest.TestCase):
         self.write('hub-web/src/main.ts', 'import { reply as renderedReply } from "./reply";\nimport { fleet } from "./fleet";\nfunction renderReply() { return reply; }\nfunction renderFleet() { return fleet; }\n')
         self.assertEqual(self.ids('hub-web/src/main.ts', base=self.base), {'HUB-J1'})
 
+    def test_extracted_rich_inspection_retains_its_journey_in_real_diff(self):
+        catalog = self.root / 'docs/qa/journeys.md'
+        catalog.write_text(catalog.read_text() + self.entry(22, 'rich'))
+        self.write('hub-web/src/rich.ts', 'export const rich = `<figure class="rich-diagram"></figure><div class="rich-diff"></div>`;\n')
+        self.write('hub-web/e2e/rich.journey.ts', 'test("HUB-J22 rich", async () => { await journey.stage("Open", async () => {}); });\n')
+        usage = 'export function countUsage(action: string) { record(action); }\n'
+        self.write('hub-web/src/usage.ts', usage)
+        self.write('hub-web/src/reply.ts', 'import { countUsage } from "./usage"; export const reply = () => countUsage("reply");\n')
+        imports = 'import { reply } from "./reply";\nimport { countUsage } from "./usage";\n'
+        self.write('hub-web/src/main.ts', imports + 'function inspect(event) { if (event.target.closest(".rich-diagram, .rich-diff")) countUsage("rich-content.inspect"); }\n')
+        base = self.commit()
+        self.write('hub-web/src/usage.ts', usage + 'export function bindRichInspectionUsage(root) { root.querySelector(".pair-card" + suffix); root.addEventListener("click", event => { if (event.target.closest(".rich-diagram, .rich-diff")) countUsage("rich-content.inspect"); }); }\n')
+        self.write('hub-web/src/main.ts', imports.replace('{ countUsage }', '{ bindRichInspectionUsage }') + 'bindRichInspectionUsage(app);\n')
+        head = self.commit()
+        result = json.loads(self.run_selector(base, head).stdout)
+        self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J22'})
+        self.assertEqual(next(j['reason'] for j in result['journeys'] if j['id'] == 'HUB-J22'), 'dom-selectors:hub-web/src/usage.ts')
+
     def test_main_state_type_words_do_not_select_unrelated_handlers(self):
         self.write('hub-web/src/main.ts', 'import { reply } from "./reply";\nimport { fleet } from "./fleet";\nconst kept: Map<string, string> = new Map();\nfunction renderReply() { return reply + kept.size; }\nfunction renderFleet(label: string) { return fleet + label; }\n')
         base = self.commit()
@@ -161,6 +179,13 @@ class SelectionTests(unittest.TestCase):
         self.write('hub-web/package.json', json.dumps({'scripts': {'build': 'vite build'}, 'dependencies': {'runtime': '1'}, 'devDependencies': {'vitest': '1'}}))
         for path in ['hub-web/package.json', 'hub-web/vite.config.ts', 'hub-web/tsconfig.json', 'hub-web/src/unmapped.ts']:
             self.assertEqual(self.ids(path, base=self.base), {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+
+        # An unmapped renderer remains unknown even when it queries owned UI.
+        path = 'hub-web/src/orphan.ts'
+        self.write(path, 'export const panel = `<section class="new-panel"></section>`; document.querySelector(".reply-card");\n')
+        result = json.loads(self.run_selector('--paths', path, base=self.base).stdout)
+        self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
+        self.assertTrue(all(j['reason'] == f'surface-wide:unmapped-source:{path}' for j in result['journeys']))
 
     def test_explicit_head_ignores_working_tree_drift(self):
         self.write('hub-web/src/reply.ts', 'import "./leaf"; export const reply = true;')

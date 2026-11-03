@@ -61,6 +61,85 @@ struct TurnEvent {
     kind: String,
 }
 
+/// Native background tools outlive their foreground turn. Only a launch
+/// result bound to this transcript's tool call owns a job; a completion for
+/// another job cannot clear it. The bounded tail never guesses missing launches.
+#[derive(Default)]
+struct BackgroundJobs {
+    tools: std::collections::HashSet<String>,
+    running: std::collections::HashMap<String, DateTime<Utc>>,
+}
+impl BackgroundJobs {
+    fn record(&mut self, value: &Value) {
+        if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        if value.get("type").and_then(Value::as_str) == Some("attachment")
+            && value.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command")
+            && let Some(text) = value.pointer("/attachment/prompt").and_then(Value::as_str)
+        {
+            self.notification(text);
+        }
+        let Some(content) = value.pointer("/message/content") else {
+            return;
+        };
+        if let Some(parts) = content.as_array() {
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && matches!(
+                        part.get("name").and_then(Value::as_str),
+                        Some("Bash" | "Task" | "Agent")
+                    )
+                    && part
+                        .pointer("/input/run_in_background")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    && let Some(id) = part.get("id").and_then(Value::as_str)
+                {
+                    self.tools.insert(id.into());
+                }
+                if part.get("type").and_then(Value::as_str) == Some("tool_result")
+                    && part
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| self.tools.remove(id))
+                    && part.get("is_error").and_then(Value::as_bool) != Some(true)
+                    && let Some(text) = part.get("content").and_then(Value::as_str)
+                {
+                    for marker in ["Command running in background with ID: ", "agentId: "] {
+                        if let Some(id) = text
+                            .split_once(marker)
+                            .and_then(|(_, rest)| rest.split_whitespace().next())
+                        {
+                            if let Some(at) = record_timestamp(value) {
+                                self.running.insert(id.trim_end_matches('.').into(), at);
+                            }
+                        }
+                    }
+                }
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    self.notification(text);
+                }
+            }
+        } else if let Some(text) = content.as_str() {
+            self.notification(text);
+        }
+    }
+    fn notification(&mut self, text: &str) {
+        if text.contains("<task-notification>")
+            && ["completed", "failed", "killed"]
+                .iter()
+                .any(|status| text.contains(&format!("<status>{status}</status>")))
+            && let Some(id) = text
+                .split_once("<task-id>")
+                .and_then(|(_, rest)| rest.split_once("</task-id>"))
+                .map(|(id, _)| id)
+        {
+            self.running.remove(id);
+        }
+    }
+}
+
 /// Visits each JSON record in the bounded tail ([`read_jsonl_tail`]). The line
 /// the window cut and an unterminated last line (still being written) are
 /// skipped; malformed JSON is ignored. Invalid UTF-8 is decoded lossily, so a
@@ -100,12 +179,16 @@ pub(crate) fn read_jsonl_tail(path: &Path, window: u64) -> Option<(u64, String)>
     Some((start, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
+fn record_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     let at = value
         .get("timestamp")
         .or_else(|| value.get("ts"))?
         .as_str()?;
-    let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
+    Some(DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc))
+}
+
+fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
+    let at = record_timestamp(value)?;
     let kind = value.get("type")?.as_str()?;
     let (state, kind) = match cli {
         SupervisorCli::Codex => {
@@ -228,12 +311,14 @@ pub(crate) fn observe(
     stall_secs: i64,
 ) -> Observation {
     let mut last: Option<TurnEvent> = None;
+    let mut background = BackgroundJobs::default();
     // cas-5e3c (GH #1130): the latest fatal provider refusal not yet followed
     // by a healthy turn or model output. A worker whose turns keep dying on a
     // 400 still burns CPU between retries, so this overrides process evidence.
     let mut fatal: Option<String> = None;
     if let Some(path) = path {
         tail_records(path, |value| {
+            if cli == SupervisorCli::Claude { background.record(value); }
             if cli == SupervisorCli::Codex {
                 use crate::factory_auth_health::{CodexRecordVerdict, codex_record_verdict};
                 match codex_record_verdict(value) {
@@ -287,14 +372,30 @@ pub(crate) fn observe(
     // rather than reading a booting TUI's CPU as `executing`.
     let claude_without_transcript =
         cli == SupervisorCli::Claude && path.is_none_or(|path| !path.exists());
+    // A launch result alone proves activity for the stall window. After that,
+    // live CPU activity can still prove the background job is executing.
+    let active_background = background.running.values()
+        .filter(|at| (now - **at).num_seconds() < stall_secs.max(0))
+        .count();
+    let expired_background = background.running.len() - active_background;
     let state = if process.alive == Some(false) {
         Liveness::Dead
     } else if fatal.is_some() {
         Liveness::Stalled
     } else if last.is_none() && claude_without_transcript {
         Liveness::AwaitingFirstPrompt
+    } else if active_background > 0
+        && last.as_ref().is_some_and(|event| matches!(event.state, Liveness::Executing | Liveness::WaitingForInput))
+    {
+        Liveness::Executing
     } else if let Some(event) = &last {
-        if event.state == Liveness::Executing
+        if event.state == Liveness::WaitingForInput && expired_background > 0 {
+            if process.cpu_busy == Some(true) {
+                Liveness::Executing
+            } else {
+                Liveness::Stalled
+            }
+        } else if event.state == Liveness::Executing
             && (now - event.at).num_seconds() > stall_secs
             && process.cpu_busy != Some(true)
         {
@@ -310,6 +411,12 @@ pub(crate) fn observe(
     let mut event_detail = last
         .map(|e| format!("{} {}s ago", e.kind, (now - e.at).num_seconds().max(0)))
         .unwrap_or_else(|| "turn evidence unavailable in bounded tail".into());
+    if active_background > 0 {
+        event_detail = format!("{active_background} native background job(s) running; {event_detail}");
+    }
+    if expired_background > 0 {
+        event_detail = format!("{expired_background} native background job(s) have no completion after the stall window; {event_detail}");
+    }
     if let Some(message) = fatal {
         event_detail = format!("fatal provider error: {message}; {event_detail}");
     }
@@ -516,20 +623,21 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
         .map(|(_, tail)| tail.split_whitespace().collect())
         .unwrap_or_default();
     let state = fields.first().copied().unwrap_or("unknown");
-    let fingerprint = fields.get(19).copied().unwrap_or("").to_string();
-    let ticks = wedged::process_cpu_ticks(pid);
+    let ticks = wedged::worker_cpu_samples(pid);
     static SAMPLES: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<u32, (String, u64)>>,
     > = std::sync::LazyLock::new(Default::default);
     let busy = ticks.and_then(|ticks| {
         let mut samples = SAMPLES.lock().ok()?;
-        if samples.len() > 1024 {
-            samples.clear();
+        let mut busy = None;
+        // Aggregate deltas, not lifetime totals: every process keeps its own
+        // start-time identity, including across child exits and PID reuse.
+        for (pid, fingerprint, ticks) in ticks {
+            if let Some(active) = record_cpu_sample(&mut samples, pid, &fingerprint, ticks) {
+                busy = Some(busy.unwrap_or(false) || active);
+            }
         }
-        let prior = samples.insert(pid, (fingerprint.clone(), ticks));
-        prior
-            .filter(|(old, _)| old == &fingerprint)
-            .map(|(_, old)| ticks > old)
+        busy
     });
     let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan"))
         .unwrap_or_else(|_| "unavailable".into());
@@ -550,6 +658,23 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
             if stdin { "yes" } else { "unobserved" }
         ),
     }
+}
+
+/// A cold probe has no delta. Keep sampling separate from classification so
+/// two status views can be checked against identical process evidence.
+fn record_cpu_sample(
+    samples: &mut std::collections::HashMap<u32, (String, u64)>,
+    pid: u32,
+    fingerprint: &str,
+    ticks: u64,
+) -> Option<bool> {
+    if samples.len() > 1024 {
+        samples.clear();
+    }
+    let prior = samples.insert(pid, (fingerprint.to_string(), ticks));
+    prior
+        .filter(|(old, _)| old == fingerprint)
+        .map(|(_, old)| ticks > old)
 }
 
 fn is_harness_command(raw: &[u8]) -> bool {

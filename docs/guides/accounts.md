@@ -91,6 +91,28 @@ cas claude --bare <profile> --continue   # resume the last session in this folde
 The picker shows the same usage marks. Sessions resume across accounts
 because `projects/` lives in the base. `cas codex` works the same way.
 
+## Choose the Codex account for a factory worker
+
+Factory capability checks inspect registered Codex homes when `CODEX_HOME` is
+unset. An authenticated named account keeps Codex lanes available after the
+legacy `~/.codex` is retired. An explicit `CODEX_HOME` limits the check to that
+account.
+
+Pass the intended worker home as `config_dir`, or set worker `config_dir` in
+the project's `.cas/config.toml` (`[factory.defaults]` or
+`[[factory.workers]]`) for hub and Commander spawns. A requesting supervisor's
+`CODEX_HOME` is inherited when no eligible account recommendation overrides it.
+When no account is selected, the account policy may recommend an eligible
+registered account. Otherwise, an authenticated default `~/.codex` remains
+usable. If that default is absent or logged out, spawn refuses before creating
+a worktree or assigning a task and lists confirmed logged-in registered homes
+with the `config_dir` remedies.
+
+`cas integrate violet` updates every registered Codex account when `CODEX_HOME`
+is unset, preserving account links into the Codex base. An explicit
+`CODEX_HOME` limits registration to that home. With no registered account, it
+reports `codex: no account` and leaves the retired `~/.codex` absent.
+
 ## List subscriptions
 
 ```bash
@@ -140,3 +162,26 @@ Codex folders sharing that identity use the newest completed usage snapshot.
 A window whose reset has passed says `reset, usage unknown until next session`;
 its JSON percentage is `null` until a new transcript reports usage. Canonical
 accounts precede the duplicates that point to them.
+
+
+## Manage accounts in Commander
+
+Use **Accounts** in the shell header to inspect each paired machine's Claude,
+Codex and Grok accounts. States, Default and Recommended badges, weekly/5-hour
+capacity and observation/reset times come from the machine registry. Times use
+your browser's local timezone and 12-hour clock; unknown usage stays unknown.
+
+Listing needs `machine:read`. Changing an account needs `factory:manage` from
+its pairing invitation. **Remove** and **Disable** ask you to type the
+provider-qualified alias, such as `claude:spare`. Remove and Rename retain the
+CLI's main-account and active-session protections; shared base items stay intact.
+**Enable**, **Rename** and **Set default** update the same machine's account
+policy or Commander launch setting. New session refreshes its choices after a
+change. Logged-out Claude/Codex rows offer a copyable login command to run on
+that machine. Grok currently has one read-only account and no named lifecycle.
+
+The hub exposes `GET /v1/accounts` and the allowlisted
+`POST /v1/accounts/operations` (`remove`, `disable`, `enable`, `rename`,
+`set_default`), with requested and outcome audit records. Browser requests name
+aliases, never paths. A failed operation can follow a partial change, so the
+panel refreshes and asks you to check the machine before retrying.

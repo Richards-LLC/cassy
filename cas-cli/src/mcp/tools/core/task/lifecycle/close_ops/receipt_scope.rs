@@ -93,13 +93,10 @@ pub(super) fn for_tested_packages(
 
 /// The refusal a delivery gets at park, while its worker can still fix it.
 ///
-/// cas-eac2 (operator D1, D2): lane CI no longer runs the no-build fast rows
-/// or broad Rust tests for factory pushes. The worker's pre-push hook runs the
-/// rows, and the worker's capped targeted tests prove each changed crate. Park
-/// only READS those receipts for this exact tip. It never executes a row, test
-/// or build, because operator decision Q6 (2026-10-15) removed park re-runs.
-/// A missing receipt is refused with its fix, never passed silently. The
-/// merge queue still runs the full suite on the final tree.
+/// Capped targeted tests prove each changed crate at this exact tip. Park
+/// only reads those receipts; it never runs checks. Fast-row proof belongs
+/// to CI because local fast-row receipts are worker-writable. Park also
+/// requires a titled CHANGELOG `[Unreleased]` entry for product source.
 pub(super) fn park_refusal(
     cas_root: &Path,
     proof_repo: &Path,
@@ -107,31 +104,48 @@ pub(super) fn park_refusal(
     changed_paths: &[String],
     head: &str,
     target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
 ) -> Option<String> {
+    let refusals = park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges);
+    (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
+}
+
+/// Every receipt-scope refusal at this tip, not just the first.
+pub(super) fn park_refusals(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Vec<String> {
     let short = &head[..head.len().min(12)];
-    if let Some(refusal) = fast_rows_refusal(proof_repo, &task.id, head, target) {
-        return Some(refusal);
-    }
+    let mut refusals: Vec<_> =
+        changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
+    // The module check below reads these receipts, so a crate that still owes
+    // one cannot be judged yet; running its tests may already cover the module.
     if !untested.is_empty() {
-        return Some(format!(
+        refusals.push(format!(
             "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours. At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
         ));
+        return refusals;
     }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
     // receipt, while proof_targets can still be widened (parking locks them).
     if !task.risk.contains(&TaskRisk::BlastRadius) {
-        return None;
+        return refusals;
     }
     let judged = for_tested_packages(proof_repo, task, changed_paths, head, &tested);
     let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
     let uncovered = super::uncovered_blast_radius_modules(proof_repo, changed_paths, targets);
     if uncovered.is_empty() {
-        return None;
+        return refusals;
     }
     let mut widened = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in &uncovered {
@@ -139,48 +153,224 @@ pub(super) fn park_refusal(
             widened.push(module.clone());
         }
     }
-    Some(format!(
+    refusals.push(format!(
         "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
+    ));
+    refusals
+}
+
+fn product_source_path(path: &str) -> bool {
+    if path.starts_with("cas-cli/src/builtins/skills/") {
+        return true;
+    }
+    if (path.starts_with("cas-cli/src/") || (path.starts_with("crates/") && path.contains("/src/")))
+        && path.ends_with(".rs")
+    {
+        return true;
+    }
+    if path.starts_with("hub-web/src/") {
+        return true;
+    }
+    if !path.starts_with("scripts/") || path.split('/').any(|part| matches!(part, "tests" | "fixtures")) {
+        return false;
+    }
+    let file = path.rsplit('/').next().unwrap_or_default();
+    if file.starts_with("test-") || file.contains(".test.") || file.contains("_test.") {
+        return false;
+    }
+    [".sh", ".py", ".js", ".mjs", ".ts", ".ps1"]
+        .iter()
+        .any(|extension| file.ends_with(extension))
+}
+
+fn changelog_refusal(
+    repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Option<String> {
+    if !changed_paths.iter().any(|path| product_source_path(path))
+        || has_no_changelog_decision(&task.notes)
+        || !has_unreleased_section_at_head(repo, head)
+    {
+        return None;
+    }
+    let changelog_changed = changed_paths.iter().any(|path| path == "CHANGELOG.md");
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges) {
+        return None;
+    }
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    Some(format!(
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading, then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        task.id, task.id, task.id,
     ))
 }
 
-/// cas-eac2 (D2): the refusal for a tip of a repository that ships
-/// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
-/// exists. That happens when the push skipped the hook through
-/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed.
-fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Option<String> {
+fn has_no_changelog_decision(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        let Some((stamp, body)) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once("] ✅ DECISION "))
+        else {
+            return false;
+        };
+        if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
+            return false;
+        }
+        body.strip_prefix("no changelog:").is_some_and(|reason| {
+            let reason = reason.trim();
+            !reason.is_empty() && !is_changelog_template_value(reason)
+        })
+    })
+}
+
+pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
+    let reference = format!("{head}:CHANGELOG.md");
+    std::process::Command::new("git")
+        .args(["show", &reference])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "## [Unreleased]")
+        })
+}
+
+/// Whether one of this task's delivery segments adds or changes a titled
+/// Unreleased entry that survives at HEAD. `delivery_ranges` are the close's
+/// task-attributed (base, tip) segments, which keep a same-task predecessor
+/// merge and drop target-sync and other tasks' merges (cas-2a65). Without
+/// them, only single-parent first-parent commits since the merge-base count,
+/// so a merge can never credit entries another branch wrote.
+fn has_titled_unreleased_delta(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .args(args)
             .current_dir(repo)
             .output()
             .ok()
-            .filter(|out| out.status.success())
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    git(&["cat-file", "-e", &format!("{head}:scripts/fast-rows-pre-push.sh")])?;
-    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-    let receipt = Path::new(String::from_utf8_lossy(&common.stdout).trim())
-        .join("cas/fast-rows")
-        .join(format!("{head}.pass"));
-    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
-    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
+    let entries_at = |commit: &str| {
+        git(&["show", &format!("{commit}:CHANGELOG.md")])
+            .and_then(|text| titled_unreleased_entries(&text))
+    };
+    let Some(final_entries) = entries_at(head) else {
+        return false;
+    };
+    let ranges = match delivery_ranges {
+        Some(ranges) => ranges.to_vec(),
+        None => {
+            let Some(base) = git(&["merge-base", head, target]) else {
+                return false;
+            };
+            let range = format!("{}..{head}", base.trim());
+            let Some(commits) = git(&["rev-list", "--first-parent", "--parents", &range]) else {
+                return false;
+            };
+            commits
+                .lines()
+                .filter_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                    [commit, parent] => Some((parent.to_string(), commit.to_string())),
+                    _ => None,
+                })
+                .collect()
+        }
+    };
+    ranges.iter().any(|(base, tip)| {
+        let Some(after) = entries_at(tip) else {
+            return false;
+        };
+        let before = entries_at(base).unwrap_or_default();
+        after.iter().any(|(key, entry)| {
+            before.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
+        })
+    })
+}
+
+fn titled_unreleased_entries(text: &str) -> Option<BTreeMap<(String, String), String>> {
+    let lines: Vec<_> = text.lines().collect();
+    let start = lines.iter().position(|line| *line == "## [Unreleased]")? + 1;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("## ["))
+        .map_or(lines.len(), |offset| start + offset);
+    let mut entries = BTreeMap::new();
+    let mut area = None::<String>;
+    let mut index = start;
+    while index < end {
+        let line = lines[index];
+        if let Some(heading) = line.strip_prefix("### ") {
+            area = changelog_area(heading);
+            index += 1;
+            continue;
+        }
+        if let Some(bullet) = line.strip_prefix("- **")
+            && let Some((title, description)) = bullet.split_once("** — ")
+            && !title.trim().is_empty()
+            && !description.trim().is_empty()
+            && !is_changelog_template_value(title)
+            && !is_changelog_template_value(description)
+        {
+            let mut block = vec![line];
+            index += 1;
+            while index < end
+                && !lines[index].trim().is_empty()
+                && !lines[index].starts_with("- ")
+                && !lines[index].starts_with("### ")
+            {
+                block.push(lines[index]);
+                index += 1;
+            }
+            if let Some(area) = area.as_ref() {
+                entries.insert((area.clone(), title.trim().to_string()), block.join("\n"));
+            }
+            continue;
+        }
+        index += 1;
+    }
+    Some(entries)
+}
+
+fn changelog_area(heading: &str) -> Option<String> {
+    let (kind, area) = heading.split_once(" — ")?;
+    let area = area.trim();
+    if ![
+        "Added",
+        "Changed",
+        "Deprecated",
+        "Removed",
+        "Fixed",
+        "Security",
+    ]
+    .contains(&kind)
+        || area.is_empty()
+        || is_changelog_template_value(area)
+    {
         return None;
     }
-    let fixes: String = text
-        .lines()
-        .filter(|line| line.starts_with("FIX "))
-        .take(10)
-        .map(|line| format!("\n- {line}"))
-        .collect();
-    Some(format!(
-        "⚠️ FAST ROWS REQUIRED (cas-eac2): task {task_id}'s tip {short} has no fast-rows PASS receipt ({path}). Lane CI no longer runs these no-build rows for factory pushes; your pre-push hook runs them (scripts/fast-rows-pre-push.sh), and park only reads the receipt.{fixes}\nWith everything committed at {short}, run `./scripts/release-gate.sh --fast-rows --base origin/{target}` (the hook's command), apply each FIX, push, then retry close.",
-        short = &head[..head.len().min(12)],
-        path = receipt.display(),
-        target = target.strip_prefix("origin/").unwrap_or(target),
-    ))
+    Some(format!("{kind} — {area}"))
+}
+
+fn is_changelog_template_value(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("title")
+        || value.eq_ignore_ascii_case("what changed.")
+        || (value.starts_with('<') && value.strip_suffix('.').unwrap_or(value).ends_with('>'))
 }
 
 /// cas-d6eb: the tested packages that cover every target a proof-scope
@@ -331,7 +521,7 @@ fn workspace_manifests(repo: &Path) -> Vec<std::path::PathBuf> {
 
 /// Map each workspace package name to its crate directory's name, as
 /// [`changed_source_modules`] records it (lowercase basename).
-fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
+pub(super) fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
     let mut dirs = BTreeMap::new();
     for path in workspace_manifests(repo) {
         let Some(name) = read_manifest(&path).and_then(|manifest| {
@@ -590,11 +780,12 @@ mod tests {
         let cas_root = tempfile::tempdir().unwrap();
         let head = "e".repeat(40);
         let mut task = blast_radius_task(&["close_ops"]);
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only receipt-gate coverage".into();
         let changed = delivered();
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
         );
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main")
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None)
             .expect("an untested crate is refused at park");
         assert!(refusal.contains("FOCUSED PROOF REQUIRED"), "{refusal}");
         assert!(refusal.contains(&format!("at {}: cas-store.", &head[..12])), "{refusal}");
@@ -603,17 +794,275 @@ mod tests {
         let mut plain = task.clone();
         plain.risk = vec![TaskRisk::None];
         for task in [&task, &plain] {
-            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main").is_some());
+            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main", None).is_some());
         }
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
         );
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None).is_none());
 
         let bare = tempfile::tempdir().unwrap();
-        let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")
+        let mut bare_task = blast_radius_task(&[]);
+        bare_task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: test-only proof-scope fixture".into();
+        let scope = park_refusal(cas_root.path(), bare.path(), &bare_task, &changed, &head, "main", None)
             .expect("undeclared modules outside a workspace");
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
+    }
+
+    fn changelog_fixture() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::create_dir_all(repo.path().join("hub-web/src")).unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 1;\n").unwrap();
+        std::fs::write(repo.path().join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        repo
+    }
+
+    fn commit_changelog_fixture(repo: &Path, subject: &str) -> String {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["add", "."]);
+        git(&["commit", "--allow-empty", "-qm", subject]);
+        git(&["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn product_source_delivery_requires_a_titled_unreleased_change() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        for path in [
+            "cas-cli/src/main.rs",
+            "cas-cli/src/builtins/skills/cas-worker/SKILL.md",
+            "crates/cas-store/src/lib.rs",
+            "hub-web/src/app.ts",
+            "scripts/release.sh",
+        ] {
+            assert!(product_source_path(path), "{path} should require release notes");
+        }
+        for path in ["docs/guide.md", "cas-cli/tests/cli.rs", "scripts/test-checks.py"] {
+            assert!(!product_source_path(path), "{path} is not shipped product source");
+        }
+
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let source_only = commit_changelog_fixture(repo.path(), "product change");
+        let changed = vec!["hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &source_only, "main", None)
+            .expect("product source without a changelog entry must be refused");
+        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- Generic status entry.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let untitled = commit_changelog_fixture(repo.path(), "add an untitled note");
+        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main", None)
+            .expect("an untitled Unreleased bullet is not release evidence");
+        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status now reflects the latest response.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let titled = commit_changelog_fixture(repo.path(), "add release note");
+        let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
+        assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
+        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None));
+        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);
+        assert!(accepted.is_none(), "{accepted:?}");
+
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status now follows the current response.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let extended = commit_changelog_fixture(repo.path(), "extend release note");
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main", None).is_none());
+    }
+
+    /// cas-2a65: through the close's task-attributed ranges, an entry a lane
+    /// receives by merging its predecessor's same-task branch counts. Another
+    /// task's merged entry beside the lane's own untitled bullet, and the
+    /// target's entry from a refresh, do not.
+    #[test]
+    fn changelog_entry_counts_only_from_task_attributed_ranges() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-a1b2".into(), "delivery".into());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity { start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let changelog = |bullets: &str| std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            format!("# Changelog\n\n## [Unreleased]\n\n### Added — Commander\n\n{bullets}\n## [1.0.0] - 2026-01-01\n"),
+        ).unwrap();
+        let refusal = |branch: &str| {
+            git(&["checkout", "-q", branch]);
+            let head = commit_changelog_fixture(repo.path(), "tip");
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, None).unwrap();
+            let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+            changelog_refusal(repo.path(), &task, &changed, &head, "main", Some(&ranges))
+        };
+
+        git(&["checkout", "-qb", "predecessor", "main"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        changelog("- **Badges show versions** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "feat: badges (cas-a1b2)");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "predecessor"]);
+        assert!(refusal("delivery").is_none(), "the predecessor's same-task entry counts");
+
+        git(&["checkout", "-qb", "foreign", "main"]);
+        changelog("- **Another task's change** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "feat: other lane (cas-beef)");
+        git(&["checkout", "-qb", "untitled", "main"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "foreign"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
+        changelog("- **Another task's change** — It is visible.\n- Lane note without a title.\n");
+        commit_changelog_fixture(repo.path(), "fix: lane work (cas-a1b2)");
+        assert!(refusal("untitled").is_some(), "another task's merged entry is not this delivery's");
+
+        git(&["checkout", "-qb", "refresh", "main"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 4;\n").unwrap();
+        commit_changelog_fixture(repo.path(), "fix: source only (cas-a1b2)");
+        git(&["checkout", "-q", "main"]);
+        changelog("- **Target change** — It is visible.\n");
+        commit_changelog_fixture(repo.path(), "target entry");
+        git(&["checkout", "-q", "refresh"]);
+        git(&["merge", "-q", "--no-edit", "main"]);
+        assert!(refusal("refresh").is_some(), "a target refresh cannot claim the target's entry");
+    }
+
+    #[test]
+    fn reasoned_no_changelog_decision_exempts_source_delivery() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "internal test-only adjustment");
+        let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog:".into();
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &head,
+            "main",
+            None,
+        )
+        .is_some(), "an empty reason must not exempt the delivery");
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: internal QA-only fixture correction".into();
+        let refusal = park_refusal(
+            cas_root.path(), repo.path(), &task, &["hub-web/src/app.ts".into()], &head, "main", None,
+        );
+        assert!(refusal.is_none(), "a typed decision with a reason should exempt the delivery: {refusal:?}");
+    }
+
+    #[test]
+    fn changelog_gate_skips_projects_without_unreleased_section() {
+        let repo = changelog_fixture();
+        std::fs::remove_file(repo.path().join("CHANGELOG.md")).unwrap();
+        let head = commit_changelog_fixture(repo.path(), "project without release notes");
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+
+        assert!(changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &head,
+            "main",
+            None,
+        ).is_none(), "projects without an Unreleased section are outside this gate");
+    }
+
+    #[test]
+    fn changelog_templates_do_not_satisfy_entry_or_exception() {
+        let repo = changelog_fixture();
+        let mut task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let source_only = commit_changelog_fixture(repo.path(), "product change");
+        task.notes = "[2026-10-29 13:00] ✅ DECISION no changelog: <reason>".into();
+        let placeholder_reason = changelog_refusal(
+            repo.path(),
+            &task,
+            &["hub-web/src/app.ts".into()],
+            &source_only,
+            "main",
+            None,
+        );
+
+        task.notes.clear();
+        let mut placeholder_entries_refused = true;
+        for entry in [
+            "### Added — <area>\n\n- **Commander shows session state** — The status line follows live events.",
+            "### Added — Commander\n\n- **Title** — What changed.",
+            "### Added — Commander\n\n- **Session state stays current** — <What changed>.",
+        ] {
+            let repo = changelog_fixture();
+            std::fs::write(
+                repo.path().join("hub-web/src/app.ts"),
+                "export const value = 2;\n",
+            ).unwrap();
+            std::fs::write(
+                repo.path().join("CHANGELOG.md"),
+                format!(
+                    "# Changelog\n\n## [Unreleased]\n\n{entry}\n\n## [1.0.0] - 2026-01-01\n"
+                ),
+            ).unwrap();
+            let placeholder = commit_changelog_fixture(repo.path(), "add changelog template");
+            let refusal = changelog_refusal(
+                repo.path(),
+                &task,
+                &["CHANGELOG.md".into(), "hub-web/src/app.ts".into()],
+                &placeholder,
+                "main",
+                None,
+            );
+            placeholder_entries_refused &= refusal.is_some();
+        }
+        assert!(
+            placeholder_reason.is_some() && placeholder_entries_refused,
+            "the literal templates must be refused: reason={placeholder_reason:?}; entries_refused={placeholder_entries_refused}"
+        );
+    }
+
+    #[test]
+    fn non_product_paths_do_not_require_a_changelog_entry() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let head = commit_changelog_fixture(repo.path(), "documentation update");
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &["docs/guide.md".into()], &head, "main", None).is_none());
     }
 
     /// cas-d6eb AC2: a widening that adds only crate-qualified modules of

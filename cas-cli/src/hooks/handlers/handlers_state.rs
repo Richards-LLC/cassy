@@ -226,6 +226,7 @@ pub(crate) fn cleanup_agent_leases_for_end(
         );
         return Some(Vec::new());
     }
+    crate::quality_ledger::session_ended(cas_root, session_id, Some(&agent.name));
     // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its identity too. Its
     // MCP server outlives the conversation and still caches this row's id;
     // tearing the row down made that server resurrect it as
@@ -895,6 +896,47 @@ mod cas_85d9_lease_renewal_tests {
 mod supervisor_handoff_tests {
     use super::*;
 
+    /// A session's injected context is measured when it ends, /clear included.
+    /// A family that injects nothing, like explicit search, reports nothing.
+    #[test]
+    fn session_end_reports_measured_feature_evidence() {
+        use cas_store::{FeedbackVerdict, QualityPayload, RetrievalHitIdentity, RetrievalStore};
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let mut ending = Agent::new("session-1".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        open_agent_store(&root).unwrap().register(&ending).unwrap();
+        let retrieval = cas_store::SqliteRetrievalStore::open(&root).unwrap();
+        retrieval.init().unwrap();
+        let hits: Vec<_> = (0..25)
+            .map(|rank| RetrievalHitIdentity {
+                result_id: format!("mem-{rank}"),
+                document_type: "entry".into(),
+                rank,
+            })
+            .collect();
+        for (id, family) in [("q1", "ambient_transition"), ("q2", "search")] {
+            retrieval
+                .record_query(id, "query", family, "current-default-v1", Some("session-1"), &hits)
+                .unwrap();
+        }
+
+        cleanup_agent_leases_for_end(&root, "session-1", Some("clear")).unwrap();
+
+        let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let QualityPayload::FeatureFeedback { feature, verdict, injected, used, .. } = &events[0].payload
+        else {
+            panic!("{:?}", events[0].payload);
+        };
+        assert_eq!(
+            (feature.as_str(), *verdict, *injected, *used),
+            ("ambient_recall", FeedbackVerdict::Noise, Some(25), Some(0))
+        );
+    }
+
     #[test]
     fn ct2_p3_session_end_hands_off_epics() {
         let mut env = crate::test_support::TestEnvGuard::new();
@@ -934,6 +976,14 @@ mod supervisor_handoff_tests {
         worker.role = AgentRole::Worker;
         worker.factory_session = ending.factory_session.clone();
         agents.register(&worker).unwrap();
+        // Short historical rows must not expand into a fleet-sized startup wall.
+        for i in 0..13 {
+            let mut retired = Agent::new(format!("retired-{i}"), format!("retired-worker-{i}"));
+            retired.role = AgentRole::Worker;
+            retired.factory_session = ending.factory_session.clone();
+            retired.status = cas_types::AgentStatus::Shutdown;
+            agents.register(&retired).unwrap();
+        }
         let mut live_task = Task::new("cas-live".into(), "Live lease".into());
         live_task.status = TaskStatus::InProgress;
         live_task.assignee = Some(worker.name.clone());
@@ -945,6 +995,78 @@ mod supervisor_handoff_tests {
         parked.deliverables.parked_branch = Some("factory/live-worker-cas-parked".into());
         parked.external_ref = Some("https://example.test/pull/42".into());
         tasks.add(&parked).unwrap();
+        // cas-d8b2: recovery is project-scoped, independent of who owned a
+        // retired lane, and must not truncate after two Codex handoff rows.
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(temp.path()).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/feature.rs"), "delivery\n").unwrap();
+        git(&["add", "src/feature.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff-project'\n[qa]\nmode='batch'\n").unwrap();
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-foreign", "cas-unmerged", "cas-override", "cas-dedicated", "cas-live-review", "cas-tier-zero", "cas-tier-two", "cas-rejected", "cas-unreadable"] {
+            let mut task = Task::new(id.into(), "Merged delivery".into());
+            task.origin_project = Some(if id == "cas-foreign" { "another-project" } else { "handoff-project" }.into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.parked_branch = Some(format!("factory/{id}"));
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "main".into() },
+                assignee: "ended-worker".into(), branch: format!("factory/{id}"), base_sha: base.clone(),
+            });
+            if id == "cas-tier-zero" {
+                std::fs::write(temp.path().join("README.md"), "documentation delivery\n").unwrap();
+                git(&["add", "README.md"]);
+                git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "docs delivery"]);
+                task.deliverables.factory_branch_start.as_mut().unwrap().base_sha = anchor.clone();
+                task.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+            }
+            if id == "cas-tier-two" {
+                let tier_base = git(&["rev-parse", "HEAD"]);
+                std::fs::create_dir_all(temp.path().join("cas-cli/src/hooks")).unwrap();
+                std::fs::write(temp.path().join("cas-cli/src/hooks/guard.rs"), "guard delivery\n").unwrap();
+                git(&["add", "cas-cli/src/hooks/guard.rs"]);
+                git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "guard delivery"]);
+                task.deliverables.factory_branch_start.as_mut().unwrap().base_sha = tier_base;
+                task.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+            }
+            if id == "cas-unmerged" {
+                git(&["branch", "unmerged-target", &base]);
+                task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:handoff-project".into(), target_branch: "unmerged-target".into() });
+            }
+            if id == "cas-override" {
+                task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+            }
+            if id == "cas-dedicated" {
+                task.labels.push("force-verifier".into());
+            }
+            tasks.add(&task).unwrap();
+            if matches!(id, "cas-live-review" | "cas-tier-two" | "cas-unreadable") {
+                let deadline = chrono::Utc::now() + chrono::Duration::hours(if id == "cas-live-review" { 1 } else { -1 });
+                cas_store::create_verification_dispatch(&root, id, "reviewer", "reviewer", deadline).unwrap();
+            }
+            if id == "cas-rejected" {
+                let mut verdict = cas_types::Verification::new("ver-rejected".into(), id.into());
+                verdict.status = cas_types::VerificationStatus::Rejected;
+                crate::store::open_verification_store(&root).unwrap().add(&verdict).unwrap();
+            }
+        }
+        std::fs::write(temp.path().join("src/dropped.rs"), "lost delivery\n").unwrap();
+        git(&["add", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "cas-dropped: deliver"]);
+        let mut dropped = tasks.get("cas-recover-one").unwrap();
+        dropped.id = "cas-dropped".into();
+        dropped.deliverables.factory_branch_anchor = Some(git(&["rev-parse", "HEAD"]));
+        tasks.add(&dropped).unwrap();
+        git(&["rm", "-q", "src/dropped.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "remove delivered content"]);
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
         let ask = queue.enqueue_with_session("ending", "operator", "Previously delivered open ask: select branch", "old-session").unwrap();
@@ -1026,31 +1148,68 @@ mod supervisor_handoff_tests {
         // Reopen through the real startup handler after the predecessor was deleted.
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_HOOK_HARNESS", "codex");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(context.contains("\"id\":\"cas-leased\""), "supervisor lease ownership must survive even without an assignee: {context}");
+        for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable", "cas-override"] {
+            assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
+            assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
+        }
+        let tier_two_row = context.lines().find(|line| line.starts_with("- cas-tier-two:")).unwrap();
+        assert!(tier_two_row.contains("expired") && tier_two_row.contains("dedicated verifier") && tier_two_row.contains("adversarial probe"), "Tier 2 must show its hold and required review: {tier_two_row}");
+        let override_row = context.lines().find(|line| line.starts_with("- cas-override:")).unwrap();
+        assert!(override_row.contains("CI override"), "discovery must name the independent-QA hold: {override_row}");
+        let tier_zero_row = context.lines().find(|line| line.starts_with("- cas-tier-zero:")).unwrap();
+        assert!(tier_zero_row.contains("mechanical"), "Tier 0 keeps mechanical close gates: {tier_zero_row}");
+        assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
+        assert!(!context.contains("task action=close id=cas-unmerged"), "unmerged work stays outside recovery: {context}");
+        for id in ["cas-live-review", "cas-dropped", "cas-rejected"] {
+            assert!(!context.contains(&format!("task action=close id={id}")), "substantive hold on {id} stays outside receipt recovery: {context}");
+        }
+        assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
         let handoff_end = context.find("verify current liveness before recovery.").unwrap();
         assert!(handoff_end - handoff_start < 2800, "long history must stay in the full receipt, inside startup's context budget");
-        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "Previously delivered open ask: select branch", "compaction"] {
+        for expected in ["Supervisor handoff", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "compaction"] {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
+        assert!(context[handoff_start..handoff_end].lines().count() <= 30, "handoff must bound short historical rows too: {context}");
+        assert!(!context.contains("{\""), "startup handoff must use readable rows: {context}");
+        let receipts = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(receipts.into_iter().next().unwrap().unwrap().path()).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["workers"].as_array().unwrap().len(), 14);
+        for expected in ["cas-owned-id", "Previously delivered open ask: select branch"] {
+            assert!(receipt.to_string().contains(expected), "full handoff lost {expected}");
+        }
+        assert!(receipt["tasks"].as_array().unwrap().iter().any(|row| row["notes"].as_str().unwrap_or_default().contains("long prior task history")), "full task history stays in the durable receipt");
         assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
         assert_eq!(agents.get_lease(&live_task.id).unwrap().unwrap().agent_id, worker.id);
         assert_eq!(tasks.get(&live_task.id).unwrap().status, TaskStatus::InProgress);
         assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        assert!(!again.contains("Integrated deliveries to adopt/close"), "recovery actions must surface once per successor");
+        // A malformed dispatch in this isolated fixture must not consume the next
+        // successor's claimed handoff or hide the other recovery rows.
+        let fixture_db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        fixture_db.execute("UPDATE verification_dispatches SET repository_proof = 'unreadable-json' WHERE task_id = 'cas-unreadable'", []).unwrap();
         handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
         env.set("CAS_AGENT_NAME", "third-supervisor");
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
         let third = serde_json::to_value(third).unwrap();
         let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(context.contains("\"id\":\"cas-owned-id\""), "an unadopted inherited epic must survive another succession: {context}");
-        assert!(context.contains("\"name\":\"live-worker\""), "the inherited live worker must remain visible: {context}");
+        let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
+        assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
+        assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
+        assert!(context.contains("Supervisor handoff"), "unreadable recovery metadata must not lose the claimed handoff: {context}");
+        assert!(context.contains("task action=close id=cas-tier-two"), "one unreadable row must not hide valid recovery: {context}");
+        assert!(!context.contains("task action=close id=cas-unreadable"), "unreadable metadata must not authorize recovery: {context}");
+        assert!(context.contains("cas-unreadable: verification metadata unreadable"), "startup must report the skipped row: {context}");
 
 
     }
@@ -1096,7 +1255,12 @@ mod supervisor_handoff_tests {
         env.set("CAS_AGENT_NAME", "successor");
         env.set("CAS_FACTORY_SESSION", "new-session");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
-        handle_session_start(&start, Some(&root)).unwrap();
+        let output = handle_session_start(&start, Some(&root)).unwrap();
+        let output = serde_json::to_value(output).unwrap();
+        let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("Answer each once in your final pane reply"), "{context}");
+        assert!(context.contains("explicit routing only for disabled or unmirrored delivery"), "{context}");
+        assert!(!context.contains("Answer them with target=operator"), "{context}");
         handle_session_start(&start, Some(&root)).unwrap();
 
         let row = queue.queued_prompt(go).unwrap().unwrap();

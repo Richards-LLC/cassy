@@ -1,0 +1,5 @@
+title: Beside Team, rail worker rows keep name and controls on one line with no border painted in forced colors, the track connector holds 3:1, and receipt names speak no internal event ids
+found: '2026-10-30'
+tasks: [cas-64ef]
+invariants: [HUB-J26-GOAL]
+journeys: [HUB-J26]

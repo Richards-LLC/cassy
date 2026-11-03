@@ -1,0 +1,4 @@
+title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
+tasks: [cas-69b3f]
+invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
+journeys: [HUB-J4, HUB-J12]

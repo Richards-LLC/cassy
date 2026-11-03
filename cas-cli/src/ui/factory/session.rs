@@ -4,18 +4,104 @@
 //! functionality to find running factory daemons by checking PIDs and sockets.
 //!
 //! For unified session metadata (worker count, epic ID, etc.), use
-//! `cas_factory::SessionSummary` and `cas_factory::UnifiedSessionManager`.
+//! `cas_factory::SessionSummary`.
 
 use crate::store::{find_cas_root_from, find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
 use cas_factory::{SessionState, SessionSummary, SessionType};
-use cas_types::{AgentStatus, AgentType};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 mod socket_cleanup;
+
+/// Confirmed teardown outcome retained after active metadata is removed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEndOutcome {
+    pub at: String,
+    pub reason: String,
+    pub workers_stopped: Vec<String>,
+    pub orphans: Vec<String>,
+    /// Missing ownership evidence must never count as a successful stop.
+    #[serde(default)]
+    pub unverified: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EndedSession {
+    pub metadata: SessionMetadata,
+    pub ended: SessionEndOutcome,
+}
+
+fn same_session_birth(a: &SessionMetadata, b: &SessionMetadata) -> bool {
+    a.name == b.name && a.created_at == b.created_at && a.daemon_pid == b.daemon_pid
+        && a.daemon_pid_starttime == b.daemon_pid_starttime
+}
+
+fn write_end_receipt(sessions: &Path, receipt: &EndedSession) -> std::io::Result<()> {
+    if !valid_session_name(&receipt.metadata.name) {
+        return Err(std::io::Error::other("invalid session name in end receipt"));
+    }
+    let dir = sessions.join("ended");
+    fs::create_dir_all(&dir)?;
+    let temporary = tempfile::NamedTempFile::new_in(&dir)?;
+    serde_json::to_writer(temporary.as_file(), receipt)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(dir.join(format!("{}.json", receipt.metadata.name)))?;
+    Ok(())
+}
+
+/// Called under the namespace lock, before metadata is unlinked. Retain a
+/// richer shutdown receipt for this birth; never attribute an old stop to a
+/// replacement by loading the name again after ownership changes.
+fn retain_end_receipt(sessions: &Path, metadata: &SessionMetadata) -> std::io::Result<()> {
+    match fs::read(sessions.join("ended").join(format!("{}.json", metadata.name))) {
+        Ok(bytes) => {
+            if let Ok(receipt) = serde_json::from_slice::<EndedSession>(&bytes)
+                && same_session_birth(&receipt.metadata, metadata) {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    write_end_receipt(sessions, &EndedSession {
+        metadata: metadata.clone(),
+        ended: SessionEndOutcome {
+            at: Utc::now().to_rfc3339(), reason: "metadata_removed".into(),
+            workers_stopped: Vec::new(), orphans: Vec::new(),
+            // Metadata removal proves the session ended, not its workers.
+            unverified: metadata.workers.iter().map(|worker| worker.name.clone()).collect(),
+        },
+    })
+}
+
+/// Match end evidence to the daemon's owned supervisor generation.
+pub(crate) fn supervisor_end_is_current(
+    metadata: &SessionMetadata,
+    owned_pid: Option<u32>,
+    recorded_pid: Option<u32>,
+    recorded_starttime: Option<u64>,
+    registered_at: &str,
+) -> bool {
+    if let Some(owned_pid) = owned_pid {
+        if recorded_pid != Some(owned_pid) {
+            return false;
+        }
+        if let Some((supervisor_start, daemon_start)) = recorded_starttime.zip(metadata.daemon_pid_starttime) {
+            // SessionStart can finish before metadata is written. The owned
+            // PTY's PID and boot-relative birth identify its generation without
+            // depending on the wall-clock ordering of those two writes.
+            return supervisor_start >= daemon_start;
+        }
+    }
+    // Older receipts without process fingerprints retain the conservative
+    // timestamp check; missing evidence must never borrow an earlier reason.
+    chrono::DateTime::parse_from_rfc3339(registered_at).ok().zip(
+        chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
+        .is_some_and(|(registered, created)| registered >= created)
+}
 
 /// Directory for factory session data
 const SESSIONS_DIR: &str = "sessions";
@@ -359,6 +445,32 @@ impl SessionManager {
         Ok(metadata)
     }
 
+    /// Separate from active discovery, so a receipt never becomes a daemon candidate.
+    pub(crate) fn record_ended(&self, name: &str, ended: SessionEndOutcome) -> std::io::Result<()> {
+        if !valid_session_name(name) {
+            return Err(std::io::Error::other("invalid session name"));
+        }
+        let metadata = self.load_metadata(&self.sessions_dir.join(format!("{name}.json")))?;
+        if metadata.name != name { return Err(std::io::Error::other("session metadata name mismatch")); }
+        write_end_receipt(&self.sessions_dir, &EndedSession { metadata, ended })
+    }
+
+    pub(crate) fn ended_sessions(&self) -> std::io::Result<Vec<EndedSession>> {
+        let entries = match fs::read_dir(self.sessions_dir.join("ended")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut receipts: Vec<EndedSession> = entries.filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()?.to_str()? != "json" { return None; }
+            serde_json::from_slice(&fs::read(path).ok()?).ok()
+        }).collect();
+        receipts.sort_by(|a, b| b.ended.at.cmp(&a.ended.at));
+        receipts.truncate(100);
+        Ok(receipts)
+    }
+
     /// Save session metadata
     pub fn save_metadata(&self, metadata: &SessionMetadata) -> std::io::Result<()> {
         if !valid_session_name(&metadata.name) {
@@ -372,7 +484,7 @@ impl SessionManager {
             .sessions_dir
             .parent()
             .ok_or_else(|| std::io::Error::other("missing session base"))?;
-        let _lock = socket_cleanup::transition_lock(base)?;
+        let _lock = socket_cleanup::namespace_lock(base)?;
         let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -399,36 +511,51 @@ impl SessionManager {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// Remove session metadata (called on clean shutdown)
+    /// Remove session metadata (called on clean shutdown).
     pub fn remove_metadata(&self, session_name: &str) -> std::io::Result<()> {
+        self.remove_metadata_matching(session_name, None, false).map(|_| ())
+    }
+
+    /// A lifecycle caller already inspected this birth. A replacement saved
+    /// while it waited must keep both its metadata and its live status.
+    pub(crate) fn remove_metadata_if_current(&self, expected: &SessionMetadata) -> std::io::Result<bool> {
+        self.remove_metadata_matching(&expected.name, Some(expected), false)
+    }
+
+    fn remove_metadata_matching(&self, session_name: &str, expected: Option<&SessionMetadata>, require_dead: bool) -> std::io::Result<bool> {
         if !valid_session_name(session_name) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid session name",
-            ));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid session name"));
         }
-        // Keep the receipt available while checking socket ownership. A live
-        // process, even one with a recycled PID, makes cleanup conservative.
-        let base = self
-            .sessions_dir
-            .parent()
-            .ok_or_else(|| std::io::Error::other("missing session base"))?;
-        for socket in [
-            format!("factory-{session_name}.sock"),
-            format!("factory-{session_name}.gui.sock"),
-        ] {
+        let base = self.sessions_dir.parent().ok_or_else(|| std::io::Error::other("missing session base"))?;
+        // Socket cleanup supplies its own namespace lock and native holder
+        // proof. Acquire the metadata lock only after those operations finish.
+        for socket in [format!("factory-{session_name}.sock"), format!("factory-{session_name}.gui.sock")] {
             socket_cleanup::remove_if_unheld(&base.join(socket), &self.sessions_dir)?;
         }
+        if !self.sessions_dir.exists() { return Ok(false); }
+        let _lock = socket_cleanup::namespace_lock(base)?;
         let path = self.sessions_dir.join(format!("{session_name}.json"));
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        // cas-cef2: the pinned provisioner lives exactly as long as its session.
+        let _record_lock = socket_cleanup::metadata_lock(&path)?;
+        let removed = match self.load_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.name != session_name { return Err(std::io::Error::other("session metadata name mismatch")); }
+                if expected.is_some_and(|expected| !same_session_birth(expected, &metadata))
+                    || (require_dead && daemon_identity_is_live(&metadata)) {
+                    return Ok(false);
+                }
+                retain_end_receipt(&self.sessions_dir, &metadata)?;
+                fs::remove_file(path)?;
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        // The pinned provisioner lives exactly as long as its session.
         match fs::remove_dir_all(provisioner_pin_dir(&self.sessions_dir, session_name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
-        Ok(())
+        Ok(removed)
     }
 
     /// Clean up stale sessions (daemon not running)
@@ -438,9 +565,7 @@ impl SessionManager {
 
         for session in sessions {
             if !session.is_running {
-                if self.remove_metadata(&session.name).is_err() {
-                    // Cleanup failed, continue with other sessions
-                } else {
+                if self.remove_metadata_matching(&session.name, Some(&session.metadata), true).unwrap_or(false) {
                     cleaned += 1;
                 }
             }
@@ -564,20 +689,25 @@ impl SessionInfo {
         let agent_store = open_agent_store(&cas_root).ok()?;
         let agents = agent_store.list(None).ok()?;
 
-        Some(
-            agents
-                .into_iter()
-                .filter(|agent| {
-                    agent.agent_type == AgentType::Worker
-                        && agent.factory_session.as_deref() == Some(self.name.as_str())
-                        && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
-                        && !agent.is_heartbeat_expired(
-                            crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
-                        )
-                })
-                .map(|agent| agent.name)
-                .collect(),
-        )
+        // A catalog poll uses the same heartbeat + harness-process evidence
+        // as worker_status. A quiet live harness is still a lane, not a
+        // transiently empty roster every time its heartbeat ages out.
+        let mut names: std::collections::BTreeSet<_> = agents
+            .iter()
+            .filter(|agent| {
+                agent.factory_session.as_deref() == Some(self.name.as_str())
+                    && crate::mcp::tools::service::agent_liveness::is_live_factory_worker(agent)
+            })
+            .map(|agent| agent.name.clone())
+            .collect();
+        // The daemon's actual pane roster spans the registration gap during
+        // a same-name recycle. A dead metadata PID cannot keep a lane alive.
+        names.extend(
+            self.metadata.workers.iter()
+                .filter(|worker| worker.pid.is_some_and(is_process_running))
+                .map(|worker| worker.name.clone()),
+        );
+        Some(names.into_iter().collect())
     }
 
     /// Get the number of live workers from the registry, falling back to
@@ -589,7 +719,7 @@ impl SessionInfo {
     /// Convert to a unified SessionSummary with full metadata.
     ///
     /// This method bridges the daemon discovery info with the unified
-    /// session model used by `cas_factory::UnifiedSessionManager`.
+    /// `cas_factory::SessionSummary` model.
     pub fn to_session_summary(&self) -> SessionSummary {
         let created_at = chrono::DateTime::parse_from_rfc3339(&self.metadata.created_at)
             .map(|dt| dt.with_timezone(&Utc))
@@ -752,6 +882,67 @@ pub fn create_metadata(
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::session::*;
+
+    #[test]
+    fn cec1_end_reason_matches_owned_process_even_when_registration_precedes_metadata() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut metadata = create_metadata("session-a", 100, "supervisor-a", &[], None, None, None);
+        metadata.created_at = "2026-10-28T18:41:32.004138274Z".into();
+        metadata.daemon_pid_starttime = Some(54141857);
+        // Measured real /exit: registration preceded metadata by 18.06 ms.
+        for (pid, start, registered, expected) in [
+            (Some(2729301), Some(54141868), "2026-10-28T18:41:31.986078318Z", true),
+            (Some(2729301), Some(54141856), "2026-10-28T18:41:31Z", false),
+            (Some(2729302), Some(54141868), "2026-10-28T18:41:33Z", false),
+            (Some(2729301), None, "2026-10-28T18:41:31Z", false),
+        ] {
+            assert_eq!(supervisor_end_is_current(&metadata, Some(2729301), pid, start, registered), expected,
+                "pid={pid:?} start={start:?} registered={registered}");
+        }
+    }
+
+    #[test]
+    fn stale_removal_retains_end_evidence() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        let old = create_metadata("crashed", i32::MAX as u32, "supervisor", &[], None, None, None);
+        manager.save_metadata(&old).unwrap();
+        assert_eq!(manager.cleanup_stale().unwrap(), 1);
+        let ended = manager.ended_sessions().unwrap();
+        assert_eq!(ended.len(), 1, "metadata cleanup must not erase positive stop evidence");
+        assert_eq!(ended[0].metadata.created_at, old.created_at);
+        assert!(!ended[0].ended.at.is_empty());
+
+        let mut replacement = old.clone();
+        replacement.daemon_pid = std::process::id();
+        replacement.created_at = Utc::now().to_rfc3339();
+        manager.save_metadata(&replacement).unwrap();
+        assert!(!manager.remove_metadata_if_current(&old).unwrap());
+        assert_eq!(manager.find_session(Some("crashed")).unwrap().unwrap().metadata.daemon_pid, replacement.daemon_pid);
+        assert_eq!(manager.ended_sessions().unwrap()[0].metadata.daemon_pid, old.daemon_pid);
+        let rich = SessionEndOutcome {
+            at: Utc::now().to_rfc3339(), reason: "prompt_input_exit".into(),
+            workers_stopped: vec!["worker".into()], orphans: Vec::new(), unverified: Vec::new(),
+        };
+        manager.record_ended(&replacement.name, rich.clone()).unwrap();
+        assert!(manager.remove_metadata_if_current(&replacement).unwrap());
+        assert_eq!(manager.ended_sessions().unwrap()[0].ended, rich);
+
+    }
+
+    #[test]
+    fn failed_end_receipt_keeps_stale_metadata_for_retry() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.save_metadata(&create_metadata("crashed", i32::MAX as u32, "supervisor", &[], None, None, None)).unwrap();
+        let blocked = manager.sessions_dir.join("ended");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert_eq!(manager.cleanup_stale().unwrap(), 0);
+        assert!(manager.find_session(Some("crashed")).unwrap().is_some());
+        fs::remove_file(blocked).unwrap();
+        assert_eq!(manager.cleanup_stale().unwrap(), 1);
+        assert_eq!(manager.ended_sessions().unwrap().len(), 1);
+    }
 
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
     /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
@@ -977,7 +1168,12 @@ mod tests {
         manager.ensure_dir().unwrap();
         let path = socket_path("lease");
         stale_socket(&path);
+        let inventory = crate::coordination::binding_repair::RuntimeSnapshot::capture(false);
         let live = bind_factory_socket(&path).unwrap();
+        assert!(
+            inventory.validate().is_err(),
+            "socket binding invalidates inventory"
+        );
         assert_eq!(
             bind_factory_socket(&path).unwrap_err().kind(),
             std::io::ErrorKind::AddrInUse
@@ -1242,6 +1438,16 @@ mod tests {
             "workers with stale heartbeats are not live"
         );
 
+        // A quiet but live harness must not disappear and return on catalog
+        // polls as its MCP heartbeat crosses the thirty-second boundary.
+        stale.pid = Some(std::process::id());
+        for seconds in (31..=91).step_by(5) {
+            stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(seconds);
+            agents.update(&stale).unwrap();
+            assert_eq!(session.worker_count(), 4, "live harness vanished at {seconds}s");
+            assert!(session.project_worker_names().contains(&stale.name));
+        }
+
         let fallback_metadata = create_metadata(
             "factory-registry-unavailable",
             std::process::id(),
@@ -1279,7 +1485,7 @@ mod tests {
         let pin = provisioner_pin_path(session);
         std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
         std::fs::write(&pin, "daemon build").unwrap();
-        std::fs::write(metadata_path(session), "{}").unwrap();
+        manager.save_metadata(&create_metadata(session, i32::MAX as u32, "supervisor", &[], None, None, None)).unwrap();
         manager.remove_metadata(session).unwrap();
         assert!(!pin.parent().unwrap().exists());
         assert!(!metadata_path(session).exists());

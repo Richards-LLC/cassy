@@ -351,6 +351,17 @@ def selector_anchors(selector: str) -> set[str]:
     return anchors
 
 
+def dom_selector_anchors(text: str) -> set[str]:
+    """Literal DOM lookups retain UI ownership when a handler is extracted."""
+    anchors: set[str] = set()
+    pattern = r"\.\s*(?:closest|matches|querySelector(?:All)?)(?:\s*<[^>]*>)?\s*\(\s*(?P<quote>[\"'`])(?P<selector>(?:\\.|(?!(?P=quote)).)*)(?P=quote)\s*\)"
+    for match in re.finditer(pattern, mask_comments(text), re.DOTALL):
+        selector = match.group("selector")
+        if "${" not in selector:
+            anchors.update(selector_anchors(selector))
+    return anchors
+
+
 def additive_recorders(before: str, after: str, old_region: str, new_region: str) -> set[str]:
     """Allow only new observation fields in an otherwise byte-preserved dispatch.
 
@@ -514,6 +525,27 @@ class Impact:
     def users(self, path: str) -> set[str]:
         return {j["id"] for j in self.journeys if path in self.reachable[j["id"]] or path not in ("hub-web/src/main.ts", "hub-web/src/styles.css") and any(fnmatch.fnmatchcase(path, p) for p in globs(j["fields"].get("Touches", "")))}
 
+    def selector_users(self, anchors: set[str]) -> set[str]:
+        matches: set[str] = set()
+        if not anchors:
+            return matches
+        for journey in self.journeys:
+            ident = journey["id"]
+            # Browser roots/spec literals own UI anchors; shared hub doubles do not.
+            for tree in self.trees:
+                corpus = "\n".join(tree.read(p) for p in self.browser[ident] | {suite_path(journey) or ""})
+                if any(re.search(rf"(?<![\w-]){re.escape(anchor)}(?![\w-])", corpus) for anchor in anchors):
+                    matches.add(ident)
+        return matches
+
+    def source_users(self, path: str) -> set[str]:
+        users = self.users(path)
+        # Existing import owners are retained even when another feature moves
+        # its DOM handler into that already-shared module. Inspect both trees.
+        for tree in self.trees:
+            users.update(self.selector_users(dom_selector_anchors(tree.read(path))))
+        return users
+
     def css(self, path: str) -> tuple[set[str], str]:
         if not self.before:
             return set(), "surface-wide:css-without-base"
@@ -528,15 +560,7 @@ class Impact:
             if global_selector(selector):
                 return set(), f"surface-wide:css-base:{selector}"
             anchors = selector_anchors(selector)
-            matches: set[str] = set()
-            for journey in self.journeys:
-                ident = journey["id"]
-                # Actual spec literals and explicit browser module roots only;
-                # shared hub fixtures do not prove that a page uses a component.
-                for tree in self.trees:
-                    corpus = "\n".join(tree.read(p) for p in self.browser[ident] | {suite_path(journey) or ""})
-                    if any(re.search(rf"(?<![\w-]){re.escape(anchor)}(?![\w-])", corpus) for anchor in anchors):
-                        matches.add(ident)
+            matches = self.selector_users(anchors)
             for model in self.models:
                 for module in model.selector_modules(anchors):
                     matches.update(self.users(module))
@@ -737,13 +761,16 @@ def select(paths: list[str], surfaces: dict[str, list[str]], journeys: list[dict
             add(hub_ids if reason.startswith("surface-wide:") else ids, reason)
             continue
         if path.startswith("hub-web/src/") and path.endswith((".ts", ".tsx", ".js", ".mjs")) or path.startswith("hub-web/e2e/"):
-            users = impact.users(path)
+            imported_users = impact.users(path)
+            if not imported_users:
+                add(hub_ids, f"surface-wide:unmapped-source:{path}")
+                continue
+            users = impact.source_users(path) if path.startswith("hub-web/src/") else imported_users
             for journey in journeys:
                 if journey["id"] in users:
                     direct = next((p for p in globs(journey["fields"].get("Touches", "")) if fnmatch.fnmatchcase(path, p)), None)
-                    add({journey["id"]}, "suite" if path == suite_path(journey) else direct or f"import-graph:{path}")
-            if not users:
-                add(hub_ids, f"surface-wide:unmapped-source:{path}")
+                    inferred = "import-graph" if journey["id"] in imported_users else "dom-selectors"
+                    add({journey["id"]}, "suite" if path == suite_path(journey) else direct or f"{inferred}:{path}")
             continue
         if path.startswith("hub-web/src/") and path.endswith(".css"):
             add(hub_ids, f"surface-wide:tokens-or-unmapped-css:{path}")

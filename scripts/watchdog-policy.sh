@@ -62,9 +62,14 @@ watchdog_api_read() {
 
 watchdog_cancel_run() {
     local run_id="$1"
+    # Keep the helper best-effort for both callers; expose the request outcome
+    # separately so a completed sweep need not imply successful reclamation.
+    WATCHDOG_CANCEL_RESULT=accepted
     if [[ "$WATCHDOG_DRY_RUN" == true ]]; then
+        WATCHDOG_CANCEL_RESULT=dry_run
         printf 'dry-run would cancel run=%s\n' "$run_id"
     elif ! gh api --method POST "repos/$WATCHDOG_REPOSITORY/actions/runs/$run_id/cancel" >/dev/null; then
+        WATCHDOG_CANCEL_RESULT=rejected
         # A run can complete after its final status read.  Do not abandon the
         # sweep merely because GitHub rejects that now-stale cancellation.
         printf 'warning: cancel failed run=%s call=POST repos/%s/actions/runs/%s/cancel; continuing sweep\n' \

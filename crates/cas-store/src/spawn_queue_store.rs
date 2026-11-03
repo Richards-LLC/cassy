@@ -333,6 +333,26 @@ pub trait SpawnQueueStore: Send + Sync {
         )
     }
 
+    /// Atomically persist the spawn and its ordered backlog.
+    fn enqueue_spawn_with_task_queue(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+        requester_secure_storage_dir: Option<&str>,
+        task_ids: &[String],
+    ) -> Result<i64> {
+        if !task_ids.is_empty() {
+            return Err(crate::StoreError::Other("This spawn store does not support task queues".into()));
+        }
+        self.enqueue_spawn_with_requester_account_dirs(count, worker_names, isolate, spec_json,
+            factory_session, task_id, requester_config_dir, requester_secure_storage_dir)
+    }
+
     /// Queue a shutdown request
     fn enqueue_shutdown(
         &self,
@@ -408,8 +428,8 @@ pub trait SpawnQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SpawnLifecycle>>;
 
-    /// Whether this name belongs to a nonterminal local spawn, including
-    /// provisioning requests already removed from the pending queue.
+    /// Whether this name belongs to a nonterminal local spawn or recycle,
+    /// including provisioning requests already removed from the pending queue.
     fn has_pending_spawn(&self, name: &str, factory_session: Option<&str>) -> Result<bool>;
 
     /// Get count of pending requests
@@ -502,6 +522,7 @@ impl SqliteSpawnQueueStore {
         task_id: Option<&str>,
         requester_config_dir: Option<&str>,
         requester_secure_storage_dir: Option<&str>,
+        task_ids: &[String],
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -512,7 +533,12 @@ impl SqliteSpawnQueueStore {
                 Some(worker_names.join(","))
             };
 
-            conn.execute(
+            if !task_ids.is_empty() {
+                conn.execute_batch(crate::worker_task_queue_store::WORKER_TASK_QUEUE_SCHEMA)?;
+                conn.execute_batch(crate::worker_task_queue_store::SPAWN_TASK_QUEUE_SCHEMA)?;
+            }
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, requester_secure_storage_dir, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     action.as_str(),
@@ -529,7 +555,12 @@ impl SqliteSpawnQueueStore {
                 ],
             )?;
 
-            let id = conn.last_insert_rowid();
+            let id = tx.last_insert_rowid();
+            if !task_ids.is_empty() {
+                let json = serde_json::to_string(task_ids).map_err(|e| crate::StoreError::Other(e.to_string()))?;
+                tx.execute("INSERT INTO spawn_task_queues(request_id,task_ids) VALUES(?,?)", params![id, json])?;
+            }
+            tx.commit()?;
             Ok(id)
         }) // with_write_retry
     }
@@ -565,6 +596,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             task_id,
             None,
             None,
+            &[],
         )
     }
 
@@ -589,6 +621,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             task_id,
             requester_config_dir,
             None,
+            &[],
         )
     }
 
@@ -614,6 +647,34 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             task_id,
             requester_config_dir,
             requester_secure_storage_dir,
+            &[],
+        )
+    }
+
+    fn enqueue_spawn_with_task_queue(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+        requester_secure_storage_dir: Option<&str>,
+        task_ids: &[String],
+    ) -> Result<i64> {
+        self.enqueue(
+            SpawnAction::Spawn,
+            Some(count),
+            worker_names,
+            false,
+            isolate,
+            spec_json,
+            factory_session,
+            task_id,
+            requester_config_dir,
+            requester_secure_storage_dir,
+            task_ids,
         )
     }
 
@@ -635,6 +696,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             None,
             None,
+            &[],
         )
     }
 
@@ -655,6 +717,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             None,
             None,
+            &[],
         )
     }
 
@@ -674,6 +737,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             None,
             None,
+            &[],
         )
     }
 
@@ -694,6 +758,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             None,
             None,
+            &[],
         )
     }
 
@@ -899,7 +964,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT worker_names, spawn_worker FROM spawn_queue
-             WHERE action = 'spawn'
+             WHERE action IN ('spawn', 'recycle')
                AND COALESCE(spawn_state, 'queued') IN ('queued', 'provisioning', 'launched')
                AND (? IS NULL OR factory_session = ? OR factory_session IS NULL)",
         )?;
@@ -967,6 +1032,30 @@ mod tests {
         let store = SqliteSpawnQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn pending_replacement_names_follow_lifecycle_and_session_cas_c71e() {
+        for action in [SpawnAction::Spawn, SpawnAction::Recycle, SpawnAction::Shutdown] {
+            let (_temp, store) = create_test_store();
+            let names = ["worker-a".to_string()];
+            let id = match action {
+                SpawnAction::Spawn => store.enqueue_spawn(1, &names, false, None, Some("s"), None),
+                SpawnAction::Recycle => store.enqueue_recycle("worker-a", None, Some("s")),
+                SpawnAction::Shutdown => store.enqueue_shutdown(None, &names, false, Some("s")),
+                _ => unreachable!(),
+            }.unwrap();
+            for state in [SpawnLifecycleState::Queued, SpawnLifecycleState::Provisioning,
+                SpawnLifecycleState::Launched, SpawnLifecycleState::Registered,
+                SpawnLifecycleState::Failed, SpawnLifecycleState::Stopped] {
+                store.record_spawn_state(id, state, Some("worker-a"), None).unwrap();
+                let pending = action != SpawnAction::Shutdown && !state.is_terminal();
+                assert_eq!(store.has_pending_spawn("worker-a", Some("s")).unwrap(), pending,
+                    "{action:?}/{state:?}");
+                assert!(!store.has_pending_spawn("worker-a", Some("other-session")).unwrap());
+                assert!(!store.has_pending_spawn("worker-a-suffix", Some("s")).unwrap());
+            }
+        }
     }
 
     #[test]

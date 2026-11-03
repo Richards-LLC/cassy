@@ -7,6 +7,12 @@ import { createDeviceKey } from "./dpop";
 import { ConversationHistory } from "./conversation-history";
 import type { MessageQueued, StoredMachine } from "./types";
 
+// Poll every 5 ms rather than vitest's 50 ms default, so each wait ends soon
+// after its condition holds; every wait keeps its timeout.
+function waitFor<T>(callback: () => T | Promise<T>, options: { interval?: number; timeout?: number } = {}) {
+  return vi.waitFor(callback, { interval: 5, ...options });
+}
+
 const supervisors: HubConnectionSupervisor[] = [];
 afterEach(() => {
   for (const supervisor of supervisors.splice(0)) supervisor.stop();
@@ -31,7 +37,7 @@ function transport(multiplex = false) {
   vi.stubGlobal("window", globalThis);
   let clock = 0;
   vi.spyOn(performance, "now").mockImplementation(() => clock);
-  const requests: { path: string; authorization: string | null }[] = [];
+  const requests: { path: string; authorization: string | null; at?: number }[] = [];
   const streams: { signal: AbortSignal; credential: string | null }[] = [];
   let blocked = false;
   let refused = false;
@@ -41,9 +47,9 @@ function transport(multiplex = false) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input)).pathname;
     const authorization = new Headers(init?.headers).get("Authorization");
-    requests.push({ path, authorization });
-    if (path === "/v1/health") return new Response("{}");
+    requests.push({ path, authorization, ...(path === "/v1/auth/websocket-ticket" ? { at: Date.now() } : {}) });
     if (blocked) throw new TypeError("Failed to fetch");
+    if (path === "/v1/health") { clock += 24; return new Response("{}"); }
     if (refused || authorization?.includes("opaque-needs-pairing")) {
       // Only an explicit refusal can end a pairing.
       return Response.json({ reason: "revoked", retryable: false }, { status: 401 });
@@ -58,7 +64,10 @@ function transport(multiplex = false) {
         init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
       });
       clock += 17;
-      return Response.json({ sessions: catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}` }] });
+      return Response.json({ sessions: [
+        ...(catalogRevision === undefined ? [] : [{ name: `catalog-${catalogRevision}`, supervisor: "supervisor", liveness: "live" }]),
+        ...["session-a", "session-b", "healthy", "a", "b", "c", "d"].map(name => ({ name, supervisor: "supervisor", workers: [], liveness: "live" })),
+      ] });
     }
     if (path === "/v1/events") {
       const signal = init!.signal as AbortSignal;
@@ -138,6 +147,62 @@ function networkHints(): EventTarget {
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("authenticates before loading the catalog and stays live while that catalog is stalled", async () => {
+    const hub = transport();
+    hub.stallRefresh(true);
+    const connection = supervisor(await storedMachine("auth-before-catalog"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(hub.requests.some(read => read.path === "/v1/sessions")).toBe(true));
+    expect(hub.streams).toHaveLength(1);
+    expect(connection.snapshot().phase).toBe("live");
+  });
+
+  it("retains known hub capabilities when a reconnect's capability read is temporarily unavailable", async () => {
+    transport(true);
+    const decoded: ReadableStream<string>[] = [];
+    const Decoder = TextDecoderStream;
+    vi.stubGlobal("TextDecoderStream", class extends Decoder {
+      constructor() { super(); decoded.push(this.readable); }
+    });
+    const fetchNow = globalThis.fetch;
+    let unavailable = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      unavailable && new URL(String(input)).pathname === "/v1/machine"
+        ? Promise.resolve(Response.json({ error: "busy" }, { status: 503 })) : fetchNow(input, init)));
+    const onMachineInfo = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("known-capabilities"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
+      onOutput: () => {}, onSocketError: () => {}, onMachineInfo,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const known = onMachineInfo.mock.calls.at(-1)?.[0];
+    expect(known.capabilities).toContain("machine_multiplex_v2");
+    await waitFor(() => expect(decoded).toHaveLength(1));
+    const cancel = ReadableStreamDefaultReader.prototype.cancel;
+    let completeCancel!: () => void;
+    let cancelStarted!: () => void;
+    const cancellation = new Promise<void>(resolve => { completeCancel = resolve; });
+    const started = new Promise<void>(resolve => { cancelStarted = resolve; });
+    vi.spyOn(ReadableStreamDefaultReader.prototype, "cancel").mockImplementationOnce(async function (this: ReadableStreamDefaultReader<unknown>, reason) {
+      cancelStarted();
+      await cancellation;
+      return cancel.call(this, reason);
+    });
+    connection.stop();
+    // Cancellation can outlive an event-loop turn. The consumer owns its
+    // decoded reader until cancellation finishes and finally releases it.
+    await started;
+    try { expect(decoded[0]!.locked).toBe(true); } finally { completeCancel(); }
+    await waitFor(() => expect(decoded[0]!.locked).toBe(false));
+    unavailable = true;
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(onMachineInfo.mock.calls.at(-1)?.[0]).toEqual(known);
+  });
+
   it("settles a resend receipt when an overlapping legacy attach's ticket finishes later (cas-547a)", async () => {
     transport();
     TransportSocket.instances = [];
@@ -159,11 +224,11 @@ describe("Commander live connection lifecycle", () => {
     });
     supervisors.push(connection);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const first = connection.attach("session-a");
-    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    await waitFor(() => expect(tickets).toHaveLength(1));
     const second = connection.attach("session-a");
-    await vi.waitFor(() => expect(tickets).toHaveLength(2));
+    await waitFor(() => expect(tickets).toHaveLength(2));
     tickets[0]!();
     await first;
     const writer = TransportSocket.instances[0]!;
@@ -205,24 +270,24 @@ describe("Commander live connection lifecycle", () => {
     }));
     const connection = supervisor(await storedMachine("stale-legacy-ticket"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const oldAttach = connection.attach("session-a");
-    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    await waitFor(() => expect(tickets).toHaveLength(1));
     if (change === "stop") connection.stop();
     else {
       hints.dispatchEvent(new Event("offline"));
-      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
       connection.retry();
       // Recovery has abandoned the old generation and started a fresh
       // ticket, which stays pending while the retired ticket finishes.
-      await vi.waitFor(() => expect(tickets).toHaveLength(2));
+      await waitFor(() => expect(tickets).toHaveLength(2));
     }
     tickets[0]!();
     await oldAttach;
     expect(TransportSocket.instances).toHaveLength(0);
     if (change === "recovery") {
       tickets[1]!();
-      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
       const socket = TransportSocket.instances[0]!;
       socket.open();
       socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
@@ -244,7 +309,7 @@ describe("Commander live connection lifecycle", () => {
     });
     supervisors.push(connection);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
     const writer = TransportSocket.instances[0]!;
     const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
@@ -271,9 +336,9 @@ describe("Commander live connection lifecycle", () => {
       vi.setSystemTime(Date.now() + 20_000);
       hub.event({ kind: "viewer_lagged" });
     } else hints.dispatchEvent(new Event("offline"));
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     connection.retry();
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
     if (change === "replaced pairing") machine.credentialId = "new-pairing";
     if (change === "new generation") machine.credentialGeneration = 2;
     if (change === "stopped") connection.stop();
@@ -312,16 +377,16 @@ describe("Commander live connection lifecycle", () => {
     supervisors.push(connection);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
     const writer = TransportSocket.instances[0]!;
     const welcome = { Welcome: { state: { panes: [] }, protocol_version: 3 } };
     writer.open(); writer.receive(welcome);
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Waiting for its receipt", client_ref: "draining" } })).toBe(true);
     hints.dispatchEvent(new Event("offline"));
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     connection.retry();
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
     const replacement = TransportSocket.instances[1]!;
     replacement.open(); replacement.receive(welcome);
     expect(writer.readyState).toBe(TransportSocket.OPEN);
@@ -329,7 +394,7 @@ describe("Commander live connection lifecycle", () => {
     else if (end === "authentication refusal") {
       hub.refusePairing(true);
       connection.retry();
-      await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+      await waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
     } else await vi.advanceTimersByTimeAsync(5_000);
     expect(writer.readyState).toBe(3);
     expect(writer.onmessage).toBeNull();
@@ -341,15 +406,15 @@ describe("Commander live connection lifecycle", () => {
     const events: Record<string, unknown>[] = [];
     const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
     const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
-    await vi.waitFor(() => expect(events).toHaveLength(100));
+    await waitFor(() => expect(events).toHaveLength(100));
     releaseSigning();
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
-    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
+    await waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
     connection.stop();
     await Promise.all(manual);
   });
@@ -361,7 +426,8 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("heartbeat-fleet-change"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(latest).toBe("catalog-1"));
 
     // Freeze the heartbeat's response at the HTTP boundary, before Stop changes
     // the catalog. Signing, event delivery and refresh coalescing stay real.
@@ -378,15 +444,47 @@ describe("Commander live connection lifecycle", () => {
       return response;
     });
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(held).toBe(true));
+    await waitFor(() => expect(held).toBe(true));
     hub.catalogRevision(2);
     hub.event({ kind: "fleet_changed", session: "session-a" });
-    await vi.waitFor(() => expect(events).toHaveLength(1));
+    await waitFor(() => expect(events).toHaveLength(1));
     expect(latest).toBe("catalog-1");
     release();
 
     // The event must obtain a post-change catalog without another heartbeat.
-    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+    await waitFor(() => expect(latest).toBe("catalog-2"));
+  });
+  it("settles a dismissal only after a catalog read that cannot predate the save", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const connection = supervisor(await storedMachine("dismiss-overlap"), () => {}, () => {}, sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(latest).toBe("catalog-1"));
+
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/dismiss")) { hub.catalogRevision(2); return new Response(null, { status: 204 }); }
+      const response = await fetchNow(input, init);
+      if (path === "/v1/sessions" && !held) { held = true; await pending; }
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await waitFor(() => expect(held).toBe(true));
+
+    let settled = false;
+    const dismissal = connection.dismissEndedSession("session-a", "2026-10-31T10:00:00Z").then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    release();
+    await dismissal;
+    expect(latest).toBe("catalog-2");
   });
   it("refreshes a fleet change even when the overlapping heartbeat's read fails (cas-1966)", async () => {
     const hub = transport();
@@ -396,7 +494,7 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("heartbeat-fleet-change-failed"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
 
     // The heartbeat's catalog read is in flight when Stop changes the fleet,
     // and then fails on a flaky network.
@@ -413,14 +511,14 @@ describe("Commander live connection lifecycle", () => {
       return fetchNow(input, init);
     });
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(held).toBe(true));
+    await waitFor(() => expect(held).toBe(true));
     hub.catalogRevision(2);
     hub.event({ kind: "fleet_changed", session: "session-a" });
-    await vi.waitFor(() => expect(events).toHaveLength(1));
+    await waitFor(() => expect(events).toHaveLength(1));
     fail();
 
     // The drained read's failure must not cost the fresh read.
-    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+    await waitFor(() => expect(latest).toBe("catalog-2"));
   });
   it("ends the stream without a fresh read when the drained heartbeat read is refused for auth (cas-1966)", async () => {
     const hub = transport();
@@ -429,7 +527,7 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("heartbeat-fleet-change-refused"), () => {}, event => events.push(event));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const stream = hub.streams.at(-1)!.signal;
 
     // The heartbeat's catalog read is in flight when the fleet changes, and
@@ -446,17 +544,17 @@ describe("Commander live connection lifecycle", () => {
       return fetchNow(input, init);
     });
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(held).toBe(true));
+    await waitFor(() => expect(held).toBe(true));
     const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length;
     const before = catalogReads();
     let readsAtEnd: number | undefined;
     stream.addEventListener("abort", () => { readsAtEnd = catalogReads(); }, { once: true });
     hub.event({ kind: "fleet_changed", session: "session-a" });
-    await vi.waitFor(() => expect(events).toHaveLength(1));
+    await waitFor(() => expect(events).toHaveLength(1));
     hub.refusePairing(true);
     release();
 
-    await vi.waitFor(() => expect(stream.aborted).toBe(true));
+    await waitFor(() => expect(stream.aborted).toBe(true));
     expect(readsAtEnd! - before).toBe(1);
   });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
@@ -465,14 +563,17 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("WebSocket", TransportSocket);
     let latest: string | undefined;
     const events: Record<string, unknown>[] = [];
-    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    const onSessions = vi.fn<HubCallbacks["onSessions"]>(sessions => { latest = sessions[0]?.name; });
+    const connection = supervisor(await storedMachine("rate-cap"), () => {}, event => events.push(event), onSessions);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    // Exclude the startup catalog from the event refresh budget.
+    await waitFor(() => expect(onSessions).toHaveBeenCalledOnce());
     let socket: TransportSocket | undefined;
     if (multiplex) {
       const attached = connection.attach("session-a");
-      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+      await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
       socket = TransportSocket.instances[0]!;
       socket.open(); socket.receive({ proto: 2 });
       await attached;
@@ -488,7 +589,7 @@ describe("Commander live connection lifecycle", () => {
     }
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(latest).toBe("catalog-100"));
+    await waitFor(() => expect(latest).toBe("catalog-100"));
     expect(events).toHaveLength(100);
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBeLessThanOrEqual(2);
     connection.stop();
@@ -502,21 +603,21 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));
     const connection = supervisor(await storedMachine("health-503"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().cause).toMatchObject({ code: "health_http_unavailable", status: 503, layer: "http" }));
+    await waitFor(() => expect(connection.snapshot().cause).toMatchObject({ code: "health_http_unavailable", status: 503, layer: "http" }));
     expect(connection.snapshot().authFailure).toBeUndefined();
   });
   it("keeps delivering a flood while the catalog stalls, with one catalog flight (cas-2b3a5)", async () => {
     const hub = transport();
     const events: Record<string, unknown>[] = [];
     const connection = supervisor(await storedMachine("burst"), () => {}, event => events.push(event));
-    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    connection.start(); await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
     const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
-    await vi.waitFor(() => expect(events).toHaveLength(100));
+    await waitFor(() => expect(events).toHaveLength(100));
     releaseSigning();
-    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
+    await waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
   });
   it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {
     const hub = transport();
@@ -524,20 +625,20 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("event-gap"), () => {}, event => events.push(event));
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    connection.start(); await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.event({ kind: "stream_metadata", epoch: "one", oldest_sequence: 1, latest_sequence: 1 });
     hub.event({ kind: "session_added", sequence: 1, revision: 0 });
     hub.event({ kind: "replay_complete" });
     hub.event({ kind: "session_added", sequence: 1, revision: 1 });
     hub.event({ kind: "session_added", sequence: 3, revision: 0 });
-    await vi.waitFor(() => expect(connection.snapshot().cause?.code).toBe("event_sequence_gap"));
+    await waitFor(() => expect(connection.snapshot().cause?.code).toBe("event_sequence_gap"));
     expect(events.map(event => [event.sequence, event.revision])).toEqual([[1, 0], [1, 1], [3, 0]]);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+    await waitFor(() => expect(hub.streams).toHaveLength(2));
     hub.event({ kind: "stream_metadata", epoch: "two", oldest_sequence: 1, latest_sequence: 1 });
     hub.event({ kind: "session_added", sequence: 1, revision: 0 });
     hub.event({ kind: "replay_complete" });
-    await vi.waitFor(() => expect(events).toHaveLength(4));
+    await waitFor(() => expect(events).toHaveLength(4));
     expect(connection.snapshot().cause?.code).toBe("event_epoch_changed");
   });
   it("clears permission guidance when the same tailnet pairing reconnects (cas-b85a)", async () => {
@@ -551,12 +652,12 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
+    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
     expect(connection.snapshot().authFailure).toBeUndefined();
     query.mockResolvedValue({ state: "granted" });
     hub.block(false);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(connection.snapshot().networkAccessHelp).toBeUndefined();
     expect(hub.streams[0]!.credential).toContain("opaque-local-network");
   });
@@ -570,10 +671,10 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
+    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
     hub.block(false);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    await waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
     expect(connection.snapshot().networkAccessHelp).toBeUndefined();
     const requests = hub.requests.length;
     await vi.advanceTimersByTimeAsync(10_000);
@@ -588,25 +689,27 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.block(true);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(1));
-    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    await waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(1));
+    const before = hub.requests.filter(request => request.path === "/v1/health").length;
     hints.rtt = 250;
     hints.downlink = 1;
     hints.effectiveType = "3g";
     hints.dispatchEvent(new Event("change"));
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(2));
+    await waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(2));
     expect(connection.snapshot().phase).toBe("live");
     expect(connection.snapshot().degraded).toBe(true);
-    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before);
+    // The scheduled heartbeat now probes the machine even when its catalog
+    // fails; the quality estimate must not add an opportunistic probe.
+    expect(hub.requests.filter(request => request.path === "/v1/health")).toHaveLength(before + 1);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(3));
+    await waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(3));
     expect(connection.snapshot().phase).toBe("live");
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
   });
 
   it("still probes a measured network transport change immediately (cas-eefe)", async () => {
@@ -618,13 +721,13 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    const before = hub.requests.filter(request => request.path === "/v1/machine").length;
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const before = hub.requests.filter(request => request.path === "/v1/health").length;
     hub.block(true);
     hints.type = "cellular";
     hints.dispatchEvent(new Event("change"));
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
-    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before + 1);
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    expect(hub.requests.filter(request => request.path === "/v1/health")).toHaveLength(before + 1);
     expect(connection.snapshot().missedHeartbeats).toBe(4);
   });
 
@@ -639,17 +742,17 @@ describe("Commander live connection lifecycle", () => {
       return controller.signal;
     });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const sessionReads = () => hub.requests.filter(request => request.path === "/v1/sessions").length;
     const before = sessionReads();
     hub.stallRefresh(true);
     hub.event();
-    await vi.waitFor(() => expect(sessionReads()).toBe(before + 1));
+    await waitFor(() => expect(sessionReads()).toBe(before + 1));
     await vi.advanceTimersByTimeAsync(3_000);
     // The stalled read ended at its deadline: the next event starts a new one.
     hub.stallRefresh(false);
     hub.event();
-    await vi.waitFor(() => expect(sessionReads()).toBe(before + 2));
+    await waitFor(() => expect(sessionReads()).toBe(before + 2));
     // Events kept flowing on the same stream; the heartbeat, not this read, judges the machine.
     expect(connection.snapshot().phase).toBe("live");
     expect(connection.snapshot().missedHeartbeats).toBe(0);
@@ -657,29 +760,46 @@ describe("Commander live connection lifecycle", () => {
   });
   it("keeps a failed event catalog read from bypassing four failed heartbeats on a half-open machine (cas-eefe)", async () => {
     const hub = transport();
-    const connection = supervisor(await storedMachine("half-open-catalog"));
+    let eventDelivered: (() => void) | undefined;
+    let catalogFailed: (() => void) | undefined;
+    let catalogLoaded!: () => void;
+    const initialCatalog = new Promise<void>(resolve => { catalogLoaded = resolve; });
+    const fetchNow = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      try { return await fetchNow(input, init); }
+      catch (error) {
+        if (new URL(String(input)).pathname === "/v1/sessions") catalogFailed?.();
+        throw error;
+      }
+    }));
+    const connection = supervisor(await storedMachine("half-open-catalog"), () => {}, () => eventDelivered?.(), catalogLoaded);
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await initialCatalog;
+    expect(connection.snapshot().phase).toBe("live");
     // Half-open: HTTP stops answering while the event stream stays open.
     hub.block(true);
     const sessionReads = () => hub.requests.filter(request => request.path === "/v1/sessions").length;
     for (let beat = 1; beat <= 3; beat++) {
-      // An event lands with every beat, so its catalog read races (and
-      // shares) the heartbeat's own read, as in the HUB-J12 trace.
+      // Observe the event and a failed catalog fetch before moving the clock.
+      // Native DPoP signing can outlive a synthetic heartbeat under CPU load;
+      // elapsed heartbeat time does not prove the signed read reached fetch.
       const reads = sessionReads();
+      const delivered = new Promise<void>(resolve => { eventDelivered = resolve; });
+      const failed = new Promise<void>(resolve => { catalogFailed = resolve; });
       hub.event();
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-      await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(beat));
+      await Promise.all([delivered, failed]);
       expect(sessionReads()).toBeGreaterThan(reads);
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      await waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(beat));
       expect(connection.snapshot().phase).toBe("live");
       if (beat >= 2) expect(connection.snapshot().degraded).toBe(true);
       expect(hub.streams).toHaveLength(1);
     }
     hub.event();
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
   });
   it("still ends the stream when the event catalog read finds the pairing refused (cas-eefe)", async () => {
     const hub = transport();
@@ -688,10 +808,10 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.refusePairing(false);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.refusePairing(true);
     hub.event();
-    await vi.waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
+    await waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));
     expect(connection.snapshot().phase).toBe("failed");
   });
   it("aborts a pending event catalog refresh when the network goes offline (cas-b85a)", async () => {
@@ -704,16 +824,16 @@ describe("Commander live connection lifecycle", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.length;
     hub.stallRefresh(true);
     hub.event();
-    await vi.waitFor(() => expect(hub.requests.length).toBeGreaterThan(before));
+    await waitFor(() => expect(hub.requests.length).toBeGreaterThan(before));
     events.dispatchEvent(new Event("offline"));
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     hub.stallRefresh(false);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(hub.streams).toHaveLength(2);
   });
 
@@ -726,34 +846,44 @@ describe("Commander live connection lifecycle", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     expect(connection.snapshot().authFailure).toBeUndefined();
     expect(hub.requests.every(request => request.path === "/v1/health")).toBe(true);
     machine.privateKey = key;
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(hub.streams[0]!.credential).toContain("opaque-signing-error");
   });
-  it("retries opaque authenticated failures without discarding an active pairing (cas-b85a)", async () => {
+  it("recovers from a sustained network outage without discarding an active pairing (cas-b85a)", async () => {
     const hub = transport();
     const connection = supervisor(await storedMachine("browser-blocked"));
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.block(true);
     for (let beat = 0; beat < 4; beat++) {
       const before = hub.requests.length;
       await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-      await vi.waitFor(() => expect(hub.requests.length).toBeGreaterThan(before));
+      await waitFor(() => expect(hub.requests.length).toBeGreaterThan(before));
     }
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot()).toMatchObject({ phase: "backoff", stage: "auth" }));
+    await waitFor(() => expect(connection.snapshot()).toMatchObject({ phase: "backoff", stage: "dialing" }));
     expect(connection.snapshot().authFailure).toBeUndefined();
+    // A longer real outage must still recover within five seconds of the
+    // machine returning, even after the retry delay has reached its ceiling.
+    for (const delay of [2_000, 4_000, 8_000]) {
+      await vi.advanceTimersByTimeAsync(delay);
+      await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    }
     hub.block(false);
-    await vi.advanceTimersByTimeAsync(MACHINE_RETRY_CEILING_MS);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const retryIn = connection.snapshot().nextRetryAt! - Date.now();
+    expect(retryIn, "leave time for dialing within the five-second recovery window").toBeLessThanOrEqual(4_000);
+    // Stop at the retry so the synthetic clock cannot outrun native signing
+    // and manufacture a request deadline after the machine has returned.
+    await vi.advanceTimersByTimeAsync(retryIn);
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(hub.streams).toHaveLength(2);
     expect(hub.streams[1]!.credential).toContain("opaque-browser-blocked");
   });
@@ -764,14 +894,14 @@ describe("Commander live connection lifecycle", () => {
     const old = supervisor(prior, (state) => states.set(prior.id, state));
     const connections = new Map([[prior.id, old]]);
     old.start();
-    await vi.waitFor(() => expect(old.snapshot()).toMatchObject({ phase: "failed", stage: "auth", authFailure: "revoked" }));
+    await waitFor(() => expect(old.snapshot()).toMatchObject({ phase: "failed", stage: "auth", authFailure: "revoked" }));
 
     const replacement = await storedMachine("replacement");
     const installed = replaceMachineConnection(replacement, connections, states, (machine) => supervisor(machine));
     expect(states.has(prior.id)).toBe(false);
     expect(old.snapshot().phase).toBe("idle");
     expect(connections.get(prior.id)).toBe(installed);
-    await vi.waitFor(() => expect(installed.snapshot()).toMatchObject({ phase: "live", stage: "live" }));
+    await waitFor(() => expect(installed.snapshot()).toMatchObject({ phase: "live", stage: "live" }));
     expect(installed.snapshot().authFailure).toBeUndefined();
     expect(hub.streams).toHaveLength(1);
     expect(hub.streams[0]!.credential).toContain("opaque-replacement");
@@ -783,21 +913,35 @@ describe("Commander live connection lifecycle", () => {
   it("aborts the old live transport and stops its heartbeats when replacing it", async () => {
     const hub = transport();
     const prior = await storedMachine("old");
-    const old = supervisor(prior);
+    const oldCatalog = vi.fn();
+    const old = supervisor(prior, () => {}, () => {}, oldCatalog);
     const connections = new Map([[prior.id, old]]);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     old.start();
-    await vi.waitFor(() => expect(old.snapshot().phase).toBe("live"));
-    const installed = replaceMachineConnection(await storedMachine("replacement"), connections, new Map(), (machine) => supervisor(machine));
-    await vi.waitFor(() => expect(installed.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(old.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(oldCatalog).toHaveBeenCalledOnce());
+    const replacement = await storedMachine("replacement");
+    const oldRequests = hub.requests.filter(request => request.authorization === hub.streams[0]!.credential).length;
+    // Stop while the old heartbeat's catalog proof is still being signed.
+    const releaseSigning = pauseSigning();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await waitFor(() => expect(crypto.subtle.sign).toHaveBeenCalled());
+    const replacementCatalog = vi.fn();
+    const installed = replaceMachineConnection(replacement, connections, new Map(), (machine) => supervisor(machine, () => {}, () => {}, replacementCatalog));
     expect(hub.streams[0]!.signal.aborted).toBe(true);
+    releaseSigning();
+    await waitFor(() => expect(installed.snapshot().phase).toBe("live"));
     expect(hub.streams[1]!.signal.aborted).toBe(false);
+    // Live precedes the signed startup catalog read. Await this supervisor's
+    // catalog delivery so neither startup read is counted as heartbeat traffic.
+    await waitFor(() => expect(replacementCatalog).toHaveBeenCalledOnce());
+    expect(hub.requests.filter(request => request.authorization === hub.streams[0]!.credential)).toHaveLength(oldRequests);
     const boundary = hub.requests.length;
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(installed.snapshot().latencyMs).toBe(41));
-    expect(hub.requests.slice(boundary).map((request) => request.authorization)).toEqual([
-      hub.streams[1]!.credential, hub.streams[1]!.credential,
-    ]);
+    await waitFor(() => expect(installed.snapshot().latencyMs).toBe(24));
+    await waitFor(() => expect(hub.requests.slice(boundary).map((request) => request.authorization)).toEqual([
+      null, hub.streams[1]!.credential,
+    ]));
     expect(old.snapshot().phase).toBe("idle");
   });
 
@@ -806,12 +950,13 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("latency"));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(connection.snapshot().latencyMs).toBeUndefined();
+    await waitFor(() => expect(hub.requests.filter(request => request.path === "/v1/sessions").length).toBeGreaterThan(0));
     const boundary = hub.requests.length;
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(connection.snapshot().latencyMs).toBe(41));
-    expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/sessions", "/v1/machine"]);
+    await waitFor(() => expect(connection.snapshot().latencyMs).toBe(24));
+    await waitFor(() => expect(hub.requests.slice(boundary).map((request) => request.path)).toEqual(["/v1/health", "/v1/sessions"]));
   });
 
   it.each([false, true])("keeps a healthy legacy attach through a peer exit (replay=%s, cas-49cc)", async (replay) => {
@@ -823,7 +968,7 @@ describe("Commander live connection lifecycle", () => {
     const events: Record<string, unknown>[] = [];
     const connection = supervisor(await storedMachine("peer-clean-exit"), () => {}, event => events.push(event));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     for (const session of ["healthy", "removed-peer"]) {
       await connection.attach(session);
       const socket = TransportSocket.instances.at(-1)!;
@@ -841,13 +986,13 @@ describe("Commander live connection lifecycle", () => {
     const metadata = { kind: "stream_metadata", epoch: "stable-hub", oldest_sequence: 4180, latest_sequence: 5203 };
     hub.replay([metadata, ...window, { kind: "replay_complete" }, ...tail]);
     peer.close(1000);
-    await vi.waitFor(() => expect(events).toHaveLength(1024));
+    await waitFor(() => expect(events).toHaveLength(1024));
     expect(healthy.readyState).toBe(TransportSocket.OPEN);
     if (replay) {
       hub.endEvents();
-      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+      await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
       await vi.advanceTimersByTimeAsync(1_000);
-      await vi.waitFor(() => expect(hub.streams).toHaveLength(2));
+      await waitFor(() => expect(hub.streams).toHaveLength(2));
       hub.replay([metadata, ...window, ...tail, { kind: "replay_complete" }]);
     }
     await vi.advanceTimersByTimeAsync(12_000);
@@ -867,17 +1012,17 @@ describe("Commander live connection lifecycle", () => {
     hub.catalogRevision(1);
     const connection = supervisor(await storedMachine("event-catalog"), () => {}, () => {}, sessions => { listed = sessions[0]?.name; });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(listed).toBe("catalog-1");
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(listed).toBe("catalog-1"));
     await connection.attach("healthy");
     const socket = TransportSocket.instances[0]!;
     socket.open(); socket.receive({ Welcome: { state: { panes: [] } } });
     hub.endEvents();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     hub.catalogRevision(2);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(listed).toBe("catalog-2");
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(listed).toBe("catalog-2"));
     expect(TransportSocket.instances).toHaveLength(1);
     expect(socket.readyState).toBe(TransportSocket.OPEN);
   });
@@ -889,20 +1034,20 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     const connection = supervisor(await storedMachine("read-health"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const pending = connection.attach("healthy");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
     const socket = TransportSocket.instances[0]!;
     socket.open();
     if (multiplex) socket.receive({ proto: 2 });
     await pending;
     const receive = (message: unknown) => socket.receive(multiplex ? { channel: "pty:healthy", message } : message);
     receive({ Welcome: { state: { panes: [] } } });
-    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    await waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
     expect(connection.hasLiveAttach("healthy")).toBe(true);
     expect(connection.hasLiveAttach("missing")).toBe(false);
     hub.endEvents();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     expect(connection.hasLiveAttach("healthy")).toBe(true);
     expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Still fenced during event recovery" } })).toBe(false);
     // Move the read clock without running retry timers or heartbeat signing.
@@ -924,14 +1069,14 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("WebSocket", TransportSocket);
     const connection = supervisor(await storedMachine("healthy-hint"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("healthy");
     const socket = TransportSocket.instances[0]!;
     socket.open();
     socket.receive({ Welcome: { state: { panes: [] } } });
-    const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+    const reads = hub.requests.filter(row => row.path === "/v1/health").length;
     hints.dispatchEvent(new Event("online"));
-    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+    await waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/health")).toHaveLength(reads + 1));
     expect(socket.readyState).toBe(TransportSocket.OPEN);
     expect(TransportSocket.instances).toHaveLength(1);
     expect(hub.requests.filter(row => row.path === "/v1/auth/websocket-ticket")).toHaveLength(1);
@@ -954,9 +1099,9 @@ describe("Commander live connection lifecycle", () => {
       if (state.phase === "backoff") retries.push(state.retryInMs!);
     });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("healthy");
-    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    await waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
     const socket = TransportSocket.instances[0]!;
     const started = Date.now();
     const pulse = setInterval(() => {
@@ -967,7 +1112,7 @@ describe("Commander live connection lifecycle", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       // Let real signing/fetch work settle before the next protocol second;
       // otherwise fake time can manufacture a signing deadline failure.
-      await vi.waitFor(() => expect(["live", "backoff"]).toContain(connection.snapshot().phase), { interval: 1 });
+      await waitFor(() => expect(["live", "backoff"]).toContain(connection.snapshot().phase), { interval: 1 });
     }
     clearInterval(pulse);
     console.info("cas-49cc flap proof", { elapsedMs: Date.now() - started, streams: hub.streams.length,
@@ -991,18 +1136,18 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     const connection = supervisor(await storedMachine("untrusted-attach"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("healthy");
     const socket = TransportSocket.instances[0]!;
     socket.open();
     socket.receive({ Welcome: { state: { panes: [] } } });
-    await vi.waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
+    await waitFor(() => expect(connection.attachSnapshot("healthy")?.phase).toBe("live"));
     if (!offline) await vi.advanceTimersByTimeAsync(20_000);
     hints.dispatchEvent(new Event(offline ? "offline" : "online"));
-    await vi.waitFor(() => expect(socket.readyState).toBe(3));
+    await waitFor(() => expect(socket.readyState).toBe(3));
     expect(connection.send("healthy", { SendMessage: { target: "supervisor", text: "Never into a dead socket" } })).toBe(false);
     if (!offline) {
-      await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
+      await waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
       expect(TransportSocket.instances[1]!.readyState).toBe(TransportSocket.CONNECTING);
     }
   });
@@ -1013,22 +1158,22 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     const connection = supervisor(await storedMachine("event-settle"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.endEvents();
-    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+    await waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.endEvents();
-    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
+    await waitFor(() => expect(connection.snapshot().retryInMs).toBe(2_000));
     await vi.advanceTimersByTimeAsync(2_000);
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     for (let beat = 0; beat < 2; beat++) {
-      const reads = hub.requests.filter(row => row.path === "/v1/machine").length;
+      const reads = hub.requests.filter(row => row.path === "/v1/health").length;
       await vi.advanceTimersByTimeAsync(5_000);
-      await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/machine")).toHaveLength(reads + 1));
+      await waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/health")).toHaveLength(reads + 1));
     }
     hub.endEvents();
-    await vi.waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
+    await waitFor(() => expect(connection.snapshot().retryInMs).toBe(1_000));
   });
 
   it("holds a send while the event stream reconnects despite an open legacy socket (cas-9dc6)", async () => {
@@ -1037,14 +1182,14 @@ describe("Commander live connection lifecycle", () => {
     vi.stubGlobal("WebSocket", TransportSocket);
     const connection = supervisor(await storedMachine("reconnecting-send"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
     const socket = TransportSocket.instances[0]!;
     socket.open();
     socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3, capabilities: ["conversation_history"] } });
-    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    await waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     hub.event({ kind: "viewer_lagged" });
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
     // A dispatch's IndexedDB/credential await can finish after this transition.
     // Event recovery still fences sends, while recent daemon frames keep
     // the healthy terminal available for its in-flight receipts (cas-49cc).
@@ -1053,92 +1198,38 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(false);
     expect(socket.sent).toHaveLength(before);
     connection.retry();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(TransportSocket.instances).toHaveLength(1);
     const recovered = socket;
-    await vi.waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
+    await waitFor(() => expect(connection.attachSnapshot("session-a")?.phase).toBe("live"));
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Did the Mac tests start?", client_ref: "late-dispatch" } })).toBe(true);
     expect(socket.sent).toHaveLength(before + 1);
     expect(recovered.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === "late-dispatch")).toHaveLength(1);
   });
 
-  it("releases a held send when the machine becomes live after its session (cas-9dc6)", async () => {
-    const hub = transport(true);
+  it("pauses session attaches while the machine is down and resumes at two ticket requests per second", async () => {
+    const hub = transport();
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
-    const fetchNow = globalThis.fetch;
-    let releaseEvents!: () => void;
-    const eventsReady = new Promise<void>(resolve => { releaseEvents = resolve; });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const response = await fetchNow(input, init);
-      if (new URL(String(input)).pathname === "/v1/events") await eventsReady;
-      return response;
-    }));
-    let written = false;
-    const connection: HubConnectionSupervisor = new HubConnectionSupervisor(await storedMachine("session-before-machine"), {
-      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
-      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
-      onAttachState: (session, state) => {
-        if (state.phase === "live" && !written) written = connection.send(session, {
-          SendMessage: { target: "supervisor", text: "Held in the first tab", client_ref: "held-before-live" },
-        });
-      },
-    });
-    supervisors.push(connection);
-    connection.start();
-    await vi.waitFor(() => expect(hub.streams).toHaveLength(1));
-    const attached = connection.attach("session-a");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
-    const socket = TransportSocket.instances[0]!;
-    socket.open(); socket.receive({ proto: 2 });
-    await attached;
-    socket.receive({ channel: "pty:session-a", message: { Welcome: {
-      state: { panes: [] }, protocol_version: 3, capabilities: [],
-    } } });
-    expect(connection.attachSnapshot("session-a")?.phase).toBe("live");
-    expect(connection.snapshot().phase).toBe("attaching");
-    expect(written).toBe(false);
-    releaseEvents();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    expect(written).toBe(true);
-    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.message?.SendMessage?.client_ref === "held-before-live")).toHaveLength(1);
-  });
-
-  it("checks the machine immediately when a fresh session recovers during event backoff (cas-9dc6)", async () => {
-    const hub = transport(true);
-    TransportSocket.instances = [];
-    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const connection = supervisor(await storedMachine("bounded-recovery-attaches"));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    const connection = supervisor(await storedMachine("session-recovers-first"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
-    const initial = connection.attach("session-a");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
-    const old = TransportSocket.instances[0]!;
-    old.open(); old.receive({ proto: 2 });
-    await initial;
-    old.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     hub.block(true);
-    hub.event({ kind: "viewer_lagged" });
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
-    old.close(1011);
+    hub.endEvents();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await Promise.all(["a", "b", "c", "d"].map(session => connection.attach(session)));
+    const tickets = () => hub.requests.filter(request => request.path === "/v1/auth/websocket-ticket").length;
+    expect(tickets()).toBe(0);
     hub.block(false);
-    const recovering = connection.attach("session-a");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(2));
-    const recovered = TransportSocket.instances[1]!;
-    recovered.open(); recovered.receive({ proto: 2 });
-    await recovering;
-    // The fresh session is reachable, while the machine's independent retry
-    // still waits. Its Welcome must prompt a check, not bypass send fencing.
-    expect(connection.snapshot().phase).toBe("backoff");
-    const streams = hub.streams.length;
-    recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
-    // Opening the event response precedes the recovery catalog read and the
-    // live transition; wait for the public outcome as well as the new stream.
-    await vi.waitFor(() => {
-      expect(hub.streams).toHaveLength(streams + 1);
-      expect(connection.snapshot().phase).toBe("live");
-    }, { timeout: 250, interval: 10 });
+    await vi.advanceTimersByTimeAsync(connection.snapshot().retryInMs!);
+    await waitFor(() => expect(tickets()).toBe(2));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitFor(() => expect(tickets()).toBe(4));
+    const starts = hub.requests.filter(request => request.path === "/v1/auth/websocket-ticket").map(request => request.at!);
+    expect(starts[2]! - starts[0]!).toBeGreaterThanOrEqual(1_000);
+    expect(starts[3]! - starts[1]!).toBeGreaterThanOrEqual(1_000);
   });
 
   it.each(["session_not_found", "daemon_offline"])("reattaches after a replacement is absent between Closed and session_added (%s, cas-d53c)", async (code) => {
@@ -1149,9 +1240,9 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     const connection = supervisor(await storedMachine("replacement-gap"));
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const attached = connection.attach("session-a");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
     const socket = TransportSocket.instances[0]!;
     socket.open(); socket.receive({ proto: 2 });
     await attached;
@@ -1176,6 +1267,181 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
+  it("resumes a requested session when its ended catalog entry becomes live again (cas-5049)", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("replacement-after-ended"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const welcome = { channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } };
+    socket.receive(welcome);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame))
+      .filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+
+    // The real HUB-J11 trace: Closed, the old daemon's end receipt, then a
+    // live replacement under the same session name. Ended must pause retries.
+    socket.receive({ channel: "pty:session-a", closed: true });
+    connection.setSessionEnded("session-a", true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(subscriptions()).toHaveLength(1);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Too soon" } })).toBe(false);
+    connection.setSessionEnded("session-a", false);
+    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
+    connection.setSessionEnded("session-a", false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    expect(TransportSocket.instances).toHaveLength(1);
+  });
+
+  it("retains omitted sessions until explicit stop evidence, then resumes a running replacement", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("catalog-removal"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    const fetchNow = globalThis.fetch;
+    let listed = false;
+    let stopped = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(Response.json({ sessions: listed ? [{ name: "session-a", supervisor: "supervisor", workers: [], liveness: "live" }] : [],
+          stopped_sessions: stopped ? [{ name: "session-a", supervisor: "supervisor", workers: [], liveness: "stale_metadata" }] : [] }))
+        : fetchNow(input, init)));
+    await connection.refreshSessions();
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    stopped = true;
+    await connection.refreshSessions();
+    expect(connection.hasLiveAttach("session-a")).toBe(false);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Gone" } })).toBe(false);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+    await connection.attach("session-a");
+    expect(subscriptions()).toHaveLength(1);
+    listed = true;
+    await connection.refreshSessions();
+    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+  });
+
+  it("recovers transport after offline even when the catalog fails", async () => {
+    const hub = transport();
+    const hints = new EventTarget();
+    vi.stubGlobal("addEventListener", hints.addEventListener.bind(hints));
+    vi.stubGlobal("removeEventListener", hints.removeEventListener.bind(hints));
+    vi.stubGlobal("document", new EventTarget());
+    const connection = supervisor(await storedMachine("catalog-recovery"));
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    hints.dispatchEvent(new Event("offline"));
+    await waitFor(() => expect(connection.snapshot().phase).not.toBe("live"));
+    const original = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(new Response("catalog busy", { status: 503 })) : original(input, init)));
+    hints.dispatchEvent(new Event("online"));
+    await waitFor(() => expect(hub.streams.length).toBeGreaterThan(1));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(hub.streams.at(-1)!.signal.aborted).toBe(false);
+  });
+
+  it("keeps a responsive machine live when the session catalog fails under load", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("slow-catalog-health"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ proto: 2, capabilities: ["pty_binary", "machine_multiplex"] });
+    await attached;
+    const fetchNow = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(new Response("catalog busy", { status: 503 }))
+        : fetchNow(input, init)));
+    let pings = 0;
+    vi.spyOn(socket, "send").mockImplementation(value => {
+      const frame = JSON.parse(value);
+      if (frame.channel === "health") {
+        pings += 1;
+        socket.receive({ channel: "health", pong: frame.ping });
+      }
+    });
+    for (let beat = 0; beat < 6; beat += 1) {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      expect(pings, "catalog work must not prevent the socket liveness probe").toBe(beat + 1);
+      expect(connection.snapshot()).toMatchObject({ phase: "live", degraded: false, missedHeartbeats: 0 });
+    }
+  });
+
+  it("does not subscribe a session that ends while waiting for its attach rate slot", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("ended-rate-slot"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const queued = connection.attach("session-b");
+    connection.setSessionEnded("session-b", true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await queued;
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.channel === "pty:session-b" && frame.subscribe)).toEqual([]);
+  });
+
+  it.each([
+    { pong: true, health: false },
+    { pong: false, health: true },
+    { pong: false, health: false },
+  ])("requires both socket and health failure before declaring loss (pong=$pong, health=$health)", async ({ pong, health }) => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("independent-health-signals"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const fetchNow = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      !health && new URL(String(input)).pathname === "/v1/health"
+        ? Promise.reject(new TypeError("health route down")) : fetchNow(input, init)));
+    vi.spyOn(socket, "send").mockImplementation(value => {
+      const frame = JSON.parse(value);
+      if (pong && frame.channel === "health") socket.receive({ channel: "health", pong: frame.ping });
+    });
+    for (let beat = 0; beat < 5; beat += 1) await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await waitFor(() => expect(connection.snapshot().phase).toBe(pong || health ? "live" : "backoff"));
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];
@@ -1183,9 +1449,9 @@ describe("Commander live connection lifecycle", () => {
     const connection = supervisor(await storedMachine("socket-latency"));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const attached = connection.attach("session-a");
-    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
     const socket = TransportSocket.instances[0]!;
     socket.open();
     socket.receive({ proto: 2, capabilities: ["pty_binary", "machine_multiplex"] });
@@ -1196,15 +1462,15 @@ describe("Commander live connection lifecycle", () => {
     } } });
     expect(connection.snapshot().latencyMs).toBeUndefined();
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    await vi.waitFor(() => expect(socket.sent.map((frame) => JSON.parse(frame)).some((frame) => frame.channel === "health")).toBe(true));
+    await waitFor(() => expect(socket.sent.map((frame) => JSON.parse(frame)).some((frame) => frame.channel === "health")).toBe(true));
     const ping = socket.sent.map((frame) => JSON.parse(frame)).find((frame) => frame.channel === "health").ping as number;
     expect(connection.snapshot().latencyMs).toBeUndefined();
     socket.receive({ channel: "health", pong: ping - 1 });
     expect(connection.snapshot().latencyMs).toBeUndefined();
     hub.elapse(24);
     socket.receive({ channel: "health", pong: ping });
-    // 17ms for the catalog refresh plus 24ms for the socket's answer.
-    expect(connection.snapshot().latencyMs).toBe(41);
+    // Socket latency excludes the independent 17ms catalog refresh.
+    expect(connection.snapshot().latencyMs).toBe(24);
   });
 });
 
@@ -1230,11 +1496,11 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     const connection = supervisor(await storedMachine("half-open-dial"));
     vi.useFakeTimers(timers);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
     expect(HalfOpenSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.dialing + MACHINE_RETRY_CEILING_MS);
-    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the dial timed out").toBeGreaterThan(1));
+    await waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the dial timed out").toBeGreaterThan(1));
   });
 
   it("replaces an opened socket that sends no session state and never finishes closing", async () => {
@@ -1244,11 +1510,11 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     const connection = supervisor(await storedMachine("half-open-ready"));
     vi.useFakeTimers(timers);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
     HalfOpenSocket.instances[0]!.open();
     await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.attaching + MACHINE_RETRY_CEILING_MS);
-    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1));
+    await waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1));
   });
 
   it("finishes replacing the timed-out socket after slow retry signing (cas-ec55)", async () => {
@@ -1259,7 +1525,7 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     const connection = supervisor(await storedMachine("slow-retry-signing"));
     vi.useFakeTimers(timers);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     await connection.attach("session-a");
 
     // Native WebCrypto can still be working after the fake timers drain.
@@ -1278,7 +1544,7 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     expect(connection.attachSnapshot("session-a")?.phase).toBe("auth");
     expect(HalfOpenSocket.instances).toHaveLength(1);
     releaseSigning();
-    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a replacement after retry signing completes").toBeGreaterThan(1));
+    await waitFor(() => expect(HalfOpenSocket.instances.length, "a replacement after retry signing completes").toBeGreaterThan(1));
   });
 
   it("reattaches a session whose attempt was abandoned while its ticket was in flight", async () => {
@@ -1296,9 +1562,9 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     const connection = supervisor(await storedMachine("abandoned-ticket"));
     vi.useFakeTimers(timers);
     connection.start();
-    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const attempt = connection.attach("session-a");
-    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    await waitFor(() => expect(tickets).toHaveLength(1));
     // The machine's sockets are dropped (lost heartbeats, a half-open
     // machine socket) while this attempt awaits its ticket: the attempt
     // ends without a socket, and no retry was pending.
@@ -1307,6 +1573,6 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     await attempt;
     expect(TransportSocket.instances).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS + MACHINE_RETRY_CEILING_MS);
-    await vi.waitFor(() => expect(TransportSocket.instances.length, "the live machine's heartbeat reattached the session").toBeGreaterThan(0));
+    await waitFor(() => expect(TransportSocket.instances.length, "the live machine's heartbeat reattached the session").toBeGreaterThan(0));
   });
 });

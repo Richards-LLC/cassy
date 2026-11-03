@@ -1,11 +1,8 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   LaunchSheet, SessionLaunchGrantError, accountLoginCommand, accountStep, canLaunch, defaultAccount, defaultSupervisorCli, launchSheetMarkup, launchSummary,
-  type LaunchProfiles, commandTokensMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
+  type LaunchProfiles, type LaunchTarget, commandTokensMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
 import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairCommand, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
@@ -116,7 +113,7 @@ function sheet(options: {
   listing?: (root: string, path: string) => BrowseListing;
   result?: LaunchResult;
   listedAfter?: number;
-  profiles?: LaunchProfiles;
+  profiles?: LaunchProfiles | ((target?: LaunchTarget) => Promise<LaunchProfiles>);
   grantError?: SessionLaunchGrantError;
   grantWait?: Promise<void>;
 }): { sheet: LaunchSheet; calls: Calls; dialog: () => HTMLDialogElement } {
@@ -127,7 +124,8 @@ function sheet(options: {
     currentMachineId: () => options.machines[0]?.id,
     origin: "https://hub.example",
     projects: async () => options.catalog ?? { projects: [], browse_roots: [] },
-    profiles: async () => options.profiles ?? {},
+    checkUsage: async () => { throw new Error("No snapshot yet"); },
+    profiles: async (_machine, _signal, target?: LaunchTarget) => typeof options.profiles === "function" ? options.profiles(target) : options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
     grant: async (machineId) => { calls.grants.push(machineId); await options.grantWait; if (options.grantError) throw options.grantError; const machine = options.machines.find((entry) => entry.id === machineId); if (machine) machine.scopes = [...machine.scopes, "session-launch"]; },
@@ -380,6 +378,47 @@ const ACCOUNTS: LaunchProfiles = {
 };
 
 describe("accounts (cas-9666)", () => {
+  it("checks an unselected account without selecting it or starting a session", async () => {
+    const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS });
+    s.open(); await flush();
+    const selected = () => dialog().querySelector<HTMLInputElement>('input[name="launch-account"]:checked')?.value;
+    expect(selected()).toBe("main");
+    dialog().querySelector<HTMLButtonElement>('[aria-label="Check usage for claude:support@petrastella.io"]')!.click();
+    await vi.waitFor(() => expect(dialog().textContent).toContain("No snapshot yet"));
+    expect(selected()).toBe("main"); expect(calls.launches).toEqual([]);
+  });
+
+  it("refreshes the selected project's recommendation and ignores an older project's late response", async () => {
+    const recommended = structuredClone(ACCOUNTS);
+    recommended.claude!.profiles[1]!.recommendation = "Project threshold leaves 41% headroom";
+    let release!: (profiles: LaunchProfiles) => void;
+    const pending = new Promise<LaunchProfiles>((resolve) => { release = resolve; });
+    const requests: Array<LaunchTarget | undefined> = [];
+    const { sheet: s, calls, dialog } = sheet({
+      machines: [ATLAS],
+      catalog: { projects: [project("first", "2026-09-27"), project("second", "2026-09-28")], browse_roots: [] },
+      profiles: async (target) => {
+        requests.push(target);
+        if (target?.kind === "project" && target.id === "p-first") return pending;
+        return target ? recommended : ACCOUNTS;
+      },
+    });
+    s.open();
+    await flush();
+    pick(dialog(), 'input[name="launch-project"][value="p-first"]');
+    expect(dialog().querySelector(".launch-account")!.textContent).toContain("Loading accounts");
+    pick(dialog(), 'input[name="launch-project"][value="p-second"]');
+    await flush();
+    expect(requests).toEqual([undefined, { kind: "project", id: "p-first" }, { kind: "project", id: "p-second" }]);
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="support@petrastella.io"]')!.checked).toBe(true);
+    release(ACCOUNTS);
+    await flush();
+    expect(dialog().querySelector(".launch-summary")!.textContent).toContain("second with Claude (support@petrastella.io)");
+    pick(dialog(), 'input[name="launch-account"][value="main"]');
+    dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-second" }, supervisor_cli: "claude", profile: "main" }));
+  });
+
   it("preselects the logged-in default, else the first logged-in account", () => {
     expect(defaultAccount(ACCOUNTS.claude)).toBe("main");
     expect(defaultAccount({ installed: true, profiles: [{ name: "a", logged_in: false, is_default: true }, { name: "b", logged_in: true, is_default: false }] })).toBe("b");
@@ -433,6 +472,7 @@ describe("accounts (cas-9666)", () => {
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
     expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');
     expect(dialog().querySelector(".launch-summary")!.textContent).toBe("Start cas-src with Claude (support@petrastella.io) on Atlas.");
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
@@ -453,6 +493,7 @@ describe("accounts (cas-9666)", () => {
     expect(recommended.closest("label")!.textContent).toContain("weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)");
     expect(calls.launches).toHaveLength(0);
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-account"][value="main"]');
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
@@ -463,6 +504,7 @@ describe("accounts (cas-9666)", () => {
     s.open();
     await flush();
     pick(dialog(), 'input[name="launch-project"]');
+    await flush();
     pick(dialog(), 'input[name="launch-cli"][value="codex"]');
     expect(dialog().querySelector(".launch-account")!.textContent).toContain("couldn't check Codex's accounts");
     expect(dialog().querySelector('[data-launch-action="retry-accounts"]')).not.toBeNull();
@@ -535,6 +577,7 @@ describe("New session and a machine's connection (cas-0e14 F30)", () => {
       currentMachineId: () => current ?? machines[0]?.id,
       origin: "https://hub.example",
       projects: async (machineId) => { loads.push(machineId); return { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] }; },
+      checkUsage: async () => { throw new Error("No snapshot yet"); },
       profiles: async () => ({}),
       browse: async () => { throw new Error("unused"); },
       launch: async () => ({ ok: true, session: "x", attached: false }),
@@ -617,29 +660,6 @@ describe("New session and a machine's connection (cas-0e14 F30)", () => {
   });
 });
 
-describe("New session polish (cas-c107)", () => {
-  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-  const rule = (selector: string) => {
-    const at = css.indexOf(`${selector} {`);
-    return at < 0 ? "" : css.slice(at, css.indexOf("}", at) + 1);
-  };
-
-  it("gives the supervisor's and the account's \"Default\" one treatment: a plain sub-label, not a pill", () => {
-    const shared = /\.launch-cli-default,\s*\.launch-account-tag \{([^}]*)\}/.exec(css)?.[1] ?? "";
-    expect(shared).toContain("color: var(--text-mid)");
-    expect(shared).toContain("font-size: var(--fs-xs)");
-    expect(shared).toContain("font-weight: var(--weight-regular)");
-    // The shared rule is the account tag's only styling: no pill fill or radius elsewhere.
-    expect(css.match(/\.launch-account-tag\b/g)).toHaveLength(1);
-  });
-
-  it("bounds the logged-out row's Copy button, and keeps the boundary in forced colors", () => {
-    expect(rule(".launch-login button")).toContain("border: var(--line-width) solid var(--color-transparent)");
-    const forced = [...css.matchAll(/@media \(forced-colors: active\) \{([\s\S]*?)\n\}/g)].map((match) => match[1]).join("\n");
-    expect(forced).toContain(".launch-login button { border-color: ButtonBorder; }");
-  });
-});
-
 describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
   it("renders a command as whole tokens: breaks only at spaces and after a scope's comma", () => {
     const code = document.createElement("code");
@@ -648,9 +668,6 @@ describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
     expect(pieces).toEqual(["cas", "hub", "pair", "--origin", "https://hub.example", "--scopes", "machine:read,", "pane:input,", "session:launch"]);
     expect(code.textContent).toBe("cas hub pair --origin https://hub.example --scopes machine:read,pane:input,session:launch");
     expect(code.querySelectorAll("wbr")).toHaveLength(2);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".launch-command-piece { white-space: nowrap; }");
-    expect(css).not.toMatch(/\.launch-grant-command code \{[^}]*overflow-wrap: anywhere/);
   });
 
   it("explains the Supervisor and Workers fields in words that agree with the field", () => {
@@ -664,4 +681,20 @@ describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
     expect(dialog.querySelector(".launch-grant-invite")!.textContent).not.toContain("kept");
     expect(dialog.querySelector(".launch-grant-note")!.textContent).toBe("The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.");
   });
+});
+
+
+it("refreshes changed accounts without losing the selected project or workers", async () => {
+  const options = { machines: [ATLAS], catalog: { projects: [project("ledger", "2026-10-28T00:00:00Z")], browse_roots: [] }, profiles: { claude: { installed: true, profiles: [{ name: "spare", logged_in: true, is_default: true }] } } };
+  const { sheet: instance, dialog } = sheet(options);
+  instance.open(); await flush();
+  const selected = dialog().querySelector<HTMLInputElement>('input[name="launch-project"]')!;
+  selected.checked = true; selected.dispatchEvent(new Event("change", { bubbles: true }));
+  const workers = dialog().querySelector<HTMLInputElement>('input[name="launch-workers"]')!;
+  workers.value = "2"; workers.dispatchEvent(new Event("input", { bubbles: true }));
+  options.profiles.claude.profiles = [{ name: "replacement", logged_in: true, is_default: true }];
+  instance.accountsChanged("atlas"); await flush();
+  expect(dialog().querySelector('input[name="launch-account"][value="spare"]')).toBeNull();
+  expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="replacement"]')!.checked).toBe(true);
+  expect(selected.checked).toBe(true); expect(workers.value).toBe("2");
 });

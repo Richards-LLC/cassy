@@ -316,6 +316,18 @@ pub fn handle_pre_compact(
         None => return Ok(HookOutput::empty()),
     };
 
+    // Native PreCompact is an execution fact, unlike submission of /compact.
+    // Record it before optional context work; failures must not block compaction.
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "pre_compact_fired",
+        &[
+            ("session_id", input.session_id.as_str()),
+            ("transcript_path", input.transcript_path.as_deref().unwrap_or("")),
+            ("harness", crate::harness_policy::own_harness_from_env().backend().name()),
+        ],
+    );
+
     let mut context_parts: Vec<String> = Vec::new();
 
     // 1. Inject high-importance memories (importance >= 0.7)
@@ -1097,6 +1109,10 @@ mod pre_compact_flush_tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_handle_pre_compact_inject_direction_preserved() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "native-phase");
+        env.set("CAS_AGENT_NAME", "native-supervisor");
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let cas = setup_cas();
 
         // Minimal HookInput — no transcript, so flush short-circuits gracefully
@@ -1120,5 +1136,11 @@ mod pre_compact_flush_tests {
             output.hook_specific_output.is_none(),
             "PreCompact must not set hookSpecificOutput (schema forbids it)"
         );
+        let log = cas.root.join("logs").join(format!("factory-session-{}.log", chrono::Utc::now().date_naive()));
+        let text = std::fs::read_to_string(log).expect("native PreCompact leaves a lifecycle fact even without a transcript");
+        let record: serde_json::Value = text.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["event"] == "pre_compact_fired").unwrap();
+        assert_eq!(record["session_id"], "inject-test-session");
+        assert_eq!(record["agent"], "native-supervisor");
     }
 }

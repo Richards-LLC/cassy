@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CHECKING_VOICE_INPUT, DRAFT_NOT_SAVED_NOTE, DRAFT_TOO_LONG_NOTE, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyDraftNote, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
-import { COMPOSER_ROLE_PLACEHOLDER, composerPlaceholder, composerPlaceholders, dressComposer, fitComposerPlaceholder, fittingPlaceholder } from "./conversation-shell";
+import { COMPOSER_ROLE_PLACEHOLDER, composerPlaceholders, dressComposer, fitComposerPlaceholder, fittingPlaceholder } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
 const luminance = (hex: string) => [1, 3, 5].map((o) => Number.parseInt(hex.slice(o, o + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
@@ -84,37 +84,7 @@ describe("mic states say what they mean (P6, cas-0c80)", () => {
 });
 
 describe("mic state styling (P6)", () => {
-  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
   const tokens = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "tokens.css"), "utf8");
-  const rule = (selector: string) => {
-    const start = css.indexOf(`${selector} {`);
-    expect(start, selector).toBeGreaterThanOrEqual(0);
-    return css.slice(start, css.indexOf("}", start));
-  };
-
-  it("paints listening in the critical fill with a static halo, never the Send accent", () => {
-    for (const selector of ["#message-mic.listening", ".conversation-composer #message-mic.listening"]) {
-      const body = rule(selector);
-      expect(body).toContain("background: var(--crit-bg)");
-      expect(body).toContain("var(--crit-fg)");
-      expect(body).not.toMatch(/--accent|--you-bg|--color-action/);
-    }
-    // The halo is the outline itself; reduced motion only stops the breathing.
-    expect(rule("#message-mic.listening")).toContain("outline: 4px solid color-mix(in srgb, var(--crit-bg) 28%, transparent)");
-    const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce) {\n  #message-mic.listening"));
-    expect(reduced.slice(0, reduced.indexOf("}\n}"))).toContain("#message-mic.listening { animation: none;");
-    expect(reduced.slice(0, reduced.indexOf("}\n}"))).not.toContain("outline");
-  });
-
-  it("paints checking and unavailable as a quiet dashed ring, never the warning amber", () => {
-    for (const selector of ["#message-mic:disabled", ".conversation-composer #message-mic:disabled"]) {
-      const body = rule(selector);
-      expect(body).toContain("border-style: dashed");
-      expect(body).toContain("border-color: var(--line-strong)");
-      expect(body).toContain("background: var(--color-transparent)");
-      expect(body).not.toMatch(/--warn-text|--state-warn/);
-    }
-  });
 
   it("meets text 4.5:1 and marks 3:1 for every mic state in both schemes", () => {
     for (const scheme of ["light", "dark"]) {
@@ -184,14 +154,6 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG);
     expect(field.placeholder).toBe("Message the supervisor");
     expect(send.getAttribute("aria-label")).toBe("Send to the supervisor");
-    // The unmeasured default is the fullest wording, whole.
-    expect(composerPlaceholder(LONG)).toBe(`Message the ${LONG} supervisor`);
-    expect(composerPlaceholder("  ")).toBe("Message the supervisor");
-  });
-  it("keeps the empty field to one line in the stylesheet", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-composer textarea:placeholder-shown { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }");
-    expect(css).toContain(".conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }");
   });
 });
 

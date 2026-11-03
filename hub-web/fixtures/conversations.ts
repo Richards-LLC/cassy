@@ -1,7 +1,9 @@
+import { bindEmojiComposer } from "../src/emoji-composer";
 import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { fleetControlGate } from '../src/fleet-permissions';
 import type { Scope } from '../src/types';
-import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
+import { groupConversationRows, type ConversationRow } from '../src/conversation-list';
+import { ProjectNavigation } from '../src/project-navigation';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { DEFAULT_EXPLORER_ORIGIN, explorerUrl } from '../src/app-switcher';
@@ -15,6 +17,8 @@ import { installAttentionObjects, renderAskObject, renderBlockerObject } from '.
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
 import { inlineAttachment } from '../src/rich-attachment';
+import { sentAttachmentReference } from '../src/sent-attachments';
+import { ComposerUploads } from '../src/composer-uploads';
 import evidenceImage from '../e2e/media/evidence.png?url';
 import { WorkEventStream, workEventsPage } from '../src/work-events';
 import type { WorkRowsContext } from '../src/work-rows-view';
@@ -53,10 +57,10 @@ export const FIXTURE_SUPERVISOR = 'patient-pelican-9';
 export function fixtureConversationRows(selected: boolean): ConversationRow[] {
   const base = { freshness: 'Catalog checked just now', connection: 'Live', attention: 0, unread: 0, selected: false };
   return [
-    { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
-    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: '09:41', preview: 'Pass two is green — every pack in one place.', unread: 2 },
-    { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
-    { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
+    { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, harness: 'claude', supervisorState: 'needs-you', projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
+    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', harness: 'codex', supervisorState: 'working', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: '09:41', preview: 'Pass two is green — every pack in one place.', unread: 2 },
+    { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', harness: 'grok', supervisorState: 'idle', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
+    { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', harness: 'opencode', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
     { ...base, key: 'bench-1:five', machineId: 'bench-1', session: 'five', supervisor: 'bright-otter-3', projectDir: '/projects/violet', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Posted both threads to the channel.' },
     { ...base, key: 'bench-1:six', machineId: 'bench-1', session: 'six', supervisor: 'calm-heron-5', projectDir: '/projects/cas-hub-static', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Nothing waiting on you.' },
   ];
@@ -67,7 +71,7 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
  * one heading with the most recent marked; this device may end them.
  */
 export function fixtureSessionRows(): ConversationRow[] {
-  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true, harness: 'codex' as const, account_email: 'operator@example.test', machine_online: true };
   const now = Date.now();
   return groupConversationRows([
     { ...base, key: 'atlas-linux:noble', session: 'gabber-studio-noble-cheetah-84', supervisor: 'noble-cheetah-84', when: '14h', freshness: 'Last activity 14h ago · relay-watchdog → Commander', activityAt: now - 14 * 3_600_000, preview: 'Mixdown preview rendered: 3 stems.' },
@@ -82,7 +86,7 @@ export function fixtureSessionRows(): ConversationRow[] {
  * phone opens on. Each can be ended; one has unread turns and one is waiting.
  */
 export function fixtureManySessionRows(): ConversationRow[] {
-  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true, harness: 'codex' as const, account_email: 'operator@example.test', machine_online: true };
   const now = Date.now();
   const names = ['calm-puma-34', 'wild-shark-68', 'noble-cheetah-84', 'quiet-otter-12', 'brave-lynx-7', 'swift-heron-51', 'amber-fox-29'];
   const previews = ['Stem export is at 60%.', 'Mixdown preview rendered: 3 stems.', 'Waiting on your approval for the mastering chain.', 'Nothing waiting on you.', 'Re-rendered the vocal bus.', 'Live', 'Live'];
@@ -123,13 +127,13 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, harness: "claude", model: "claude-opus-5-5", effort: "high", host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
   // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
   const needsPairing = state === 'conversation-needs-pairing';
   const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()
     : needsPairing ? fixtureConversationRows(selected).map((row) => row.machineId === 'atlas-linux' ? { ...row, connection: 'Needs pairing', interrupted: true } : row)
     : fixtureConversationRows(selected);
-  const conversationList = new ConversationList();
+  const conversationList = new ProjectNavigation();
   const listNode = app.querySelector<HTMLElement>('#conversation-list')!;
   // Ending a session drops its row, as main.ts does once the hub confirms.
   let shownRows = listRows;
@@ -291,6 +295,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(62, 61, ['## Pass two is green', '', '**All 14 targets passed** with *one recorded flake*.', '', '- `cargo check` stayed green', '- Review the [receipt](https://example.com/reports/pass-two).', '  - No retry was needed', '', '1. Tagged gabber-studio v2.4.1', '2. Pushed the release branch.', '', 'Every pack:', '', '| pack | cases | result |', '| --- | --- | --- |', '| core | 412 | pass |', '| ui | 388 | pass |', '| net | 211 | pass |', '| store | 174 | pass |', '| hooks | 96 | pass |', '| mcp | 143 | pass |', '| hub | 260 | pass |', '| cli | 318 | 1 flake |'].join('\n'), 'answer', at(9, 30));
     reply(63, 61, 'Tagged gabber-studio v2.4.1 and pushed.', 'receipt', at(9, 31));
     working = true;
+  } else if (state === 'conversation-code-frames') {
+    reply(91, null, '# Source ready to copy\n\nThe source stays literal. Turn on Wrap to read long lines here.\n\n```ts src/example.ts\n// Literal source stays selectable\nconst message = "<script>&amp;雪 ' + 'long_source_'.repeat(18) + '";  \n\tconsole.log(message);\n```\n\n~~~unknown\nUnknown languages stay readable.\n~~~', 'answer', at(9, 44));
   } else if (state === 'conversation-rich-content') {
     // Visual fixture only: transport, decode and unavailable states are HUB-J22.
     installAttachmentSheet((sheet, file) => {
@@ -301,6 +307,25 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       return root;
     });
     reply(91, null, '# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```diff\n--- a/launch.ts\n+++ b/launch.ts\n@@ -1,25 +1,25 @@\n-launch()\n+launchWithEvidence()\n' + Array.from({ length: 24 }, (_, index) => ` context ${index}`).join('\n') + '\n```', 'answer', at(9, 44), [{ artifact_id: 'rich-visual-image', name: 'Evidence screenshot.png', mime: 'image/png', size_bytes: 1024, sha256: '9f'.repeat(32) }]);
+  } else if (state === 'conversation-sent-attachment' || state === 'conversation-attachment-failure') {
+    // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
+    installAttachmentSheet((sheet, file) => {
+      if (state === 'conversation-attachment-failure') return inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: new URL('/attachment-preview-missing.png', location.href).href } }));
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
+      const viewport = root.querySelector<HTMLElement>('.rich-media');
+      if (viewport) {
+        const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;
+        viewport.replaceChildren(image); viewport.dataset.previewState = 'ready';
+      }
+      return root;
+    });
+    const text = ['Please review this screenshot.',
+      sentAttachmentReference({ path: '/host/commander/art-screenshot/screenshot.png', mime: 'image/png', size: 2048 }),
+      sentAttachmentReference({ path: '/host/commander/art-notes/notes.txt', mime: 'text/plain', size: 1024 }),
+    ].join('\n\n');
+    history.submit('upload', supervisor, text, at(9, 40));
+    history.acknowledge({ client_ref: 'upload', notification_id: 70, target: supervisor, stamped: true });
+    if (state === 'conversation-attachment-failure') reply(71, 70, 'This screenshot is unavailable too.', 'answer', at(9, 41), [{ artifact_id: 'art-failed-supervisor', name: 'Unavailable.png', mime: 'image/png', size_bytes: 2048, sha256: '9f'.repeat(32) }]);
   } else if (state === 'conversation-attachment') {
     // The report-card case: a receipt with prose, then its two artifacts laid on the thread as sheets.
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
@@ -421,7 +446,17 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  bindEmojiComposer(slot.querySelector<HTMLTextAreaElement>('#message-text')!, slot.querySelector<HTMLButtonElement>('#message-emoji')!);
   applyDraftNote(slot, state === 'conversation-draft-too-long' ? 'too-long' : state === 'conversation-draft-not-saved' ? 'not-saved' : false);
+  if (state === 'conversation-upload-progress' || state === 'conversation-upload-refusal') {
+    const uploads = new ComposerUploads(); uploads.bind(slot);
+    uploads.add([new File([new Uint8Array(10 * 1024 * 1024)], 'holiday-photo.heif', { type: 'image/heif' })]);
+    void uploads.prepare('', async (_id, _name, _data, report) => {
+      if (state === 'conversation-upload-refusal') throw new Error('This file type is not supported.');
+      report?.(0.42);
+      return new Promise(() => {});
+    }).catch(() => {}); // The production component owns this refusal status.
+  }
   // The dismissed-messages chip sits at the top of the composer region, as main.ts places it.
   if (!view.unsent.hidden) slot.prepend(view.unsent);
   if (state === 'conversation-keyboard') {

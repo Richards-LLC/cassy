@@ -132,7 +132,7 @@ fn fixture_with_surface(env: &mut TestEnvGuard, surface: &str, evidence_gate: bo
     env.set("CAS_FACTORY_MODE", "1");
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     std::fs::write(cas_dir.join("config.toml"),
-        format!("[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nevidence_gate={evidence_gate}\nindependent_pass=true\n")).unwrap();
+        format!("[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate={evidence_gate}\nindependent_pass=true\n")).unwrap();
     open_store(&cas_dir).unwrap().init().unwrap();
     open_rule_store(&cas_dir).unwrap().init().unwrap();
     open_skill_store(&cas_dir).unwrap().init().unwrap();
@@ -236,7 +236,6 @@ async fn close_output(fixture: &Recovery) -> String {
                 commit_receipt: Some(fixture.final_tip.clone()),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -255,94 +254,161 @@ async fn close(fixture: &Recovery) -> Task {
     parked
 }
 
+/// GH #1382: a start boundary can contain UI inherited from a reused lane.
+/// Only the source range delivered after that boundary owes UI evidence.
+#[tokio::test]
+async fn close_classifies_delivery_after_start_boundary_gh1382() {
+    let mut env = TestEnvGuard::temp_home();
+    for surface in ["api.ts", "delivered.vue"] {
+        let mut f = fixture_with_surface(&mut env, "note.txt", true);
+        let repo = f.dir.path();
+        git(&f.worker_path, &["reset", "--hard", "main"]);
+        std::fs::write(f.worker_path.join("inherited.vue"), "<template>Earlier UI</template>\n").unwrap();
+        git(&f.worker_path, &["add", "inherited.vue"]);
+        git(&f.worker_path, &["commit", "-qm", "Earlier lane work"]);
+        let start = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        std::fs::write(f.worker_path.join(surface), "export const result = 'delivered';\n").unwrap();
+        git(&f.worker_path, &["add", surface]);
+        git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): deliver source change")]);
+        f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.demo_statement.clear();
+        task.deliverables.parked_branch = None;
+        task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+        task.deliverables.historical_factory_branch_anchors.clear();
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(),
+            branch: BRANCH.into(),
+            base_sha: start,
+        });
+        tasks.update(&task).unwrap();
+
+        let output = close_output(&f).await;
+        if surface.ends_with(".vue") {
+            assert!(output.contains("QA evidence bundle"), "delivered UI must owe evidence: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{output}");
+        } else {
+            assert!(output.contains("MERGE REQUIRED"), "API-only delivery must park: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
+            assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+            let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+            let files: Vec<_> = state["qa_impact"]["unowned"].as_array().unwrap().iter()
+                .filter_map(|entry| entry["file"].as_str()).collect();
+            assert!(files.contains(&surface), "API change must appear in delivered impact: {state}");
+            assert!(!files.contains(&"inherited.vue"), "inherited UI must not select a review journey: {state}");
+            git(repo, &["merge", "-q", "--no-ff", BRANCH, "-m", "Integrate API delivery"]);
+            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+            let output = close_output(&f).await;
+            assert!(output.contains("Closed task:"), "API-only delivery must also close after integration: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{output}");
+            assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+        }
+    }
+}
+
 /// cas-2bec: spawn assigns a plain lane. The commit hook records the RED
-/// commit, but only the pushed GREEN tip has a passing fast-rows receipt.
+/// commit; close must bind the pushed GREEN tip.
 #[tokio::test]
 async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture_with_surface(&mut env, "note.txt", false);
-    let repo = f.dir.path();
-    git(&f.worker_path, &["reset", "--hard", "main"]);
-    std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
-    std::fs::write(
-        f.worker_path.join("scripts/fast-rows-pre-push.sh"),
-        "#!/bin/sh\n",
-    )
-    .unwrap();
-    std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
-    git(&f.worker_path, &["add", "scripts", "regression.txt"]);
-    git(
-        &f.worker_path,
-        &["commit", "-qm", &format!("test({TASK}): RED regression")],
-    );
-    let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
-    git(&f.worker_path, &["add", "fix.txt"]);
-    git(
-        &f.worker_path,
-        &[
-            "commit",
-            "-qm",
-            &format!("fix({TASK}): GREEN implementation"),
-        ],
-    );
-    let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(
-        repo,
-        &[
-            "update-ref",
-            &format!("refs/remotes/origin/{BRANCH}"),
-            &green,
-        ],
-    );
+    for (subject, explicit_receipt, advances) in [
+        (format!("fix({TASK}): GREEN implementation"), false, true),
+        ("test: correct pre-push failure".into(), false, false),
+        ("test: correct pre-push failure".into(), true, true),
+        (
+            format!("fix(cas-abcd): sibling work\n\nContext: {TASK}"),
+            true,
+            false,
+        ),
+    ] {
+        let f = fixture_with_surface(&mut env, "note.txt", false);
+        let repo = f.dir.path();
+        git(&f.worker_path, &["reset", "--hard", "main"]);
+        std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
+        git(&f.worker_path, &["add", "regression.txt"]);
+        git(
+            &f.worker_path,
+            &["commit", "-qm", &format!("test({TASK}): RED regression")],
+        );
+        let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        // cas-93d7: pre-push refuses the first delivery before origin updates.
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(
+            repo,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(&hook, "#!/bin/sh\ngit cat-file -e HEAD:fix.txt\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = std::process::Command::new("git")
+            .args(["push", "origin", BRANCH])
+            .current_dir(&f.worker_path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "pre-push must reject RED");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("fix.txt"),
+            "{refused:?}"
+        );
+        assert!(git(repo, &["ls-remote", "--heads", "origin"]).is_empty());
+        std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
+        git(&f.worker_path, &["add", "fix.txt"]);
+        git(&f.worker_path, &["commit", "-qm", &subject]);
+        let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
 
-    let common = git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    );
-    let receipts = Path::new(&common).join("cas/fast-rows");
-    std::fs::create_dir_all(&receipts).unwrap();
-    std::fs::write(
-        receipts.join(format!("{green}.pass")),
-        format!("fast-rows: PASS {green} fixture\n"),
-    )
-    .unwrap();
-    let tasks = open_task_store(&repo.join(".cas")).unwrap();
-    let mut task = tasks.get(TASK).unwrap();
-    task.demo_statement.clear();
-    task.deliverables.parked_branch = None;
-    task.deliverables.factory_branch_anchor = Some(red.clone());
-    task.deliverables.historical_factory_branch_anchors.clear();
-    tasks.update(&task).unwrap();
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.demo_statement.clear();
+        task.deliverables.parked_branch = None;
+        task.deliverables.factory_branch_anchor = Some(red.clone());
+        task.deliverables.historical_factory_branch_anchors.clear();
+        tasks.update(&task).unwrap();
 
-    let output = text(
-        f.core
-            .cas_task_close(Parameters(TaskCloseRequest {
-                id: TASK.into(),
-                reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
-                commit_receipt: None,
-                no_delivery: None,
-                supervisor_override: None,
-                stranded_branch_override: None,
-                legacy_bypass_code_review: None,
-                search_manifest: None,
-            }))
-            .await
-            .unwrap(),
-    );
-    assert!(output.contains("MERGE REQUIRED"), "{output}");
-    let parked = tasks.get(TASK).unwrap();
-    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert_eq!(
-        parked.deliverables.factory_branch_anchor.as_deref(),
-        Some(green.as_str()),
-        "{output}"
-    );
-    assert!(
-        parked.notes.contains(&red),
-        "the original RED boundary stays audited"
-    );
+        let output = text(
+            f.core
+                .cas_task_close(Parameters(TaskCloseRequest {
+                    id: TASK.into(),
+                    reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
+                    commit_receipt: explicit_receipt.then(|| green.clone()),
+                    no_delivery: None,
+                    supervisor_override: None,
+                    stranded_branch_override: None,
+                    search_manifest: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        let parked = tasks.get(TASK).unwrap();
+        if !advances {
+            assert_eq!(
+                parked.deliverables.factory_branch_anchor.as_deref(),
+                Some(red.as_str()),
+                "must keep the old anchor for {subject:?}, explicit={explicit_receipt}: {output}"
+            );
+            continue;
+        }
+        assert!(output.contains("MERGE REQUIRED"), "{output}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(green.as_str()),
+            "{output}"
+        );
+        assert!(
+            parked.notes.contains(&red),
+            "the original RED boundary stays audited"
+        );
+    }
 }
 
 #[tokio::test]
@@ -378,6 +444,75 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds.len(), 1);
     assert_eq!(rounds[0].bound_head, f.final_tip);
     assert_eq!(rounds[0].branch, BRANCH);
+}
+
+/// GH #1389: the first final close must use the pushed receipt, even when a
+/// commit hook saved its predecessor before the worker synchronized the target.
+#[tokio::test]
+async fn first_close_explicit_final_receipt_binds_qa_and_merge_request_gh1389() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture(&mut env);
+    // The final target-sync merge also carries the worker's last source
+    // correction. Prior-head QA is therefore stale, not source-equivalent.
+    std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(&f.worker_path, &["add", "footer.css"]);
+    git(&f.worker_path, &["commit", "--amend", "-q", "--no-edit"]);
+    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+    let cas_dir = f.dir.path().join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.historical_factory_branch_anchors.clear();
+    tasks.update(&task).unwrap();
+
+    let unrelated = git(f.dir.path(), &["rev-parse", "main"]);
+    for (label, receipt) in [("prior head", &f.predecessor), ("unrelated target", &unrelated)] {
+        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some(format!("{label} receipt must refuse")),
+            commit_receipt: Some(receipt.clone()),
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            search_manifest: None,
+        })).await.unwrap());
+        assert!(output.contains("REJECTED") || output.contains("REFUSED"), "{label}: {output}");
+        let unchanged = tasks.get(TASK).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::InProgress, "{label}: {output}");
+        assert_eq!(unchanged.deliverables.factory_branch_anchor.as_deref(), Some(f.predecessor.as_str()));
+        assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+    }
+
+    let parked = close(&f).await;
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
+    let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    assert_eq!(rounds.len(), 1);
+    assert_eq!(rounds[0].bound_head, f.final_tip);
+
+    let service = crate::mcp::CasService::new(f.core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": TASK,
+        "summary": "Merge final delivery", "message": "Merge the final pushed receipt",
+        "merge_request": true,
+    })).unwrap();
+    let output = text(service.coordination(Parameters(request)).await.unwrap());
+    assert!(!output.contains("RE-PARK"), "{output}");
+    let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().poll_all(50).unwrap();
+    assert!(rows.iter().any(|row| {
+        crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            .is_some_and(|envelope| envelope.task_id == TASK && envelope.branch_tip == f.final_tip)
+    }), "{output}");
+
+    cas_store::waive_qa_pass(
+        &cas_dir, TASK, "supervisor-session", WORKER, BRANCH,
+        &f.predecessor, "reviewed predecessor only", chrono::Utc::now(),
+    ).unwrap();
+    let supervisor = CasCore::with_daemon(cas_dir, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let refusal = supervisor.independent_qa_merge_refusal(TASK, WORKER, f.dir.path());
+    assert!(refusal.is_some(), "prior-head QA must not approve the final receipt");
 }
 
 /// GH #1355: a pushed target-sync merge is the new park boundary, even
@@ -433,7 +568,6 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
             no_delivery: None,
             supervisor_override: None,
             stranded_branch_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
         })).await.unwrap();
         let output = text(result);
@@ -737,7 +871,6 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
                 commit_receipt: None,
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -840,7 +973,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         commit_receipt: None,
         supervisor_override: None,
         stranded_branch_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     })).await.unwrap());
     let parked = tasks.get(TASK).unwrap();
@@ -883,7 +1015,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
                 commit_receipt: Some(final_tip.clone()),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -903,7 +1034,6 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
                 commit_receipt: Some(final_tip),
                 supervisor_override: None,
                 stranded_branch_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
             }))
             .await
@@ -998,11 +1128,16 @@ fn fresh_ledger(f: &Recovery) -> std::path::PathBuf {
     let paths = crate::config::resolved_factory_artifact_paths(&cas_dir, None);
     let task_dir = paths.task_dirs(TASK)[0].clone();
     std::fs::create_dir_all(&task_dir).unwrap();
-    std::fs::write(
-        task_dir.join("LEDGER.md"),
-        "| M01 | render contract | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
-    )
-    .unwrap();
+    std::fs::create_dir_all(task_dir.join("qa")).unwrap();
+    std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
+    std::fs::write(task_dir.join("LEDGER.md"), format!(
+        "cells=4; PASS=1; FAIL=0; NOT EXERCISED=3\nlabels: real-build=1; source-inferred=3\n{}\n\
+         | M01 | render | ok | ok | PASS | real-build | qa/M01.txt | - |\n\
+         | M02 | invalid | refused | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n\
+         | M03 | boundary | bounded | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n\
+         | M04 | adjacent | stable | not run | NOT EXERCISED: not run in this fixture | source-inferred | - | - |\n",
+        crate::qa_ledger::HEADER
+    )).unwrap();
     task_dir
 }
 
@@ -1453,7 +1588,6 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         commit_receipt: Some(f.final_tip.clone()),
         supervisor_override: Some(true),
         stranded_branch_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
     }));
     let invalid = text(reviewed_close(format!("reviewed-drop: {} -- not a replacement", f.final_tip)).await.unwrap());
@@ -1479,4 +1613,14 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     assert_eq!(closed.status, TaskStatus::Closed, "{reviewed}");
     assert!(closed.notes.contains(&replacement) && closed.notes.contains("reviewed delivery content supersession accepted"), "{}", closed.notes);
 
+    // The override is an intervention and the independent verdict is a check.
+    let ledger = cas_store::quality_events_for_task(&cas_dir, TASK).unwrap();
+    let interventions: Vec<_> = ledger.iter().filter_map(|event| match event.payload {
+        cas_store::QualityPayload::Intervention { intervention, .. } => Some(intervention),
+        _ => None,
+    }).collect();
+    assert!(interventions.contains(&cas_store::InterventionKind::OverrideClose), "{ledger:?}");
+    assert!(ledger.iter().any(|event| matches!(&event.payload,
+        cas_store::QualityPayload::CheckRun { check_id, outcome: cas_store::CheckOutcome::Pass, .. } if check_id == "task_verifier")),
+        "{ledger:?}");
 }

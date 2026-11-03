@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 
-import { runVisualQa } from './visual-qa.mjs';
+import { resolvePlaywright, runVisualQa } from './visual-qa.mjs';
 import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -67,6 +67,65 @@ test('reports every planted visual defect and captures a screenshot', async () =
   assert.ok(result.screenshots.length === 1);
   assert.match(result.markdown, /PASS\/FAIL|FAIL/);
   assert.match(result.markdown, /contrast|clipped-content|overlapping-text/);
+});
+
+test('capture pool preserves ordered results and overflow failures at N=1 and N=3', async () => {
+  const fixtureDir = await mkdtemp(join(tmpdir(), 'visual-qa-pool-pages-'));
+  const urls = [join(fixtureDir, 'first-page.html'), join(fixtureDir, 'first_page.html')];
+  const html = await readFile(fixture('defects.html'), 'utf8');
+  await writeFile(urls[0], html);
+  await writeFile(urls[1], html.replace('Content extends below', 'Second page extends below'));
+  const { playwright } = await resolvePlaywright();
+  const launch = playwright.chromium.launch;
+  let active = 0;
+  let peak = 0;
+  let launches = 0;
+  playwright.chromium.launch = async function (options) {
+    launches += 1;
+    const browser = await launch.call(this, options);
+    const newContext = browser.newContext.bind(browser);
+    browser.newContext = async (options) => {
+      const context = await newContext(options);
+      active += 1;
+      peak = Math.max(peak, active);
+      context.once('close', () => { active -= 1; });
+      return context;
+    };
+    return browser;
+  };
+  try {
+    const results = [];
+    const images = [];
+    for (const concurrency of [1, 3]) {
+      peak = 0;
+      const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-pool-'));
+      const result = await runVisualQa({
+        // Shared selectors test first-URL dedup; colliding slugs test ordered writes.
+        urls,
+        artifactDir,
+        concurrency,
+        strict: true,
+        schemes: ['light', 'dark'],
+        viewports: ['390x800', '1280x800'],
+      });
+      assert.equal(peak, concurrency, 'one browser must bound its live contexts to N');
+      assert.equal(active, 0, 'all capture contexts close');
+      assert.equal(result.status, 'FAIL');
+      assert.equal(result.exitCode, 1);
+      assert.ok(result.findings.some(({ type }) => type === 'clipped-content'));
+      assert.equal(result.screenshots.length, 8);
+      assert.ok(result.findings.every(({ url }) => url === urls[0]), 'first URL wins dedup');
+      images.push(await Promise.all(result.screenshots.map(({ path }) => readFile(join(artifactDir, path)))));
+      // Only the wall-clock timestamp differs between independent runs.
+      const { generatedAt, markdown, ...stable } = result;
+      results.push({ ...stable, markdown: markdown.replaceAll(generatedAt, '<timestamp>') });
+    }
+    assert.equal(launches, 2, 'each run uses one Chromium process');
+    assert.deepEqual(results[1], results[0]);
+    assert.deepEqual(images[1], images[0]);
+  } finally {
+    playwright.chromium.launch = launch;
+  }
 });
 
 test('passes the clean fixture in light and dark at both required widths', async () => {
@@ -423,16 +482,20 @@ test('JavaScript requirement needs a reason and cannot waive print loss', async 
 test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
-  for (const name of exemplarNames) {
-    const result = await acceptanceRender(
-      join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name),
-      join(artifactDir, `exemplar-${name}`),
-    );
-    assert.equal(result.status, 'PASS', `${name} should pass: ${JSON.stringify(result.counts)}`);
-  }
-
-  const cleanReview = await acceptanceRender(await revisionFixture('2420a246'), join(artifactDir, 'review-2420a246'));
-  assert.equal(cleanReview.status, 'PASS', `2420a246 should pass: ${JSON.stringify(cleanReview.counts)}`);
+  // Use the runner's bounded capture pool for the independent clean pages.
+  // This keeps all 20 clean captures while avoiding five serial browsers.
+  const cleanPages = exemplarNames.map((name) =>
+    join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name));
+  cleanPages.push(await revisionFixture('2420a246'));
+  const clean = await runVisualQa({
+    urls: cleanPages, artifactDir: join(artifactDir, 'clean'),
+    schemes: ['light', 'dark'], viewports: [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'phone', width: 390, height: 800 },
+    ],
+  });
+  assert.equal(clean.status, 'PASS', JSON.stringify(clean.findings));
+  assert.equal(clean.screenshots.length, cleanPages.length * 4);
 
   const defectiveReview = await acceptanceRender(await revisionFixture('cbac967b'), join(artifactDir, 'review-cbac967b'));
   assert.equal(defectiveReview.status, 'FAIL');

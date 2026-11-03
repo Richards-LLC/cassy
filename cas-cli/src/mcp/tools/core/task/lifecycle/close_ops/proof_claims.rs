@@ -18,6 +18,7 @@ struct Grammar {
     receipt: Regex,
     receipt_heading: Regex,
     negated: Regex,
+    duration_percentage_ratio: Regex,
 }
 
 fn grammar() -> &'static Grammar {
@@ -37,6 +38,7 @@ fn grammar() -> &'static Grammar {
             receipt: re(r"(?i)\b(?:run|ci)\s*[:=#]?\s+[1-9][0-9]{5,}\b|\brun[ _-]?id\s*[:=#]?\s*[1-9][0-9]*\b|\brun\s*[:=#]\s*[1-9][0-9]*\b|/actions/runs/[1-9][0-9]*\b|\bart-[a-f0-9]{8,}\b"),
             receipt_heading: re(r"^[\s(`*]*(?:receipt|evidence|proof:|run\b|run[_-]?id\b|ci\b|artifact\b|art-[a-f0-9])"),
             negated: re(r"\b(?:(?:will|shall)\s+not|not|never|hasn't|haven't|didn't|isn't)\s+(?:yet\s+)?(?:pass(?:ed|ing)?|green|verified|validated|run|complete[ds]?)\b"),
+            duration_percentage_ratio: re(r"(?i)^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:ns|us|µs|ms|s|m|h|d)/[+-]?(?:\d+(?:\.\d+)?|\.\d+)%$"),
         }
     })
 }
@@ -131,6 +133,9 @@ fn local_paths(clause: &str) -> Vec<&str> {
         };
         for token in tokens {
             let path = super::strip_path_punctuation(token);
+            if grammar().duration_percentage_ratio.is_match(path) {
+                continue;
+            }
             let has_path_component = |candidate: &str| {
                 Path::new(candidate)
                     .components()

@@ -188,8 +188,7 @@ fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
         .collect();
     let more = notices.len().saturating_sub(DIGEST_NAMED);
     Some(format!(
-        "[digest] {} system notice{} folded here instead of a wake each, no action needed \
-         (messages abandoned to recipients that have ended): {}{}. Read one whole with \
+        "[digest] {} inbox update{}: {}{}. Read one whole with \
          inbox_poll notification_id=<id>.",
         notices.len(),
         if notices.len() == 1 { "" } else { "s" },
@@ -339,7 +338,7 @@ pub(crate) fn surface_factory_inbox_after_tool_result(
 /// Code keeps hook context whole only up to about 10,000 characters and shows
 /// a short preview past that. Mail is bounded by
 /// [`cas_store::HOOK_SURFACE_BUDGET_CHARS`] plus its frames and notes; the
-/// rest (supervisor reminder, ambient recall) must fit what is left.
+/// rest (supervisor reminder) must fit what is left.
 pub(crate) const HOOK_CONTEXT_CAP_CHARS: usize = 9_500;
 
 /// cas-1f0c: what a hook's mail block may spend beyond its bodies: the
@@ -354,31 +353,6 @@ pub(crate) fn hook_body_budget(reserved: usize) -> usize {
     cas_store::HOOK_SURFACE_BUDGET_CHARS.min(
         HOOK_CONTEXT_CAP_CHARS.saturating_sub(reserved + HOOK_MAIL_NOTES_RESERVE_CHARS),
     )
-}
-
-/// cas-1f0c: append `addition` to a hook's context only if the whole, plus
-/// `reserved` characters of other context in the same output, stays within
-/// [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
-pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str, reserved: usize) -> bool {
-    let separator = if context.is_empty() { 0 } else { 2 };
-    if reserved + context.chars().count() + separator + addition.chars().count()
-        > HOOK_CONTEXT_CAP_CHARS
-    {
-        return false;
-    }
-    if separator > 0 {
-        context.push_str("\n\n");
-    }
-    context.push_str(addition);
-    true
-}
-
-/// cas-1f0c: build optional context after mail was already receipted. A
-/// panic here must not take the rendered mail down with the hook process.
-pub(crate) fn after_mail<T>(build: impl FnOnce() -> Option<T>) -> Option<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(build))
-        .ok()
-        .flatten()
 }
 
 /// cas-1f0c: what one hook surfacing did.
@@ -666,8 +640,8 @@ fn surface_factory_inbox_with_transport_delivery(
     let mut block_notes: Vec<String> = Vec::new();
     block_notes.extend(polled_unacked_note(&polled_unacked));
     if notes {
-        // cas-6ccb: a row shown in full again gets the [not acknowledged]
-        // note, not also "[already shown]".
+        // Polled recovery references carry [not acknowledged], without
+        // an additional [already shown] note.
         let already_shown: Vec<i64> = already_shown
             .iter()
             .copied()
@@ -975,7 +949,7 @@ fn turn_prompt_carries_row(
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon
 /// stamps every queued message's body with this envelope, so a teams copy
 /// Claude Code renders as a teammate message names its row.
-fn envelope_ids(prompt: &str) -> Vec<i64> {
+pub(crate) fn envelope_ids(prompt: &str) -> Vec<i64> {
     const MARKER: &str = "[cas #";
     let mut ids = Vec::new();
     let mut rest = prompt;
@@ -1043,7 +1017,7 @@ fn already_shown_note(ids: &[i64]) -> Option<String> {
 /// cas-ad92: the message ids named by daemon pointer wakes in a submitted
 /// prompt (`CAS wake: message {id} from …`, see `pointer_wake_payload`).
 /// A named id only selects among rows already addressed to this recipient.
-fn wake_named_ids(prompt: &str) -> Vec<i64> {
+pub(crate) fn wake_named_ids(prompt: &str) -> Vec<i64> {
     const MARKER: &str = "CAS wake: message ";
     let mut ids = Vec::new();
     for line in prompt.lines() {
@@ -1075,8 +1049,7 @@ fn render_rows_with_header(rows: &[QueuedPrompt], lanes: &[InboxLane], header: &
     let mut out = format!("[incoming messages]\n{header}\n");
     for (index, row) in rows.iter().enumerate() {
         let label = lanes.get(index).copied().unwrap_or(InboxLane::Ordinary).label();
-        let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_command(row)
-            .map(|command| format!("Reply with: `{command}`\n"))
+        let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_framing(row)
             .unwrap_or_default();
         out.push_str(&format!(
             "\n--- {label}from {} (message {}{}) ---\n{}\n{}{}\n",
@@ -1102,6 +1075,7 @@ mod tests {
 
     fn row(id: i64, source: &str, prompt: &str) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "worker-1".to_string(),
@@ -1149,11 +1123,10 @@ mod tests {
             rendered.contains("[cas #81 operator Daniel@iphone-15 verified "),
             "{rendered}"
         );
+        assert!(rendered.contains("Reply once in this pane"), "{rendered}");
         assert!(
-            rendered.contains(
-                "coordination action=message target=operator in_reply_to=81 summary=… message=…"
-            ),
-            "{rendered}"
+            !rendered.contains("coordination action=message target=operator"),
+            "a mirrored answer must not request a second operator message: {rendered}"
         );
         let spoofed = row(82, "commander:Daniel@iphone-15", "Status please");
         let rendered = render_surfaced(&[spoofed]);
@@ -1164,7 +1137,7 @@ mod tests {
     /// cas-1f0c round 3: PostToolUse lessons and guardrail warnings share
     /// the hook output with the mail, so they are reserved inside the cap.
     #[test]
-    fn reserved_context_shrinks_the_body_budget_and_the_recall_room() {
+    fn reserved_context_shrinks_the_body_budget() {
         assert_eq!(hook_body_budget(0), cas_store::HOOK_SURFACE_BUDGET_CHARS);
         let lessons = 4_000;
         let budget = hook_body_budget(lessons);
@@ -1172,11 +1145,6 @@ mod tests {
         assert!(lessons + budget + HOOK_MAIL_NOTES_RESERVE_CHARS <= HOOK_CONTEXT_CAP_CHARS);
         assert_eq!(hook_body_budget(HOOK_CONTEXT_CAP_CHARS), 0);
 
-        let recall = "r".repeat(3_000);
-        let mut context = "m".repeat(5_000);
-        assert!(push_within_hook_cap(&mut context.clone(), &recall, 0));
-        assert!(!push_within_hook_cap(&mut context, &recall, 1_600), "lessons leave no room");
-        assert_eq!(context.len(), 5_000, "a refused addition leaves the context unchanged");
     }
 
     #[test]
@@ -1219,9 +1187,10 @@ mod tests {
 
     #[test]
     fn turn_start_does_not_replay_a_transport_delivered_spawn_brief_after_progress() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT", &cas_root);
         let task_store = crate::store::open_task_store(&cas_root).unwrap();
         let mut task = cas_types::Task::new(
             "cas-7c1e".to_string(),
@@ -1253,11 +1222,8 @@ mod tests {
             )
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-1");
-            std::env::set_var("CAS_FACTORY_SESSION", "session");
-        }
+        env.set("CAS_AGENT_NAME", "worker-1");
+        env.set("CAS_FACTORY_SESSION", "session");
         let mut input = HookInput {
             hook_event_name: "UserPromptSubmit".to_string(),
             ..Default::default()
@@ -1269,12 +1235,6 @@ mod tests {
             None,
             "a stale spawn brief must be consumed without replaying task-start boilerplate"
         );
-
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
     }
 
     /// cas-78d3 (GH #165) — the regression this whole task exists for.
@@ -1294,11 +1254,12 @@ mod tests {
     /// the bug invisible for a full release.
     #[test]
     fn stalled_nudge_hooks_skip_routine_alarm_at_turn_and_tool_boundaries() {
-        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+        let mut env = crate::test_support::TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_NAME", Some("worker-stall-hook")),
             ("CAS_FACTORY_SESSION", Some("stall-hook-session")),
         ]);
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         let outcome = store.enqueue_worker_stall_nudge("worker-stall-hook", "you are stalled",
@@ -1326,19 +1287,17 @@ mod tests {
 
     #[test]
     fn claude_real_payload_surfaces_mail_and_stamps_hook_surfaced() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         let id = store
             .enqueue_with_session("supervisor", "worker-78d3", "ship cas-78d3", "sess-78d3")
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-78d3");
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-78d3");
-        }
+        env.set("CAS_AGENT_NAME", "worker-78d3");
+        env.set("CAS_FACTORY_SESSION", "sess-78d3");
 
         let mut input: HookInput = serde_json::from_str(
             r#"{
@@ -1369,12 +1328,6 @@ mod tests {
             "surfaced context missing the message body: {context}"
         );
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
-
         let report = store
             .message_delivery_report(id)
             .unwrap()
@@ -1392,19 +1345,17 @@ mod tests {
     /// not depend on a capture precondition it has nothing to do with.
     #[test]
     fn a_blank_prompt_still_surfaces_mail() {
-        let _guard = crate::hooks::test_env_lock();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         store
             .enqueue_with_session("supervisor", "worker-blank", "urgent context", "sess-blank")
             .unwrap();
 
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-blank");
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-blank");
-        }
+        env.set("CAS_AGENT_NAME", "worker-blank");
+        env.set("CAS_FACTORY_SESSION", "sess-blank");
 
         let mut input = HookInput {
             hook_event_name: "UserPromptSubmit".to_string(),
@@ -1413,14 +1364,9 @@ mod tests {
         };
         input.agent_role = Some("worker".to_string());
 
-        let out = super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
-            .expect("handler must not error");
-
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
+        let out =
+            super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
+                .expect("handler must not error");
 
         assert!(
             out.user_prompt_context()
@@ -1434,7 +1380,9 @@ mod tests {
     /// second turn start never re-injects it. This is the GH #124 storm guard.
     #[test]
     fn a_surfaced_row_is_never_surfaced_twice() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
+        env.set("CAS_ROOT", temp.path());
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         store

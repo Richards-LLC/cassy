@@ -2,9 +2,9 @@
  * Plain words for a refused supervisor message (journey evaluation F6).
  *
  * The hub and the daemon refuse a send with protocol codes the operator cannot
- * act on: the hub answers every authorization failure with `forbidden`
- * (hub/server.rs `handle_client_message`: no `message:send` scope, or this
- * device does not hold the session lease), the hub answers
+ * act on: the hub distinguishes a rejected pairing, missing `message:send`
+ * permission and terminal control (hub/server.rs `handle_client_message`),
+ * while older hubs answer authorization failures with `forbidden`. It answers
  * `upstream_unavailable` (retryable, cas-a0e2) when the session's daemon
  * upstream could not take the message, and the daemon prefixes its enqueue
  * failures with `semantic message enqueue failed:` (daemon runtime
@@ -40,12 +40,22 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
     reason: "The question it answered is no longer open.",
     next: "Edit it and send it as a new message.",
   }],
+  [/message_send_required|paired without supervisor messages/i, {
+    reason: "This device was paired without permission to send messages.",
+    next: "Re-pair this device with Send messages to supervisors, then retry.",
+  }],
+  // A specific pairing cause wins over generic forbidden/authorization text.
+  // Keep bare expiry below lease/control: an expired lease is not a pairing.
+  [/authenticat|credential|revoked|pair/i, {
+    reason: "This device's pairing is no longer accepted.",
+    next: "Re-pair this device, then retry.",
+  }],
   [/forbidden|authori[sz]ation|permission|not allowed|denied|lease|observ|control/i, {
     reason: "This device isn't the one in control of the session.",
     next: "Take control, then retry.",
     action: "take-control",
   }],
-  [/authenticat|credential|expired|revoked|pair/i, {
+  [/expired/i, {
     reason: "This device's pairing is no longer accepted.",
     next: "Re-pair this device, then retry.",
   }],

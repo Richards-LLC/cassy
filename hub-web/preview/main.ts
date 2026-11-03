@@ -1,6 +1,5 @@
 // Commander preview: the real production app (src/main.ts) against fixture
 // machines served in-page by the journey HubDouble. Preview only.
-import "./env";
 import { PreviewPage } from "./browser-page";
 import { HubDouble, type HistoryPage, type Machine } from "../e2e/journeys/hub-double";
 

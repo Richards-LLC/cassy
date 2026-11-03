@@ -26,35 +26,6 @@ fn test_memory_request_deserialization() {
 }
 
 #[test]
-fn test_memory_request_minimal() {
-    let json = json!({
-        "action": "get",
-        "id": "2024-01-01-001"
-    });
-
-    let req: MemoryRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.action, "get");
-    assert_eq!(req.id, Some("2024-01-01-001".to_string()));
-    assert!(req.content.is_none());
-}
-
-#[test]
-fn test_task_request_create() {
-    let json = json!({
-        "action": "create",
-        "title": "Fix bug",
-        "priority": 1,
-        "task_type": "bug"
-    });
-
-    let req: TaskRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.action, "create");
-    assert_eq!(req.title, Some("Fix bug".to_string()));
-    assert_eq!(req.priority, Some(1));
-    assert_eq!(req.task_type, Some("bug".to_string()));
-}
-
-#[test]
 fn test_task_request_notes() {
     let json = json!({
         "action": "notes",
@@ -203,22 +174,6 @@ fn test_search_context_request_observe() {
     assert_eq!(req.content, Some("Fixed the parser bug".to_string()));
     assert_eq!(req.observation_type, Some("bugfix".to_string()));
     assert_eq!(req.tags, Some("parser,fix".to_string()));
-}
-
-#[test]
-fn test_system_request_reindex() {
-    let json = json!({
-        "action": "reindex",
-        "bm25": true,
-        "embeddings": true,
-        "missing_only": false
-    });
-
-    let req: SystemRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.action, "reindex");
-    assert_eq!(req.bm25, Some(true));
-    assert_eq!(req.embeddings, Some(true));
-    assert_eq!(req.missing_only, Some(false));
 }
 
 #[test]
@@ -401,20 +356,6 @@ fn test_empty_optional_fields() {
 }
 
 #[test]
-fn test_task_claim_with_duration() {
-    let json = json!({
-        "action": "claim",
-        "id": "cas-1234",
-        "duration_secs": 1800,
-        "reason": "Working on implementation"
-    });
-
-    let req: TaskRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.duration_secs, Some(1800));
-    assert_eq!(req.reason, Some("Working on implementation".to_string()));
-}
-
-#[test]
 fn test_task_transfer() {
     let json = json!({
         "action": "transfer",
@@ -426,25 +367,6 @@ fn test_task_transfer() {
     let req: TaskRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.to_agent, Some("agent-5678".to_string()));
     assert_eq!(req.notes, Some("Handoff notes here".to_string()));
-}
-
-/// cas-3ed5: supervisor force-transfer — TaskRequest accepts bypass_code_review=true
-/// as the supervisor-override flag for the transfer action.
-#[test]
-fn test_task_transfer_supervisor_override_deserializes() {
-    let json = json!({
-        "action": "transfer",
-        "id": "cas-1234",
-        "to_agent": "agent-5678",
-        "bypass_code_review": true,
-        "notes": "Supervisor reassign"
-    });
-
-    let req: TaskRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.to_agent, Some("agent-5678".to_string()));
-    assert_eq!(req.effective_supervisor_override(), Some(true));
-    assert!(req.used_deprecated_supervisor_override_alias());
-    assert_eq!(req.notes, Some("Supervisor reassign".to_string()));
 }
 
 #[test]

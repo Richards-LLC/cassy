@@ -171,7 +171,7 @@ fn team_default_errors_when_slug_not_found() {
 }
 
 /// AC: when teams[] is empty, error message tells the user to run
-/// `cas cloud login` to refresh team membership.
+/// `cas login` to refresh team membership.
 #[test]
 fn team_default_errors_with_login_hint_when_teams_empty() {
     let tmp = seed_user_cas_dir(vec![], None);
@@ -187,8 +187,8 @@ fn team_default_errors_with_login_hint_when_teams_empty() {
         .to_string();
 
     assert!(
-        err.contains("cas cloud login"),
-        "error must suggest running `cas cloud login` when teams[] is empty, got: {err}"
+        err.contains("cas login"),
+        "error must suggest running `cas login` when teams[] is empty, got: {err}"
     );
 }
 

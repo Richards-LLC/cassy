@@ -97,7 +97,7 @@ a later build in a *different* `CARGO_TARGET_DIR`. If a build wedges right
 after you killed a previous one, that is the first thing to check:
 
 ```text
-mcp__cas__coordination action=gc_report
+mcp__cas__factory action=gc_report
 ```
 
 Orphaned `rustc` shows up as reapable, annotated "build tool with no parent to
@@ -158,7 +158,7 @@ run; cleanup is the supervisor's (`gc_cleanup` is host-wide, not scoped to your
 worktree), so name the exact pid you want gone:
 
 ```text
-mcp__cas__coordination action=gc_report
+mcp__cas__factory action=gc_report
 ```
 
 **Never select test binaries by name.** `pkill -f cas-` or `pkill -f

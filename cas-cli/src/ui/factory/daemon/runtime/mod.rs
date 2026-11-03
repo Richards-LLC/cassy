@@ -6,6 +6,7 @@ mod busy_claude_delivery_tests;
 mod client_input;
 mod cloud;
 mod commander_mirror;
+mod quality_turns;
 pub(crate) use commander_mirror::MirrorScanState;
 pub(crate) mod delivery;
 pub(crate) mod director_refresh;
@@ -70,3 +71,5 @@ pub(crate) mod poison_sweep_jobs;
 
 #[cfg(test)]
 mod supervisor_single_turn_tests;
+
+pub(crate) mod supervisor_commands;

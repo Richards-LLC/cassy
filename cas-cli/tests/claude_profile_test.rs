@@ -24,6 +24,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
         .env_remove("CAS_ROOT")
         .env_remove("CAS_CLONE_PATH")
         .env_remove("COLUMNS")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -72,6 +73,43 @@ fn home_with_profiles() -> TempDir {
 }
 
 #[test]
+fn generated_statusline_records_usage_even_for_a_factory_supervisor() {
+    let home = home_with_profiles();
+    let project = TempDir::new().unwrap();
+    cas_cmd(home.path()).current_dir(project.path())
+        .env_remove("CAS_AGENT_ROLE")
+        .args(["init", "--yes", "--no-integrations", "--json"])
+        .assert().success();
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join(".claude/settings.json")).unwrap()).unwrap();
+    let command = settings["statusLine"]["command"].as_str().unwrap();
+    let args = command.strip_prefix("cas ").expect("generated Cassy command");
+    for role in ["supervisor", "worker"] {
+        let dir = home.path().join(format!(".claude-{role}"));
+        std::fs::create_dir(&dir).unwrap();
+        cas_cmd(home.path()).current_dir(project.path())
+            .env("CLAUDE_CONFIG_DIR", &dir).env("CAS_AGENT_ROLE", role)
+            .args(args.split_whitespace())
+            .write_stdin(serde_json::json!({"rate_limits": {
+                "seven_day": {"used_percentage": 38, "resets_at": chrono::Utc::now().timestamp() + 86400}
+            }}).to_string())
+            .assert().success();
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join(".cas-claude-usage.json")).expect("generated command must record the native snapshot")).unwrap();
+        assert_eq!(snapshot["windows"][0]["used_percent"].as_f64(), Some(38.0));
+        // Idle profiles retain their observation until the window resets.
+        let mut old = snapshot;
+        old["observed_at"] = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339().into();
+        std::fs::write(dir.join(".cas-claude-usage.json"), old.to_string()).unwrap();
+    }
+    cas_cmd(home.path()).args(["claude", "--list-profiles"])
+        .assert().success()
+        .stdout(predicate::str::contains("weekly 38%").count(2))
+        .stdout(predicate::str::contains("as of ").count(2))
+        .stdout(predicate::str::contains(" ET"));
+}
+
+#[test]
 fn list_profiles_shows_detected_accounts_and_login_state() {
     let home = home_with_profiles();
     let alt = home.path().join(".claude-alt");
@@ -94,7 +132,51 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         ))
         .stdout(predicate::str::contains(
             "  work (not logged in)\n    ~/.claude-work\n",
-        ));
+        ))
+        .stdout(predicate::str::contains("Full profile names and folders:").not());
+
+    for alias in [
+        format!("{}@example.com", "long-profile-".repeat(5)),
+        "界".repeat(50),
+        "🚀".repeat(40),
+    ] {
+        let directory = home.path().join(format!(".claude-{alias}"));
+        std::fs::create_dir(&directory).unwrap();
+        let email = format!("{alias}@example.org");
+        std::fs::write(directory.join(".claude.json"), serde_json::json!({
+            "oauthAccount": {"emailAddress": email, "accountUuid": alias, "organizationUuid": "long-profile"}
+        }).to_string()).unwrap();
+        let output = cas_cmd(home.path())
+            .env("COLUMNS", "80")
+            .env("CLAUDE_CONFIG_DIR", &directory)
+            .args(["claude", "--list-profiles"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        for line in output.lines() {
+            let width = ratatui::text::Line::from(line).width();
+            assert!(width <= 80, "profile list overflows 80 cells: {line}");
+        }
+        let header = output.lines().find(|line| line.contains("(active)")).unwrap();
+        assert!(ratatui::text::Line::from(header).width() >= 79, "unused display cells: {header}");
+        assert!(header.contains("(not logged in) (active)"), "{output}");
+        assert!(output.contains("--full"), "truncated identity needs an escape: {output}");
+        for flag in ["--full", "--json"] {
+            cas_cmd(home.path())
+                .env("CLAUDE_CONFIG_DIR", &directory)
+                .args(["claude", "--list-profiles", flag])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(&email))
+                .stdout(predicate::str::contains(&alias))
+                .stdout(predicate::str::contains(format!("~/.claude-{alias}")))
+                .stdout(predicate::str::contains("Full profile names and folders:").not());
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }
 
 #[test]
@@ -183,13 +265,16 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     let team = row("codex", "team");
     assert_eq!(team["plan"], "pro");
     assert!(row("codex", "past")["windows"][0]["used_percent"].is_null());
-    assert_eq!(team["windows"][0]["used_percent"], 45.0);
-    assert_eq!(row("codex", "team@example.com")["windows"], team["windows"]);
+    assert_eq!(team["email"], serde_json::Value::Null);
+    assert_eq!(team["identity"], serde_json::Value::Null);
+    assert_eq!(team["flags"]["duplicate_of"], serde_json::Value::Null);
+    assert_eq!(team["windows"][0]["used_percent"], 12.0);
+    assert_eq!(row("codex", "team@example.com")["windows"][0]["used_percent"], 45.0);
     assert!(
         rows.iter()
             .position(|a| a["name"] == "team@example.com")
             .unwrap()
-            < rows.iter().position(|a| a["name"] == "team").unwrap()
+            > rows.iter().position(|a| a["name"] == "team").unwrap()
     );
     assert_eq!(
         chrono::DateTime::parse_from_rfc3339(team["windows"][0]["resets_at"].as_str().unwrap())
@@ -269,7 +354,8 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
                 .args([provider, "--bare", name, "--version"]);
             cmd
         };
-        command("main@example.com")
+        let main_key = if provider == "claude" { "main@example.com" } else { "main" };
+        command(main_key)
             .assert()
             .success()
             .stdout(predicate::str::contains("SELECTED=main"));
@@ -277,7 +363,7 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
             .env_remove("CODEX_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-            .args([provider, "main@example.com"])
+            .args([provider, main_key])
             .assert()
             .failure()
             .stderr(predicate::str::contains(
@@ -289,12 +375,21 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
                 .join(format!(".{provider}-main@example.com"))
                 .exists()
         );
-        command("shared@example.com")
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("ambiguous"))
-            .stderr(predicate::str::contains("alt"))
-            .stderr(predicate::str::contains("work"));
+        if provider == "claude" {
+            command("shared@example.com")
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("ambiguous"))
+                .stderr(predicate::str::contains("alt"))
+                .stderr(predicate::str::contains("work"));
+        } else {
+            for email in ["main@example.com", "shared@example.com"] {
+                command(email).assert().failure()
+                    .stderr(predicate::str::contains("unknown"));
+            }
+            command("alt").assert().success()
+                .stdout(predicate::str::contains(".codex-alt"));
+        }
         command("altt")
             .assert()
             .failure()
@@ -561,6 +656,151 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
     }
 }
 
+/// Picker new-login on a real terminal: keys inquire read ahead of the
+/// duplicate question are handed over without reading the terminal again, so
+/// finished answers, EOF and Ctrl-C keep their order and meaning; everything
+/// newer is the terminal's own input.
+#[cfg(unix)]
+#[tokio::test]
+async fn picker_email_type_ahead_answers_the_duplicate_question_for_claude() {
+    use cas_pty::{Pty, PtyConfig, PtyEvent};
+    // Only Claude publishes a non-secret identity for the duplicate question.
+    {
+        let provider = "claude";
+        let home = TempDir::new().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        // Official-login stub: every login is the same real@example.com identity.
+        cas::test_paths::warm_stub(
+            &bin.join(provider),
+            r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
+if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
+if [ "$1" = auth ] || [ "$1" = login ]; then
+  # The login child must inherit the terminal's native (canonical) mode.
+  stty -a 2>/dev/null | grep -q -- -icanon && echo CHILD_RAW
+  echo LOGIN_STARTED; [ -f "$HOME/pause-login" ] && sleep 1
+fi
+if [ "$1" = auth ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  printf '{"oauthAccount":{"emailAddress":"real@example.com","accountUuid":"one"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+fi
+if [ "$1" = login ] && [ -n "$CODEX_HOME" ]; then
+  printf '{"tokens":{"id_token":"h.eyJlbWFpbCI6InJlYWxAZXhhbXBsZS5jb20ifQ.s","account_id":"one"}}' > "$CODEX_HOME/auth.json"
+fi
+exit 0
+"#,
+        );
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .args([provider, "login", "first@example.com"])
+            .assert()
+            .success();
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        // (keys written with the email, output that triggers the next write,
+        // keys written then, succeeds). Everything typed after the email's
+        // Enter is the terminal's own input, in order, until the question.
+        let cases: [(&[u8], &str, &[u8], bool); 10] = [
+            (b"typed@example.com\ry\r", "", b"", true),
+            // Chooser, email and answer in one write share one reader queue.
+            (b"\x1b[F\rtyped@example.com\ry\r", "", b"", true),
+            // Answers are consumed in order: the first one, `n`, wins.
+            (b"typed@example.com\rn\ry\r", "", b"", false),
+            (b"typed@example.com\ry\x15\r", "", b"", false),
+            // An unfinished, never-displayed `n` is dropped; later keys are
+            // the terminal's own, so Backspace then `y` answers yes and a
+            // lone Enter during the login is an empty answer.
+            (b"typed@example.com\rn", "[y/N] ", b"\x7fy\r", true),
+            (b"typed@example.com\ry", "LOGIN_STARTED", b"\r", false),
+            // EOF between the two readers, in every position, cancels.
+            (b"typed@example.com\r\x04", "", b"", false),
+            (b"typed@example.com\ry", "LOGIN_STARTED", b"\x04", false),
+            (b"typed@example.com\ry", "[y/N] ", b"\x04", false),
+            (b"typed@example.com\r\x03", "", b"", false),
+        ];
+        for (with_email, trigger, then, succeeds) in cases {
+            let pause = home.path().join("pause-login");
+            if trigger == "LOGIN_STARTED" {
+                std::fs::write(&pause, "").unwrap();
+            } else {
+                let _ = std::fs::remove_file(&pause);
+            }
+            let mut pty = Pty::spawn(
+                "picker-type-ahead",
+                PtyConfig {
+                    command: cas::test_paths::cas_binary().to_string_lossy().into_owned(),
+                    args: vec![provider.into(), "--bare".into()],
+                    cwd: Some(home.path().to_path_buf()),
+                    env: vec![
+                        ("HOME".into(), home.path().to_string_lossy().into_owned()),
+                        ("XDG_CONFIG_HOME".into(), home.path().join(".xdg").to_string_lossy().into_owned()),
+                        ("PATH".into(), path.to_string_lossy().into_owned()),
+                        ("TERM".into(), "xterm-256color".into()),
+                        ("CAS_SKIP_FACTORY_TOOLING".into(), "1".into()),
+                    ],
+                    env_remove: vec![
+                        "CAS_ROOT".into(),
+                        "CLAUDE_CONFIG_DIR".into(),
+                        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                        "CODEX_HOME".into(),
+                    ],
+                    ..PtyConfig::default()
+                },
+            )
+            .expect("spawn Cassy with terminal stdin/stdout");
+            let (mut output, mut step) = (Vec::new(), 0);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    match pty.recv().await {
+                        Some(PtyEvent::Output(bytes)) => {
+                            output.extend(bytes);
+                            let text = String::from_utf8_lossy(&output).into_owned();
+                            if step == 0 && text.contains("list-profiles") {
+                                // End selects the last row: the new-login entry.
+                                let whole = with_email.starts_with(b"\x1b[F");
+                                pty.write(if whole { with_email } else { b"\x1b[F\r" }).await.unwrap();
+                                step = if whole { 2 } else { 1 };
+                            } else if step == 1 && text.contains("Email for the new") {
+                                pty.write(with_email).await.unwrap();
+                                step = 2;
+                            } else if step == 2 && !trigger.is_empty() && text.contains(trigger) {
+                                pty.write(then).await.unwrap();
+                                step = 3;
+                            }
+                        }
+                        Some(PtyEvent::Exited(code)) => return code,
+                        Some(PtyEvent::Error(error)) => panic!("picker PTY: {error}"),
+                        None => panic!("picker exited without status"),
+                    }
+                }
+            })
+            .await;
+            pty.kill_tree_force();
+            let output = String::from_utf8_lossy(&output).replace('\r', "");
+            let case = format!("{} then {:?} at {trigger:?}", String::from_utf8_lossy(with_email), String::from_utf8_lossy(then));
+            let Ok(code) = result else { panic!("{provider} {case:?}: still waiting for input: {output}") };
+            assert!(!output.contains("CHILD_RAW"), "{provider} {case:?}: {output}");
+            if succeeds {
+                assert_eq!(code, Some(0), "{provider} {case:?}: {output}");
+                assert!(output.contains("Keep the existing account? [y/N] "), "{provider} {case:?}: {output}");
+            } else {
+                assert_ne!(code, Some(0), "{provider} {case:?}: {output}");
+            }
+            let left: Vec<_> = std::fs::read_dir(home.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(&format!(".{provider}-")))
+                .collect();
+            assert_eq!(left.len(), 1, "{provider} {case:?}: one account, no staging: {left:?}");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn bare_picker_on_a_real_tty_forwards_the_selected_profile_cas_fa64() {
@@ -657,7 +897,30 @@ fn factory_flags_pass_through_with_and_without_a_profile() {
 }
 
 #[test]
+fn account_mutation_help_explains_macos_shell_visibility() {
+    let home = TempDir::new().unwrap();
+    for command in ["rename", "remove"] {
+        cas_cmd(home.path())
+            .args(["accounts", command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("macOS"))
+            .stdout(predicate::str::contains("/bin/zsh, /bin/bash and /bin/sh"))
+            .stdout(predicate::str::contains("CLAUDE_CONFIG_DIR"))
+            .stdout(predicate::str::contains("CODEX_HOME"))
+            .stdout(predicate::str::contains("Close shells"));
+    }
+}
+
+#[test]
 fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
+    const HOLDER: &str = "CAS_TEST_ACCOUNT_HOLDER";
+    if std::env::var_os(HOLDER).is_some() {
+        // Use stderr so libtest's stdout banner cannot race the ready signal.
+        eprintln!("ready");
+        std::io::stdin().read_line(&mut String::new()).unwrap();
+        return;
+    }
     for provider in ["claude", "codex"] {
         let home = TempDir::new().unwrap();
         let folder = home.path().join(format!(".{provider}-typo@example.com"));
@@ -703,27 +966,27 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
             .args(["accounts", "rename", &key, "taken"])
             .assert()
             .failure();
-        cas_cmd(home.path())
-            .current_dir(home.path())
-            .args(["accounts", "rename", &key, "fixed@example.com"])
-            .assert()
-            .success();
-        assert!(!folder.exists());
+        let can_rename = !(cfg!(target_os = "macos") && provider == "claude");
+        let mut rename = cas_cmd(home.path());
+        rename.current_dir(home.path()).args(["accounts", "rename", &key, "fixed@example.com"]);
+        let name = if can_rename {
+            rename.assert().success();
+            assert!(!folder.exists());
+            "fixed@example.com"
+        } else {
+            rename.assert().failure().stderr(predicate::str::contains("cas claude login fixed@example.com"));
+            assert!(folder.exists());
+            "typo@example.com"
+        };
         let output = cas_cmd(home.path())
             .current_dir(home.path())
             .args(["accounts", "list", "--json"])
-            .output()
-            .unwrap();
+            .output().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["accounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| a["name"] == "fixed@example.com" && a["flags"]["disabled"] == true)
-        );
-        let key = format!("{provider}:fixed@example.com");
-        let moved = home.path().join(format!(".{provider}-fixed@example.com"));
+        assert!(value["accounts"].as_array().unwrap().iter()
+            .any(|a| a["name"] == name && a["flags"]["disabled"] == true));
+        let key = format!("{provider}:{name}");
+        let moved = home.path().join(format!(".{provider}-{name}"));
         let selector = if provider == "claude" {
             "CLAUDE_CONFIG_DIR"
         } else {
@@ -739,32 +1002,62 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         {
             use std::io::{BufRead, Write};
             use std::process::Stdio;
+            let test_name = "accounts_lifecycle_preserves_shared_targets_and_guards_mutations";
+            let child_test = module_path!()
+                .split_once("::")
+                .map(|(_, module)| format!("{module}::{test_name}"))
+                .unwrap_or_else(|| test_name.to_string());
+            // Keep an Apple shell alive around a readable child. Even when
+            // macOS hides the shell's env, its descendant must protect the account.
             let mut holder = std::process::Command::new("/bin/sh")
-                .args(["-c", "printf 'ready\\n'; read answer"])
+                .args(["-c", "\"$@\"; exit $?", "account-holder"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &child_test,
+                    "--nocapture",
+                ])
+                .env(HOLDER, "1")
                 .env(selector, &moved)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
             let mut ready = String::new();
-            std::io::BufReader::new(holder.stdout.take().unwrap())
+            std::io::BufReader::new(holder.stderr.take().unwrap())
                 .read_line(&mut ready)
                 .unwrap();
             assert_eq!(ready.trim(), "ready");
-            cas_cmd(home.path())
-                .current_dir(home.path())
-                .env_remove(selector)
-                .args(["accounts", "rename", &key, "busy-rename"])
-                .assert()
-                .failure();
+            if can_rename {
+                cas_cmd(home.path())
+                    .current_dir(home.path())
+                    .env_remove(selector)
+                    .args(["accounts", "rename", &key, "busy-rename"])
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains("is in use"));
+            }
             cas_cmd(home.path())
                 .current_dir(home.path())
                 .env_remove(selector)
                 .args(["accounts", "remove", &key, "--yes"])
                 .assert()
-                .failure();
+                .failure()
+                .stderr(predicate::str::contains("is in use"));
+            assert!(moved.exists(), "busy account must remain in place");
             holder.stdin.take().unwrap().write_all(b"\n").unwrap();
             assert!(holder.wait().unwrap().success());
+        }
+        if can_rename {
+            for (from, to) in [(name, "busy-rename"), ("busy-rename", name)] {
+                cas_cmd(home.path())
+                    .current_dir(home.path())
+                    .env_remove(selector)
+                    .args(["accounts", "rename", &format!("{provider}:{from}"), to])
+                    .assert()
+                    .success();
+            }
         }
         cas_cmd(home.path())
             .current_dir(home.path())
@@ -797,7 +1090,7 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|a| a["name"] == "fixed@example.com" && a["flags"]["disabled"] == false)
+                .any(|a| a["name"] == name && a["flags"]["disabled"] == false)
         );
         std::fs::create_dir(home.path().join(format!(".{provider}"))).unwrap();
         for name in ["main", "unknown"] {
@@ -849,34 +1142,36 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
             .args(["accounts", "disable", &format!("{provider}:work")])
             .assert()
             .success();
-        cas_cmd(aliases_home.path())
-            .current_dir(aliases_home.path())
-            .args(["accounts", "rename", &format!("{provider}:work"), "renamed"])
-            .assert()
-            .success();
-        let renamed = aliases_home.path().join(format!(".{provider}-renamed"));
-        assert!(renamed.join("keep").is_file());
-        let output = cas_cmd(aliases_home.path())
-            .current_dir(aliases_home.path())
-            .args(["accounts", "list", "--json"])
-            .output()
-            .unwrap();
-        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let moved = rows["accounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["name"] == "renamed")
-            .unwrap();
-        assert_eq!(
-            moved["flags"]["disabled"], true,
-            "renaming through a symlinked HOME retains disabled state"
-        );
-        cas_cmd(aliases_home.path())
-            .current_dir(aliases_home.path())
-            .args(["accounts", "rename", &format!("{provider}:renamed"), "work"])
-            .assert()
-            .success();
+        if can_rename {
+            cas_cmd(aliases_home.path())
+                .current_dir(aliases_home.path())
+                .args(["accounts", "rename", &format!("{provider}:work"), "renamed"])
+                .assert()
+                .success();
+            let renamed = aliases_home.path().join(format!(".{provider}-renamed"));
+            assert!(renamed.join("keep").is_file());
+            let output = cas_cmd(aliases_home.path())
+                .current_dir(aliases_home.path())
+                .args(["accounts", "list", "--json"])
+                .output()
+                .unwrap();
+            let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let moved = rows["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == "renamed")
+                .unwrap();
+            assert_eq!(
+                moved["flags"]["disabled"], true,
+                "renaming through a symlinked HOME retains disabled state"
+            );
+            cas_cmd(aliases_home.path())
+                .current_dir(aliases_home.path())
+                .args(["accounts", "rename", &format!("{provider}:renamed"), "work"])
+                .assert()
+                .success();
+        }
         cas_cmd(aliases_home.path())
             .current_dir(aliases_home.path())
             .args(["accounts", "disable", &format!("{provider}:alt")])
@@ -1054,33 +1349,33 @@ fi
                 .join(format!(".{provider}-mistyped@example.com"))
                 .exists()
         );
+        let stable_path = cfg!(target_os = "macos") && provider == "claude";
         cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
             .args([provider, "login", "mistyped@example.com"])
-            .assert()
-            .success();
-        assert!(
-            home.path()
-                .join(format!(".{provider}-real@example.com"))
-                .is_dir()
-        );
-        assert!(
-            !home
-                .path()
-                .join(format!(".{provider}-mistyped@example.com"))
-                .exists()
-        );
-        cas_cmd(home.path())
+            .assert().success();
+        let unknown_identity = provider == "codex";
+        let expected_name = if stable_path || unknown_identity { "mistyped@example.com" } else { "real@example.com" };
+        assert!(home.path().join(format!(".{provider}-{expected_name}")).is_dir());
+        if !stable_path && !unknown_identity {
+            assert!(!home.path().join(format!(".{provider}-mistyped@example.com")).exists());
+        }
+        let duplicate = cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
             .args([provider, "login", "another-typo"])
             .write_stdin("y\n")
             .assert()
-            .success()
-            .stderr(predicate::str::contains("already exists"));
+            .success();
+        if unknown_identity {
+            duplicate.stderr(predicate::str::contains("already exists").not());
+            assert!(home.path().join(".codex-another-typo").is_dir());
+        } else {
+            duplicate.stderr(predicate::str::contains("already exists"));
+        }
         let names: Vec<_> = std::fs::read_dir(home.path())
             .unwrap()
             .flatten()
@@ -1092,7 +1387,7 @@ fi
             .collect();
         assert_eq!(
             names.len(),
-            1,
+            if unknown_identity { 2 } else { 1 },
             "failed/duplicate logins must leave no scratch accounts"
         );
         cas_cmd(home.path())
@@ -1105,11 +1400,8 @@ fi
             .assert()
             .success()
             .stderr(predicate::str::contains("already exists").not());
-        assert!(
-            home.path()
-                .join(format!(".{provider}-real@example.com-2"))
-                .is_dir()
-        );
+        let second_name = if stable_path || unknown_identity { "another-subscription" } else { "real@example.com-2" };
+        assert!(home.path().join(format!(".{provider}-{second_name}")).is_dir());
     }
 }
 

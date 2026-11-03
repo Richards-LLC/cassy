@@ -1,0 +1,4 @@
+title: Escaped backticks inside double-quoted shell data stay literal while executable backticks retain workspace and operator-only inspection
+tasks: [cas-6e99]
+invariants: []
+journeys: []

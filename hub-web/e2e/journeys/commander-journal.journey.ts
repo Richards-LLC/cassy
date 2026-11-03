@@ -1,4 +1,4 @@
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, holdPageClock } from "./journey";
 import { HubDouble } from "./hub-double";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 import { journalRows } from "./commander-journal-storage";
@@ -8,10 +8,18 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 async function choose(page: Page) {
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  // Selecting a row can finish before the conversation has attached. Do not
+  // take its hub offline while the thread is still opening (cas-05f7).
+  await expect(page.getByRole("textbox", { name: "Your message" })).toBeEditable();
+  await expect(page.getByRole("tabpanel", { name: "Conversation", exact: true }).getByText("Opening the conversation…", { exact: true })).toHaveCount(0);
 }
 async function send(page: Page, text: string) {
-  await page.getByRole("textbox", { name: "Your message" }).fill(text);
+  const composer = page.getByRole("textbox", { name: "Your message" });
+  // A missing composer should fail at the assertion deadline, with its state,
+  // rather than spending the remainder of the whole journey in fill().
+  await expect(composer).toBeEditable();
+  await composer.fill(text);
   await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
 
@@ -30,7 +38,13 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     for (const tab of [page, peer]) await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
   });
   await journey.stage("One tab sends; its confirmation is visible in both tabs", async () => {
+    // Assertions and recording can outlast the 15s receipt deadline on a
+    // loaded host. Hold the shared clock before reconnecting; no receipt time
+    // should elapse while we inspect it. The browser's online hint restarts
+    // reconnect immediately without advancing either tab's receipt deadline.
+    await holdPageClock(page);
     await Promise.all([hub.up("atlas"), other.up("atlas")]);
+    await Promise.all([page, peer].map(tab => tab.evaluate(() => window.dispatchEvent(new Event("online")))));
     await expect.poll(() => hub.sends.length + other.sends.length, { timeout: 20_000 }).toBe(1);
     // Both tabs project the same active claim before any receipt arrives.
     // Retry here would allow the still-running send to cross the wire twice.
@@ -67,6 +81,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
       observer.observe(document.querySelector('[role="log"]')!, { childList: true, subtree: true });
       Object.assign(window, { peerRetryObservation: { observed, stop: () => observer.disconnect() } });
     });
+    await holdPageClock(page);
     await send(page, "Retry this same instruction");
     await expect.poll(() => hub.sends.length + other.sends.length).toBe(1);
     for (const tab of [page, peer]) {
@@ -78,8 +93,9 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
       }), "no transient Retry before the peer's receipt deadline (cas-fb48)").toEqual([]);
     }
     // The receipt timeout belongs to the durable claim, including on a peer.
-    // Advance both clocks explicitly; do not wait out 15s on every repeat.
-    await Promise.all([page.clock.fastForward(15_000), peer.clock.fastForward(15_000)]);
+    // Both tabs share the BrowserContext clock. Advance it once: advancing
+    // per tab also expires the 30s catalog while its renewal is in flight.
+    await page.clock.fastForward(15_000);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toBeVisible({ timeout: 20_000 });
     }
@@ -164,7 +180,8 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     expect(new Set(sends.map((row) => row.client_ref)).size).toBe(2);
     await Promise.all([page.reload(), second.reload()]);
     await choose(page); await choose(second);
-    await Promise.all([page.clock.fastForward(15_000), second.clock.fastForward(15_000)]);
+    // A single BrowserContext clock drives both tabs, including after reload.
+    await page.clock.fastForward(15_000);
     await expect(page.getByRole("log")).toContainText("2 messages not confirmed");
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);
@@ -181,7 +198,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
     await expect(page.locator("#conversation-connection")).not.toHaveText(" · Live");
     await send(page, "Send this when Atlas is back");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
-    await expect(status).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
+    await expect(status).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself if it reconnects within 2 minutes after Send. After that, use Edit or Retry.");
   });
   await journey.stage("Atlas comes back: the message goes out once and the waiting line clears", async () => {
     await hub.up("atlas");
@@ -447,14 +464,14 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
 test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const casSrc = list.getByRole("button", { name: /cas-src/ });
+  const casSrc = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   await journey.stage("Read a reply, then move to another conversation", async () => {
     await journey.open();
     await casSrc.click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Read before the reload.");
     await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
   });

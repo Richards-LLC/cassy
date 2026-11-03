@@ -77,12 +77,17 @@ pub use conformance::{
 pub use display::is_unsafe_terminal_character;
 pub use error::{Error, Result};
 pub use input_queue::{PTY_INPUT_BUFFER_CAP, PtyInput};
-pub use pty::{claude_supports_chrome_flag, claude_supports_flag, expand_codex_home};
+pub use pty::{
+    claude_supports_chrome_flag, claude_supports_flag, expand_claude_selector, expand_codex_home,
+};
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,
 };
-pub use pty::{Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV};
+pub use pty::{
+    Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV,
+    WORKER_ROLE_SKILLS,
+};
 
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]

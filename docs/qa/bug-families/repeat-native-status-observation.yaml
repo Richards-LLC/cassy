@@ -1,0 +1,4 @@
+title: A repeated native status command whose output leaves the screen unchanged is confirmed by the output the harness printed after it was typed, instead of staying unconfirmed until the receipt timeout and blocking every other supervisor command
+tasks: [cas-7ec8]
+invariants: [HUB-J27-OBSERVED-OUTCOME]
+journeys: [HUB-J27]

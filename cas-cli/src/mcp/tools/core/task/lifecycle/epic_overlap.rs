@@ -24,7 +24,7 @@ fn scope_terms(title: &str, description: &str) -> BTreeSet<String> {
         .split_whitespace()
         // Apply recall's noise floor per token, without its 16-term query cap:
         // an epic's substantive scope may follow a long introductory title.
-        .flat_map(crate::ambient_recall::content_terms)
+        .flat_map(super::recall_terms::content_terms)
         .filter(|term| {
             !super::is_generic_task_token(term)
                 && !matches!(

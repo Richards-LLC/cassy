@@ -313,12 +313,5 @@ esac
         self.assertIn('mergeQueue(branch: "main")', log.read_text())
 
 
-class Parity(unittest.TestCase):
-    def test_merge_queue_query_matches_release_train_preflight(self):
-        text = (SCRIPTS / "release-train.d/preflight.sh").read_text()
-        match = re.search(r"cut_preflight_merge_queue_query\(\) \{\n\s+printf '%s\\n' '([^']+)'", text)
-        self.assertEqual(match.group(1), release_env.MERGE_QUEUE_QUERY)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -225,7 +225,7 @@ pub(crate) fn snapshot_with_installed(
     })
 }
 
-fn installed_version() -> Option<String> {
+pub(crate) fn installed_version() -> Option<String> {
     static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<String>)>>> = OnceLock::new();
     let path = std::env::var("PATH").unwrap_or_default();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
@@ -288,6 +288,11 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
     lines.join("\n")
 }
 
+/// cas-1c1f: a supervisor's unrequested pane exit shuts its whole factory down
+/// (the daemon's `PaneExited` arm), so the remedy must name that cost and the
+/// routes that keep the workers running.
+const SUPERVISOR_RELOAD: &str = "For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory.";
+
 pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Option<String> {
     let snapshot = match snapshot(cas_root) {
         Ok(snapshot) => snapshot,
@@ -304,7 +309,7 @@ pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Optio
     let versions = render(&snapshot, session);
     Some(if rows.iter().any(|row| row.older) {
         format!(
-            "⚠ Factory MCP servers older than installed Cassy.\n{versions}\nRecycle affected sessions after saving worker state."
+            "⚠ Factory MCP servers older than installed Cassy.\n{versions}\nSave worker state, then recycle affected workers. {SUPERVISOR_RELOAD}"
         )
     } else {
         versions
@@ -333,7 +338,7 @@ fn stale_notice(snapshot: &Snapshot) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "Cassy {} is installed, but these factory sessions have older MCP servers:\n{lines}\nSave worker state, then recycle affected workers; restart each affected supervisor session to load the installed binary. No process was recycled automatically.",
+        "Cassy {} is installed, but these factory sessions have older MCP servers:\n{lines}\nSave worker state, then recycle affected workers. {SUPERVISOR_RELOAD} No process was recycled automatically.",
         snapshot.installed,
     ))
 }
@@ -541,5 +546,10 @@ mod tests {
         assert!(notice.contains("session-b: supervisor-b"), "{notice}");
         assert!(!notice.contains("worker-current"), "{notice}");
         assert!(notice.contains("recycle affected workers"), "{notice}");
+        assert!(notice.contains("MCP reconnect control"), "{notice}");
+        assert!(
+            notice.contains("A plain supervisor exit stops every worker"),
+            "{notice}"
+        );
     }
 }

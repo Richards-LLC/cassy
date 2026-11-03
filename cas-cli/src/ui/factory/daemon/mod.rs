@@ -143,6 +143,9 @@ enum PendingSpawn {
         request_id: i64,
         name: String,
         spec: Option<cas_mux::WorkerSpec>,
+        /// Recovery of a registry-dead worker must never stop a live successor.
+        dead_worker_recovery: bool,
+        stopped: bool,
     },
     /// Spawn a shell pane
     Shell { name: String, shell: Option<String> },
@@ -366,6 +369,7 @@ pub struct FactoryDaemon {
     /// cas-bea6: receipts for recent Commander sends by `client_ref`, so a
     /// resent message is answered with its first receipt and queued once.
     send_receipts: runtime::send_dedupe::SendReceipts,
+    supervisor_commands: runtime::supervisor_commands::CommandState,
     /// cas-6e76 (GH #224): normal PTY writes are transport receipts, not proof
     /// that an idle harness surfaced a turn.  Keep a bounded probe until pane
     /// output corroborates it, then retry once and make residual silence loud.

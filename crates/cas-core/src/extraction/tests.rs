@@ -26,15 +26,6 @@ fn test_ai_extractor_config_default() {
 }
 
 #[test]
-fn test_extraction_result_default() {
-    let result = ExtractionResult::default();
-    assert!(result.learnings.is_empty());
-    assert!(result.preferences.is_empty());
-    assert!(result.rules.is_empty());
-    assert!(!result.deferred);
-}
-
-#[test]
 fn test_build_prompt() {
     let extractor = AIExtractor::new(AIExtractorConfig::default());
     let observation = Entry {
@@ -336,27 +327,6 @@ fn test_extractor_trait_batched() {
     let result = extractor.extract_batched(&observations).unwrap();
     // Combined result should be empty since DeferredExtractor returns empty
     assert!(result.learnings.is_empty());
-}
-
-#[test]
-fn test_extracted_item_fields() {
-    let item = ExtractedItem {
-        content: "Test content".to_string(),
-        confidence: 0.85,
-        quality_score: Some(8),
-        tags: vec!["rust".to_string(), "testing".to_string()],
-        source_id: "src-123".to_string(),
-        should_be_rule: true,
-        rule_paths: Some("src/**/*.rs".to_string()),
-    };
-
-    assert_eq!(item.content, "Test content");
-    assert_eq!(item.confidence, 0.85);
-    assert_eq!(item.quality_score, Some(8));
-    assert_eq!(item.tags.len(), 2);
-    assert_eq!(item.source_id, "src-123");
-    assert!(item.should_be_rule);
-    assert_eq!(item.rule_paths, Some("src/**/*.rs".to_string()));
 }
 
 #[test]

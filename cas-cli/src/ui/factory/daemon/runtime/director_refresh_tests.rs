@@ -20,29 +20,252 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn r1_approved_verdict_leaves_close_retry_with_worker() {
+    r1_verification_wait_wakes("verdict").await;
+}
+
+#[tokio::test]
+async fn r1_expired_dispatch_wakes_supervisor_once() {
+    for release in ["deadline", "close-timeout", "sweep-before-close-timeout"] {
+        r1_verification_wait_wakes(release).await;
+    }
+}
+
+async fn r1_verification_wait_wakes(release: &str) {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, emit_verification_dispatch_handoff,
+    };
+    use cas_types::{Agent, AgentRole, TaskStatus};
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let root = fixture.app.cas_dir().to_path_buf();
+    let lead = Agent::new_with_role(
+        "lead-id".into(),
+        fixture.app.supervisor_name().into(),
+        AgentRole::Supervisor,
+    );
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&lead)
+        .unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = tasks.get("cas-9efb-test").unwrap();
+    // This wait exercises a repository-independent proof, not the merge fixture's selector.
+    task.deliverables.work_target = None;
+    tasks.update(&task).unwrap();
+    let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let dispatch = cas_store::create_verification_dispatch(
+        &root,
+        "cas-9efb-test",
+        "merge-w",
+        &lead.id,
+        deadline,
+    )
+    .unwrap();
+    task.status = TaskStatus::Blocked;
+    task.pending_verification = true;
+    task.notes = format!(
+        "[{}] 🚫 BLOCKER {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id)
+    );
+    tasks.update(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    emit_verification_dispatch_handoff(
+        &root,
+        queue.as_ref(),
+        &dispatch.id,
+        &task.id,
+        &lead.id,
+        deadline,
+        "merge-w",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.push_task_lifecycle(
+        &task.id,
+        &task.title,
+        TaskStatus::InProgress,
+        TaskStatus::Blocked,
+        "merge-w",
+        None,
+        LifecycleTransition::Blocked,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let idle = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker: "merge-w".into(),
+            active_task: None,
+        };
+        let mut inputs = fixture
+            .app
+            .delivery_request(std::slice::from_ref(&idle))
+            .read(None);
+        inputs.set_idle_liveness(
+            [(
+                "merge-w".into(),
+                Some(crate::mcp::tools::service::worker_liveness::Observation {
+                    state: crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput,
+                    evidence: "recorded task_complete".into(),
+                }),
+            )]
+            .into(),
+        );
+        let (_, prompts, _) = fixture
+            .app
+            .revalidate_and_prompt_for_delivery_from(&[idle], inputs);
+        assert!(prompts.is_empty());
+        core.push_task_lifecycle(
+            &task.id,
+            &task.title,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            "merge-w",
+            None,
+            LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+    }
+    let rows = queue.peek_all(20).unwrap();
+    // pin: dispatch handoff is the only waking source during this owned episode.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| !crate::supervisor_message_wakes::quiet(&row.prompt))
+            .count(),
+        1,
+        "the dispatch handoff is the sole wake while verification owns the next step"
+    );
+    assert_eq!(rows.len(), 2);
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
+    reconcile_blocked_task_alert(&root, &task.id, deadline - chrono::Duration::seconds(1)).unwrap();
+    assert_eq!(queue.peek_all(20).unwrap().len(), 2);
+    if release == "verdict" {
+        fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+        core.set_agent_id_for_testing(lead.id.clone());
+        let result = core
+            .cas_verification_add(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id": task.id,
+                    "dispatch_id": dispatch.id,
+                    "status": "approved",
+                    "summary": "Review passed; worker can retry close."
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(
+            rows.iter().filter(|row| row.target == "merge-w").count(),
+            1,
+            "the real verdict path must queue the worker's close retry: {rows:?}"
+        );
+    }
+    let released_at = if release != "verdict" {
+        deadline + chrono::Duration::seconds(1)
+    } else {
+        chrono::Utc::now()
+    };
+    if release == "sweep-before-close-timeout" {
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root, released_at,
+        );
+    }
+    if release.contains("close-timeout") {
+        // The close retry persists this transition before the daemon sees it.
+        let timed_out = cas_store::timeout_verification_dispatch(&root, &task.id, released_at)
+            .unwrap().unwrap();
+        assert_eq!(timed_out.state, cas_types::VerificationDispatchState::TimedOut);
+    }
+    for _ in 0..3 {
+        reconcile_blocked_task_alert(&root, &task.id, released_at).unwrap();
+        crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+            &root,
+            released_at,
+        );
+    }
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.target != "merge-w"
+                && !crate::supervisor_message_wakes::quiet(&row.prompt))
+            .count(),
+        if release != "verdict" { 2 } else { 1 },
+        "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
+    );
+    if release == "verdict" {
+        let resolved_at = cas_store::get_latest_verification_dispatch(&root, &task.id)
+            .unwrap().unwrap().resolved_at.unwrap();
+        let close_deadline = resolved_at + chrono::Duration::minutes(5);
+        reconcile_blocked_task_alert(&root, &task.id, close_deadline - chrono::Duration::seconds(1)).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), rows.len(),
+            "approval gives the worker a bounded chance to retry close");
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&root, &task.id, close_deadline).unwrap();
+            crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
+                &root, close_deadline,
+            );
+        }
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target != "merge-w"
+            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 2,
+            "an unretried approval must escalate exactly once after its grace period: {rows:?}");
+    }
+}
+
+#[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
-    for cause in ["owned", "foreign", "expired", "independent", "successor"] {
+    for cause in ["owned", "foreign", "expired", "timed-out", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
-        let supervisor = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
-        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let supervisor = Agent::new_with_role(
+            "lead-id".into(),
+            fixture.app.supervisor_name().into(),
+            AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&supervisor)
+            .unwrap();
         if cause == "successor" {
             let mut successor = supervisor.clone();
             successor.id = "successor-id".into();
             successor.registered_at += chrono::Duration::seconds(1);
-            crate::store::open_agent_store(&cas_dir).unwrap().register(&successor).unwrap();
+            crate::store::open_agent_store(&cas_dir)
+                .unwrap()
+                .register(&successor)
+                .unwrap();
         }
         let dispatch = cas_store::create_verification_dispatch(
-            &cas_dir, "cas-9efb-test", "merge-w",
-            if cause == "foreign" { "other-lead" } else { "lead-id" },
-            chrono::Utc::now() + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
-        ).unwrap();
+            &cas_dir,
+            "cas-9efb-test",
+            "merge-w",
+            if cause == "foreign" {
+                "other-lead"
+            } else {
+                "lead-id"
+            },
+            chrono::Utc::now()
+                + chrono::Duration::minutes(if matches!(cause, "expired" | "timed-out") { -1 } else { 10 }),
+        )
+        .unwrap();
+        if cause == "timed-out" {
+            cas_store::timeout_verification_dispatch(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
+        }
         let store = crate::store::open_task_store_local(&cas_dir).unwrap();
         let mut task = store.get("cas-9efb-test").unwrap();
         task.status = TaskStatus::Blocked;
-        task.notes = format!("[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M"), dispatch.id);
+        task.notes = format!(
+            "[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            dispatch.id
+        );
         store.update(&task).unwrap();
         if cause == "independent" {
             store.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
@@ -50,42 +273,65 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             }})).unwrap();
         }
         let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
-            task_id: task.id, task_title: task.title, worker: "merge-w".into(),
+            task_id: task.id,
+            task_title: task.title,
+            worker: "merge-w".into(),
         };
-        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
-        assert_eq!(prompts.len(), 1);
+        let (_, prompts, _) = fixture
+            .app
+            .revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
+        assert!(prompts.is_empty());
         let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
-        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
-        core.push_task_lifecycle("cas-9efb-test", "verification wait", TaskStatus::InProgress,
-            TaskStatus::Blocked, "merge-w", None, LifecycleTransition::Blocked,
-            &chrono::Utc::now().to_rfc3339()).unwrap();
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, is_lifecycle_wake_source,
+        };
+        core.push_task_lifecycle(
+            "cas-9efb-test",
+            "verification wait",
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            "merge-w",
+            None,
+            LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
-        assert_eq!(is_lifecycle_wake_source(&rows[0].source), cause != "owned",
-            "{cause}: lifecycle routing must use the same sole-blocker classification");
-        // pin: the table's owned case alone gets CAS's quiet receipt marker.
-        assert_eq!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), cause == "owned");
-        queue.mark_processed(rows[0].id).unwrap();
-        // pin: the cause labels select the recipient/dispatch/independent-hold table above.
-        assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",
-            "{cause}: only the recipient's sole active verification wait is quiet");
-        if cause == "owned" {
-            let mut daemon = daemon_on_lanes(&cas_dir);
-            std::mem::swap(&mut daemon.app, &mut fixture.app);
-            let worker = super::super::store_worker::global();
-            daemon.inject_rechecked_batch(super::super::factory_jobs::DeliverabilityBatch {
-                prompts: prompts.into_iter().map(|prompt| (prompt, true)).collect(),
-                assignments: vec![], events: vec![event], refresh_started: Instant::now(),
-            }, worker).await;
-            assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
-            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
-            assert_eq!(rows.len(), 1, "receipt must remain available for the supervisor's next poll");
-            assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
-            assert!(FactoryDaemon::supervisor_wake_class(
-                &super::super::queue_and_events::WakeSender::Daemon, "supervisor", &rows[0].source, &rows[0].prompt,
-            ).is_none());
+        let owned = matches!(cause, "owned" | "expired" | "timed-out");
+        // pin: owned dispatches use their handoff/expiry relay instead of a generic blocker wake.
+        assert_eq!(
+            is_lifecycle_wake_source(&rows[0].source),
+            !owned,
+            "{cause}: lifecycle routing must use the same sole-blocker classification"
+        );
+        // pin: an owned dispatch keeps its generic receipt quiet even after expiry.
+        assert_eq!(
+            crate::supervisor_message_wakes::quiet(&rows[0].prompt),
+            owned
+        );
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::reconcile_blocked_task_alert;
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test", chrono::Utc::now()).unwrap();
+        }
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(
+                &cas_dir,
+                "cas-9efb-test",
+                chrono::Utc::now() + chrono::Duration::minutes(20),
+            )
+            .unwrap();
+        }
+        assert_eq!(queue.peek_all(10).unwrap().len(), if owned { 1 } else { 2 });
+        if owned {
+            for _ in 0..2 {
+                reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test",
+                    dispatch.deadline_at + chrono::Duration::hours(24)).unwrap();
+            }
+            assert_eq!(queue.peek_all(10).unwrap().len(), 2,
+                "{cause}: verification outside the expiry relay window gets one deadline alert");
         }
     }
 }
@@ -148,7 +394,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
             task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
         };
-        assert_eq!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).1.len(), 1,
+        assert_eq!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).0.len(), 1,
             "an unrelated supervisor message must leave the blocker armed (reply_to={reply_to:?})");
     }
     let answered = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
@@ -180,9 +426,21 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     for id in [before_answer.id, idle_id] {
         let report = queue.message_delivery_report(id).unwrap().unwrap();
         assert!(report.delivered_at.is_none());
-        // pin: the report distinguishes an intentionally withdrawn wake from failed delivery.
-        assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
+        if id == before_answer.id {
+            // pin: an outstanding blocker wake is parked after its explicit answer.
+            assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
+        }
     }
+    // 29da493b3 / 5092b8d5f: routine worker_idle rows bypass daemon delivery
+    // entirely. Prove the digest and its full-read escape instead of expecting
+    // a parking stamp on a row QueueSelect intentionally never selects.
+    let digest = queue.surface_for_recipient_within_budget(
+        fixture.app.supervisor_name(), None, cas_store::HookDrain::NoticeDigest, 30, 0,
+    ).unwrap().rows;
+    assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![idle_id]);
+    let explicit = queue.poll_named_for_recipient(fixture.app.supervisor_name(), None, &[idle_id]).unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].prompt, idle_row.prompt);
     assert_eq!(queue.peek_all(30).unwrap().into_iter().find(|row| row.id == before_answer.id).unwrap().prompt,
         before_answer.prompt);
     // Release the held lifecycle alert after the worker resumes: it must be
@@ -237,8 +495,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
-    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1);
+    let (events, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(events.len(), 1);
+    assert!(prompts.is_empty());
     let answered_again = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "merge-w", "task_id": task.id,
         "kind": "answer", "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
@@ -262,9 +521,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
-    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1);
-    assert!(!crate::supervisor_message_wakes::quiet(&prompts[0].text));
+    let (events, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(events.len(), 1);
+    assert!(prompts.is_empty());
     let opened = service.task(Parameters(serde_json::from_value(serde_json::json!({
         "action": "update", "id": task.id, "status": "open"
     })).unwrap())).await.unwrap();
@@ -272,46 +531,362 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("answered_blocker").is_none());
 }
 
+// a6be40dba / 1ecb22e52 deliberately replace direct green Teams/PTY
+// fallbacks with one durable readiness episode. Reproduce the original race
+// after the real batch check, then drive that queue through its final live read.
 #[tokio::test]
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
-    let mut shutdown_delivered = false;
-    let mut stale_fallback_suppressed = false;
-    let mut stale_sync_fallbacks = Vec::new();
+    use super::super::supervisor_single_turn_tests::{attach_supervisor_pty, fixture_child, teams_messages};
+    if !fixture_child("ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox") {
+        return;
+    }
+    for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+        for outcome in ["live", "merged", "declined"] {
+            let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+            let cas_dir = fixture.app.cas_dir().to_path_buf();
+            let root = cas_dir.parent().unwrap();
+            fixture.app.set_supervisor_cli_for_test(cli);
+            let (_, mut prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(
+                std::slice::from_ref(&fixture.event),
+            );
+            assert_eq!(prompts.len(), 1);
+            let mut daemon = daemon_on_lanes(&cas_dir);
+            std::mem::swap(&mut daemon.app, &mut fixture.app);
+            fixture._env.set("CAS_FACTORY_SESSION", &daemon.session_name);
+            attach_supervisor_pty(&mut daemon, root, cli, true).await;
+
+            assert!(prompts[0].is_merge_ready());
+            let expected_text = prompts[0].text.lines().next().unwrap().to_string();
+            assert_eq!(daemon.app.deliverability_request().read(None, &mut prompts), vec![true],
+                "the merge must be genuinely outstanding at the batch check");
+            let mut refresh = DirectorRefresh::new();
+            refresh.start_deliverability_check(
+                &daemon.app, &mut daemon.queue_jobs, prompts,
+                vec![fixture.event.clone()], Instant::now(),
+            ).unwrap();
+            let batch = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(batch) = refresh.take_deliverability(&mut daemon.queue_jobs).pop() {
+                        break batch;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("batch recheck must finish");
+            assert!(batch.prompts[0].1);
+
+            // The target/task changes only after the successful async verdict.
+            match outcome {
+                "merged" => fixture.advance_target(true),
+                "declined" => {
+                    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+                    let mut task = tasks.get("cas-9efb-test").unwrap();
+                    task.deliverables.decline_factory_branch_anchor();
+                    task.status = cas_types::TaskStatus::Open;
+                    tasks.update(&task).unwrap();
+                }
+                _ => {}
+            }
+            let writer = super::super::store_worker::global();
+            daemon.inject_rechecked_batch(batch, writer).await;
+            assert!(writer.wait_idle(Duration::from_secs(10)));
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "one durable readiness episode: {cli:?}/{outcome}");
+            let id = rows[0].id;
+            assert!(rows[0].prompt.contains(&expected_text));
+            assert!(teams_messages(&daemon).is_empty(), "green readiness uses the queue");
+
+            let completed = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    let report = queue.message_delivery_report(id).unwrap().unwrap();
+                    let written = std::fs::read_to_string(root.join("input")).unwrap();
+                    if outcome == "live" {
+                        if report.delivered_at.is_some() && written.contains(&expected_text)
+                            && written.ends_with('\r') && !daemon.app.mux.has_pending_injects()
+                        {
+                            break (report, written);
+                        }
+                    } else if report.pending_reason == Some(cas_store::PendingReason::SupersededStale) {
+                        break (report, written);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap_or_else(|_| panic!("queue did not settle: {cli:?}/{outcome}: {:?}",
+                queue.message_delivery_report(id).unwrap()));
+            let (report, written) = completed;
+            assert_eq!(report.delivered_at.is_some(), outcome == "live", "{cli:?}/{outcome}: {report:?}");
+            assert_eq!(written.matches(&expected_text).count(), usize::from(outcome == "live"),
+                "only the live merge demand may reach the actual supervisor consumer: {cli:?}/{outcome}: {written:?}");
+            assert!(report.confirmed_at.is_none(), "transport is not an observed model turn");
+            assert!(teams_messages(&daemon).is_empty(), "no duplicate teammate body");
+            assert!(daemon.finish_shutdown_writes(writer, Duration::from_secs(10)));
+        }
+    }
+}
+
+// cas-1586: non-green batch handoffs, including refused/unfinished external
+// reads and shutdown, must survive as attributed queue rows and reach the real
+// supervisor PTY. Native transport is exercised separately below.
+#[tokio::test]
+async fn cas_91bab_non_green_direct_delivery_fallbacks() {
+    use super::super::supervisor_single_turn_tests::{attach_supervisor_pty, fixture_child};
+    if !fixture_child(
+        "ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_non_green_direct_delivery_fallbacks",
+    ) {
+        return;
+    }
     for scenario in [
-        "codex_merged",
-        "codex_positive",
-        "merged",
-        "positive",
         "superseded",
+        "superseded_queued",
         "missing",
         "shutdown",
         "merged_fallback",
         "superseded_refused",
         "superseded_unreported",
     ] {
-        let synchronous_fallback =
-            matches!(scenario, "superseded_refused" | "superseded_unreported");
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        fixture.ci(Some("failure"));
+        let cas_dir = fixture.app.cas_dir().to_path_buf();
+        let mut daemon = daemon_on_lanes(&cas_dir);
+        std::mem::swap(&mut daemon.app, &mut fixture.app);
+        attach_supervisor_pty(
+            &mut daemon,
+            cas_dir.parent().unwrap(),
+            if matches!(scenario, "superseded_refused" | "superseded_unreported") {
+                cas_mux::SupervisorCli::Codex
+            } else {
+                cas_mux::SupervisorCli::Claude
+            },
+            true,
+        )
+        .await;
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
+            let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
+            std::fs::remove_dir_all(&tree).unwrap();
+            daemon.teams = Some(super::super::teams::TeamsManager::rooted_at(
+                tree,
+                &daemon.session_name,
+            ));
+        }
+        let (_, prompts, _) = daemon
+            .app
+            .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].is_merge_ready());
+        assert!(prompts[0].text.contains("CI failed"));
+        let original_tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = tasks.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            tasks.update(&task).unwrap();
+        }
+        let mut refresh = DirectorRefresh::new();
+        let worker = super::super::store_worker::global();
+        if scenario == "superseded_refused" {
+            daemon.queue_jobs.close_lanes_for_test();
+            daemon
+                .deliver_director_events(
+                    &mut refresh,
+                    vec![fixture.event.clone()],
+                    (vec![fixture.event.clone()], prompts, None),
+                    Instant::now(),
+                    0.0,
+                    worker,
+                    &super::super::loop_watchdog::LoopProgress::new(),
+                )
+                .await;
+        } else {
+            let gate = (scenario == "superseded_unreported").then(|| Arc::new(ReadGate::default()));
+            if let Some(gate) = &gate {
+                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(gate));
+            }
+            refresh
+                .start_deliverability_check(
+                    &daemon.app,
+                    &mut daemon.queue_jobs,
+                    prompts,
+                    vec![fixture.event.clone()],
+                    Instant::now(),
+                )
+                .unwrap();
+            if let Some(gate) = gate {
+                daemon
+                    .drain_director_deliveries_for_shutdown(&mut refresh, worker, Duration::ZERO)
+                    .await;
+                gate.open();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while daemon.queue_jobs.external_completions_ready() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("late recheck must finish");
+                assert!(
+                    refresh
+                        .take_deliverability(&mut daemon.queue_jobs)
+                        .is_empty(),
+                    "shutdown already consumed the unfinished batch"
+                );
+            } else {
+                let batch = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if let Some(batch) =
+                            refresh.take_deliverability(&mut daemon.queue_jobs).pop()
+                        {
+                            break batch;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("batch recheck must finish");
+                daemon.inject_rechecked_batch(batch, worker).await;
+            }
+        }
+        if scenario == "shutdown" {
+            daemon
+                .drain_director_deliveries_for_shutdown(
+                    &mut refresh,
+                    worker,
+                    Duration::from_secs(10),
+                )
+                .await;
+            assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
+        }
+        assert!(worker.wait_idle(Duration::from_secs(10)));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "{scenario}: one durable director wake");
+        let row = &rows[0];
+        assert_eq!(row.source, "director");
+        assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(!row.urgent);
+        assert_eq!(
+            row.factory_session.as_deref(),
+            Some(daemon.session_name.as_str())
+        );
+        assert!(
+            row.processed_at.is_none(),
+            "shutdown/refusal must preserve the pending row"
+        );
+        let prompt =
+            super::super::delivery::parse_director_prompt(&row.target, &row.prompt).unwrap();
+        assert_eq!(prompt.retract_task.as_deref(), Some("cas-9efb-test"));
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_tip, original_tip,
+            "the original delivery identity must survive the queue handoff");
+        if scenario.starts_with("superseded") && scenario != "superseded_queued" {
+            // pin: a withdrawn delivery must be labelled superseded and must never ask for a merge.
+            assert!(prompt.text.contains("Superseded delivery"));
+            // pin: a withdrawn delivery must never instruct a supervisor to merge it.
+            assert!(!prompt.text.contains("MERGE REQUIRED"));
+        }
+        if scenario == "superseded_queued" {
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = tasks.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            tasks.update(&task).unwrap();
+        }
+        if scenario == "merged_fallback" {
+            fixture.advance_target(true);
+        }
+        if scenario == "superseded_refused" {
+            // Resume the same durable row after the unavailable lanes restart.
+            daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(
+                cas_dir.clone(),
+                daemon.app.project_scope(),
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if queue
+                    .queued_prompt(row.id)
+                    .unwrap()
+                    .unwrap()
+                    .processed_at
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{scenario}: queued wake did not complete: {:?}",
+                queue.message_delivery_report(row.id).unwrap()
+            )
+        });
+        let report = queue.message_delivery_report(row.id).unwrap().unwrap();
+        let capture = cas_dir.parent().unwrap().join("input");
+        if scenario == "merged_fallback" {
+            assert_eq!(
+                report.pending_reason,
+                Some(cas_store::PendingReason::SupersededStale)
+            );
+            assert!(report.delivered_at.is_none());
+            assert!(
+                std::fs::read_to_string(capture).unwrap().is_empty(),
+                "stale body must never reach PTY"
+            );
+        } else {
+            assert!(report.delivered_at.is_some(), "{scenario}: {report:?}");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let written = std::fs::read_to_string(&capture).unwrap();
+                    // pin: delayed request_changes must render the informational superseded label.
+                    let expected = if scenario == "superseded_queued" { "Superseded delivery" } else { &prompt.text };
+                    if written.contains(expected) && written.ends_with('\r') {
+                        if scenario.starts_with("superseded") {
+                            // pin: a delivery withdrawn during queue delay must not ask for a merge.
+                            assert!(!written.contains("MERGE REQUIRED"));
+                        }
+                        assert_eq!(written.matches('\r').count(), 1, "one submitted wake");
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: queued body must reach supervisor PTY"));
+        }
+        assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
+    }
+}
+
+// Keep the native transport contract at its own seam. Supervisor director
+// wakes now use the durable queue, so batch injection does not submit this job.
+#[tokio::test]
+async fn cas_91bab_non_green_native_transport_fallbacks() {
+    use super::super::supervisor_single_turn_tests::fixture_child;
+    if !fixture_child(
+        "ui::factory::daemon::runtime::director_refresh::tests::cas_91bab_non_green_native_transport_fallbacks",
+    ) {
+        return;
+    }
+    let mut shutdown_delivered = false;
+    let mut stale_fallback_suppressed = false;
+    for scenario in ["superseded", "missing", "shutdown", "merged_fallback"] {
+        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        fixture.ci(Some("failure"));
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         // A dropped incident must count as zero rows, not an uninitialized schema.
         let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         fixture
             .app
-            .set_supervisor_cli_for_test(if synchronous_fallback || scenario.starts_with("codex_") {
-                cas_mux::SupervisorCli::Codex
-            } else {
-                cas_mux::SupervisorCli::Claude
-            });
+            .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
         let (_, mut prompts, _) = fixture
             .app
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
-        // pin: the incident's CI-success teammate emitter is the route under test.
-        assert!(
-            prompts[0]
-                .text
-                .contains("CI completed successfully for delivery")
-        );
+        // Red CI keeps the direct transport route after a6be40dba / 1ecb22e52.
+        assert!(prompts[0].text.contains("CI failed"));
+        assert!(!prompts[0].is_merge_ready());
         assert!(prompts[0].retract_task.is_some());
         let verdicts = fixture
             .app
@@ -332,7 +907,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let inbox = teams.teams_dir().join("inboxes/supervisor.json");
         daemon.teams = Some(teams);
 
-        if scenario == "superseded" || synchronous_fallback {
+        if scenario == "superseded" {
             let store = crate::store::open_task_store_local(&cas_dir).unwrap();
             let mut task = store.get("cas-9efb-test").unwrap();
             task.deliverables.decline_factory_branch_anchor();
@@ -341,40 +916,42 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         }
         // Exercise the real batch job: relabelled prompts must survive its handoff.
         let mut refresh = DirectorRefresh::new();
-        let batch = if synchronous_fallback {
-            None
-        } else {
-            refresh
-                .start_deliverability_check(
-                    &daemon.app,
-                    &mut daemon.queue_jobs,
-                    prompts.clone(),
-                    vec![fixture.event.clone()],
-                    Instant::now(),
-                )
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let batch = loop {
-                let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
-                if let Some(batch) = batches.pop() {
-                    break batch;
-                }
-                assert!(Instant::now() < deadline, "batch recheck did not complete");
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            };
-            if scenario == "superseded" {
-                // pin: this failure identifies the missing superseded-body batch handoff.
-                assert!(
-                    batch.prompts[0].1,
-                    "superseded prompt must survive the batch handoff"
-                );
+        refresh
+            .start_deliverability_check(
+                &daemon.app,
+                &mut daemon.queue_jobs,
+                prompts.clone(),
+                vec![fixture.event.clone()],
+                Instant::now(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let batch = loop {
+            let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
+            if let Some(batch) = batches.pop() {
+                break batch;
             }
-            Some(batch)
+            assert!(Instant::now() < deadline, "batch recheck did not complete");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         };
+        if scenario == "superseded" {
+            // pin: this failure identifies the missing superseded-body batch handoff.
+            assert!(
+                batch.prompts[0].1,
+                "superseded prompt must survive the batch handoff"
+            );
+        }
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
-        let capture = cas_dir.join("fallback.txt");
-        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback || scenario.starts_with("codex_") {
+        let capture = cas_dir.parent().unwrap().join("input");
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
+            super::super::supervisor_single_turn_tests::attach_supervisor_pty(
+                &mut daemon,
+                cas_dir.parent().unwrap(),
+                cas_mux::SupervisorCli::Claude,
+                true,
+            )
+            .await;
             let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
             std::fs::remove_dir_all(&tree).unwrap();
             // A missing live tree with no saved roster exercises the real ENOENT path.
@@ -382,132 +959,14 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 tree,
                 &daemon.session_name,
             ));
-            let name = daemon.app.supervisor_name().to_string();
-            let pty = cas_mux::Pty::spawn(
-                &name,
-                cas_mux::PtyConfig {
-                    command: "sh".into(),
-                    args: vec![
-                        "-c".into(),
-                        "stty -echo; cat > \"$1\"".into(),
-                        "fallback".into(),
-                        capture.display().to_string(),
-                    ],
-                    cwd: Some(cas_dir.clone()),
-                    env: vec![],
-                    env_remove: vec![],
-                    rows: 24,
-                    cols: 80,
-                },
-            )
-            .unwrap();
-            daemon.app.mux.add_pane(
-                cas_mux::Pane::with_pty(
-                    &name,
-                    cas_mux::PaneKind::Supervisor,
-                    pty,
-                    24,
-                    80,
-                    if synchronous_fallback || scenario.starts_with("codex_") {
-                        cas_mux::SupervisorCli::Codex
-                    } else {
-                        cas_mux::SupervisorCli::Claude
-                    },
-                )
-                .unwrap(),
-            );
         }
-        if matches!(scenario, "merged" | "codex_merged") {
-            // Preserve the successful verdict while the integration target moves.
-            fixture.advance_target(true);
+
+        for (prompt, deliverable) in batch.prompts {
+            assert!(deliverable, "{scenario}: transport needs a live prompt");
+            assert!(daemon.submit_merge_alert_inbox(&prompt, batch.refresh_started));
         }
-        if synchronous_fallback {
-            let store_worker = super::super::store_worker::global();
-            if scenario == "superseded_refused" {
-                daemon.queue_jobs.close_lanes_for_test();
-                daemon
-                    .deliver_director_events(
-                        &mut refresh,
-                        vec![fixture.event.clone()],
-                        (vec![fixture.event.clone()], prompts, None),
-                        Instant::now(),
-                        0.0,
-                        store_worker,
-                        &super::super::loop_watchdog::LoopProgress::new(),
-                    )
-                    .await;
-            } else {
-                // The real read job cannot report until shutdown has used its
-                // unchecked fallback; no scheduling race or timed sleep.
-                let gate = Arc::new(ReadGate::default());
-                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
-                refresh
-                    .start_deliverability_check(
-                        &daemon.app,
-                        &mut daemon.queue_jobs,
-                        prompts,
-                        vec![fixture.event.clone()],
-                        Instant::now(),
-                    )
-                    .unwrap();
-                daemon
-                    .drain_director_deliveries_for_shutdown(
-                        &mut refresh,
-                        store_worker,
-                        Duration::ZERO,
-                    )
-                    .await;
-                gate.open();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while daemon.queue_jobs.external_completions_ready() == 0 {
-                    assert!(Instant::now() < deadline, "late recheck did not finish");
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                // The original pending batch was already consumed by shutdown.
-                assert!(
-                    refresh
-                        .take_deliverability(&mut daemon.queue_jobs)
-                        .is_empty()
-                );
-            }
-            let name = daemon.app.supervisor_name().to_string();
-            // A Codex inject retains the submit boundary after writing its body.
-            // Wait for ownership to clear before issuing the marker; otherwise
-            // inject correctly defers it and there is nothing for cat to drain.
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(!daemon.app.mux.pane_submit_pending(&name));
-            let marker = "sync-fallback-check-finished";
-            assert_eq!(
-                daemon.app.mux.inject(&name, marker).await.unwrap(),
-                cas_mux::InjectOutcome::Delivered
-            );
-            while !std::fs::read_to_string(&capture)
-                .unwrap_or_default()
-                .contains(marker)
-                && Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let written = std::fs::read_to_string(&capture).unwrap_or_default();
-            assert!(
-                written.contains(marker),
-                "PTY did not drain its complete body"
-            );
-            // pin: both direct transport fallbacks must preserve the Superseded label and remove merge instructions.
-            if !written.contains("Superseded delivery") || written.contains("MERGE REQUIRED") {
-                stale_sync_fallbacks.push((scenario, written));
-            }
-            assert!(daemon.finish_shutdown_writes(store_worker, Duration::from_secs(10)));
-            continue;
-        }
-        daemon
-            .inject_rechecked_batch(batch.unwrap(), super::super::store_worker::global())
-            .await;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !scenario.starts_with("codex_") && daemon.queue_jobs.external_completions_ready() == 0 {
+        while daemon.queue_jobs.external_completions_ready() == 0 {
             assert!(
                 Instant::now() < deadline,
                 "merge alert job did not complete"
@@ -542,12 +1001,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let rows: Vec<super::super::teams::InboxMessage> =
             serde_json::from_str(&std::fs::read_to_string(inbox).unwrap_or_else(|_| "[]".into()))
                 .unwrap();
-        if scenario == "merged" {
-            assert!(
-                rows.is_empty(),
-                "a completed merge must suppress the stale director teammate message: {rows:?}"
-            );
-        } else if scenario == "superseded" {
+        if scenario == "superseded" {
             assert_eq!(
                 rows.len(),
                 1,
@@ -558,14 +1012,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             assert!(rows[0].text.contains("Superseded delivery"));
             // pin: this heading asks the supervisor to merge a superseded tip.
             assert!(!rows[0].text.contains("MERGE REQUIRED"));
-        } else if scenario == "positive" {
-            assert_eq!(
-                rows.len(),
-                1,
-                "a genuine merge alert must reach the native inbox exactly once"
-            );
-            assert_eq!(rows[0].retract_task, expected_task);
-        } else if scenario == "merged_fallback" || scenario.starts_with("codex_") {
+        } else if scenario == "merged_fallback" {
             // A later marker on the same PTY proves all earlier queued payloads
             // have reached cat before absence of the stale body is judged.
             let name = daemon.app.supervisor_name().to_string();
@@ -585,11 +1032,6 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             let written = std::fs::read_to_string(&capture).unwrap_or_default();
             stale_fallback_suppressed =
                 written.contains(marker) && !written.contains(&expected_text);
-            if scenario.starts_with("codex_") {
-                assert!(written.contains(marker), "PTY must drain before judging delivery");
-                assert_eq!(written.contains(&expected_text), scenario == "codex_positive",
-                    "only a live merge demand may reach Codex: {written}");
-            }
         } else {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !std::fs::read_to_string(&capture)
@@ -622,11 +1064,6 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             }
         }
     }
-    // pin: failure reports each real fallback route that delivered stale merge instructions.
-    assert!(
-        stale_sync_fallbacks.is_empty(),
-        "stale fallback bodies: {stale_sync_fallbacks:?}"
-    );
     assert!(
         shutdown_delivered,
         "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})"
@@ -825,7 +1262,7 @@ async fn flv2_retraction_reads_fresh() {
     store.update(&task_b).unwrap();
 
     let idle_alert = |worker: &str| crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: format!("{worker} is idle"),
         stall_nudge_task: None,
@@ -938,7 +1375,7 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let alert = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -1170,7 +1607,7 @@ async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
         .with_read_gate(Arc::clone(&gate))
         .with_timeout(Duration::ZERO);
     let alert = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -1395,7 +1832,7 @@ async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let prompt = |text: &str, drop_if_worker_assigned: Option<&str>| crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: text.into(),
         stall_nudge_task: None,
@@ -1518,9 +1955,9 @@ fn idle_worker_with_task(
         worker: "idle-w".into(),
         active_task: Some(cas_factory::ActiveLeaseSummary {
             task_id: "cas-1d1e".into(),
-            task_title: "parked".into(),
-            task_status: cas_types::TaskStatus::Blocked,
-            close_rejected_reason: Some("blocked on review".into()),
+            task_title: "running".into(),
+            task_status: cas_types::TaskStatus::InProgress,
+            close_rejected_reason: Some("proof required".into()),
             pending_qa: None,
         }),
     }

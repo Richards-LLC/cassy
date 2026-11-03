@@ -4,6 +4,39 @@
 use super::*;
 
 pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Result<bool> {
+    if !agent.metadata.contains_key("clone_path") { return Ok(false); }
+    let tasks = snapshot_worker_tasks(cas_root, agent)?;
+    retire_worker_with_snapshot(cas_root, agent, &tasks)
+}
+
+/// Capture ownership before shutdown releases task bindings. No Git or target I/O.
+pub(crate) fn snapshot_worker_tasks(cas_root: &Path, agent: &cas_types::Agent) -> io::Result<Vec<cas_types::Task>> {
+    snapshot_workers_tasks(cas_root, std::slice::from_ref(agent))
+}
+
+/// All registrations share the name's retirement safety, even when tasks use IDs.
+pub(crate) fn snapshot_workers_tasks(cas_root: &Path, agents: &[cas_types::Agent]) -> io::Result<Vec<cas_types::Task>> {
+    let tasks = crate::store::open_task_store(cas_root).map_err(io::Error::other)?
+        .list(None).map_err(io::Error::other)?;
+    Ok(tasks.into_iter().filter(|task| task_owned_by(task, agents)).collect())
+}
+
+/// The frozen task facts retain safety and evidence ownership even after release.
+/// The existing live registry/task recheck still fences changes during cleanup.
+pub(crate) fn retire_worker_with_snapshot(
+    cas_root: &Path,
+    agent: &cas_types::Agent,
+    tasks: &[cas_types::Task],
+) -> io::Result<bool> {
+    retire_workers_with_snapshot(cas_root, std::slice::from_ref(agent), tasks)
+}
+
+pub(crate) fn retire_workers_with_snapshot(
+    cas_root: &Path,
+    agents: &[cas_types::Agent],
+    tasks: &[cas_types::Task],
+) -> io::Result<bool> {
+    let Some(agent) = agents.first() else { return Ok(false); };
     let Some(worktree) = agent.metadata.get("clone_path") else {
         return Ok(false);
     };
@@ -14,19 +47,13 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
     );
     // A worker's latest task is the receipt owner. Unassociated retired workers
     // have a separate inventory-only namespace, never closed-task artifact GC.
-    let store = crate::store::open_task_store(cas_root).map_err(io::Error::other)?;
-    let tasks = store.list(None).map_err(io::Error::other)?;
-    if !delivery_safe(agent, &tasks) {
+    if !delivery_safe(agents, tasks) {
         tracing::warn!(worker = %agent.name, "retired target deferred: nonterminal or unpushed work");
         return Ok(false);
     }
     let label = tasks
         .iter()
-        .filter(|task| {
-            task.assignee
-                .as_deref()
-                .is_some_and(|owner| owner == agent.id || owner == agent.name)
-        })
+        .filter(|task| task_owned_by(task, agents))
         .max_by_key(|task| task.updated_at)
         .map(|task| task.id.as_str())
         .unwrap_or("_retired-workers");
@@ -44,19 +71,20 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
                 .map_err(io::Error::other)?
                 .list(None)
                 .map_err(io::Error::other)?;
-            Ok(registered_live_owner(root, worktree)? || !delivery_safe(agent, &tasks))
+            Ok(registered_live_owner(root, worktree)? || !delivery_safe(agents, &tasks))
         },
     )
 }
 
-fn delivery_safe(agent: &cas_types::Agent, tasks: &[cas_types::Task]) -> bool {
+fn task_owned_by(task: &cas_types::Task, agents: &[cas_types::Agent]) -> bool {
+    task.assignee.as_deref().is_some_and(|owner| agents.iter().any(|agent| owner == agent.id || owner == agent.name))
+}
+
+fn delivery_safe(agents: &[cas_types::Agent], tasks: &[cas_types::Task]) -> bool {
+    let Some(agent) = agents.first() else { return false; };
     let owned: Vec<_> = tasks
         .iter()
-        .filter(|task| {
-            task.assignee
-                .as_deref()
-                .is_some_and(|owner| owner == agent.id || owner == agent.name)
-        })
+        .filter(|task| task_owned_by(task, agents))
         .collect();
     if owned
         .iter()

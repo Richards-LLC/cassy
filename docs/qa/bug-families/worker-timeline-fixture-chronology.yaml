@@ -1,0 +1,4 @@
+title: A newly appended worker timeline fixture event is chronologically newer than its initial page regardless of recording delays
+tasks: [cas-5ff7]
+invariants: [HUB-J25-GOAL]
+journeys: [HUB-J25]

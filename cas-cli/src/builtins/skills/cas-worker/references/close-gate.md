@@ -6,7 +6,17 @@ metadata:
 # Close Gate — Delivery
 
 Read at delivery. Review owns coding and test-quality judgments; this branch
-collects evidence and delivers the assigned task.
+collects evidence and delivers the assigned task. Task start lists what close
+will check. A refused park lists every failed gate: fix them all, retry once.
+
+## Commit and push
+
+Commit scoped work; push once before parking, once per review round, unless
+`delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
+`scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
+CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+exact-tip capped test receipts, never runs checks. For changelog scope and
+format, follow [Changelog at park](#changelog-at-park).
 
 ## Clean-tree receipt
 
@@ -19,9 +29,16 @@ of closing over them. This receipt applies at every depth.
 For `depth=light`, deliver the minimal working outcome with honest evidence.
 For deep or unset depth, map every criterion to executed proof or a named proof
 owner using `verify-before-claim`; trace affected consumers and registrations.
-Read [discipline.md](discipline.md) before check/test work. Rust assembly belongs
-to the supervisor; name unexecuted obligations. Run affected non-Rust checks and
-record their exit status and actual test count. A zero-test success is no proof.
+Consume the receipts from [discipline.md](discipline.md); name unexecuted
+obligations and their assembly owner.
+
+## Ledger preflight
+
+Create required evidence with `cas qa ledger init --task <id>`; it prints the
+project-scoped path and preserves existing evidence. Fill it from the real
+walk, then run `cas qa ledger check <path> --task <id>`. Fix every line/row
+diagnostic. Close uses that check before verification dispatch, including
+existing no-code ledgers. A structural PASS does not judge captures.
 
 ## Merge and freshness
 
@@ -31,13 +48,14 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
    unread supervisor messages and re-read the task before corrective edits.
 2. Capture the current tip: `git rev-parse factory/<name>` (use your per-task
    branch if active). Check `git merge-base --is-ancestor <delivered-tip> <target-tip>`.
-   If already merged or closed, re-close or stop rather than amend stale state.
+   If already merged or closed, stop and await the verdict rather than amend stale state.
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the
    target and SHA. The merge closes the task: Cassy dispatches verification at
    the merge, a PASS closes it and tells you once, a FAIL reopens it to you with
-   findings. Do not re-close or block on that verification. While it is pending, follow
+   findings. In `qa.mode=batch` a Tier 1 delivery opens no dispatch and waits for
+   the release verdict, which the supervisor records; you have nothing to do. Do not re-close or block on that verification. While it is pending, follow
    [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
 4. For a protected target, follow its PR flow. Ask for an epic merge rather than
    `gh pr create --base epic/...`; the supervisor owns the merge venue.
@@ -62,6 +80,17 @@ as a decision note with a specific reason, then retry. Cassy writes the
 and treat an `UPKEEP OBSERVE` note as the refusal a later `enforce` stage will
 make. The reviewer and QA see each escape, so a vague reason costs a round.
 
+## Changelog at park
+
+For a delivery that changes shipped Rust, `hub-web/src`, user-run scripts or
+builtin skills, add or extend a titled entry in `CHANGELOG.md` under
+`## [Unreleased]`, grouped under a category and product area (for example
+`### Fixed — Commander` with a per-delivery `- **Title** — description` line).
+If the delivery is test-only, docs-only or internal QA, record a typed
+decision note with `no changelog: <reason>`. The close gate checks that the
+task's own delivery changed an Unreleased entry; the changelog fast row
+checks the entry format.
+
 ## Delivery receipts
 
 - `commit_receipt=<sha>` names this task's immutable, non-empty delivered commit.
@@ -78,8 +107,9 @@ make. The reviewer and QA see each escape, so a vague reason costs a round.
 
 - Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking; cite its commit-bound bundle or real-build ledger. A
-  binary-driven ledger runs the supervisor's exact-tip candidate, never a
-  compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal
+  binary-driven ledger runs an exact-tip candidate from `factory
+  action=candidate_request`, never a compile of your own (cas-qa-craft's
+  evidence-ledger names the sources). Terminal
   paths also need `cas-cli-craft`'s `terminal-qa: PASS` receipt. Docs/test/CI-only
   deliveries do not trigger visual QA.
 - Human-facing output (a user-facing label, a demo, or a deliverable a person

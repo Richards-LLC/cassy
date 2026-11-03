@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for check-scoped-test-surface.sh, including its no-rg fallback.
+# Self-test for committed scoped-test surface resolution, independent of host rg.
 
 set -euo pipefail
 
@@ -41,10 +41,54 @@ printf '%s\n' 'changed skill' >>"$repo/cas-cli/src/builtins/skills/demo/SKILL.md
 git -C "$repo" add .
 git -C "$repo" commit -qm 'change scoped surfaces'
 
-with_rg_output="$(
-    cd "$repo"
-    bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
-)"
+# cas-7fd28: a real 160-symbol source and tracked integration corpus expose
+# Git's cost when each symbol gets a separate -e. Keep ample wall-clock slack
+# for the combined-regex scan, while staying below close's 15-second budget.
+python3 - "$checker" "$tmpdir/symbol-heavy" <<'PY_TIMING'
+from pathlib import Path
+import os
+import signal
+import subprocess
+import sys
+import time
+
+checker, location = sys.argv[1:]
+repo = Path(location)
+(repo / "cas-cli/src").mkdir(parents=True)
+(repo / "cas-cli/tests").mkdir()
+(repo / "cas-cli/src/symbol_heavy.rs").write_text(
+    "".join(f"pub fn public_symbol_{i:03}() {{}}\n" for i in range(160))
+)
+(repo / "cas-cli/tests/consumer.rs").write_text(
+    "let keep = unrelated::identifier_with_a_long_nonmatching_prefix;\n" * 100000
+    + "let first = symbol_heavy::public_symbol_000();\n"
+    + "let last = symbol_heavy::public_symbol_159();\n"
+)
+for args in [
+    ["init", "-q", "-b", "main"], ["add", "."],
+    ["-c", "user.name=Scoped fixture", "-c", "user.email=scoped@example.test",
+     "commit", "-qm", "symbol-heavy fixture"],
+]:
+    subprocess.run(["git", *args], cwd=repo, check=True)
+started = time.monotonic()
+process = subprocess.Popen(
+    ["bash", checker, "--resolve-targets", "--paths-from-stdin", "--base", "HEAD", "--"],
+    cwd=repo, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE, start_new_session=True,
+)
+try:
+    output, error = process.communicate("cas-cli/src/symbol_heavy.rs\n", timeout=10)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate()
+    raise SystemExit("FAIL: 160-symbol proof discovery exceeded its generous 10-second bound")
+assert process.returncode == 0, error
+assert output.strip() == "SCOPED_PROOF_TARGET_ARGS: --lib symbol_heavy --test consumer", output
+print(f"ok   160-symbol proof discovery preserves consumers in {time.monotonic()-started:.3f}s (<10s)")
+PY_TIMING
+
+# Host color configuration must not enter either regex or fixed-path results.
+git -C "$repo" config color.grep always
 
 # Build an isolated PATH containing every command used by the checker except
 # rg. This masks both /usr/bin/rg and /bin/rg on hosts that ship either one.
@@ -59,7 +103,24 @@ without_rg_output="$(
         --resolve-targets --base main --
 )"
 
-[[ "$without_rg_output" == "$with_rg_output" ]]
+# cas-81bc: the proof resolver must not launch a PATH-provided rg. The
+# Codex bundle can stall before main on macOS; an immediately failing stand-in
+# catches that dependency deterministically, without sleeps or host state.
+unusable_rg_bin="$tmpdir/unusable-rg-bin"
+mkdir -p "$unusable_rg_bin"
+cat >"$unusable_rg_bin/rg" <<'EOF'
+#!/bin/sh
+printf '%s\n' invoked >>"$CAS_TEST_RG_CALLS"
+exit 99
+EOF
+chmod +x "$unusable_rg_bin/rg"
+unusable_rg_output="$(
+    cd "$repo"
+    CAS_TEST_RG_CALLS="$tmpdir/rg-calls" PATH="$unusable_rg_bin:$no_rg_bin" \
+        bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --
+)"
+[[ "$unusable_rg_output" == "$without_rg_output" ]]
+[[ ! -e "$tmpdir/rg-calls" ]]
 for expected in \
     '--lib widget' \
     '--test widget_test' \
@@ -67,10 +128,13 @@ for expected in \
     '--test builtin_flavor_drift_test' \
     '--test agent_definition_contract_test' \
     '--test factory_codex_skill_guardrails'; do
-    grep -qF -- "$expected" <<<"$without_rg_output"
+    if ! grep -qF -- "$expected" <<<"$without_rg_output"; then
+        printf 'FAIL: missing target %s with color.grep=always: %s\n' "$expected" "$without_rg_output" >&2
+        exit 1
+    fi
 done
 
-printf 'ok   no-rg backend preserves scoped target mapping\n'
+printf 'ok   committed target mapping never launches host rg\n'
 
 manifest_repo="$tmpdir/manifest-repo"
 mkdir -p "$manifest_repo/cas-cli/tests/hooks_test" "$manifest_repo/scripts"
@@ -203,4 +267,136 @@ for exclusion in "-- --skip cli::other::tests::broken" "-E not(test(=cli::other:
     grep -qF 'SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pairing::tests result=PASS' <<<"$skip_proof"
 done
 printf 'ok   a skipped test is an exclusion, not a module filter\n'
+# A close has 15 seconds for surface discovery. Give the shared CI host twice
+# that wall budget, and count Git searches so the process fan-out regression
+# fails deterministically even with a small test tree on a fast host.
+batch_repo="$tmpdir/batch-repo"
+mkdir -p "$batch_repo/cas-cli/src" "$batch_repo/cas-cli/tests" "$batch_repo/scripts"
+cp "$checker" "$batch_repo/scripts/check-scoped-test-surface.sh"
+for index in {1..58}; do
+    printf 'pub fn factory_operation_%s() {}\n' "$index" >"$batch_repo/cas-cli/src/module_$index.rs"
+    printf 'use module_%s::factory_operation_%s;\n' "$index" "$index" >>"$batch_repo/cas-cli/tests/source_consumers.rs"
+done
+# Include a large public API: repeating every qualified symbol inside one
+# alternation can exceed Git's regex compiler limit despite avoiding argv caps.
+for index in {1..300}; do
+    printf 'pub fn factory_large_api_%s() {}\n' "$index" >>"$batch_repo/cas-cli/src/module_1.rs"
+done
+for skill in first second; do
+    mkdir -p "$batch_repo/cas-cli/src/builtins/skills/$skill"
+    printf 'fixture skill\n' >"$batch_repo/cas-cli/src/builtins/skills/$skill/SKILL.md"
+done
+printf '%s\n' 'cas-cli/src/builtins/skills/first/SKILL.md' >"$batch_repo/cas-cli/tests/source_builtin.rs"
+printf '%s\n' 'skills/second/SKILL.md' >"$batch_repo/cas-cli/tests/catalog_builtin.rs"
+git -C "$batch_repo" init -q -b main
+git -C "$batch_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid add .
+git -C "$batch_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm baseline
+python3 - "$batch_repo" "$no_rg_bin" "$tmpdir/batch-git.trace" <<'PY_BATCH'
+from pathlib import Path
+import os
+import subprocess
+import sys
+import time
+
+repo, search_path, trace = map(Path, sys.argv[1:])
+paths = sorted(str(path.relative_to(repo)) for path in (repo / 'cas-cli/src').rglob('*') if path.is_file())
+assert len(paths) == 60, paths
+started = time.monotonic()
+result = subprocess.run(
+    ['bash', './scripts/check-scoped-test-surface.sh', '--resolve-targets', '--base', 'HEAD', '--paths-from-stdin', '--'],
+    cwd=repo, env=dict(os.environ, PATH=str(search_path), GIT_TRACE=str(trace)),
+    input='\n'.join(paths) + '\n', capture_output=True, text=True, timeout=60,
+)
+elapsed = time.monotonic() - started
+assert result.returncode == 0, result.stdout + result.stderr
+for target in ['source_consumers', 'source_builtin', 'catalog_builtin']:
+    assert f'--test {target}' in result.stdout, result.stdout
+searches = sum('built-in: git grep ' in line for line in trace.read_text().splitlines())
+print(f'60-path no-rg delivery: {searches} test-tree searches, {elapsed:.3f}s', flush=True)
+assert searches <= 2, f'expected one search per kind, found {searches}'
+assert elapsed < 30, f'60-path discovery took {elapsed:.3f}s (30s shared-host allowance)'
+PY_BATCH
+printf 'ok   60-path delivery batches searches within the close budget\n'
+# The same discovery must survive deliveries larger than Git's regex compiler
+# limit. Keep consumers across the path list, a duplicate consumer, and a final
+# partial batch; comments and untracked files still cannot create targets.
+python3 - "$batch_repo" <<'PY_LARGE_SETUP'
+from pathlib import Path
+import subprocess
+import sys
+
+repo = Path(sys.argv[1])
+for index in range(58, 1313):
+    path = repo / f'cas-cli/src/large_delivery/proof_surface_module_{index:04}.rs'
+    path.parent.mkdir(exist_ok=True)
+    path.write_text('pub fn operation() {}\n')
+(repo / 'cas-cli/tests/source_consumers.rs').open('a').write(
+    'use large_delivery::proof_surface_module_1312::operation;\n'
+)
+(repo / 'cas-cli/tests/chunk_use.rs').write_text(
+    'use large_delivery::proof_surface_module_0058::operation;\n'
+)
+(repo / 'cas-cli/tests/chunk_symbol.rs').write_text(
+    'fn test() { large_delivery::proof_surface_module_0700::operation(); }\n'
+)
+(repo / 'cas-cli/tests/chunk_path.rs').write_text(
+    'const SOURCE: &str = include_str!("cas-cli/src/large_delivery/proof_surface_module_1312.rs");\n'
+)
+(repo / 'cas-cli/tests/comment_only.rs').write_text(
+    '// large_delivery::proof_surface_module_1312::operation();\n'
+)
+subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+(repo / 'cas-cli/tests/untracked.rs').write_text(
+    'use large_delivery::proof_surface_module_1312::operation;\n'
+)
+subprocess.run(['git', 'config', 'color.grep', 'always'], cwd=repo, check=True)
+PY_LARGE_SETUP
+python3 - "$batch_repo" "$no_rg_bin" "$tmpdir/large-git.trace" <<'PY_LARGE'
+from pathlib import Path
+import os
+import shlex
+import subprocess
+import sys
+
+repo, search_path, trace = map(Path, sys.argv[1:])
+# Model a Git regex compiler with a finite input budget. Newer host Git can
+# accept the oversized union, so a host-dependent compiler error is no oracle.
+# All accepted searches still execute real Git against the tracked fixtures.
+bounded_bin = repo / 'bounded-bin'
+bounded_bin.mkdir()
+for tool in search_path.iterdir():
+    if tool.name != 'git':
+        (bounded_bin / tool.name).symlink_to(tool.resolve())
+git = bounded_bin / 'git'
+git.write_text(f'''#!{sys.executable}
+import os, subprocess, sys
+real_git = {str((search_path / 'git').resolve())!r}
+if sys.argv[1:2] == ['grep'] and '-E' in sys.argv and '-f' in sys.argv:
+    pattern = sys.stdin.buffer.read()
+    if len(pattern) > 65536:
+        print('fixture: Git regex exceeds portable compile budget', file=sys.stderr)
+        sys.exit(2)
+    sys.exit(subprocess.run([real_git, *sys.argv[1:]], input=pattern).returncode)
+os.execv(real_git, [real_git, *sys.argv[1:]])
+''')
+git.chmod(0o755)
+paths = sorted(str(path.relative_to(repo)) for path in (repo / 'cas-cli/src').rglob('*') if path.is_file())
+assert len(paths) == 1315, len(paths)
+result = subprocess.run(
+    ['bash', './scripts/check-scoped-test-surface.sh', '--resolve-targets', '--base', 'HEAD', '--paths-from-stdin', '--'],
+    cwd=repo, env=dict(os.environ, PATH=str(bounded_bin), GIT_TRACE=str(trace)),
+    input='\n'.join(paths) + '\n', capture_output=True, text=True, timeout=60,
+)
+assert result.returncode == 0, result.stdout + result.stderr
+args = shlex.split(result.stdout)
+targets = [args[index + 1] for index, value in enumerate(args) if value == '--test']
+assert len(targets) == len(set(targets)), targets
+assert set(targets) == {
+    'source_consumers', 'source_builtin', 'catalog_builtin',
+    'chunk_use', 'chunk_symbol', 'chunk_path',
+}, targets
+searches = sum('built-in: git grep ' in line for line in trace.read_text().splitlines())
+assert searches <= 8, f'1315-path discovery used {searches} searches'
+print(f'ok   1315-path delivery preserves consumer union in {searches} searches')
+PY_LARGE
 printf 'PASS: scoped test surface backend and nested-module mapping verified.\n'

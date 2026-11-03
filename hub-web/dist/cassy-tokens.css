@@ -2,7 +2,7 @@
  * Source: docs/design/design-tokens.json -> hub-web/src/tokens.css + hub-web/src/glass.css (token blocks only).
  * Scheme: light by default, dark under prefers-color-scheme: dark; html[data-scheme="light"|"dark"] forces one.
  * Sync and check: node hub-web/scripts/sync-cassy-tokens.mjs (cassy hub-web/DESIGN.md "Shared tokens").
- * cassy-tokens-sha256: 35ea13a0f663b81f46da7655c694869c7f043c6f780985e756f2c31c62de89e2
+ * cassy-tokens-sha256: 8b94e4e70bcb0aa519f17954061beefd4ac460b3bcf5350b685a4a247c29933d
  */
 /* House roles (src/tokens.css) */
 :root {
@@ -81,7 +81,8 @@
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -202,7 +203,8 @@
     --color-verdict: #A9B3FF;
     --color-action: #A9B3FF;
     --color-focus: #A9B3FF;
-    --state-idle: #9AA1AF;
+    --state-idle: #3E8A63;
+    --state-off: #9AA1AF;
     --color-series-neutral: #9AA1AF;
     --canvas: #12141A;
     --panel: #191C24;
@@ -323,7 +325,8 @@ html[data-scheme="light"] {
   --color-verdict: #2E3A9F;
   --color-action: #2E3A9F;
   --color-focus: #2E3A9F;
-  --state-idle: #6B7280;
+  --state-idle: #4F8A6A;
+  --state-off: #6B7280;
   --color-series-neutral: #6B7280;
   --canvas: #F7F4EE;
   --panel: #FFFFFF;
@@ -443,7 +446,8 @@ html[data-scheme="dark"] {
   --color-verdict: #A9B3FF;
   --color-action: #A9B3FF;
   --color-focus: #A9B3FF;
-  --state-idle: #9AA1AF;
+  --state-idle: #3E8A63;
+  --state-off: #9AA1AF;
   --color-series-neutral: #9AA1AF;
   --canvas: #12141A;
   --panel: #191C24;
@@ -493,6 +497,21 @@ html[data-scheme="dark"] {
   --glass-radius: 22px;
   --glass-inset: 8px;
   --look-blur: blur(16px) saturate(160%);
+  --radius-inline: 4px;
+  --radius-control: 12px;
+  --radius-surface: 16px;
+  --radius-sheet: 24px;
+  --radius-card: 12px;
+  --radius-pane: 16px;
+  --card-padding: 12px;
+  --card-gap: 8px;
+  --pill-status-height: 24px;
+  --pill-action-height: 32px;
+  --avatar-size: 42px;
+  --avatar-mark: 24px;
+  --avatar-lane-size: 32px;
+  --avatar-lane-mark: 18px;
+  --status-dot: 10px;
 }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root, html[data-scheme] {

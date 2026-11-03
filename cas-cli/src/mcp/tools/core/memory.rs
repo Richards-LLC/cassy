@@ -774,6 +774,7 @@ impl CasCore {
                 .and_then(|cfg| cfg.active_team_id())
         };
 
+        let handoff_content = handoff_role.as_ref().map(|_| req.content.clone());
         let entry = Entry {
             origin_project: None,
             source_ids: Vec::new(),
@@ -792,8 +793,7 @@ impl CasCore {
             harmful_count: 0,
             last_accessed: None,
             archived: false,
-            // Preserve author session provenance so ambient recall can avoid
-            // immediately echoing a memory back into the same conversation.
+            // Preserve author session provenance for the entry audit trail.
             session_id: self.get_agent_id().ok(),
             source_tool: Some("mcp".to_string()),
             pending_extraction: false,
@@ -851,6 +851,15 @@ impl CasCore {
         let mut msg = format!("Created entry: {id}");
         if let Some(role) = handoff_role.as_deref() {
             msg.push_str(&format!("\nCurrent {role} handoff for this project."));
+            let verdicts = crate::quality_ledger::handoff_saved(
+                &self.cas_root,
+                &id,
+                handoff_content.as_deref().unwrap_or_default(),
+                self.get_agent_id().ok().as_deref(),
+            );
+            if verdicts > 0 {
+                msg.push_str(&format!("\nRecorded {verdicts} feature_feedback verdict(s)."));
+            }
             if !superseded_ids.is_empty() {
                 msg.push_str(&format!(
                     "\nSuperseded (kept as history): {}",

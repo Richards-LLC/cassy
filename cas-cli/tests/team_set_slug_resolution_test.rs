@@ -29,7 +29,7 @@
 //! Mutex is per-process and there's no cross-binary state to share.
 
 use std::path::Path;
-use std::sync::Mutex;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -44,54 +44,17 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Process-global lock for CAS_ROOT mutations. Per-binary (separate from the
-/// one in `team_pull_wiring_test.rs` — each test binary has its own
-/// process).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct CasRootGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<std::ffi::OsString>,
-    prev_user_cloud_json: Option<std::ffi::OsString>,
-}
-
+struct CasRootGuard;
 impl CasRootGuard {
-    fn set(cas_root: &Path) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("CAS_ROOT");
-        let prev_user_cloud_json = std::env::var_os("CAS_USER_CLOUD_JSON");
-        // SAFETY: env mutation on an integration-test process, guarded by
-        // ENV_LOCK so no other test can race the var concurrently.
-        unsafe { std::env::set_var("CAS_ROOT", cas_root) };
-        Self {
-            _lock: lock,
-            prev,
-            prev_user_cloud_json,
-        }
+    fn set(root: &Path) -> TestEnvGuard {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_ROOT", root);
+        env
     }
-
-    fn set_with_user_cloud_json(cas_root: &Path, user_cloud_json: &Path) -> Self {
-        let guard = Self::set(cas_root);
-        // SAFETY: env mutation on an integration-test process, guarded by
-        // ENV_LOCK held by `guard`.
-        unsafe { std::env::set_var("CAS_USER_CLOUD_JSON", user_cloud_json) };
-        guard
-    }
-}
-
-impl Drop for CasRootGuard {
-    fn drop(&mut self) {
-        // SAFETY: same as `set` — ENV_LOCK held for entire guard lifetime.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var("CAS_ROOT", v),
-                None => std::env::remove_var("CAS_ROOT"),
-            }
-            match &self.prev_user_cloud_json {
-                Some(v) => std::env::set_var("CAS_USER_CLOUD_JSON", v),
-                None => std::env::remove_var("CAS_USER_CLOUD_JSON"),
-            }
-        }
+    fn set_with_user_cloud_json(root: &Path, user_cloud: &Path) -> TestEnvGuard {
+        let mut env = Self::set(root);
+        env.set("CAS_USER_CLOUD_JSON", user_cloud);
+        env
     }
 }
 

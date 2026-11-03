@@ -172,7 +172,7 @@ fn heartbeat_stale_agent_should_be_kept(agent: &crate::types::Agent) -> bool {
 
 /// Run a single maintenance cycle.
 pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasError> {
-    use crate::store::{open_agent_store, open_event_store, open_recording_store, open_store};
+    use crate::store::{open_agent_store, open_event_store, open_store};
 
     let started_at = Utc::now();
     let mut errors = Vec::new();
@@ -192,7 +192,6 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     let mut events_pruned = 0;
     let mut telemetry_events_pruned = 0;
     let mut lease_history_pruned = 0;
-    let mut recordings_pruned = 0;
     let mut trace_archives_evicted = 0;
 
     let store = open_store(&config.cas_root)?;
@@ -439,17 +438,6 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
-    // Archive old recordings (30-day live retention, including agents/events)
-    // before deleting their live rows.
-    if config.auto_prune {
-        if let Ok(recording_store) = open_recording_store(&config.cas_root) {
-            match recording_store.archive_old(&config.cas_root.join("archive"), 30) {
-                Ok(count) => recordings_pruned = count,
-                Err(error) => errors.push(format!("Recording archiving failed: {error}")),
-            }
-        }
-    }
-
     if config.auto_prune {
         match cas_store::enforce_trace_archive_size(&config.cas_root, config.archive_max_bytes) {
             Ok(eviction) => trace_archives_evicted = eviction.files_evicted,
@@ -500,7 +488,6 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         events_pruned,
         telemetry_events_pruned,
         lease_history_pruned,
-        recordings_pruned,
         trace_archives_evicted,
         agents_cleaned,
         agents_purged,

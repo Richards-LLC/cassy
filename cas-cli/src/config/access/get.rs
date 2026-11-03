@@ -5,7 +5,7 @@ impl Config {
         let cloud = self.cloud.clone().unwrap_or_default();
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
-        let qa = self.qa.clone().unwrap_or_default();
+        let qa = self.qa();
         let capture = qa.capture.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
         let daemon = self.daemon.clone().unwrap_or_default();
@@ -162,6 +162,7 @@ impl Config {
             "factory.block_stale_assignment" => Some(factory.block_stale_assignment.to_string()),
             "factory.stale_threshold_commits" => Some(factory.stale_threshold_commits.to_string()),
             "factory.stall_threshold_secs" => Some(factory.stall_threshold_secs.to_string()),
+            "factory.restart_worker_between_tasks" => Some(factory.restart_worker_between_tasks.to_string()),
             "factory.context_recycle_threshold_percent" => Some(factory.context_recycle_threshold_percent.to_string()),
             "factory.stall_after_secs" => Some(factory.stall_after_secs.to_string()),
             "factory.delivery_stalled_priority_secs" => Some(factory.delivery_stalled_priority_secs.to_string()),
@@ -299,46 +300,30 @@ impl Config {
             "issues.components.cassy" => Some(issue_repos.cassy),
             "issues.components.violet" => Some(issue_repos.violet),
             "issues.components.cloud" => Some(issue_repos.cloud),
+            "secrets.destination" => Some(
+                self.secrets
+                    .as_ref()
+                    .and_then(|secrets| secrets.destination.clone())
+                    .unwrap_or_default(),
+            ),
+            "secrets.auto_delete" => Some(
+                self.secrets
+                    .as_ref()
+                    .and_then(|secrets| secrets.auto_delete.clone())
+                    .unwrap_or_else(|| "off".into()),
+            ),
             // History section
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section
             "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
             // Notifications section
             "notifications.enabled" => Some(notifications.enabled.to_string()),
-            "notifications.sound_enabled" => Some(notifications.sound_enabled.to_string()),
-            "notifications.display_duration_secs" => {
-                Some(notifications.display_duration_secs.to_string())
-            }
-            "notifications.max_visible" => Some(notifications.max_visible.to_string()),
             "notifications.on_permission_prompt" => {
                 Some(notifications.on_permission_prompt.to_string())
             }
             "notifications.on_idle_prompt" => Some(notifications.on_idle_prompt.to_string()),
             "notifications.on_auth_success" => Some(notifications.on_auth_success.to_string()),
             "notifications.webhook_url" => Some(notifications.webhook_url.unwrap_or_default()),
-            // Notifications.tasks section
-            "notifications.tasks.on_created" => Some(notifications.tasks.on_created.to_string()),
-            "notifications.tasks.on_started" => Some(notifications.tasks.on_started.to_string()),
-            "notifications.tasks.on_closed" => Some(notifications.tasks.on_closed.to_string()),
-            "notifications.tasks.on_updated" => Some(notifications.tasks.on_updated.to_string()),
-            // Notifications.entries section
-            "notifications.entries.on_added" => Some(notifications.entries.on_added.to_string()),
-            "notifications.entries.on_updated" => {
-                Some(notifications.entries.on_updated.to_string())
-            }
-            "notifications.entries.on_deleted" => {
-                Some(notifications.entries.on_deleted.to_string())
-            }
-            // Notifications.rules section
-            "notifications.rules.on_created" => Some(notifications.rules.on_created.to_string()),
-            "notifications.rules.on_promoted" => Some(notifications.rules.on_promoted.to_string()),
-            "notifications.rules.on_demoted" => Some(notifications.rules.on_demoted.to_string()),
-            // Notifications.skills section
-            "notifications.skills.on_created" => Some(notifications.skills.on_created.to_string()),
-            "notifications.skills.on_enabled" => Some(notifications.skills.on_enabled.to_string()),
-            "notifications.skills.on_disabled" => {
-                Some(notifications.skills.on_disabled.to_string())
-            }
             // Agent section
             "agent.name" => Some(self.agent.clone().unwrap_or_default().name),
             "agent.max_concurrent_tasks" => Some(

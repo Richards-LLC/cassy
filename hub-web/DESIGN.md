@@ -43,8 +43,10 @@ colors:
   warning-dark: "#E2B14D"
   danger: "#B3261E"
   danger-dark: "#EF7B72"
-  idle: "#6B7280"
-  idle-dark: "#9AA1AF"
+  idle: "#4F8A6A"
+  idle-dark: "#3E8A63"
+  disconnected: "#6B7280"
+  disconnected-dark: "#9AA1AF"
   supervisor: "rgba(255, 255, 255, 0.9)"
   supervisor-dark: "rgba(36, 33, 70, 0.92)"
   on-supervisor: "#1A1830"
@@ -100,10 +102,14 @@ typography:
     fontWeight: 400
     lineHeight: 1.35
 rounded:
-  card: 4px
-  pane: 8px
+  inline: 4px
+  control: 12px
+  surface: 16px
   glass: 22px
+  sheet: 24px
   full: 999px
+  card: 12px
+  pane: 16px
 spacing:
   space-1: 4px
   space-2: 8px
@@ -117,9 +123,14 @@ components:
   canvas: { backgroundColor: "{colors.bg}", textColor: "{colors.ink}" }
   glass-panel: { backgroundColor: "{colors.glass}", rounded: "{rounded.glass}", padding: 8px }
   dialog: { backgroundColor: "{colors.glass-strong}", textColor: "{colors.ink}", rounded: 24px }
-  card: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", rounded: "{rounded.pane}" }
+  card: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", rounded: "{rounded.surface}", padding: 12px }
+  list-row: { textColor: "{colors.ink}", rounded: "{rounded.control}", height: 44px }
   button-primary: { backgroundColor: "{colors.primary}", textColor: "{colors.on-primary}", rounded: "{rounded.full}", height: 40px }
-  project-badge: { backgroundColor: "{colors.verdict-soft}", typography: "{typography.title-md}", rounded: "{rounded.card}" }
+  button-action: { backgroundColor: "{colors.glass-strong}", textColor: "{colors.ink}", rounded: "{rounded.full}", height: 32px }
+  pill-status: { backgroundColor: "{colors.surface}", textColor: "{colors.ink-muted}", typography: "{typography.eyebrow}", rounded: "{rounded.full}", height: 24px }
+  machine-chip: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", typography: "{typography.label-md}", rounded: "{rounded.full}" }
+  provider-avatar: { backgroundColor: "{colors.surface}", textColor: "{colors.ink}", rounded: "{rounded.full}", width: 42px, height: 42px }
+  project-badge: { backgroundColor: "{colors.verdict-soft}", typography: "{typography.title-md}", rounded: "{rounded.control}" }
   bubble-supervisor: { backgroundColor: "{colors.supervisor}", textColor: "{colors.on-supervisor}" }
   bubble-operator: { backgroundColor: "{colors.you}", textColor: "{colors.on-you}" }
   ask-card: { backgroundColor: "{colors.ask}", textColor: "{colors.on-ask}" }
@@ -137,6 +148,7 @@ components:
   status-warn: { backgroundColor: "{colors.warning}", rounded: "{rounded.full}" }
   status-crit: { backgroundColor: "{colors.danger}", rounded: "{rounded.full}" }
   status-idle: { backgroundColor: "{colors.idle}", rounded: "{rounded.full}" }
+  status-disconnected: { backgroundColor: "{colors.disconnected}", rounded: "{rounded.full}" }
   raw-output: { backgroundColor: "{colors.terminal}", typography: "{typography.terminal}" }
 maps:
   primary: "--color-action"
@@ -159,6 +171,7 @@ maps:
   warning: "--state-warn"
   danger: "--state-crit"
   idle: "--state-idle"
+  disconnected: "--state-off"
   supervisor: "--sup-bg"
   on-supervisor: "--sup-fg"
   you: "--you-bubble-bg"
@@ -177,10 +190,14 @@ maps:
   typography.eyebrow: "fontFamily --font-ui, fontSize --fs-xs, fontWeight --weight-semibold, letterSpacing --tracking-label"
   typography.mono-xs: "fontFamily --font-mono, fontSize --fs-xs, fontWeight --weight-regular"
   typography.terminal: "fontFamily --font-mono, fontSize --fs-terminal, fontWeight --weight-regular, lineHeight --line-terminal"
+  rounded.inline: "--radius-inline"
+  rounded.control: "--radius-control"
+  rounded.surface: "--radius-surface"
+  rounded.glass: "--glass-radius"
+  rounded.sheet: "--radius-sheet"
+  rounded.full: "--radius-pill"
   rounded.card: "--radius-card"
   rounded.pane: "--radius-pane"
-  rounded.glass: "--glass-radius"
-  rounded.full: "--radius-pill"
 ---
 ## Overview
 
@@ -197,7 +214,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 - **Cards.** `--bg-raised` is an opaque lavender-white (#F7F5FF) or deep indigo (#23203E): worker cards, the paired-machines row and dialog footers never read as grey slabs on glass. `--bg-hover` and `--bg-active` are violet washes, never grey.
 - **Ink.** `--ink`/`--text-hi` (#1A1830 / #EEEBFF) and `--ink-mid`/`--text-mid` (#4A4762 / #B8B3D9). There is no tertiary text step; timestamps and meta use `--ink-mid`.
 - **Violet is the one action colour.** `--color-action`, `--color-verdict` and `--color-focus` are the same violet (#5B3FE0 light; #A897FF and a lighter #B9ABFF focus in dark). Send, the compose button and every `.primary` carry the `--look-send` gradient (#7656FA → #5B3FE0 → #3E5BEA) with white text. Violet never marks status.
-- **Status.** `--state-ok`, `--state-warn`, `--state-crit` and `--state-idle` are the house values; Glass leaves them alone. A message known **not sent** is critical (`--crit-bg` outline, glyph and label); one only **not confirmed** is caution (`--warn-text`), in the thread and on the dismissed-messages chip; a settled record drops to `--ink-mid`.
+- **Status.** `--state-ok`, `--state-warn`, `--state-crit`, `--state-idle` and `--state-off` are the house values; Glass leaves them alone. A message known **not sent** is critical (`--crit-bg` outline, glyph and label); one only **not confirmed** is caution (`--warn-text`), in the thread and on the dismissed-messages chip; a settled record drops to `--ink-mid`.
 - **Ask and blocker.** An open question is `--look-ask` (light #FFD983 → #FFA184) in `--ask-fg` #2A1A05 over an ember `--look-ask-tray`, in both schemes; its answer chips are opaque and stay opaque on hover (`--tray-chip-hover`). A blocker is a `--crit-bg` flood in light and, in dark, a `--crit-tint` #3A1F1E card in ink with a 4px salmon `--crit-edge`.
 - **Bubbles.** Supervisor bubbles are `--sup-bg` (0.9 alpha, no blur). The operator's bubble is the `--look-you` gradient; under more contrast it is the flat `--you-bubble-bg`.
 - **Machine accents.** `.machine-accent-0…4` (indigo, green, violet, teal, rose; `hub-web/src/machine-accent.ts`, append only) colour only each machine's avatar. Glass resets their `--sup-bg`, `--accent-soft` and `--lift-sup`, so they never tint bubbles or the selected row.
@@ -217,7 +234,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ## Layout
 
-- 4px grid: 4/8/12/16/24/32/48/64px (`--space-*`). Controls are `--button-height` 40px, compact pane controls 28px.
+- 4px grid: 4/8/12/16/24/32/48/64px (`--space-*`). Controls are `--button-height` 40px, card action pills `--pill-action-height` 32px, compact pane controls 28px.
 - Desktop: a floating 382px glass list (`--conversation-rail-width`; 374px of content inside an 8px `--glass-inset`), a reading column open to the aurora, and the glass context rail, which collapses to its 48px track.
 - The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in CSS and in `hub-web/src/viewport.ts`; landscape uses the same short-axis query, so rotation keeps the phone layout.
 - Phone: list → full-width thread with an always-addressed composer. The list is full-bleed glass, the heading hangs from the top edge with rounded lower corners, every touch target is at least `--rail-item-min` 44px, and Tasks & progress, Waiting on you and Raw output open as sheets.
@@ -235,23 +252,110 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ## Shapes
 
-- Radii: `--radius-card` 4px (controls, project badge), `--radius-pane` 8px (panes), `--glass-radius` 22px (list and context rail), 20px (conversation heading), 24px (dialogs), 26px (composer bar), 23px (reply fields: the conversation composer's and the inbox reply composer's), 16px (conversation rows, search, app-switcher card), `--radius-pill` 999px (dots, chips, outlined dialog buttons).
-- Bubbles are asymmetric: supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px.
+Glass has no square-cornered rectangles. Anything with its own fill or edge takes one step of the shape scale, chosen by what it is, never by its size:
+
+| Step | Token | Value | Use |
+| --- | --- | --- | --- |
+| inline | `--radius-inline` | 4px | Inline code, key hints (`Enter ↵`), focus-outline rounding. Never a card. |
+| control | `--radius-control` | 12px | Fields and selects, menu items, wells and rows nested inside a card, the project badge. |
+| surface | `--radius-surface` | 16px | Cards (project, worker, account, Needs you), conversation rows, search, code frames, evidence wells. |
+| glass | `--glass-radius` | 22px | The floating list and context rail; the conversation heading is 20px. |
+| sheet | `--radius-sheet` | 24px | Dialogs and sheets; phone bottom sheets round only their top corners. |
+| full | `--radius-pill` | 999px | Buttons, chips, badges, machine chips, status pills, avatars and dots. |
+
+- Glass re-shapes the house `--radius-card` (4px) and `--radius-pane` (8px) to 12px and 16px, so every existing consumer inherits the scale; new rules name the semantic step (`--radius-control`, `--radius-surface`), not the house alias.
+- A nested shape is one step smaller than its parent (surface card → control rows), so corners never collide. Ledgers and tables inside a card stay ruled, never boxed.
+- Fixed shapes kept on purpose: bubbles are asymmetric (supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px), the composer bar is 26px, reply fields 23px (both composers), the PDF plate 7px.
+- ❌ Never write a literal radius below 12px on anything with a fill or an edge, except the `inline` step; never square a card's corners to fit a neighbour.
 - Lines: `--line-width` 1px hairlines, `--state-rule-width` 2px critical rules, `--rule-verdict` 2.5px and `--rule-hero` 3px (launch progress). The open conversation row has a 2px `--color-action` edge all round, never a left bar.
-- Focus: `--focus-ring-width` 2px in `--color-focus`.
+- Focus: `--focus-ring-width` 2px in `--color-focus`, following the element's own radius.
 
 ## Components
 
 - **Shell.** `render()` in `hub-web/src/main.ts` builds the shell from `hub-web/src/conversation-shell.ts`; rows from `conversation-list.ts`, the thread from `conversation-view.ts` and `conversation-history.ts`.
-- **Conversation row** (`conversation-list.ts`). Open: `--look-row-open` wash plus the 2px `--color-action` edge (5.7:1 light, 7.5:1 dark against the list). Hover is a faint `--bg-hover` wash with no edge, so hover can never look open.
+- **Project navigation** (`project-navigation.ts`). One outlined `--bg-raised` card per canonical project across machines, bounded with `--ink-mid` (at least 3:1). A full-width expanded-state toggle precedes clickable machine chips and known worker/merge-rate figures. Only running sessions form cards; a project with none disappears. During a machine outage, last-known running rows stay while the machine carries the recovery status once. Saved messages to stopped sessions use the existing critical Attention treatment and Details/Copy controls in the list when no conversation is open. Device-local collapse persists; search temporarily reveals matches. Needs you shortcuts lead the register and disappear when empty. All/Needs you/machine filter chips intersect search; the paired-machine footer opens the same filters beside machine management. Phone rows use `--space-1` vertical padding to keep six sessions visible while preserving 44px End controls.
+- **Conversation row** (`conversation-list.ts`). Optional harness marks, account email and a state dot identify supervisors inside project cards; absent metadata leaves a generic avatar without a blank line. Names and preview text stay available to assistive technology. Open: `--look-row-open` wash plus the 2px `--color-action` edge (5.7:1 light, 7.5:1 dark against the list). Hover is a faint `--bg-hover` wash with no edge, so hover can never look open.
 - **Primary button** (`styles.css`, `glass.css`). `--look-send` with `--look-send-glow`; hover deepens to `--look-send-hover` and never brightens.
 - **Dialog** (`glass.css`). Glass-strong sheet; its sticky action bar is a light `--look-glass-bar` frost with a hairline and a 12px gap; plain buttons (Close, Back) are outlined pills; a destructive Remove is a `--crit-bg` outlined pill.
-- **Ask card and pinned ask** (`attention-view.ts`, `context-rail.ts`). The full stepped question lives once, in the thread; the "Waiting on you" bookmark points to it. Only asks and blockers count as waiting on the operator.
+- **Ask card and pinned ask** (`attention-view.ts`, `context-rail.ts`). The full stepped question lives once, in the thread; the "Waiting on you" bookmark points to it, and the context rail never repeats the pinned question. Only asks and blockers count as waiting on the operator.
 - **Conversation header.** Interrupt (`#conversation-interrupt`, `--state-crit` outline, `aria-disabled` with its reason when it cannot act) and Raw output (`dialog#raw-output`, a read-only `transcript-view.ts` on `--bg-terminal`: a 640px right sheet on desktop, a bottom sheet on a phone).
 - **Project badge.** `--bg-active` fill, `--color-action` text, 15px semibold, wraps; named from the catalog `project_dir` with an honest missing state.
 - **New session** (`#launch-dialog`, `launch-session.ts`). Chosen rows carry `--bg-active` and a `--color-action` edge (`.is-checked`); Attach and Start are its only `.primary`; progress is a `--rule-hero` rule with a quiet elapsed count, never a spinner.
 - **Toast** (`#toast`, `main.ts`). Solid `--bg-panel`; slides but never fades through the page.
 - **Inbox reply composer** (`form.operator-inbox-composer`, `inbox/inbox-view.ts`; `styles.css`). The offline inbox's reply field reuses the conversation composer's rounded field so a reply looks the same in both places: a column with a `--space-2` gap; the textarea is full width with `--line-width` `--line-strong` edge, 23px radius, `--panel` fill (white 0.84 light, indigo rgba(32, 29, 60, 0.82) dark, opaque `--bg-panel` under more contrast, reduced transparency or forced colours), `--ink` text, inherited font at line-height 1.55 and `resize: none`. Text is inset `12px 22px` so no line touches the rounded edge, including a long reply that scrolls. Unlike the conversation field it carries no `--lift` and keeps `--panel` rather than Glass's `--look-glass-strong`, because it already sits on the glass-strong dialog. HUB-J19 (`e2e/journeys/operator-inbox.journey.ts`) compares the field's fill, edge, radius, ink, inset, line height and resize against these tokens.
+
+Work-step disclosures (`work-rows-view.ts`) use operation-first body text at `--fs-meta`, with named read/edit target lists, search-match scope, or command/working-directory/exit metadata. Exact tool input and output stays plain mono text inside the existing `--bg-raised` detail well; unknown wrapper tools keep their original label and raw record. Failures have words plus the critical dot. Routine turn-start/completion notices share a collapsed Turn activity disclosure; failed notices remain visible. Detail loads only on opening, and live metadata updates preserve focus and expansion in both the thread and worker timeline. See `src/work-rows.brief.md`.
+
+### Cards and rows
+
+One card pattern serves the project register, Needs you, Tasks & progress worker cards, Team lanes and Accounts.
+
+- **Card.** `--bg-raised` fill, `--radius-surface`, a 1px `--line-subtle` edge, `--card-padding` (12px) inside and `--card-gap` (8px) between its lines and between sibling cards. Cards are separated by fill and spacing, never by a heavy outline: a card edge is `--line-strong` only under more contrast or forced colours. Severity is an edge colour on the card (`--state-warn` for Needs you, `--state-crit` for a blocker), never a fill some severities get and others do not (D8); selection is the 2px `--color-action` edge.
+- **Card header.** One row: title (15px semibold, or mono for a codename), then status pills, then trailing actions pushed to the end with `margin-inline-start: auto`. The row wraps as a whole; an action never drops below the body text.
+- **Card body.** At most three text lines at `--fs-meta`: the work, then evidence (`--ink-mid`), then time. Identifiers stay mono inside prose.
+- **Row inside a card.** `--radius-control`, transparent until hover (`--bg-hover`) or open (`--look-row-open` plus the action edge), at least `--rail-item-min` 44px tall on a phone.
+- ❌ Never box a box: a card inside a card becomes rows; a list of cards inside a dialog has no extra frame around the list.
+
+### Pills
+
+Three kinds, distinguishable without reading them:
+
+- **Status pill** (`.status-chip`). `--pill-status-height` 24px, `--radius-pill`, `--bg-panel` fill, 12px uppercase label in the state's text colour (`--state-ok`, `--state-warn` with `--tint-warn`, `--ink-mid` for idle/open). It states a fact and is never a button: no hover, no border, no pointer.
+- **Team attention.** Task titles lead each lane; worker name, harness and model are supporting evidence. Reported stalled or budget-stopped workers and blocked tasks move ahead of merge waits, with a critical left rule; merge waits use a warning rule. Equal-priority lanes keep catalog order. Needs you names the worker and reported reason, and its count includes stalled workers without counting their blocked task twice. A critical underline gives the count weight even in forced colors. Blocked task state takes precedence over worker Waiting in the shared rail/Team projection, with one critical badge. Worker focus is a quiet dotted ink inset, preserving the semantic edge. The task board labels its lifecycle as “Tasks in progress” to distinguish it from worker liveness. No elapsed-time threshold invents trouble.
+- **Team Waiting and Offline.** Waiting is live-idle and uses `--state-ok` text; Offline uses gray `--state-off`. In forced colours, Waiting is underlined `CanvasText` and Offline is `GrayText`, so the words and treatment distinguish them even when the system colours coincide.
+- **Action pill** (a `button` in a card header or row). `--pill-action-height` 32px, `--radius-pill`, `--look-glass-strong` fill with a 1px `--line-strong` edge, `--ink` text at `--fs-meta` 500; hover is `--bg-hover`, never brighter. On a phone its hit area reaches 44px with padding, not a taller face. Only one `.primary` (Send gradient) per surface; a destructive action is the `--crit-bg` outlined pill.
+- **Chip** (filters, machine chips, badges). `--radius-pill`, 28–32px tall, `--bg-raised` fill with a `--line-subtle` edge; pressed filters take `--bg-active` and the action edge. A **machine chip** is a pill: the connection dot, the machine name in `--font-ui`, then the runtime in quiet mono `--ink-mid`; it never uses `--radius-control`.
+- Default and Recommended are verdict-coloured text badges (`--color-verdict` on `--bg-active`), never status colours.
+- ❌ Never set a 40px button beside a 24px status pill in one header row (the oversized "Activity" pill); never give a status pill a border that makes it read as a button.
+
+### Avatars
+
+An avatar names who is working, and the model's provider is that identity.
+
+- **Provider mark.** Sessions and workers that report a harness show its provider's mark: Claude (Claude Code), OpenAI (Codex, including the Sol and Luna models) and Grok, as clean single-colour SVG on a `--bg-panel` disc. Sizes: `--avatar-size` 42px with a `--avatar-mark` 24px mark in conversation rows and project cards; `--avatar-lane-size` 32px with an 18px mark in Team lanes and worker cards. Marks are `aria-hidden`; the harness is spoken in the row's name.
+- **Fallback.** An unknown or unsupported harness shows its name's first two letters in `--font-ui` 600 (OpenCode → "OC"); a session with no harness shows the machine monogram on its machine accent. Never a single tiny glyph (✳, `>_`) in a dark circle.
+- **Status dot.** `--status-dot` 10px at the avatar's lower right with a 2px ring of the surface behind it. Its colour is the state, per the operator's ruling of 2026-11-01. Each dot clears 3:1 against `--bg-raised`, has a state name for assistive technology and hover, and is never the only carrier of the state: the row text or a status pill says it too.
+  - **Working:** a solid `--state-ok` green circle; solid `CanvasText` in forced colours.
+  - **Idle:** a solid muted green `--state-idle` circle (3.76:1 light, 3.73:1 dark); a hollow square with `Canvas` fill and `CanvasText` outline in forced colours, distinct from both circles even if system colours coincide. A live supervisor never gets a gray dot.
+  - **Offline:** a solid gray `--state-off` circle (4.48:1 light, 6.00:1 dark), when a machine is unreachable; stopped sessions are absent from navigation. Gray is reserved for offline; in forced colours it has a `Canvas` fill and `CanvasText` outline.
+  - **Needs you:** solid `--state-warn`, with the existing worded reason.
+  - Neutral non-status marks (a cleared attention dot, the Team trail's unreported connector) use `--state-off`.
+
+### Conversation header
+
+The heading answers, in this order of weight: which project, which model, where, which session, and is it live.
+
+- **Avatar.** The provider-mark avatar (`--avatar-size`, `--avatar-mark`) with its status dot leads the identity row; a session with no harness keeps the machine monogram.
+- **Line 1.** The project name (`typography.title-md`, 600; the codename when there is no project), then the live-state status pill ("Live", "Reconnecting", "Ended") on the same baseline. The state is a pill, not a trailing "· Live" word.
+- **Line 2.** The model and version in `--ink` at `--fs-meta` 500 ("Claude Opus 5.5", "GPT-5 Sol"), then the machine, then the session codename, all in one typeface (`--font-ui`, `--ink-mid` after the model). When the hub does not report a model, line 2 names the harness ("Claude Code", "Codex") instead; the header never shows "Model not reported".
+- Header actions (Raw output, Interrupt, Show work) are action pills in one cluster. On desktop the identity and the actions share one row, identity left and actions right; never between avatar and name. On a phone the identity keeps one avatar row (about 56px): the provider mark carries the maker, the model label stays spoken but is not drawn, and line 2 keeps the machine and codename, ellipsising with its full text in `title`.
+
+### Accounts
+
+- Machine, then provider, then one card per account in headroom order (least capacity left sorts last). Each card: provider mark, identity (the profile id lives in the name's `title` and accessible name, not a second line), where it lives ("Lives in `~/.claude-work` on soundwave · used by Claude Code"), the login state pill and one usage bar per window: `--state-ok`, amber `--state-warn` below 25% left, `--state-crit` below 10%, each with its reset in ET.
+- One "usage as of" stamp per machine, not per card. Stale logins and duplicates sort into a Needs cleanup group, announced by a top banner whose Clean up action removes every removable copy behind one typed confirmation.
+- Set default stays on the card; Rename, Disable or Enable, and Remove sit in a `⋯` menu, and Remove confirms by typing the profile id. A read-only pairing keeps every action visible but disabled beside the exact `cas hub pair … factory:manage` command.
+
+### Header and action spacing
+
+- Panel headers (list, heading, rail, sheets) keep every control at least `--space-3` (12px) from the panel's rounded edge and `--space-2` (8px) apart; icon-only controls are 40px circles (`--radius-pill`) with an accessible name, never an empty square.
+- An action cluster is one flex row with an `--space-2` gap; the primary action is last. A sheet's sticky action bar keeps its 12px gap and hairline.
+- Section labels inside a sheet are eyebrows (`typography.eyebrow`, `--ink-mid`) followed by their count in the same style ("WORKERS · 5"); they are not cards.
+
+### Published reasoning
+
+Show work and worker timelines keep published reasoning subordinate to replies: a quiet label over a plain-text preview, with safe Markdown detail opened in place. Only `codex_summary` and `claude_thinking` v2 sources opt into formatting. Legacy and unknown sources remain literal. Raw summary exposes the exact published text; opening it survives repaints. Without a lifecycle boundary, use Reasoning summary (Reasoning for a work block); use Thinking for a reported start/phase and Thought for a reported end. Detail scroll and keyboard focus stay put across updates.
+
+### Reply tables
+
+A Markdown table in a reply (`renderBody`, `conversation-view.ts`) is a ruled ledger inside the bubble, never a filled or rounded sheet, so it never reads as a code frame. A `--line-strong` hairline closes the header and a `--line-subtle` hairline closes every row. Headers are `--ink-mid` at `--fs-xs`, medium weight; cells use the bubble's UI font at `--fs-meta`. Numeric and status columns right-align with tabular numerals in that same UI font, never mono. A blank corner header (`| | time |`) is an empty cell, not a nameless column header. Copy Markdown and Copy CSV are quiet `--ink-mid` text buttons right-aligned on the closing rule (28px tall, 44px on phone), with their status beneath. A wide table scrolls inside the bubble, never the page.
+
+### Unknown and empty states
+
+- Say what is missing in plain words, at the weight of evidence, not of a verdict: `--ink-mid`, regular weight, `--fs-meta`. "Merge progress not reported", "Usage unknown", "Version unknown" are evidence lines; they are never bold, never headings and never status pills.
+- Pair an unknown with the action that would make it known when one exists ("Usage unknown · log in to read it"); otherwise state it once and move on.
+- An empty list says what would fill it in one sentence ("No workers in this supervisor's session.") inside the surface it would fill, never as a floating card of its own.
+- Times are local 12-hour with the generic zone name (`timeZoneName: "shortGeneric"`: "3:45 PM ET", never "EDT"/"EST"), never 24-hour or UTC.
 
 ### Brand
 
@@ -261,7 +365,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ### App switcher
 
-The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud apps"); below 380px it shows the mark and chevron only. It opens `nav#app-switcher`, a native popover: an opaque `--bg-panel` card, `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide, listing **Commander** then **Explorer** (15px semibold names, 13px `--ink-mid` hints, 44px rows). The current app is a `span[aria-current="page"]` with `--bg-active` and an inner 2px `--color-action` outline, never the Send gradient. The other app is a link to a named tab (`cassy-explorer` / `cassy-commander`) with `rel="noopener noreferrer"`, opening `<cloud origin>/explorer/tasks?project_id=<id>`. The URL carries only the origin, the path and `project_id`, never a key, code, session name or token (`app-switcher.test.ts`).
+The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud apps"). Whenever the list header itself is 27rem (432px) wide or narrower, it shows the mark and chevron only, so pairing, Accounts and settings share one row. That includes the desktop rail at its usual width as well as the phone; the wordmark stays in the button's accessible name. It opens `nav#app-switcher`, a native popover: an opaque `--bg-panel` card, `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide, listing **Commander** then **Explorer** (15px semibold names, 13px `--ink-mid` hints, 44px rows). The current app is a `span[aria-current="page"]` with `--bg-active` and an inner 2px `--color-action` outline, never the Send gradient. The other app is a link to a named tab (`cassy-explorer` / `cassy-commander`) with `rel="noopener noreferrer"`, opening `<cloud origin>/explorer/tasks?project_id=<id>`. The URL carries only the origin, the path and `project_id`, never a key, code, session name or token (`app-switcher.test.ts`).
 
 ## Do's & Don'ts
 
@@ -275,7 +379,7 @@ The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud 
 - ❌ Never put light-scheme ink on `--bg-terminal` or wire ANSI colours to application tokens.
 - ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
 - ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
-- ❌ Never hand-edit or commit generated `hub-web/dist` from a factory lane; the integration owner rebuilds it once.
+- ❌ Never hand-edit or commit `hub-web/dist` on a factory lane. Journey tooling builds a scratch production snapshot bound to the committed source tip and records its content hash. The integration owner generates the committed release bundle from merged sources. Follow [the scratch-build workflow](../cas-cli/docs/CONTRIBUTING.md#scratch-builds-for-exact-tip-journeys).
 
 ## Behavioural constraints
 <!-- keep -->
@@ -299,3 +403,5 @@ Re-pairing proves the retained origin-local signing key and updates the same ins
 - Kept commands use per-item IndexedDB transactions scoped to hub URL, installation and session; a sending or unconfirmed claim never expires into a second send; held messages keep the two-minute wait and explicit cancel. Local reply payloads expire after 90 days; remove or revocation deletes them.
 - The Connection log shows the measured machine cause while that machine is Unsteady; NetworkInformation estimates never count as a changed route. A hub 503 `auth_store_unavailable` is its own cause, **Hub is temporarily unable to check pairings**, saying Commander retries by itself and this device's pairing is intact; it never reads as a refused or expired credential. An Attention notice with unchanged identity and payload keeps its open Details and Copy across outage-copy changes and shell rebuilds.
 - While a machine is reconnecting or Unsteady, its catalog stays listed past its freshness instead of emptying the list: each row's status label gains **· last known**, and the footer qualifies only that share (**N conversations · K last known**, or **N conversations, last known** when every listed conversation is). A live machine's catalog still expires, and an empty catalog still empties the list.
+
+**Machine versions.** Project machine chips and paired-machine cards show the reported Cassy runtime in mono, with quiet `--ink-mid` text and a wrapping `--state-warn` “Update available → VERSION” note only for a newer stable release. Missing information says Version unknown. The Web footer independently names the client release and content build receipt; it remains visible in the phone list. Release checks run outside rendering, at most hourly, and retain the last known release after a network failure.

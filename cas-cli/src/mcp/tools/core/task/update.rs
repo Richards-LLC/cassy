@@ -28,6 +28,19 @@ fn branch_update_work_target(
     }
 }
 
+fn refresh_epic_lane_binding(task: &mut Task) {
+    if task.task_type == TaskType::Epic
+        && task
+            .branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+    {
+        let branch = super::repo_context::effective_epic_branch(task).map(str::to_string);
+        if branch.is_some() {
+            task.branch = branch;
+        }
+    }
+}
 fn last_recorded_close_blocker(cas_root: &std::path::Path, task_id: &str) -> Option<String> {
     let events = crate::store::open_event_store(cas_root).ok()?
         .list_by_type(cas_types::EventType::WorkerVerificationBlocked, 512).ok()?;
@@ -343,14 +356,11 @@ pub(crate) fn resolve_assignment_freshness_branch(
     task_store: &dyn cas_store::TaskStore,
     task: &Task,
 ) -> Option<String> {
-    if let Some(target_branch) = task
-        .deliverables
-        .work_target
-        .as_ref()
-        .map(|target| target.target_branch.trim())
-        .filter(|branch| !branch.is_empty())
+    let parent_epic = task_store.get_parent_epic(&task.id).ok().flatten();
+    if let Some(target) = super::repo_context::effective_task_work_target(task, parent_epic.as_ref())
+        && !target.target_branch.trim().is_empty()
     {
-        return Some(target_branch.to_string());
+        return Some(target.target_branch);
     }
 
     if task.task_type == TaskType::Epic {
@@ -370,6 +380,57 @@ pub(crate) fn resolve_assignment_freshness_branch(
     }
 
     None
+}
+
+/// QA assignment reserves an immutable delivery, not an implementation base.
+/// An idle checkout may still belong to a previous review; preserve it and
+/// identify the bound candidate instead of syncing it against a moving epic.
+fn immutable_qa_assignment_note(
+    cas_dir: &std::path::Path,
+    task: &Task,
+    worker: &cas_types::Agent,
+) -> Result<Option<String>, String> {
+    if !task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
+        return Ok(None);
+    }
+    let reject = |error| format!("Cannot assign independent QA task {}: {error}", task.id);
+    // Both producer identity spellings are used by existing QA rounds.
+    cas_store::assert_may_review_qa_task(cas_dir, &task.id, &worker.id).map_err(reject)?;
+    let Some(pass) = cas_store::assert_may_review_qa_task(cas_dir, &task.id, &worker.name)
+        .map_err(reject)? else {
+        return Ok(None); // A label alone cannot bypass implementation policy.
+    };
+    let mut note = format!(
+        "Independent QA assignment is bound to immutable producer HEAD {} (round {}). ",
+        pass.bound_head, pass.id,
+    );
+    if let Some(clone_path) = worker.metadata.get("clone_path") {
+        let path = std::path::Path::new(clone_path);
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(path).output()
+            .map_err(|_| format!("Cannot assign QA task {}: cannot inspect reviewer checkout", task.id))?;
+        if !status.status.success() {
+            return Err(format!("Cannot assign QA task {}: cannot inspect reviewer checkout", task.id));
+        }
+        if !status.stdout.is_empty() {
+            return Err(format!(
+                "Cannot assign QA task {}: reviewer has tracked checkout changes; preserve them before reviewing immutable HEAD {}",
+                task.id, pass.bound_head,
+            ));
+        }
+        let head = crate::mcp::tools::worktree_head(path)
+            .ok_or_else(|| format!("Cannot assign QA task {}: reviewer checkout HEAD is unavailable", task.id))?;
+        if head == pass.bound_head {
+            note.push_str("Reviewer checkout matches the bound HEAD.");
+        } else {
+            note.push_str(&format!(
+                "Reviewer checkout is still at {head}; inspect the bound producer HEAD when starting this review."
+            ));
+        }
+    }
+    note.push_str(" Assignment leaves the checkout unchanged.");
+    Ok(Some(note))
 }
 
 /// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
@@ -551,6 +612,10 @@ impl CasCore {
                  `task mine` can find this task. \
                  Use '{worker_name}' directly to avoid this warning."
             ));
+        }
+        if let Some(note) = immutable_qa_assignment_note(&self.cas_root, task, worker)? {
+            warnings.push(note);
+            return Ok(worker_name.clone());
         }
         if let Some(note) = parked_assignment_note(task_store, worker) {
             warnings.push(note);
@@ -1181,6 +1246,7 @@ impl CasCore {
             }
 
             task.deliverables.work_target = corrected_target.clone();
+            refresh_epic_lane_binding(&mut task);
             if !proof_targets_fix && !risk_fix && !methodology_fix {
                 // cas-3b42: only this explicit clear makes a missing target
                 // a reviewed one (GH #1167); a new target ends it.
@@ -1705,6 +1771,7 @@ impl CasCore {
             } else {
                 task.deliverables.work_target = branch_only_target;
             }
+            refresh_epic_lane_binding(&mut task);
             changes.push("work_target");
         }
 
@@ -2004,7 +2071,11 @@ impl CasCore {
                 if let Err(message) = crate::qa_batch::ensure_deferred_close(&self.cas_root, &task, None, None) {
                     return Ok(Self::tool_error(message));
                 }
-                let close_repo_context = match task.deliverables.work_target.as_ref() {
+                let parent_epic = task_store.get_parent_epic(&task.id).map_err(|error| {
+                    Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to resolve effective task target: {error}"))
+                })?;
+                let effective_target = super::repo_context::effective_task_work_target(&task, parent_epic.as_ref());
+                let close_repo_context = match effective_target.as_ref() {
                     Some(target) => Some(
                         super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
                             |message| McpError {
@@ -2469,6 +2540,17 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if changes.contains(&"labels") {
+            crate::quality_ledger::bug_labelled(
+                &self.cas_root,
+                &task.id,
+                &task.title,
+                task.task_type,
+                &task.labels,
+                None,
+            );
+        }
 
         if epic_update_supplied {
             match crate::cloud::epic_split::release_obsolete_claims_for_task(
@@ -3035,6 +3117,25 @@ mod status_transition_tests {
 
     #[tokio::test]
     async fn task_update_rejects_terminal_status_changes_and_reopen_clears_factory_branch_anchor() {
+        use futures::FutureExt;
+
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set("CAS_AGENT_ROLE", "worker");
+        for unwind in [false, true] {
+            let result = std::panic::AssertUnwindSafe(task_update_reopen_fixture(unwind))
+                .catch_unwind()
+                .await;
+            assert_eq!(result.is_err(), unwind);
+            let _lock = crate::test_env_guard::test_env_lock();
+            assert_eq!(
+                std::env::var("CAS_AGENT_ROLE").as_deref(),
+                Ok("worker"),
+                "the actual update/reopen fixture must restore its caller's role (unwind={unwind})"
+            );
+        }
+    }
+
+    async fn task_update_reopen_fixture(unwind: bool) {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -3053,6 +3154,8 @@ mod status_transition_tests {
 
         let cas_dir = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        assert_eq!(crate::store::find_cas_root_from(repo).unwrap(), cas_dir);
         let core = CasCore::with_daemon(cas_dir, None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
@@ -3087,17 +3190,15 @@ mod status_transition_tests {
 
         // The attributed supervisor-only reopen path remains the sanctioned
         // way to start a fresh close cycle.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        env.set("CAS_AGENT_ROLE", "supervisor");
         core.cas_task_reopen(Parameters(TaskReopenRequest {
             id: "cas-anchor".into(),
             reason: Some("delivery needs a fresh review cycle".into()),
         }))
         .await
         .unwrap();
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
+        if unwind {
+            panic!("exercise fixture restoration after the real reopen");
         }
 
         let updated = store.get("cas-anchor").unwrap();

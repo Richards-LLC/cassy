@@ -110,8 +110,7 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
 /// worktree, server, database, loop and queue control, plus Slack-thread
-/// authority. `coordination` accepts the original factory actions for one
-/// release as deprecated aliases; external-work actions are factory-only.
+/// authority. These actions are available only through `factory`.
 pub const FACTORY_ACTIONS: &[&str] = &[
     // Fleet
     "spawn_workers",
@@ -120,6 +119,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "hold_worker",
     "release_worker",
     "worker_status",
+    "worker_queue",
     "worker_activity",
     "clear_context",
     "sync_all_workers",
@@ -129,6 +129,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "focus_epic",
     "epic_split",
     "restart_spawn_queue",
+    "restart_supervisor",
     "record_test_receipt",
     "recover_branch",
     "agent_list",
@@ -138,6 +139,8 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "server_start",
     "server_stop",
     "server_list",
+    // A worker's candidate binary, built by the factory daemon
+    "candidate_request",
     // Disposable database branches
     "db_branch_create",
     "db_branch_show",
@@ -238,6 +241,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
     "qa_waive",
     "qa_request",
     "qa_status",
+    "qa_reconcile",
 ];
 
 /// Verification actions dispatched only in builds with the `mcp-proxy` feature.

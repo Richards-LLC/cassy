@@ -22,7 +22,7 @@ class Learning(unittest.TestCase):
         self.run_dir.mkdir()
         self.log = self.repo / 'cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
         self.log.parent.mkdir(parents=True)
-        self.log.write_text('- 2026-10-05 — **assemble-stale-base** — Symptom: fixture Root cause: fixture\n')
+        self.log.write_text('- 2026-10-05 — **release-script** — Symptom: fixture Root cause: fixture\n')
         self.env = dict(os.environ)
         self.command('git', 'init', '-q', '-b', 'main')
         self.command('git', 'config', 'user.name', 'Fixture')
@@ -48,7 +48,7 @@ class Learning(unittest.TestCase):
         self.assertIn('--evidence blockers.log:1', result.stdout)
 
     def test_existing_failure_row_mapping_passes(self):
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script\n')
         self.assertEqual(self.check().returncode, 0)
 
     def test_unknown_and_manual_row_mapping_refused(self):
@@ -57,7 +57,7 @@ class Learning(unittest.TestCase):
             self.assertNotEqual(self.check().returncode, 0)
 
     def test_each_supervisor_intervention_requires_mapping(self):
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script\n')
         (self.run_dir / 'supervisor-interventions.md').write_text('# Rescues\n\n- assemble: manual rebase\n')
         result = self.check()
         self.assertNotEqual(result.returncode, 0)
@@ -81,48 +81,27 @@ class Learning(unittest.TestCase):
     def test_clean_run_passes_without_db(self):
         self.assertEqual(self.check().returncode, 0)
 
-    def test_receipts_commit_shortcut_still_checks_learning(self):
-        (self.run_dir / 'blockers.log').write_text('assemble\n')
-        (self.run_dir / 'receipts.commit').write_text('COMMIT_SHA=irrelevant\n')
-        result = self.command('bash', '-c', '''
-script_dir="$1/scripts"; worktree="$2"; run_dir="$2/run"
-source "$script_dir/release-train.d/receipts.sh"
-release_train_receipts
-''', 'fixture', str(ROOT), str(self.repo))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('release-learning', result.stdout)
-        self.assertIn('assemble', result.stdout)
-
-    def test_cut_done_shortcut_still_checks_learning(self):
-        (self.run_dir / 'blockers.log').write_text('publish\n')
-        result = self.command('bash', '-c', '''
-script_dir="$1/scripts"; worktree="$2"; run_dir="$2/run"
-source "$script_dir/release-train.d/ledger.sh"
-cut_stage_done() { return 0; }
-cut_run_stage receipts
-''', 'fixture', str(ROOT), str(self.repo))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('publish', result.stdout)
 
     def test_map_existing_entry_is_durable(self):
         (self.run_dir / 'blockers.log').write_text('assemble\n')
         result = self.command('python3', str(HELPER), '--map', str(self.repo), str(self.run_dir),
-                              'assemble-stale-base', 'blockers.log:1')
+                              'release-script', 'blockers.log:1')
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('learn=assemble-stale-base', (self.run_dir / 'blockers.log').read_text())
+        # pin: the saved learn=<gate-id> field is the durable blocker-mapping wire format.
+        self.assertIn('learn=release-script', (self.run_dir / 'blockers.log').read_text())
         self.assertEqual(self.check().returncode, 0)
 
     def test_learn_command_records_mapping_and_rejects_invalid_reference(self):
         shutil.copy(HELPER, self.repo / 'scripts/release-learning.py')
         (self.run_dir / 'blockers.log').write_text('assemble\n')
         result = self.command('bash', 'scripts/release-gate.sh', '--learn',
-                              'assemble rejected docs', 'journey docs omitted', 'assemble-stale-base',
+                              'assemble rejected docs', 'journey docs omitted', 'release-script',
                               '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.check().returncode, 0)
         before = self.log.read_bytes()
         result = self.command('bash', 'scripts/release-gate.sh', '--learn',
-                              'bad', 'bad', 'assemble-stale-base', '--run-dir', str(self.run_dir),
+                              'bad', 'bad', 'release-script', '--run-dir', str(self.run_dir),
                               '--evidence', '../outside:1')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.log.read_bytes(), before)
@@ -157,8 +136,8 @@ cut_run_stage receipts
     # or failure-log entry needs an open P0/P1 task that removes the cause.
     def recurring_log(self):
         self.log.write_text(
-            '- 2026-10-01 — **assemble-stale-base** — Symptom: first Root cause: fixture\n'
-            '- 2026-10-05 — **assemble-stale-base** — Symptom: second Root cause: fixture\n')
+            '- 2026-10-01 — **release-script** — Symptom: first Root cause: fixture\n'
+            '- 2026-10-05 — **release-script** — Symptom: second Root cause: fixture\n')
 
     def cause_tasks(self):
         database = self.repo / 'tasks.db'
@@ -172,22 +151,22 @@ cut_run_stage receipts
     def test_recurring_lesson_mapping_needs_an_open_p1_cause_task(self):
         self.recurring_log()
         self.cause_tasks()
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script\n')
         result = self.check()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn('assemble-stale-base has been learned 2 times', result.stdout)
+        self.assertIn('release-script has been learned 2 times', result.stdout)
         self.assertIn('--task "${RELEASE_CAUSE_TASK:?', result.stdout)
         for task, expected in [('cas-p3', 1), ('cas-done', 1), ('cas-none', 1), ('cas-p1', 0), ('cas-p0', 0)]:
-            (self.run_dir / 'blockers.log').write_text(f'assemble learn=assemble-stale-base task={task}\n')
+            (self.run_dir / 'blockers.log').write_text(f'assemble learn=release-script task={task}\n')
             self.assertEqual(self.check().returncode, expected, (task, self.check().stdout))
         # The row's own --learn entry is not a prior learning; a forged marker gains one, not a pass.
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base recurrence=2\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script recurrence=2\n')
         self.assertEqual(self.check().returncode, 0)
-        self.log.write_text(self.log.read_text() + '- 2026-10-09 — **assemble-stale-base** — Symptom: third Root cause: fixture\n')
+        self.log.write_text(self.log.read_text() + '- 2026-10-09 — **release-script** — Symptom: third Root cause: fixture\n')
         self.assertNotEqual(self.check().returncode, 0)
         # A first-time lesson still maps by itself.
-        self.log.write_text('- 2026-10-01 — **assemble-stale-base** — Symptom: once Root cause: fixture\n')
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        self.log.write_text('- 2026-10-01 — **release-script** — Symptom: once Root cause: fixture\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script\n')
         self.assertEqual(self.check().returncode, 0)
 
     def test_learn_task_on_a_recurring_lesson_needs_the_p1_cause_task(self):
@@ -195,7 +174,7 @@ cut_run_stage receipts
         shutil.copy(HELPER, self.repo / 'scripts/release-learning.py')
         self.recurring_log()
         self.cause_tasks()
-        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=release-script\n')
         learn_task = lambda task: self.command(  # noqa: E731
             'bash', 'scripts/release-gate.sh', '--learn-task', task,
             '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
@@ -205,7 +184,7 @@ cut_run_stage receipts
         self.assertNotEqual(self.check().returncode, 0)
         self.assertEqual(learn_task('cas-p1').returncode, 0)
         self.assertEqual((self.run_dir / 'blockers.log').read_text(),
-                         'assemble learn=assemble-stale-base task=cas-p1\n')
+                         'assemble learn=release-script task=cas-p1\n')
         self.assertEqual(self.check().returncode, 0)
 
     def test_learn_refuses_a_third_entry_without_cause_task(self):
@@ -216,21 +195,21 @@ cut_run_stage receipts
         before = self.log.read_bytes()
         for extra in ([], ['--task', 'cas-p3']):
             result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'stale base again',
-                                  'rebase skipped', 'assemble-stale-base', *extra,
+                                  'rebase skipped', 'release-script', *extra,
                                   '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn('has been learned 2 times', result.stdout)
             self.assertEqual(self.log.read_bytes(), before)
             self.assertEqual((self.run_dir / 'blockers.log').read_text(), 'assemble\n')
         result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'stale base again',
-                              'rebase skipped', 'assemble-stale-base', '--task', 'cas-p1',
+                              'rebase skipped', 'release-script', '--task', 'cas-p1',
                               '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
         self.assertEqual(result.returncode, 0, result.stdout)
         entry = self.log.read_text().splitlines()[-1]
         self.assertIn('Symptom: stale base again Root cause: rebase skipped Recurrence: 3. Rung: gate. '
                       'Task: cas-p1. Release: operator-reported.', entry)
         self.assertEqual((self.run_dir / 'blockers.log').read_text(),
-                         'assemble learn=assemble-stale-base recurrence=3 task=cas-p1\n')
+                         'assemble learn=release-script recurrence=3 task=cas-p1\n')
         self.assertEqual(self.check().returncode, 0)
 
     def test_learn_records_recurrence_and_rung(self):
@@ -255,10 +234,10 @@ cut_run_stage receipts
         self.log.write_text(
             '- 2026-09-02 — **version-literals** — Symptom: literal Root cause: no env!\n'
             '- 2026-10-10 — **scratch-base** — Symptom: tmpfs Root cause: base\n'
-            '- 2026-10-14 — **assemble-stale-base** — Symptom: new Root cause: new\n')
+            '- 2026-10-14 — **release-script** — Symptom: new Root cause: new\n')
         (self.run_dir / 'blockers.log').write_text(
             'preflight learn=scratch-base\ngate learn=version-literals\nreceipts task=cas-1543\n'
-            'assemble learn=assemble-stale-base recurrence=1\n')
+            'assemble learn=release-script recurrence=1\n')
         run_dir = self.repo / 'v9.98.0-release-9.98.0'
         self.run_dir.rename(run_dir)
         self.command('python3', str(HELPER), '--measure', str(self.repo), str(run_dir))
@@ -377,26 +356,6 @@ cut_run_stage receipts
         self.assertNotIn('fatal:', result.stdout)
         self.assertIn('factory/criss-cross', result.stdout)
         self.assertIn('release-extra.py', result.stdout)
-
-    def test_off_main_tooling_branch_warns(self):
-        self.command('git', 'checkout', '-qb', 'factory/parked-fix')
-        (self.repo / 'scripts/release-extra.py').write_text('# changed tooling\n')
-        self.command('git', 'add', '.')
-        self.command('git', 'commit', '-qm', 'unreleased tooling')
-        self.command('git', 'checkout', '-q', 'main')
-        result = self.command('bash', '-c', '''
-script_dir="$1/scripts"; worktree="$2"
-source "$script_dir/release-train.d/preflight.sh"
-cut_preflight_check_unreleased_tooling
-''', 'fixture', str(ROOT), str(self.repo))
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('preflight warning', result.stdout)
-        self.assertIn('factory/parked-fix', result.stdout)
-        self.assertIn('release-extra.py', result.stdout)
-        self.command('git', 'merge', '-q', '--ff-only', 'factory/parked-fix')
-        result = self.command('python3', str(HELPER), '--warn-tooling', str(self.repo))
-        self.assertEqual(result.returncode, 0)
-        self.assertNotIn('preflight warning', result.stdout)
 
 
 if __name__ == '__main__':

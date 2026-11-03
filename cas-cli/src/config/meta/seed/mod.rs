@@ -13,6 +13,7 @@ mod notifications;
 mod qa;
 mod qa_capture;
 mod release;
+mod secrets;
 mod sections;
 mod skill_validation;
 mod skills;
@@ -39,5 +40,6 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     peers::register_peers(registry);
     slack::register_slack(registry);
     hub::register_hub(registry);
+    secrets::register_secrets(registry);
     viktor::register_viktor(registry);
 }

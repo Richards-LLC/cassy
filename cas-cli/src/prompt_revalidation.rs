@@ -9,7 +9,6 @@ pub(crate) use cas_types::{
 
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
-const DELIVERY_PR_MERGED_ENVELOPE_OPEN: &str = "<delivery-pr-merged ";
 const DELIVERY_PR_MERGED_ENVELOPE_CLOSE: &str = "</delivery-pr-merged>";
 
 /// CAS-emitted envelopes that join `<cas-merge-request>` as things a
@@ -49,6 +48,18 @@ pub(crate) fn attach_assignment_envelope(message: &str, task_id: Option<&str>) -
         .map(|id| format!(" task_id=\"{}\"", xml_attribute_value(id)))
         .unwrap_or_default();
     format!("<cas-assignment{task_attribute}/>\n{message}")
+}
+
+/// Queue advancement has already started the task. This server-owned intent
+/// asks the worker to continue it, rather than replay an obsolete start prompt.
+pub(crate) fn attach_queue_continuation(message: &str, task_id: &str) -> String {
+    format!("<cas-assignment task_id=\"{}\" intent=\"continue\"/>\n{message}",
+        xml_attribute_value(task_id))
+}
+
+fn is_queue_continuation(prompt: &str) -> bool {
+    prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN)
+        && prompt.find('>').and_then(|end| xml_attribute(&prompt[..end], "intent")) == Some("continue")
 }
 
 /// Caller text cannot supply a durable server assignment binding. Remove
@@ -158,6 +169,9 @@ pub(crate) fn assignment_targets_started_task(
     assignee: Option<&str>,
     recipient: &str,
 ) -> Option<String> {
+    if status == TaskStatus::InProgress && is_queue_continuation(prompt) {
+        return None;
+    }
     matches!(
         status,
         TaskStatus::InProgress
@@ -232,14 +246,6 @@ pub(crate) struct MergeRequestEnvelope {
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
 /// merged. The body deliberately names the exact close receipt so an idle
 /// worker can resume the terminal action without guessing which commit landed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeliveryPrMergedEnvelope {
-    pub task_id: String,
-    pub worker: String,
-    pub pr_number: u64,
-    pub merge_commit: String,
-}
-
 pub(crate) fn delivery_pr_merged_envelope(
     task_id: &str,
     worker: &str,
@@ -252,28 +258,6 @@ pub(crate) fn delivery_pr_merged_envelope(
     format!(
         "<delivery-pr-merged task_id=\"{task_id}\" worker=\"{worker}\" pr_number=\"{pr_number}\" merge_commit=\"{merge_commit}\">\nPR #{pr_number} merged at {merge_commit}: close {task_id} with commit_receipt={merge_commit}\n{DELIVERY_PR_MERGED_ENVELOPE_CLOSE}"
     )
-}
-
-pub(crate) fn parse_delivery_pr_merged_envelope(prompt: &str) -> Option<DeliveryPrMergedEnvelope> {
-    if !prompt.starts_with(DELIVERY_PR_MERGED_ENVELOPE_OPEN)
-        || !prompt.trim_end().ends_with(DELIVERY_PR_MERGED_ENVELOPE_CLOSE)
-    {
-        return None;
-    }
-    let tag_end = prompt.find('>')?;
-    let tag = &prompt[..tag_end];
-    Some(DeliveryPrMergedEnvelope {
-        task_id: xml_attribute(tag, "task_id")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-        worker: xml_attribute(tag, "worker")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-        pr_number: xml_attribute(tag, "pr_number")?.parse().ok()?,
-        merge_commit: xml_attribute(tag, "merge_commit")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,6 +668,7 @@ impl WorkerExitCause {
 
 /// Render a worker-death relay for PTY injection into the supervisor's session.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn format_worker_died_relay(
     worker_id: &str,
     worker_name: &str,
@@ -1192,7 +1177,7 @@ pub(crate) fn merge_landed_guidance(
     format!(
         "Merge already landed; Cassy suppressed your stale merge request.\n\n\
          Task: {task_id}\nBranch tip: {branch_tip}\nTarget: {target_branch} at {target_tip}\n\n\
-         Re-run task close for {task_id} now."
+         The merge verdict closes or reopens the task; wait for its result."
     )
 }
 
@@ -1557,6 +1542,7 @@ fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..end])
 }
 
+#[cfg(test)]
 pub(crate) fn revalidate_lifecycle_prompt(
     prompt: &str,
     current_status: TaskStatus,
@@ -1749,6 +1735,15 @@ mod cas_8aee_assignment_delivery_tests {
                 "a stale assignment must be identified at the final delivery boundary for {status}"
             );
         }
+        let continuation = super::attach_queue_continuation(&prompt, "cas-7c1a");
+        for status in [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::Blocked,
+            TaskStatus::AwaitingMerge, TaskStatus::Closed, TaskStatus::Cancelled] {
+            let stale = assignment_stale_task(&continuation, status, Some("worker-1"), "worker-1");
+            assert_eq!(stale.is_some(), !matches!(status, TaskStatus::Open | TaskStatus::InProgress),
+                "continuation may bypass only the already-started suppression: {status}");
+        }
+        // Caller-authored continuation intent is stripped before server binding.
+        assert_eq!(super::strip_assignment_envelopes(&continuation), prompt);
         assert_eq!(
             assignment_stale_task(&prompt, TaskStatus::Open, Some("worker-1"), "worker-1"),
             None,
@@ -2402,7 +2397,9 @@ mod tests {
             &git(repo.path(), &["rev-parse", "main"]),
         );
         assert!(guidance.contains("Merge already landed"));
-        assert!(guidance.contains("Re-run task close for cas-test now"));
+        // pin: a suppressed landed request needs no worker close action.
+        assert!(guidance.contains("merge verdict closes or reopens the task"));
+        assert!(!guidance.contains("Re-run task close"));
     }
 
     /// GH #1022: a merge request for a branch whose parked anchor landed but
@@ -2837,23 +2834,6 @@ mod tests {
             },
             "a later AwaitingMerge cycle must not revive the declined request"
         );
-    }
-
-    #[test]
-    fn delivery_pr_merge_wake_round_trips_and_names_the_close_receipt() {
-        let body = delivery_pr_merged_envelope(
-            "cas-7ea6",
-            "calm-octopus-51",
-            932,
-            "deadbeef",
-        );
-        let parsed = parse_delivery_pr_merged_envelope(&body).expect("daemon envelope parses");
-        assert_eq!(parsed.task_id, "cas-7ea6");
-        assert_eq!(parsed.worker, "calm-octopus-51");
-        assert_eq!(parsed.pr_number, 932);
-        assert_eq!(parsed.merge_commit, "deadbeef");
-        assert!(body.contains("close cas-7ea6 with commit_receipt=deadbeef"));
-        assert!(parse_delivery_pr_merged_envelope("quoted text").is_none());
     }
 
     #[test]

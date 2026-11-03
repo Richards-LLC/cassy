@@ -40,6 +40,19 @@ impl Fixture {
         Self { root, service }
     }
 
+    fn as_agent(&self, agent_id: &str) -> Self {
+        let core = CasCore::with_daemon(self.root.clone(), None, None);
+        core.set_agent_id_for_testing(agent_id.to_string());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        Self {
+            root: self.root.clone(),
+            service,
+        }
+    }
+
     async fn verification(&self, value: Value) -> Result<CallToolResult, rmcp::ErrorData> {
         self.service
             .verification(Parameters(serde_json::from_value(value).unwrap()))
@@ -55,6 +68,63 @@ fn text(result: CallToolResult) -> String {
         .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[tokio::test]
+async fn verification_without_status_is_error_and_cannot_close_task() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let mut supervisor = Agent::new("missing-status-supervisor".into(), "supervisor".into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    let owner = Agent::new("missing-status-owner".into(), "owner".into());
+    agents.register(&owner).unwrap();
+    let tasks = open_task_store_local(&fixture.root).unwrap();
+    let mut task = tasks.get("cas-c034").unwrap();
+    task.status = TaskStatus::InProgress;
+    task.pending_verification = true;
+    tasks.update(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root,
+        &task.id,
+        &supervisor.id,
+        &owner.id,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .unwrap();
+    let mut record = Verification::approved(
+        "ver-missing-status".into(),
+        task.id.clone(),
+        "Partial synced record".into(),
+    );
+    record.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    record.agent_id = Some(supervisor.id.clone());
+    record.issuer_agent_id = Some(supervisor.id);
+    record.dispatch_id = Some(dispatch.id);
+    let mut payload = serde_json::to_value(record).unwrap();
+    assert!(payload.as_object_mut().unwrap().remove("status").is_some());
+    let imported: Verification = serde_json::from_value(payload).unwrap();
+    assert_eq!(imported.status, VerificationStatus::Error);
+    open_verification_store(&fixture.root)
+        .unwrap()
+        .add(&imported)
+        .unwrap();
+
+    let result = fixture.as_agent(&owner.id).service.task(Parameters(
+        serde_json::from_value(json!({"action":"close", "id":task.id, "reason":"Partial synced record must not authorize close"})).unwrap(),
+    )).await.unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let diagnostic = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(diagnostic.contains("VERIFICATION"), "{diagnostic}");
+    assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
 }
 
 #[tokio::test]
@@ -124,6 +194,7 @@ async fn verification_add_and_reads_preserve_all_statuses_issues_and_metadata() 
         assert_eq!(persisted.status, status);
         assert_eq!(persisted.confidence, Some(0.95));
         assert_eq!(persisted.duration_ms, Some(1500));
+        assert_eq!(persisted.duration_source.as_deref(), Some("explicit"));
         assert_eq!(persisted.issues.len(), 2);
         assert_eq!(persisted.files_reviewed, ["src/main.rs", "src/lib.rs"]);
         let shown = text(
@@ -236,6 +307,14 @@ async fn verification_refuses_missing_rows_and_invalid_status_without_writing() 
             json!({"action": "add", "task_id": "cas-c034", "status": "invalid_status", "summary": "Must not write"}),
             "Invalid verification status",
         ),
+        (
+            json!({"action": "add", "task_id": "cas-c034", "status": "pending", "summary": "Must not write"}),
+            "Invalid verification status",
+        ),
+        (
+            json!({"action": "add", "task_id": "cas-c034", "status": "supervisor_call", "summary": " "}),
+            "requires the question",
+        ),
     ] {
         let error = fixture
             .verification(request)
@@ -252,4 +331,263 @@ async fn verification_refuses_missing_rows_and_invalid_status_without_writing() 
             .unwrap()
             .is_none()
     );
+}
+
+/// A question is durable review evidence, but does not reject the delivery or
+/// spend the dispatch. The supervisor answers with a verdict on that same id.
+#[tokio::test]
+async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let supervisor_id = "question-supervisor";
+    let mut supervisor = Agent::new(supervisor_id.into(), supervisor_id.into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    for (index, mode) in ["supervisor", "capability", "handoff"]
+        .into_iter()
+        .enumerate()
+    {
+        let task_id = format!("cas-question-{index}");
+        let mut task = Task::new(task_id.clone(), "Question during review".into());
+        task.status = TaskStatus::InProgress;
+        task.pending_verification = true;
+        open_task_store_local(&fixture.root)
+            .unwrap()
+            .add(&task)
+            .unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &fixture.root,
+            &task_id,
+            supervisor_id,
+            supervisor_id,
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
+        let mut capability = None;
+        let caller = if mode == "supervisor" {
+            supervisor_id.to_string()
+        } else {
+            let child_id = format!("question-verifier-{index}");
+            agents
+                .register(&Agent::new_sub_agent(
+                    child_id.clone(),
+                    "task-verifier".into(),
+                    supervisor_id.into(),
+                ))
+                .unwrap();
+            if mode == "capability" {
+                let issued =
+                    cas_store::issue_verifier_capability(&fixture.root, &task_id, supervisor_id)
+                        .unwrap();
+                cas_store::bind_verifier_capability(&fixture.root, &issued.token, &child_id)
+                    .unwrap();
+                cas_store::claim_verification_dispatch(
+                    &fixture.root,
+                    &task_id,
+                    supervisor_id,
+                    &child_id,
+                    &issued.capability.id,
+                )
+                .unwrap();
+                capability = Some(issued.token);
+            } else {
+                cas_store::issue_server_verifier_handoff(
+                    &fixture.root,
+                    &task_id,
+                    &dispatch.id,
+                    supervisor_id,
+                    &format!("question-tool-{index}"),
+                )
+                .unwrap();
+                cas_store::bind_server_verifier_handoff(&fixture.root, supervisor_id, &child_id)
+                    .unwrap();
+            }
+            child_id
+        };
+        let question_caller = fixture.as_agent(&caller);
+        // Model queue wait separately from child review time without sleeping.
+        let dispatched_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let started_at = if mode == "supervisor" {
+            dispatched_at
+        } else {
+            dispatched_at + chrono::Duration::seconds(40)
+        };
+        let conn = rusqlite::Connection::open(fixture.root.join("cas.db")).unwrap();
+        conn.execute(
+            "UPDATE verification_dispatches SET requested_at = ?2 WHERE id = ?1",
+            rusqlite::params![dispatch.id, dispatched_at.to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE verification_capabilities SET bound_at = ?2 WHERE dispatch_id = ?1",
+            rusqlite::params![dispatch.id, started_at.to_rfc3339()],
+        )
+        .unwrap();
+        let question = "Does the recorded scope split cover the unexercised Accounts row?";
+        text(question_caller.verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"supervisor_call", "summary":question, "verifier_capability":capability,
+        })).await.expect("a scope question is accepted"));
+        let history = open_verification_store(&fixture.root).unwrap();
+        let call = history.get_latest_for_task(&task_id).unwrap().unwrap();
+        assert_eq!(call.status.to_string(), "supervisor_call");
+        assert_eq!(call.summary, question);
+        let timing_source = if mode == "supervisor" {
+            "dispatch_elapsed_fallback"
+        } else {
+            "capability_bound_to_consumed"
+        };
+        assert_eq!(call.duration_source.as_deref(), Some(timing_source));
+        assert_eq!(call.capability_id.is_none(), mode == "supervisor");
+        assert_eq!(
+            call.duration_ms,
+            Some((call.created_at - started_at).num_milliseconds() as u64),
+            "{mode}: omitted duration must use the persisted review start, excluding child queue wait"
+        );
+        if mode != "supervisor" {
+            let (bound_at, consumed_at): (String, String) = conn
+                .query_row(
+                    "SELECT bound_at, consumed_at FROM verification_capabilities WHERE dispatch_id = ?1",
+                    [&dispatch.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(bound_at, started_at.to_rfc3339());
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&consumed_at).unwrap() >= started_at,
+                "{mode}: consumed authority must retain both timing boundaries"
+            );
+            assert_eq!(
+                call.created_at,
+                chrono::DateTime::parse_from_rfc3339(&consumed_at).unwrap(),
+                "child duration ends at the persisted consume time"
+            );
+        }
+        let shown = text(
+            question_caller
+                .verification(json!({"action":"show", "id":call.id}))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            shown.contains(question) && shown.contains(&dispatch.id),
+            "question stays attached to the proof: {shown}"
+        );
+        assert!(shown.contains(&format!("Duration source: {timing_source}")));
+        assert!(
+            open_task_store_local(&fixture.root)
+                .unwrap()
+                .get(&task_id)
+                .unwrap()
+                .pending_verification
+        );
+        let waiting = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
+        assert!(matches!(
+            waiting.state,
+            cas::types::VerificationDispatchState::Pending
+                | cas::types::VerificationDispatchState::Claimed
+        ));
+        assert!(
+            cas_store::quality_events_between(&fixture.root, None, None)
+                .unwrap()
+                .iter()
+                .all(|event| event.task_id.as_deref() != Some(task_id.as_str())),
+            "a question ran no check"
+        );
+
+        // A worker cannot turn the question into an approval.
+        let worker_id = format!("question-worker-{index}");
+        agents
+            .register(&Agent::new(worker_id.clone(), worker_id.clone()))
+            .unwrap();
+        let worker = fixture.as_agent(&worker_id);
+        assert!(
+            worker
+                .verification(json!({
+                    "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+                    "status":"approved", "summary":"unauthorized answer",
+                }))
+                .await
+                .is_err()
+        );
+
+        let supervisor = fixture.as_agent(supervisor_id);
+        let final_status = if mode == "capability" {
+            "rejected"
+        } else {
+            "approved"
+        };
+        let answer = json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":final_status, "summary":"Scope decision recorded; final review completed.",
+        });
+        text(
+            supervisor
+                .verification(answer.clone())
+                .await
+                .expect("supervisor answers the existing dispatch"),
+        );
+        text(
+            supervisor
+                .verification(answer)
+                .await
+                .expect("lost-response retry is idempotent"),
+        );
+        assert_eq!(
+            history.get(&call.id).unwrap().summary,
+            question,
+            "retain the original question"
+        );
+        let verdict = cas_store::get_verification_for_dispatch(&fixture.root, &dispatch.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(verdict.status.to_string(), final_status);
+        assert_eq!(
+            verdict.duration_source.as_deref(),
+            Some("dispatch_elapsed_fallback")
+        );
+        assert!(verdict.capability_id.is_none());
+        assert_eq!(
+            verdict.duration_ms,
+            Some((verdict.created_at - dispatched_at).num_milliseconds() as u64),
+            "direct answers use dispatch elapsed time and preserve it on retry"
+        );
+        assert!(
+            cas_store::quality_events_between(&fixture.root, None, None)
+                .unwrap()
+                .iter()
+                .any(|event| event.task_id.as_deref() == Some(task_id.as_str())
+                    && matches!(&event.payload, cas_store::QualityPayload::CheckRun {
+                        minutes: Some(minutes), ..
+                    } if *minutes == verdict.duration_ms.unwrap() as f64 / 60_000.0)),
+            "automatic duration must reach the verifier measurement ledger"
+        );
+        assert!(
+            !open_task_store_local(&fixture.root)
+                .unwrap()
+                .get(&task_id)
+                .unwrap()
+                .pending_verification
+        );
+        let resolved = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
+        assert_eq!(
+            resolved.state,
+            cas::types::VerificationDispatchState::Resolved
+        );
+        assert!(resolved.resolved_at.unwrap() >= verdict.created_at);
+        assert!(
+            supervisor
+                .verification(json!({
+                    "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+                    "status":if final_status == "approved" { "rejected" } else { "approved" },
+                    "summary":"conflicting replay",
+                }))
+                .await
+                .is_err(),
+            "terminal verdict remains single use"
+        );
+    }
 }

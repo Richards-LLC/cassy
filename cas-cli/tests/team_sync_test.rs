@@ -26,7 +26,7 @@
 mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
-use cas::cli::cloud::execute_team_push;
+use cas::cli::cloud::{execute_team_push, execute_team_push_with_config};
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue,
 };
@@ -817,9 +817,16 @@ async fn team_push_http_failure_is_isolated() {
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
-    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-        .await
-        .unwrap();
+    // A 1 ms backoff base keeps all three real attempts without the 2 s + 4 s waits.
+    let syncer_config = CloudSyncerConfig {
+        backoff_base_ms: 1,
+        ..Default::default()
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        execute_team_push_with_config(&cfg, syncer_config, &cas_root, &cli)
+    })
+    .await
+    .unwrap();
     assert!(
         result.is_ok(),
         "helper must return Ok even when team push fails (partial-failure isolation): {result:?}"

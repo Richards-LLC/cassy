@@ -74,6 +74,46 @@ fn codex_all_states_and_terminal_aliases() {
 }
 
 #[test]
+fn fixed_cpu_evidence_agrees_while_cold_to_warm_sampling_changes_liveness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let at = (now() - chrono::Duration::seconds(394)).to_rfc3339();
+    for (cli, event) in [
+        (SupervisorCli::Codex, serde_json::json!({
+            "timestamp": at, "type": "response_item",
+            "payload": {"type": "function_call_output"},
+        })),
+        (SupervisorCli::Claude, serde_json::json!({
+            "timestamp": at, "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use"},
+        })),
+    ] {
+        std::fs::write(&path, format!("{event}\n")).unwrap();
+        let mut samples = std::collections::HashMap::new();
+        let cold = record_cpu_sample(&mut samples, 42, "original-process", 100);
+        let warm = record_cpu_sample(&mut samples, 42, "original-process", 110);
+        assert_eq!(cold, None);
+        assert_eq!(warm, Some(true));
+        for (cpu_busy, expected) in [(cold, Liveness::Stalled), (warm, Liveness::Executing)] {
+            let evidence = ProcessEvidence {
+                alive: Some(true), cpu_busy, detail: format!("fixed cpu sample: {cpu_busy:?}"),
+            };
+            let full = observe(cli, Some(&path), evidence.clone(), now(), 300);
+            let same_snapshot = observe(cli, Some(&path), evidence, now(), 300);
+            let summary = super::super::factory_ops::render_worker_liveness_summary(&[
+                ("worker".into(), same_snapshot.clone()),
+            ]);
+            assert_eq!(full.state, expected, "{cli:?}: {}", full.detail());
+            assert_eq!(same_snapshot.state, full.state);
+            assert!(summary.starts_with(&format!("liveness: {} |", expected.as_str())), "{summary}");
+            assert!(full.detail().starts_with(&format!("liveness: {} (", expected.as_str())));
+        }
+        // PID reuse cannot borrow the prior process's CPU activity.
+        assert_eq!(record_cpu_sample(&mut samples, 42, "replacement", 900), None);
+    }
+}
+
+#[test]
 fn codex_budget_abort_is_distinct_from_stall_and_idle() {
     let start = "{\"timestamp\":\"2026-09-10T19:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
     let budget = "{\"timestamp\":\"2026-09-10T19:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"budget_limited\"}}\n";
@@ -503,4 +543,191 @@ fn repeated_fatal_codex_model_errors_override_busy_cpu_and_retries() {
     assert!(got.evidence.contains("not supported"), "{}", got.evidence);
     std::fs::write(&path, format!("{text}{{\"timestamp\":\"2026-09-10T19:01:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"last_agent_message\":\"working\"}}}}\n")).unwrap();
     assert_eq!(observe(SupervisorCli::Codex, Some(&path), busy, now(), 300).state, Liveness::WaitingForInput);
+}
+
+#[test]
+fn claude_background_job_keeps_a_completed_turn_busy_until_its_notification() {
+    let launch = concat!(
+        r#"{"timestamp":"2026-09-10T19:00:00Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-shell","name":"Bash","input":{"command":"affected tests","run_in_background":true}}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-10T19:00:01Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-shell","content":"Command running in background with ID: job-42. Output is being written to a file."}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+        "\n",
+    );
+    assert_eq!(
+        run(SupervisorCli::Claude, launch, true).state,
+        Liveness::Executing
+    );
+    assert_eq!(
+        run(SupervisorCli::Claude, launch, false).state,
+        Liveness::Dead
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("silent-background.jsonl");
+    std::fs::write(&path, launch).unwrap();
+    // No terminal notification: foreground end_turn must not own busy forever.
+    let launched_at = now() - chrono::Duration::seconds(59);
+    for (elapsed, cpu_busy, expected) in [
+        (299, Some(false), Liveness::Executing),
+        (300, Some(false), Liveness::Stalled),
+        (300, None, Liveness::Stalled),
+        (900, Some(true), Liveness::Executing),
+    ] {
+        let mut evidence = process(true);
+        evidence.cpu_busy = cpu_busy;
+        assert_eq!(observe(SupervisorCli::Claude, Some(&path), evidence,
+            launched_at + chrono::Duration::seconds(elapsed), 300).state, expected,
+            "unconfirmed background job at {elapsed}s, cpu busy: {cpu_busy:?}");
+    }
+    for (notice, expected) in [
+        (
+            serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+            Liveness::WaitingForInput,
+        ),
+        (
+            serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>job-42</task-id><status>completed</status></task-notification>"}}),
+            Liveness::WaitingForInput,
+        ),
+        (
+            serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>another-job</task-id><status>completed</status></task-notification>"}}),
+            Liveness::Executing,
+        ),
+    ] {
+        let finished = format!(
+            "{notice}\n{{\"timestamp\":\"2026-09-10T19:00:51Z\",\"type\":\"assistant\",\"message\":{{\"stop_reason\":\"end_turn\"}}}}\n"
+        );
+        assert_eq!(
+            run(SupervisorCli::Claude, &format!("{launch}{finished}"), true).state,
+            expected,
+            "completion notice: {notice}"
+        );
+    }
+}
+
+// Drive real /proc evidence with acknowledged CPU work, not sleeps or a
+// fabricated cpu_busy. Every process stays alive and quiescent between commands.
+#[cfg(target_os = "linux")]
+struct CpuTree {
+    harness: std::process::Child,
+    output: std::io::BufReader<std::process::ChildStdout>,
+    agent: cas_types::Agent,
+}
+
+#[cfg(target_os = "linux")]
+impl CpuTree {
+    fn new(depth: u32) -> Self {
+        use std::os::unix::process::CommandExt;
+        let script = r#"
+import subprocess, sys, time
+script, depth = sys.argv[1], int(sys.argv[2])
+child = None
+if depth:
+    child = subprocess.Popen(['python3', '-u', '-c', script, script, str(depth - 1)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert child.stdout.readline().strip() == 'ready'
+print('ready', flush=True)
+for line in sys.stdin:
+    command = line.strip()
+    if command == 'harness' or (command == 'work' and child is None):
+        end = time.process_time() + 0.15
+        while time.process_time() < end:
+            pass
+    elif child:
+        child.stdin.write('work\n' if command == 'work' else 'idle\n')
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == 'done'
+    print('done', flush=True)
+if child:
+    child.stdin.close()
+    assert child.wait(timeout=5) == 0
+"#;
+        let mut harness = std::process::Command::new("python3")
+            .arg0("claude")
+            .args(["-u", "-c", script, script, &depth.to_string()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = std::io::BufReader::new(harness.stdout.take().unwrap());
+        let mut agent =
+            cas_types::Agent::new(format!("cpu-tree-{}", harness.id()), "worker".into());
+        agent.pid = Some(harness.id());
+        agent.pid_starttime = crate::mcp::daemon::read_pid_starttime(harness.id());
+        let mut tree = Self {
+            harness,
+            output,
+            agent,
+        };
+        tree.read_ack("ready");
+        tree
+    }
+
+    fn read_ack(&mut self, expected: &str) {
+        use std::io::BufRead;
+        let mut line = String::new();
+        self.output.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), expected);
+    }
+
+    fn work(&mut self, command: &str) {
+        use std::io::Write;
+        writeln!(self.harness.stdin.as_mut().unwrap(), "{command}").unwrap();
+        self.read_ack("done");
+    }
+
+    fn observe(&self) -> Observation {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("background.jsonl");
+        std::fs::write(&path, concat!(
+            r#"{"timestamp":"2026-09-10T18:59:59Z","type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"shell","name":"Bash","input":{"command":"background job","run_in_background":true}}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-10T19:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","content":"Command running in background with ID: job-42."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-10T19:00:02Z","type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+            "\n",
+        )).unwrap();
+        observe(
+            SupervisorCli::Claude,
+            Some(&path),
+            process_evidence(&self.agent),
+            now() + chrono::Duration::seconds(900),
+            120,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CpuTree {
+    fn drop(&mut self) {
+        drop(self.harness.stdin.take());
+        self.harness.wait().unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_evidence_busy_background_child_and_grandchild_keep_executing() {
+    for depth in [1, 2] {
+        let mut tree = CpuTree::new(depth);
+        tree.observe(); // Cold CPU sample.
+        tree.work("work");
+        let got = tree.observe();
+        assert_eq!(
+            got.state,
+            Liveness::Executing,
+            "depth {depth}: {}",
+            got.detail()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_evidence_silent_background_child_ignores_harness_cpu() {
+    let mut tree = CpuTree::new(1);
+    tree.observe();
+    tree.work("harness");
+    let got = tree.observe();
+    assert_eq!(got.state, Liveness::Stalled, "{}", got.detail());
 }

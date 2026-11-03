@@ -2,19 +2,48 @@
 import { expect, it, vi } from "vitest";
 import { composerMarkup } from "./composer-markup";
 import { ComposerUploads } from "./composer-uploads";
+import { ConversationHistory } from "./conversation-history";
+import { ConversationView } from "./conversation-view";
+import { installAttachmentSheet } from "./attachment-sheet";
+import type { ArtifactRef } from "./types";
 
-it("previews pasted content, keeps failed uploads across rebinding, and sends stable local paths", async () => {
+it("previews pasted content, keeps failed uploads across rebinding, and renders sent files without exposing host paths", async () => {
   const draft = new ComposerUploads();
   document.body.innerHTML = composerMarkup("supervisor");
   draft.bind(document.body);
   draft.add([new File(["notes"], "notes.txt", { type: "text/plain" })]);
   expect(document.body.textContent).toContain("notes.txt");
-  const upload = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ path: "/host/project/notes.txt", artifact_id: "art-one" });
+  const upload = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ path: "/host/project/art-one/notes.txt", artifact_id: "art-one", mime: "text/plain" });
   await expect(draft.prepare("See this", upload)).rejects.toThrow("offline");
   document.body.innerHTML = composerMarkup("supervisor");
   draft.bind(document.body);
   expect(document.body.textContent).toContain("notes.txt");
-  expect(await draft.prepare("See this", upload)).toContain("/host/project/notes.txt");
+  const text = await draft.prepare("See this", upload);
+  expect(text).toContain("/host/project/art-one/notes.txt");
+  draft.add([new File(["image"], "screenshot.bin", { type: "application/octet-stream" })]);
+  upload.mockResolvedValueOnce({ path: "/host/project/art-image/screenshot.bin", artifact_id: "art-image", mime: "image/png" });
+  const prepared = await draft.prepare("See this", upload);
+  const files: ArtifactRef[] = [];
+  const unregister = installAttachmentSheet((sheet, file) => { files.push(file); return sheet; });
+  const history = new ConversationHistory();
+  const view = new ConversationView(document, history, { supervisor: "supervisor" });
+  try {
+    history.submit("send", "supervisor", prepared);
+    view.update();
+    expect(view.element.textContent).toContain("See this");
+    expect(view.element.textContent).toContain("notes.txt");
+    expect(view.element.textContent).toContain("screenshot.bin");
+    expect(view.element.textContent).not.toContain("/host/");
+    expect(history.preview()).not.toContain("/host/");
+    expect(files.map(file => [file.artifact_id, file.mime, file.size_bytes])).toEqual([
+      ["art-one", "text/plain", 5], ["art-image", "image/png", 5],
+    ]);
+    expect(view.element.querySelector('a[data-artifact-id="art-image"]')?.getAttribute("href")).toBe("#artifact:art-image");
+    history.submit("legacy", "supervisor", "Attached files\n\nAttached file: /home/operator/.cas/artifacts/commander/session/art-legacy/photo.png");
+    view.update();
+    expect(view.element.textContent).not.toContain("/home/operator");
+    expect(view.element.querySelector('a[data-artifact-id="art-legacy"]')).not.toBeNull();
+  } finally { view.dispose(); unregister(); }
   expect(upload.mock.calls[0]![0]).toBe(upload.mock.calls[1]![0]);
   draft.clear();
   expect(document.body.textContent).not.toContain("notes.txt");
@@ -43,5 +72,47 @@ it("names the refused file among several attachments without prescribing a recon
   await expect(draft.prepare("", upload)).rejects.toThrow("archive.bin: This file type is not supported.");
   expect(document.querySelector(".upload-error")?.textContent).toContain("archive.bin");
   expect(document.querySelector(".upload-error")?.textContent).not.toContain("reconnect");
+  expect(draft.hasFiles()).toBe(true);
+});
+
+it("restores a refused send's files as cards for Edit, without the host path in the composer", async () => {
+  const draft = new ComposerUploads();
+  document.body.innerHTML = composerMarkup("supervisor");
+  draft.bind(document.body);
+  const sent = "See this\n\nAttached file: [notes.txt](</host/project/art-one/notes.txt> \"text/plain; size=5\")";
+  expect(draft.restoreSent(sent)).toBe("See this");
+  expect(document.querySelector(".composer-file")?.textContent).toContain("notes.txt");
+  expect(document.body.textContent).not.toContain("/host/");
+  const upload = vi.fn();
+  expect(await draft.prepare("Edited", upload)).toBe(sent.replace("See this", "Edited"));
+  expect(upload).not.toHaveBeenCalled();
+});
+
+it("shows byte progress through saving, survives rebinding, and clears progress on refusal", async () => {
+  const draft = new ComposerUploads();
+  document.body.innerHTML = composerMarkup("supervisor");
+  draft.bind(document.body);
+  draft.add([new File(["photo"], "photo.jpg")]);
+  let progress!: (fraction: number) => void;
+  let refuse!: (error: Error) => void;
+  let start!: () => void;
+  const started = new Promise<void>(resolve => { start = resolve; });
+  const result = draft.prepare("", async (_id, _name, _data, report) => {
+    progress = report!; start();
+    return new Promise((_resolve, reject) => { refuse = reject; });
+  });
+  const rejected = expect(result).rejects.toThrow("offline");
+  await started;
+  progress(0.42);
+  expect(document.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+  expect(document.querySelector(".composer-uploads")?.textContent).toContain("Uploading photo.jpg · 42%");
+  document.body.innerHTML = composerMarkup("supervisor"); draft.bind(document.body);
+  expect(document.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+  progress(1);
+  expect(document.querySelector(".composer-uploads")?.textContent).toContain("Saving photo.jpg");
+  refuse(new Error("offline"));
+  await rejected;
+  expect(document.querySelector(".upload-error")).not.toBeNull();
+  expect(document.querySelector('[role="progressbar"]')).toBeNull();
   expect(draft.hasFiles()).toBe(true);
 });

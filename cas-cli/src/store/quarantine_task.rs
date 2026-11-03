@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn cas_4bd8_suppression_report_survives_notifying_and_syncing_wrappers() {
+    fn cas_4bd8_suppression_report_survives_syncing_wrapper() {
         let (_temp, queue, store) = store();
         store
             .add(&Task::new("cas-keep".into(), "Visible".into()))
@@ -367,8 +367,7 @@ mod tests {
         queue
             .quarantine_row(QUARANTINE_TASK, "cas-hide", "fixture")
             .unwrap();
-        let notifying = crate::store::NotifyingTaskStore::new(Arc::new(store), Default::default());
-        let syncing = crate::store::SyncingTaskStore::new(Arc::new(notifying), Arc::clone(&queue));
+        let syncing = crate::store::SyncingTaskStore::new(Arc::new(store), Arc::clone(&queue));
         let (visible, suppressed) = syncing
             .list_with_suppressed(Some(TaskStatus::Open))
             .unwrap();

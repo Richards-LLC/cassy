@@ -901,7 +901,11 @@ fn listed_files_may_not_escape_the_bundle() {
 #[test]
 fn newest_citation_wins() {
     let notes = "qa-bundle: /a/old/bundle.json\n[later] qa-bundle: `/a/new/bundle.json`.\n\
-                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json";
+                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json\n\
+                 [legacy reviewer] qa-bundle: /qa-task/qa/bundle.json (independent QA round 1, passed)\n\
+                 [reviewer] qa-review-bundle: /other-qa-task/qa/bundle.json\n\
+                 QA_PASS_PROOF: {\"summary\":\"Reviewed qa-bundle: /reviewer/metadata.json\"}\n\
+                 QA_EVIDENCE_PROOF: {\"source_path\":\"qa-bundle: /metadata/path.json\"}";
     assert_eq!(
         cited_bundle_path(notes).as_deref(),
         Some("/a/new/bundle.json"),
@@ -927,8 +931,10 @@ fn ledger_tier_requires_a_fresh_pass_row() {
             .problem
             .contains("missing")
     );
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.task_dir.join("LEDGER.md");
-    std::fs::write(&ledger, "| id | cell | expected | observed | verdict | label | evidence | defect |\n| M01 | cli | ok | ok | NOT EXERCISED | fixture | - | - |\n").unwrap();
+    std::fs::write(&ledger, ledger_rows("| M01 | cli | ok | ok | NOT EXERCISED: not run in this fixture | fixture | - | - |\n")).unwrap();
     assert!(
         validate_ledger(&ctx)
             .unwrap_err()
@@ -937,13 +943,13 @@ fn ledger_tier_requires_a_fresh_pass_row() {
     );
     std::fs::write(
         &ledger,
-        "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     validate_ledger(&ctx).expect("fresh pipe-form PASS row");
     std::fs::write(
         &ledger,
-        "M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | -\n",
+        ledger_rows(&"M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | -\n"),
     )
     .unwrap();
     validate_ledger(&ctx).expect("fresh doc-style PASS row");
@@ -954,6 +960,35 @@ fn ledger_tier_requires_a_fresh_pass_row() {
             .problem
             .starts_with("stale")
     );
+}
+
+#[test]
+fn ledger_rejects_failed_row_without_defect_ownership() {
+    let fx = Fixture::new();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: "",
+        deployed_origins: &[], capture_configured: false, rebind_scope: None,
+    };
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "CLI output from the fixture build").unwrap();
+    std::fs::write(fx.task_dir.join("LEDGER.md"),
+        "# QA evidence\ncells=2; PASS=1; FAIL=1; NOT EXERCISED=0\n\
+         labels: real-build=2\n\
+         | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | M01 | help | usage | usage printed | PASS | real-build | qa/M01.txt | - |\n\
+         | M02 | invalid option | clear error | unclear error | FAIL | real-build | qa/M01.txt | - |\n"
+    ).unwrap();
+    let refusal = validate_ledger(&ctx)
+        .expect_err("a passing row must not hide a failed row with no defect owner");
+    assert!(refusal.problem.contains("M02") && refusal.problem.contains("defect"), "{refusal:?}");
+    let cli = crate::cli::qa_ledger::check(&fx.task_dir.join("LEDGER.md"), None);
+    assert!(!cli.ok);
+    assert_eq!(cli.refusal(), refusal.problem, "CLI and verifier use the same diagnostics");
 }
 
 #[test]
@@ -1342,10 +1377,12 @@ fn ledger_pass_row_must_be_real_build() {
         notes: "",
         deployed_origins: &[], capture_configured: false, rebind_scope: None,
     };
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
         &ledger,
-        "| M01 | cli | ok | ok | PASS | fixture | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cli | ok | ok | PASS | fixture | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let refusal = validate_ledger(&ctx).unwrap_err();
@@ -1397,9 +1434,11 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
     );
 
     // The ledger tier composes both requirements.
+    std::fs::create_dir_all(fx.task_dir.join("qa")).unwrap();
+    std::fs::write(fx.task_dir.join("qa/M01.txt"), "captured output").unwrap();
     std::fs::write(
         fx.task_dir.join("LEDGER.md"),
-        "| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+        ledger_rows(&"| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n"),
     )
     .unwrap();
     let error = run_close_gate(
@@ -2676,6 +2715,93 @@ fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_input_changes() {
 }
 
 #[test]
+fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
+    let mut fx = Fixture::new();
+    let executed = fx.head.clone();
+    let manifest_path = fx.write_bundle(|_| {});
+    let original_trace = std::fs::read(fx.bundle_dir().join("trace.zip")).unwrap();
+    let original_receipt = std::fs::read(fx.bundle_dir().join("receipt.webm")).unwrap();
+
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "epic"]);
+    git_ok(&fx.repo, &["commit", "-q", "--allow-empty", "-m", "target bookkeeping"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "delivery", &executed]);
+    git_ok(&fx.repo, &["merge", "-q", "--no-ff", "epic", "-m", "merge reviewed delivery"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", executed)]),
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", fx.head)]),
+    );
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    manifest["executed_head_sha"] = serde_json::json!(executed);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let notes = fx.notes();
+    let context = journey_context(&fx, &notes);
+    let missing = run_close_gate(
+        &context, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[],
+    ).unwrap_err();
+    assert!(missing.contains("no ledger"), "{missing}");
+    std::fs::write(
+        fx.task_dir.join("LEDGER.md"),
+        ledger_rows(&"| M01 | reviewed flow | ready | ready | PASS | real-build | qa/trace.zip | - |\n"),
+    ).unwrap();
+    run_close_gate(
+        &context, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[],
+    ).unwrap();
+    run_close_gate(
+        &context, EvidenceTier::Bundle, &["journeys:HUB-J7".into()], &[],
+    ).expect("the original execution covers the identical merged tree");
+    assert_eq!(std::fs::read(fx.bundle_dir().join("trace.zip")).unwrap(), original_trace);
+    assert_eq!(std::fs::read(fx.bundle_dir().join("receipt.webm")).unwrap(), original_receipt);
+
+    // The implementer bundle does not silently approve the independent QA
+    // round at B. Carrying A's verdict remains a separate logged operation.
+    let mut task = cas_types::Task::new(TASK.into(), "Reviewed delivery".into());
+    task.demo_statement = "Reviewed flow works".into();
+    let now = chrono::Utc::now();
+    let pass = cas_types::QaPass {
+        id: "qapass-A".into(), task_id: TASK.into(), round: 1,
+        implementer_agent_id: "worker".into(), branch: "delivery".into(),
+        bound_head: executed.clone(), qa_task_id: Some("qa-A".into()),
+        reviewer_agent_id: Some("reviewer".into()), state: cas_types::QaPassState::Passed,
+        summary: Some("reviewed A".into()), issues_json: None, ledger_path: None,
+        issuer_agent_id: None, requested_at: now, deadline_at: now, resolved_at: Some(now),
+    };
+    assert!(crate::qa_pass::merge_gate(&task, &crate::config::QaConfig::default(), &[pass], &fx.head).is_err());
+
+    let merged = fx.head.clone();
+    git_ok(&fx.repo, &["checkout", "-q", "--orphan", "unrelated"]);
+    git_ok(&fx.repo, &["add", "-A"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "unrelated same tree"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", executed)]),
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", fx.head)]),
+    );
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let unrelated = run_close_gate(
+        &journey_context(&fx, &notes), EvidenceTier::Bundle,
+        &["journeys:HUB-J7".into()], &[],
+    ).unwrap_err();
+    assert!(unrelated.contains("changed product or journey inputs"), "{unrelated}");
+
+    git_ok(&fx.repo, &["checkout", "-q", "delivery"]);
+    fx.head = merged;
+
+    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
+    fx.head = commit(&fx.repo, "scripts/journey-eval.sh", 0);
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let changed = run_close_gate(
+        &journey_context(&fx, &notes), EvidenceTier::Bundle,
+        &["journeys:HUB-J7".into()], &[],
+    ).unwrap_err();
+    assert!(changed.contains("changed product or journey inputs"), "{changed}");
+}
+
+#[test]
 fn non_visual_bundle_omits_screencast_cas_7e91() {
     let fx = Fixture::new();
     fx.write_bundle(|manifest| {
@@ -2708,4 +2834,23 @@ fn non_visual_listed_screencast_is_still_validated_cas_7e91() {
     std::fs::write(fx.bundle_dir().join("receipt.webm"), "").unwrap();
     let refusal = fx.validate(&fx.notes()).expect_err("a listed optional capture must be valid");
     assert!(refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"), "{refusal:?}");
+}
+
+
+fn ledger_rows(rows: &str) -> String {
+    let mut labels = std::collections::BTreeMap::<&str, usize>::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut n = 0;
+    for row in rows.lines().filter(|line| !line.trim().is_empty()) {
+        let cells: Vec<_> = row.trim().trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() == 8 && cells[0] != "id" {
+            n += 1;
+            *counts.entry(cells[4].split(':').next().unwrap()).or_default() += 1;
+            *labels.entry(cells[5]).or_default() += 1;
+        }
+    }
+    format!("cells={n}; PASS={}; FAIL={}; NOT EXERCISED={}\nlabels: {}\n{}\n{}",
+        counts.get("PASS").unwrap_or(&0), counts.get("FAIL").unwrap_or(&0), counts.get("NOT EXERCISED").unwrap_or(&0),
+        labels.iter().map(|(key,n)| format!("{key}={n}")).collect::<Vec<_>>().join("; "),
+        crate::qa_ledger::HEADER, rows)
 }

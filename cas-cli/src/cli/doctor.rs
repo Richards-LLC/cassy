@@ -186,18 +186,6 @@ impl PhaseRecorder {
     fn phases(&self) -> &[Phase] {
         &self.phases
     }
-
-    /// Phases worth naming, slowest first.
-    fn slowest(&self, threshold: Duration, limit: usize) -> Vec<&Phase> {
-        let mut phases: Vec<&Phase> = self
-            .phases
-            .iter()
-            .filter(|phase| phase.duration >= threshold)
-            .collect();
-        phases.sort_by(|a, b| b.duration.cmp(&a.duration));
-        phases.truncate(limit);
-        phases
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1715,8 +1703,8 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
 }
 
 /// cas-dd56: open GitHub issues whose every referencing task is closed with
-/// its delivery in a release tag. A failed `gh` is a stated skip, not an
-/// empty list.
+/// its delivery in a release tag. Partial lookups retain findings and name
+/// unchecked references; a wholly unavailable check is an explicit skip.
 fn shipped_issues_check(
     tasks: &[crate::types::Task],
     default_repo: Option<&str>,
@@ -1725,23 +1713,57 @@ fn shipped_issues_check(
 ) -> Check {
     const NAME: &str = "shipped issues";
     let Some(repo) = default_repo else {
-        return Check::new(NAME, CheckStatus::Info, "skipped: no GitHub repository resolved for this project");
+        return Check::new(
+            NAME,
+            CheckStatus::Info,
+            "skipped: no GitHub repository resolved for this project",
+        );
     };
-    match crate::issue_reconcile::shipped_open_issues(tasks, Some(repo), states, tag_containing) {
-        Err(error) => Check::new(NAME, CheckStatus::Info, format!("skipped: could not list open issues ({error})")),
-        Ok(shipped) if shipped.is_empty() => Check::new(
+    let report = match crate::issue_reconcile::shipped_open_issues(
+        tasks,
+        Some(repo),
+        states,
+        tag_containing,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            return Check::new(
+                NAME,
+                CheckStatus::Info,
+                format!("skipped: could not list open issues ({error})"),
+            );
+        }
+    };
+    let default_ref_prefix = format!("{repo}#");
+    let default_lookup_failed = report.unchecked.iter().any(|reference| {
+        reference
+            .get(..default_ref_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&default_ref_prefix))
+    });
+    let mut check = if report.shipped.is_empty() {
+        // An empty shipped list only proves absence in repositories whose
+        // lookups succeeded; don't attribute it to an unchecked default repo.
+        let message = if default_lookup_failed {
+            "no open issue in the checked repositories has all of its referencing tasks shipped"
+                .to_string()
+        } else {
+            format!("no open {repo} issue has all of its referencing tasks shipped")
+        };
+        Check::new(
             NAME,
             CheckStatus::Ok,
-            format!("no open {repo} issue has all of its referencing tasks shipped"),
-        ),
-        Ok(shipped) => Check::new(
+            message,
+        )
+    } else {
+        Check::new(
             NAME,
             CheckStatus::Warning,
             format!(
                 "{} open issue(s) whose referencing tasks have all shipped; close them with the \
                  release version: {}",
-                shipped.len(),
-                shipped
+                report.shipped.len(),
+                report
+                    .shipped
                     .iter()
                     .map(|item| format!(
                         "{} ({})",
@@ -1755,8 +1777,16 @@ fn shipped_issues_check(
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
-        ),
+        )
+    };
+    if !report.unchecked.is_empty() {
+        check.status = CheckStatus::Warning;
+        check.message.push_str(&format!(
+            "; could not check: {}",
+            report.unchecked.join("; ")
+        ));
     }
+    check
 }
 
 /// Report the effective destinations and distinguish an inferred project
@@ -2184,13 +2214,16 @@ fn prompt_queue_absent(cas_root: &Path) -> bool {
 /// Why the prompt queue couldn't be read, in the operator's words.
 fn prompt_queue_read_failure(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
-    if error.contains("locked") || error.contains("busy") {
-        "the database is in use by another process; run cas doctor again in a moment"
-    } else if error.contains("no such table") || error.contains("no such column") {
+    // rusqlite appends ` in <SQL> at offset ...` to a preparation error.
+    // Query/column names (e.g. awaiting_busy_recipient) are not its diagnosis.
+    let diagnostic = error.split_once(" in ").map_or(error.as_str(), |(reason, _)| reason);
+    if diagnostic.contains("no such table") || diagnostic.contains("no such column") {
         "the prompt queue is from an older cas; run 'cas update --schema-only'"
-    } else if error.contains("not a database") || error.contains("malformed") {
+    } else if diagnostic.contains("locked") || diagnostic.contains("busy") {
+        "the database is in use by another process; run cas doctor again in a moment"
+    } else if diagnostic.contains("not a database") || diagnostic.contains("malformed") {
         "the database file looks damaged"
-    } else if error.contains("unable to open") {
+    } else if diagnostic.contains("unable to open") {
         "the database could not be opened"
     } else {
         "the prompt queue could not be read"
@@ -6623,6 +6656,11 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let root = crate::store::init_cas_dir(&project).unwrap();
         let db = root.join("cas.db");
+        for primary in ["database is locked", "database is busy"] {
+            let rendered = format!("{primary} in SELECT 'no such column: missing' FROM awaiting_busy_recipient at offset 0");
+            assert_eq!(prompt_queue_read_failure(&rendered), prompt_queue_read_failure(primary),
+                "query text must not replace the primary error diagnosis");
+        }
         // A complete numbered ledger must not conceal an old lazy queue.
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
@@ -6925,6 +6963,10 @@ mod tests {
                 Some("cas-d6b9"),
             )
             .unwrap();
+        queue.park_for_busy_recipient(lost, Some("recipient has a tool call in flight"),
+            chrono::Utc::now() + chrono::Duration::seconds(120)).unwrap();
+        assert!(matches!(supervisor_relay_check(temp.path()).status, CheckStatus::Ok),
+            "fresh readiness holds must not warn before the sixty-second grace");
         queue
             .mark_undelivered_lifecycle_relay(lost, Some("recipient unavailable"))
             .unwrap();
@@ -7162,7 +7204,10 @@ mod tests {
     fn shipped_issues_doctor_row_lists_open_issues_whose_fixes_shipped_cas_dd56() {
         struct States(Result<std::collections::HashSet<u64>, String>);
         impl crate::issue_reconcile::IssueStates for States {
-            fn open_issues(&self, _repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+            fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                if repo.starts_with("broken/") {
+                    return Err("repository unavailable".into());
+                }
                 self.0.clone()
             }
         }
@@ -7177,9 +7222,15 @@ mod tests {
         let repo = Some("Richards-LLC/cassy");
 
         let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
         assert!(
-            check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
             "{}",
             check.message
         );
@@ -7189,11 +7240,121 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
 
         let check = shipped_issues_check(&tasks, repo, &States(Err("gh: offline".into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Info), "{}", check.message);
-        assert!(check.message.contains("skipped: could not list open issues (gh: offline)"));
+        assert!(
+            matches!(check.status, CheckStatus::Info),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("skipped: could not list open issues")
+                && check.message.contains("gh: offline")
+        );
 
         let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
-        assert!(check.message.starts_with("skipped: no GitHub repository"), "{}", check.message);
+        assert!(
+            check.message.starts_with("skipped: no GitHub repository"),
+            "{}",
+            check.message
+        );
+
+        struct DefaultUnavailable;
+        impl crate::issue_reconcile::IssueStates for DefaultUnavailable {
+            fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                if repo.eq_ignore_ascii_case("Richards-LLC/cassy") {
+                    Err("default repository unavailable".into())
+                } else {
+                    Ok(std::collections::HashSet::new())
+                }
+            }
+        }
+        let mut foreign = crate::types::Task::new(
+            "cas-foreign".into(),
+            "foreign/repo#42: fix".into(),
+        );
+        foreign.status = crate::types::TaskStatus::Closed;
+        foreign.deliverables.factory_branch_anchor = Some("bbb222".into());
+        let check = shipped_issues_check(&[tasks[0].clone(), foreign], repo, &DefaultUnavailable, &tags);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("no open issue in the checked repositories")
+                && check.message.contains("Richards-LLC/cassy#1158")
+                && check.message.contains("default repository unavailable"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("no open Richards-LLC/cassy issue"),
+            "{}",
+            check.message
+        );
+
+        let mut mixed = tasks.clone();
+        mixed.push(crate::types::Task::new(
+            "cas-bad".into(),
+            "broken/repo#9, broken/repo#10, broken/repo#11: fix".into(),
+        ));
+        // Earlier invalid repos fill the lookup cap; another proves omitted counts.
+        for (id, title) in [
+            ("cas-bada", "broken/a#1"),
+            ("cas-badb", "broken/b#2"),
+            ("cas-badz", "broken/z#3"),
+        ] {
+            mixed.push(crate::types::Task::new(id.into(), title.into()));
+        }
+        let check = shipped_issues_check(&mixed, repo, &States(Ok([1158].into())), &tags);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("could not check")
+                && check.message.contains("broken/repo#9")
+                && check.message.contains("repository unavailable"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("skipped:"), "{}", check.message);
+        assert_eq!(
+            check.message.matches("broken/repo#").count(),
+            1,
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("+2 more"), "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("1 more unchecked repository (1 reference)"),
+            "{}",
+            check.message
+        );
+
+        let check = shipped_issues_check(&mixed, repo, &States(Ok([].into())), &tags);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("no open Richards-LLC/cassy issue")
+                && check.message.contains("broken/repo#9"),
+            "{}",
+            check.message
+        );
     }
 
     #[test]
@@ -7570,15 +7731,7 @@ mod tests {
             phases[0].checks, 0,
             "a phase that produced no check still spent time and must be kept"
         );
-        assert_eq!(
-            recorder
-                .slowest(Duration::from_millis(100), 5)
-                .iter()
-                .map(|phase| phase.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["integrations"],
-            "slowest() ranks by duration and drops phases under the threshold"
-        );
+
     }
 
     /// The operator-facing half: `--verbose` must print the duration beside
@@ -11256,6 +11409,8 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
     #[test]
     fn busy_retirement_doctor_autofix_warns_until_retry_cas_e4aa() {
+        // The held writer exhausts a shortened budget (production: 10 s).
+        crate::daemon::indexing::set_writer_lock_budget_for_tests(std::time::Duration::from_millis(100));
         let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
         assert!(fixture.scan(&fixture.main).errors.is_empty());
         fs::remove_file(fixture.main.join("new.rs")).unwrap();

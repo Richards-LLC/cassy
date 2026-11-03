@@ -940,9 +940,9 @@ a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-mono);ove
 <td class="num">26</td>
 <td>7 areas</td>
 </tr>
-</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-27-v3.83.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.83.0; retrieved 27 October 2026 · 2:04 PM ET.</p></details>
+</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-27-v3.83.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.83.0; retrieved 27 October 2026 · 5:42 AM ET.</p></details>
 <div class="stats"><div class="stat"><span class="stat-value">26</span><span class="stat-label">Changes shipped</span><p>21 fixed, 2 changed, 3 added; tests and docs not counted</p></div>
-<div class="stat"><span class="stat-value">12m 2s</span><span class="stat-label">Green to published</span><p>Over budget (10m 0s budget); Merge-queue CI completion to publication</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.83.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1379 or the CHANGELOG section references it and it closed between the PR opening (4:13 AM ET) and 15 minutes after its merge (5:39 AM ET). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. No GitHub issues are counted in this report&#x27;s fixes ledger. No release stage was blocked. No manual interventions. Not measured for this release: request to published, cut to published, lesson recurrence.</p></div></section>
+<div class="stat"><span class="stat-value">12m 2s</span><span class="stat-label">Green to published</span><p>Over budget (10m 0s budget); Merge-queue CI completion to publication</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.83.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1379 or the CHANGELOG section references it and it closed between the PR opening (4:13 AM ET) and 15 minutes after its merge (5:39 AM ET). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. No GitHub issues are counted in this report&#x27;s fixes ledger. The merge queue turned the release back once: combining the two branches of work exposed nine failing checks that neither branch ran on its own. One repair round fixed all nine and the second queue run passed. No rescue repeated a lesson already learned. Not measured for this release: request to published, cut to published.</p></div></section>
 <!-- section: users -->
 <section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Commander</h3></div><div class="changes">
 <article class="change"><h4>Phone sends</h4><div class="pair"><p class="was"><span class="state">Was</span>A phone message could sit unseen in an idle conversation.</p><p class="now"><span class="state">Now</span>Commander wakes the conversation, including for a short approval.</p></div></article>
@@ -1042,16 +1042,16 @@ a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-mono);ove
 </tr>
 </tbody></table></div></section>
 <!-- section: provenance. The closing folio stays inside this section so print never starts a page with it; on screen its rule and gap sit above it. -->
-<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 27 October 2026 · 2:04 PM ET.</p>
-<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-27-v3.83.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.83.0; retrieved 27 October 2026 · 2:04 PM ET.</p>
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 27 October 2026 · 5:42 AM ET.</p>
+<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-27-v3.83.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.83.0; retrieved 27 October 2026 · 5:42 AM ET.</p>
 <p>Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.</p>
 <p>Release PR: <a href="https://github.com/Richards-LLC/cassy/pull/1379">https://github.com/Richards-LLC/cassy/pull/1379</a> (merged 27 October 2026 · 5:24 AM ET).</p>
 <p>Release-notes draft: <code>docs/release-notes/2026-10-27-v3.83.0-slack.md</code>.</p>
 <p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
 <p>GitHub release: <a href="https://github.com/Richards-LLC/cassy/releases/tag/v3.83.0">https://github.com/Richards-LLC/cassy/releases/tag/v3.83.0</a> (published or unknown).</p>
-<p>Standalone release receipt supplied; its parsed measurements are shown below.</p>
+<p>Release receipt (relative to <code>~/.cas/artifacts</code>): <code>cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/release-v3.83.0/release-latency.receipt</code>.</p>
 <h3>Pipeline latency</h3>
-<p>Stage timings are unavailable: the latency receipt records no STAGE_SECS.</p>
+<p>Release commit to main: 1h 11m 47s, over the 30m budget, because of the one merge-queue return and its repair round (release commit 27 October 2026 · 4:13 AM ET; landed on main 5:24 AM ET). Main to published: 12m 0s, inside the 20m budget (published 5:36 AM ET). Installed on the release host within a minute of publication. Per-stage timings are not recorded in the latency receipt.</p>
 <p>No source warnings.</p><footer class="page-footer"><span>cas-src v3.83.0 / Release report</span><span><a href="https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v3.83.0.md">Markdown source</a> · <a href="https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v3.83.0.pdf">Print edition</a></span></footer></section>
 </main>
 </div>

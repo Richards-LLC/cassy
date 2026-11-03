@@ -71,6 +71,9 @@ content = (
     "handoff is available, return evidence to the supervisor for a registered "
     "independent reviewer; do not register yourself or manufacture authority.\n\n"
     + body + "\n'''\n"
+    # A verifier reads one task: the role drops the native skill listing even
+    # under a parent launched with the full catalog. `$name` still expands.
+    "\n[skills]\ninclude_instructions = false\n"
 )
 tomllib.loads(content)
 for target in [root / "codex/agents/task-verifier.toml", Path(".codex/agents/task-verifier.toml")]:

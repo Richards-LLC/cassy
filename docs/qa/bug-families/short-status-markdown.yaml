@@ -1,0 +1,4 @@
+title: A short status must render its callout, heading, list and inline Markdown instead of showing their markers in the quiet status box
+tasks: [cas-2eb8]
+invariants: [HUB-J4-MESSAGE-HIERARCHY]
+journeys: [HUB-J4]

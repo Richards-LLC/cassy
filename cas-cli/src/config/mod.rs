@@ -27,6 +27,15 @@ pub use hooks::*;
 pub use runtime::*;
 pub use settings::*;
 
+/// Load-time QA source information; never serialized as project policy.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QaLayers {
+    user: toml::Value,
+    local: toml::Value,
+    baseline: toml::Value,
+}
+
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -61,6 +70,11 @@ pub struct Config {
     /// User-facing QA gate configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa: Option<QaConfig>,
+
+    /// Source QA keys and user defaults, retained separately from local writes.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub qa_layers: Option<QaLayers>,
 
     /// Paths and directory globs used by overview freshness and G6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,12 +145,6 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<crate::logging::LoggingConfig>,
 
-    /// Retired `[jev]` section (the Jev client was removed by cas-4971).
-    /// Accepted so older config files still load, never written back, and
-    /// noted once per process by [`Config::load`].
-    #[serde(default, rename = "jev", skip_serializing)]
-    pub(crate) retired_jev: Option<serde::de::IgnoredAny>,
-
     /// LLM configuration for harness and model selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmConfig>,
@@ -180,6 +188,10 @@ pub struct Config {
     /// default, and the gate fails closed when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<ReleaseConfig>,
+
+    /// `[secrets]` — where Commander saves pasted secrets (cas-1996).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsConfig>,
 
     /// `[hub]` — public origin used for Commander reverse pairing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +306,7 @@ impl Config {
         merge_option!(history);
         merge_option!(memory);
         merge_option!(hub);
+        merge_option!(secrets);
         merge_option!(project);
         merge_option!(release);
         merge_option!(slack);

@@ -17,9 +17,15 @@ const PROVENANCE_BLOCKS: &[(&str, &str)] = &[
     ),
 ];
 
+fn is_proof_line(line: &str) -> bool {
+    line.starts_with("ARTIFACT_PROOF:") || line.starts_with("QA_PASS_PROOF:")
+        || line.starts_with("QA_EVIDENCE_PROOF:")
+        || line.starts_with("QA_BATCH_RECEIPT_PROOF:")
+        || line.starts_with("RELEASE_VERDICT_PROOF:")
+}
+
 pub fn is_reserved_line(line: &str) -> bool {
-    line.starts_with("ARTIFACT_PROOF:")
-        || PROVENANCE_BLOCKS
+    is_proof_line(line) || PROVENANCE_BLOCKS
             .iter()
             .any(|(begin, end)| line.starts_with(begin) || line.starts_with(end))
 }
@@ -33,6 +39,75 @@ pub(crate) fn contains_complete_lines(notes: &str, text: &str) -> bool {
                 .strip_prefix(text)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
         })
+}
+
+fn is_timestamped_note(text: &str) -> bool {
+    text.starts_with('[')
+        && text.get(17..18) == Some("]")
+        && text.get(1..17).is_some_and(|timestamp| {
+            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M").is_ok()
+        })
+}
+
+/// Keep a timestamped timeline entry's paragraphs and proof lines together.
+/// Untimestamped preambles and rendered provenance retain paragraph boundaries.
+pub fn note_blocks(notes: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for (offset, _) in notes.match_indices("\n\n") {
+        let next = &notes[offset + 2..];
+        if is_timestamped_note(next)
+            || next.lines().next().is_some_and(is_proof_line)
+            || PROVENANCE_BLOCKS.iter().any(|(begin, _)| next.starts_with(begin))
+            || !is_timestamped_note(notes[start..offset].trim())
+        {
+            blocks.push(notes[start..offset].trim());
+            start = offset + 2;
+        }
+    }
+    blocks.push(notes[start..].trim());
+    blocks.into_iter().filter(|block| !block.is_empty()).collect()
+}
+
+/// A trusted artifact receipt upgrades only its exact, complete raw copy.
+/// Different enriched receipts and unrelated proof lines remain untouched.
+pub(crate) fn replace_raw_artifact_note(notes: &str, receipt: &str) -> Option<String> {
+    if !is_timestamped_note(receipt)
+        || !receipt.lines().any(|line| line.starts_with("ARTIFACT_PROOF:"))
+    {
+        return None;
+    }
+    let raw = receipt.lines()
+        .filter(|line| !line.starts_with("ARTIFACT_PROOF:"))
+        .collect::<Vec<_>>().join("\n");
+    let blocks = note_blocks(notes);
+    let copies = blocks.iter()
+        .filter(|block| **block == raw)
+        .map(|block| {
+            // note_blocks borrows complete slices of notes. Keep their byte
+            // ranges so replacing a duplicate leaves all other text intact.
+            let start = block.as_ptr() as usize - notes.as_ptr() as usize;
+            start..start + block.len()
+        }).collect::<Vec<_>>();
+    if copies.is_empty() {
+        return None;
+    }
+    let mut enriched_exists = blocks.contains(&receipt);
+    let mut next = notes.to_string();
+    for mut range in copies.into_iter().rev() {
+        if enriched_exists {
+            if next[range.end..].starts_with("\n\n") {
+                range.end += 2;
+            } else if range.start >= 2 {
+                range.start -= 2;
+            }
+            next.replace_range(range, "");
+        } else {
+            next.replace_range(range, receipt);
+            enriched_exists = true;
+        }
+    }
+    Some(next)
 }
 
 fn provenance_blocks(notes: &str) -> Vec<Range<usize>> {
@@ -82,7 +157,7 @@ pub fn neutralize_new_markers<'a>(notes: &'a str, previous: Option<&str>) -> Cow
     let prior_markers: HashSet<&str> = previous
         .into_iter()
         .flat_map(str::lines)
-        .filter(|line| line.starts_with("ARTIFACT_PROOF:"))
+        .filter(|line| is_proof_line(line))
         .collect();
     let preserved_blocks = provenance_blocks(notes)
         .into_iter()

@@ -1,0 +1,5 @@
+title: The sender's own non-media upload cannot be opened, Edit on a refused send puts the host path in the composer, and every preview request re-hashes the upload
+found: '2026-10-28'
+tasks: [cas-a4c4]
+invariants: [HUB-J24-GOAL, HUB-J24-SENT-ATTACHMENT]
+journeys: [HUB-J24]

@@ -51,6 +51,7 @@ toml = "0.9"
 # the whole read-modify-write/read-back transaction, not just the rename.
 fs2 = "0.4"
 
+tempfile = "3.14"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tempfile = "3.14"

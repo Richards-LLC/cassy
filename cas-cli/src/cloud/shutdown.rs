@@ -414,6 +414,7 @@ pub(crate) fn presence_lease(root: &Path) -> Result<Option<File>, String> {
 
 /// One nonblocking lease per project prevents concurrent daemons from sending
 /// the same cleanup. The entire off-loop pass, including retries, gets 5s.
+#[cfg(test)]
 pub(crate) fn drain(
     root: &Path,
     coordinator: &CloudCoordinator,

@@ -623,6 +623,55 @@ impl SqliteRetrievalStore {
         self.evidence_funnel_for_session_hash(Some(session_hash))
     }
 
+    /// Stage-separated evidence per query family, for one raw session or all.
+    pub fn evidence_funnel_by_family(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<(String, RetrievalEvidenceFunnel)>> {
+        let session_hash = session_id
+            .map(|session| Self::identity_hash("session", session))
+            .transpose()?;
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT q.query_family,
+                 COUNT(DISTINCT r.query_id || char(0) || r.result_id),
+                 COUNT(DISTINCT CASE
+                     WHEN q.query_family = 'context_session_start'
+                          OR q.query_family LIKE 'ambient_%'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'used' AND o.attribution = 'automatic'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'used' AND o.attribution = 'explicit'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'helpful' AND o.attribution = 'judge'
+                     THEN r.query_id || char(0) || r.result_id END)
+             FROM retrieval_query_results r
+             JOIN retrieval_queries q ON q.id = r.query_id
+             LEFT JOIN retrieval_outcomes o
+               ON o.query_id = r.query_id AND o.result_id = r.result_id
+             WHERE (?1 IS NULL OR q.session_hash = ?1)
+             GROUP BY q.query_family
+             ORDER BY q.query_family",
+        )?;
+        let rows = stmt.query_map([session_hash], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                RetrievalEvidenceFunnel {
+                    retrieved: row.get::<_, i64>(1)?.max(0) as u64,
+                    injected: row.get::<_, i64>(2)?.max(0) as u64,
+                    opened: row.get::<_, i64>(3)?.max(0) as u64,
+                    used: row.get::<_, i64>(4)?.max(0) as u64,
+                    judged_helpful: row.get::<_, i64>(5)?.max(0) as u64,
+                },
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
+    }
+
     fn evidence_funnel_for_session_hash(
         &self,
         session_hash: Option<String>,

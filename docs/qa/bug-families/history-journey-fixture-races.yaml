@@ -1,0 +1,4 @@
+title: History controls select conversation rows and distinguish settled host layout and storage from hostile-frame effects
+tasks: [cas-e155, cas-b255, cas-c3ac]
+invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
+journeys: [HUB-J4]

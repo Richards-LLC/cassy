@@ -24,7 +24,8 @@ impl CodeStore for SqliteCodeStore {
     // ========== File Operations ==========
 
     fn generate_file_id(&self) -> Result<String> {
-        self.generate_hash_id("file")
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::File)
     }
 
     fn generate_file_id_for(&self, repository: &str, path: &str) -> String {
@@ -119,7 +120,8 @@ impl CodeStore for SqliteCodeStore {
     // ========== Symbol Operations ==========
 
     fn generate_symbol_id(&self) -> Result<String> {
-        self.generate_hash_id("sym")
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::Symbol)
     }
 
     fn generate_symbol_id_for(
@@ -306,7 +308,8 @@ impl CodeStore for SqliteCodeStore {
     // ========== Relationship Operations ==========
 
     fn generate_relationship_id(&self) -> Result<String> {
-        self.generate_hash_id("rel")
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::hash_id::generate_hash_id(&conn, crate::hash_id::IdKind::Relationship)
     }
 
     fn add_relationship(&self, rel: &CodeRelationship) -> Result<()> {

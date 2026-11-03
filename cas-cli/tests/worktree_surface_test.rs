@@ -234,6 +234,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,
@@ -300,6 +301,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        revision: None,
         mine: None,
         theirs: None,
         decision: None,
@@ -663,9 +665,9 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -703,9 +705,9 @@ async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -761,9 +763,9 @@ async fn test_worktree_list_honors_configured_base_path() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     // Reclaim external worktree before asserts so a failure still cleans up.
@@ -800,9 +802,9 @@ async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir(
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -832,9 +834,9 @@ async fn test_worktree_list_ignores_unrelated_git_worktrees() {
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -864,9 +866,9 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
 
     let svc = make_service(cas_root);
     let result = svc
-        .coordination(Parameters(coord_req("worktree_list")))
+        .factory(Parameters(coord_req("worktree_list")))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -989,9 +991,9 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     req.allow_trunk = Some(true);
     req.cleanup = Some(true);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
 
     let text = get_text(&result);
 
@@ -1005,13 +1007,12 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("Merge policy: merge proceeded because CI is advisory."),
-        "worktree_merge without a GitHub origin must state its advisory policy.\nGot:\n{text}"
+        text.contains("CI admission: advisory") && text.contains("Push state:"),
+        "trunk fallback and unavailable publication keep full actionable details.\nGot:\n{text}"
     );
-    assert!(
-        text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"),
-        "worktree_merge CI diagnostics must name the endpoint and source SHA.\nGot:\n{text}"
-    );
+
+    assert!(text.contains("Merge policy: merge proceeded because CI is advisory."), "{text}");
+    assert!(text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"), "{text}");
 
     // The merge actually landed: content reachable from the checked-out repo.
     assert!(
@@ -1115,7 +1116,7 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("task-bound cross-repo merge call");
     let text = get_text(&result);
@@ -1151,6 +1152,62 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
         a_status_before,
         "repo A working tree must remain unchanged"
     );
+}
+
+fn contains_fixture_home(text: &str, home: &Path) -> bool {
+    let canonical = std::fs::canonicalize(home).expect("canonical fixture HOME");
+    text.contains(home.to_string_lossy().as_ref())
+        || text.contains(canonical.to_string_lossy().as_ref())
+}
+
+fn portable_close_detail(close_text: &str, home: &Path) -> Result<String, String> {
+    let (summary, reference) = close_text
+        .split_once("\nDetails: ")
+        .ok_or("compact close receipt references its full detail")?;
+    let (detail_path, digest) = reference
+        .split_once(" (SHA-256 ")
+        .ok_or("detail reference carries its integrity receipt")?;
+    let digest = digest.strip_suffix(')').ok_or("detail digest must end the receipt")?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("detail reference must end with only its SHA-256 digest".into());
+    }
+    let detail = std::fs::read_to_string(detail_path).map_err(|error| error.to_string())?;
+    for text in [summary, detail.as_str()] {
+        if contains_fixture_home(text, home) {
+            return Err(format!("fixture HOME leaked in receipt: {text}"));
+        }
+    }
+    Ok(detail)
+}
+
+#[cfg(unix)]
+#[test]
+fn close_binding_check_rejects_canonical_home() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home-link");
+    let actual = root.path().join("actual-home");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &home).unwrap();
+    let canonical = std::fs::canonicalize(&home).unwrap();
+    let detail = root.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture; binding {}\nDetails: {} (SHA-256 {})",
+        canonical.display(), detail.display(), "0".repeat(64),
+    );
+    assert!(portable_close_detail(&receipt, &home).is_err(), "canonical HOME leak accepted: {receipt}");
+}
+
+#[test]
+fn close_binding_check_rejects_home_after_details_digest() {
+    let home = TempDir::new().unwrap();
+    let detail = home.path().join("detail.txt");
+    std::fs::write(&detail, "Closed task: fixture").unwrap();
+    let receipt = format!(
+        "Closed task: fixture\nDetails: {} (SHA-256 {})\n{}",
+        detail.display(), "0".repeat(64), home.path().display(),
+    );
+    assert!(portable_close_detail(&receipt, home.path()).is_err(), "digest suffix leak accepted: {receipt}");
 }
 
 #[tokio::test]
@@ -1241,11 +1298,13 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
         "normal close must resolve the intended bound clone: {close_text}"
     );
     assert!(!close_text.contains("AMBIGUOUS WORK TARGET"));
-    assert!(!close_text.contains(home.path().to_string_lossy().as_ref()));
+    // The local Details artifact may live under HOME; the binding itself must not.
+    let detail = portable_close_detail(&close_text, home.path()).expect("portable close receipt");
+    assert!(detail.contains(&format!("Closed task: {task_id} - Bound lifecycle updated")), "{detail}");
 
     let persisted = task_store.get(&task_id).unwrap();
     let portable = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1312,7 +1371,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("task-bound duplicate-selector merge call");
     let text = get_text(&result);
@@ -1437,7 +1496,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
     req.force = Some(true);
     req.cleanup = Some(true);
     let error = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("same-selector wrong-clone worktree must fail closed")
         .to_string();
@@ -1478,7 +1537,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
         "rejection created delivery state"
     );
     let portable = serde_json::to_string(&task_store.get(&task.id).unwrap().deliverables).unwrap();
-    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&portable, home.path()), "{portable}");
     assert!(!portable.contains("repo_root"));
     assert!(!portable.contains("git_common_dir"));
 }
@@ -1596,7 +1655,7 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
     );
     assert_eq!(evidence.task_tip.as_deref(), Some(own_tip.as_str()));
     let json = serde_json::to_string(&persisted.deliverables).unwrap();
-    assert!(!json.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!contains_fixture_home(&json, home.path()), "{json}");
     assert!(!json.contains(unrelated_path.to_string_lossy().as_ref()));
 }
 
@@ -1838,7 +1897,6 @@ async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktr
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -1970,7 +2028,6 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         id: task.id.clone(),
         reason: Some("reference history integrated".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -2041,7 +2098,7 @@ async fn test_worktree_merge_reports_not_found_not_disabled_when_nothing_matches
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/bob".to_string());
     req.task_id = Some("missing-worker".into());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let (not_disabled, contains_not_found) = match &result {
         Ok(r) => {
@@ -2118,12 +2175,23 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 
 #[tokio::test]
 async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
-    for origin_only in [false, true] {
+    for (origin_only, target_valid) in [(false, true), (true, true), (true, false)] {
         let repo = GitRepo::new();
         let mut env = test_env();
         let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
         disable_system_a(&cas_root);
 
+        if origin_only {
+            // GH #1386: the unrelated supervisor tree gives the opposite
+            // validation result from the target being merged and pushed.
+            std::fs::write(
+                repo.root.join("push-input.txt"),
+                if target_valid { "invalid" } else { "valid" },
+            )
+            .unwrap();
+            run_git(&["add", "push-input.txt"], &repo.root);
+            run_git(&["commit", "-m", "supervisor validation input"], &repo.root);
+        }
         run_git(&["branch", "epic/foo"], &repo.root);
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
         if origin_only {
@@ -2151,9 +2219,19 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
             run_git(&["config", "user.email", "peer@example.test"], &peer);
             run_git(&["config", "user.name", "Peer"], &peer);
             std::fs::write(peer.join("peer-target.txt"), "peer target content\n").unwrap();
-            run_git(&["add", "peer-target.txt"], &peer);
+            std::fs::write(
+                peer.join("push-input.txt"),
+                if target_valid { "valid" } else { "invalid" },
+            )
+            .unwrap();
+            run_git(&["add", "peer-target.txt", "push-input.txt"], &peer);
             run_git(&["commit", "-m", "peer advances epic"], &peer);
             run_git(&["push", "origin", "epic/foo"], &peer);
+            if target_valid {
+                // Moving validation must not change a relative local origin.
+                let relative_origin = format!("../{}", remote.path().file_name().unwrap().to_str().unwrap());
+                run_git(&["remote", "set-url", "origin", &relative_origin], &repo.root);
+            }
             run_git(&["branch", "-D", "epic/foo"], &repo.root);
             run_git(
                 &["update-ref", "-d", "refs/remotes/origin/epic/foo"],
@@ -2167,7 +2245,24 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                     .unwrap()
                     .success()
             );
+            let hook = repo.root.join(".git/hooks/pre-push");
+            let log = remote.path().join("push-tree.log");
+            let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+            std::fs::write(&hook, format!(
+                "#!/bin/sh\nwhile read local_ref local_sha remote_ref remote_sha; do\n\
+                 printf '%s %s %s\\n' \"$local_sha\" \"$(git rev-parse HEAD)\" \"$(cat push-input.txt)\" >> {}\n\
+                 test \"$(cat push-input.txt)\" = valid || exit 1\ndone\n",
+                quote(&log)
+            )).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
+        let remote_before = origin_only.then(|| {
+            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+        });
 
         // cas-bd5f: task must belong to alice (matching worker/task/epic).
         let (_epic_id, worker_task_id) =
@@ -2187,9 +2282,9 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
         req.id = Some("factory/alice".to_string());
         req.task_id = Some(worker_task_id);
         let result = svc
-            .coordination(Parameters(req))
+            .factory(Parameters(req))
             .await
-            .expect("coordination call should succeed");
+            .expect("factory call should succeed");
         let text = get_text(&result);
 
         assert!(
@@ -2226,15 +2321,284 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 String::from_utf8_lossy(&epic_tree.stdout).contains("peer-target.txt"),
                 "the peer's origin-only target commit must survive the merge"
             );
+            let target_sha = git_stdout(&repo.root, &["rev-parse", "epic/foo"]);
             assert_eq!(
-                git_stdout(&repo.root, &["rev-parse", "epic/foo"]),
-                git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+                std::fs::read_to_string(remote.path().join("push-tree.log")).unwrap().trim(),
+                format!("{target_sha} {target_sha} {}", if target_valid { "valid" } else { "invalid" }),
+                "the real pre-push hook must inspect exactly the pushed target, not supervisor HEAD; receipt: {text}"
             );
-            assert_eq!(
-                git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
-                git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
-            );
+            let remote_after = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"]);
+            if target_valid {
+                assert_eq!(target_sha, remote_after, "unrelated supervisor failure must not block push: {text}");
+                assert!(!text.contains("NOT PUSHED"), "{text}");
+                assert_eq!(
+                    git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
+                    git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
+                );
+            } else {
+                assert_eq!(Some(remote_after), remote_before, "a failing target hook must not publish the merge");
+                assert!(text.contains("NOT PUSHED"), "an unrelated passing tree must not bypass target validation: {text}");
+            }
         }
+    }
+}
+
+struct ReboundMergeFixture {
+    repo: GitRepo,
+    origin: TempDir,
+    cas_root: PathBuf,
+    worker: PathBuf,
+    branch: String,
+    tip: String,
+    service: CasService,
+}
+
+async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
+    let repo = GitRepo::new();
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(
+        &["init", "--bare", origin.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(&["branch", "epic/rebound"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/rebound"], &repo.root);
+    let base = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    let cas_root = init_cas_dir(&repo.root, env).unwrap();
+    std::fs::write(cas_root.join("config.toml"),
+        "[verification]\nenabled=false\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    let worker = cas_root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    std::fs::write(worker.join("historical.txt"), "unrelated old task\n").unwrap();
+    run_git(&["add", "historical.txt"], &worker);
+    run_git(&["commit", "-m", "cas-dead: historical lane"], &worker);
+    run_git(&["push", "origin", "factory/alice"], &worker);
+    register_delivery_agent(
+        &cas_root,
+        "rebound-worker",
+        "alice",
+        AgentRole::Worker,
+        "rebound-session",
+    );
+    register_delivery_agent(
+        &cas_root,
+        "rebound-supervisor",
+        "supervisor",
+        AgentRole::Supervisor,
+        "rebound-session",
+    );
+    let agents = open_agent_store(&cas_root).unwrap();
+    let mut agent = agents.get("rebound-worker").unwrap();
+    agent
+        .metadata
+        .insert("clone_path".into(), worker.display().to_string());
+    agents.update(&agent).unwrap();
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut epic = Task::new("epic-rebound".into(), "Rebound epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/rebound".into());
+    tasks.add(&epic).unwrap();
+    let mut task = Task::new("cas-e429".into(), "Rebound delivery".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("alice".into());
+    task.depth = TaskDepth::Light;
+    task.risk = vec![cas::types::TaskRisk::None];
+    let target = WorkTarget {
+        repo_selector: "project:rebound".into(),
+        target_branch: "epic/rebound".into(),
+    };
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target,
+        assignee: "alice".into(),
+        branch: "factory/alice".into(),
+        base_sha: base,
+    });
+    tasks
+        .create_atomic(&task, &[], Some(&epic.id), None)
+        .unwrap();
+    let branch = "factory/alice-cas-e429".to_string();
+    run_git(&["switch", "-c", &branch, "epic/rebound"], &worker);
+    std::fs::write(worker.join("delivery.txt"), "approved task delivery\n").unwrap();
+    run_git(&["add", "delivery.txt"], &worker);
+    run_git(&["commit", "-m", "cas-e429: approved delivery"], &worker);
+    run_git(&["push", "origin", &branch], &worker);
+    let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let service = delivery_service(&cas_root, "rebound-supervisor");
+    env.set_current_dir(&repo.root);
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "rebind_branch", "id": task.id, "branch": branch,
+            "reason": "Approve the per-task delivery instead of the historical worker lane",
+        }))))
+        .await
+        .expect("real supervisor rebind succeeds");
+    let ledger = cas_store::quality_events_for_task(&cas_root, &task.id).unwrap();
+    assert!(
+        ledger.iter().any(|event| matches!(
+            event.payload,
+            cas_store::QualityPayload::Intervention {
+                intervention: cas_store::InterventionKind::Rebind,
+                ..
+            }
+        ) && event.local_note.as_deref().is_some_and(|note| note.contains("Approve"))),
+        "{ledger:?}"
+    );
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .unwrap()
+            .deliverables
+            .factory_branch_start
+            .unwrap()
+            .branch,
+        branch
+    );
+    ReboundMergeFixture {
+        repo,
+        origin,
+        cas_root,
+        worker,
+        branch,
+        tip,
+        service,
+    }
+}
+
+#[tokio::test]
+async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
+    let mut env = test_env();
+    let fixture = rebound_merge_fixture(&mut env).await;
+    let task = open_task_store(&fixture.cas_root).unwrap().get("cas-e429").unwrap();
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert!(task.deliverables.parked_branch.is_none());
+    let mut request = coord_req("worktree_merge");
+    request.id = Some(fixture.branch.clone());
+    request.task_id = Some(task.id);
+    request.cleanup = Some(false);
+    let response = fixture.service.factory(Parameters(request)).await.unwrap();
+    let text = get_text(&response);
+    assert!(text.contains("UNPARKED TASK") && text.contains("cas-e429"),
+        "an explicit merge must disclose the worker's unfinished lifecycle state: {text}");
+}
+
+#[tokio::test]
+async fn test_worktree_merge_honors_rebound_task_branch_gh1397() {
+    let mut env = test_env();
+    let fixture = rebound_merge_fixture(&mut env).await;
+    let historical = git_stdout(&fixture.repo.root, &["rev-parse", "factory/alice"]);
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("alice".into());
+    request.task_id = Some("cas-e429".into());
+    request.cleanup = Some(false);
+    let response = fixture
+        .service
+        .factory(Parameters(request))
+        .await
+        .unwrap();
+    let text = get_text(&response);
+    assert!(text.contains("Merged worktree"), "{text}");
+    let tree = git_stdout(
+        &fixture.repo.root,
+        &["ls-tree", "-r", "--name-only", "epic/rebound"],
+    );
+    assert!(
+        tree.contains("delivery.txt"),
+        "approved task commit must land: {tree}\n{text}"
+    );
+    assert!(
+        !tree.contains("historical.txt"),
+        "historical generic lane must stay out: {tree}"
+    );
+    run_git(
+        &["merge-base", "--is-ancestor", &fixture.tip, "epic/rebound"],
+        &fixture.repo.root,
+    );
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "factory/alice"]),
+        historical
+    );
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+        git_stdout(
+            fixture.origin.path(),
+            &["rev-parse", "refs/heads/epic/rebound"]
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_worktree_merge_refuses_stale_or_conflicting_rebound_ref_gh1397() {
+    let mut env = test_env();
+    let parent = cas::test_paths::runtime_fixture_parent();
+    for case in ["missing", "remote-conflict", "binding-conflict"] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+        match case {
+            "missing" => {
+                run_git(&["switch", "factory/alice"], &fixture.worker);
+                run_git(&["branch", "-D", &fixture.branch], &fixture.repo.root);
+                run_git(
+                    &["push", "origin", "--delete", &fixture.branch],
+                    &fixture.repo.root,
+                );
+            }
+            "remote-conflict" => run_git(
+                &[
+                    "update-ref",
+                    &format!("refs/heads/{}", fixture.branch),
+                    &before,
+                ],
+                fixture.origin.path(),
+            ),
+            _ => {
+                let tasks = open_task_store(&fixture.cas_root).unwrap();
+                let mut task = tasks.get("cas-e429").unwrap();
+                task.deliverables
+                    .factory_branch_start
+                    .as_mut()
+                    .unwrap()
+                    .assignee = "another-worker".into();
+                tasks.update(&task).unwrap();
+            }
+        }
+        let refs_before = git_stdout(&fixture.repo.root, &["show-ref"]);
+        let origin_before = git_stdout(fixture.origin.path(), &["show-ref"]);
+        let head_before = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+        let mut request = coord_req("worktree_merge");
+        request.id = Some("alice".into());
+        request.task_id = Some("cas-e429".into());
+        request.cleanup = Some(false);
+        let error = fixture
+            .service
+            .factory(Parameters(request))
+            .await
+            .expect_err(case);
+        assert!(
+            error.message.contains("DELIVERY BRANCH")
+                && error.message.contains("No merge was attempted"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["show-ref"]),
+            refs_before,
+            "{case}: local refs changed"
+        );
+        assert_eq!(
+            git_stdout(fixture.origin.path(), &["show-ref"]),
+            origin_before,
+            "{case}: origin mutated"
+        );
+        assert_eq!(
+            git_stdout(&fixture.worker, &["rev-parse", "HEAD"]),
+            head_before,
+            "{case}: source checkout moved"
+        );
+        env.set_current_dir(&parent);
     }
 }
 
@@ -2372,7 +2736,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             assert_ne!(rebased_tip, anchor);
             run_git(&["push", "--force-with-lease", "origin", branch], &peer);
             env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
-            let merged = svc.coordination(Parameters(request)).await
+            let merged = svc.factory(Parameters(request)).await
                 .expect("a reviewed same-patch rebase must merge from the pushed tip");
             assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
             assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(rebased_tip.as_str()));
@@ -2384,7 +2748,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             continue;
         }
         if branch == "delivery/reviewed-correction" {
-            let refused = svc.coordination(Parameters(request)).await
+            let refused = svc.factory(Parameters(request)).await
                 .expect_err("an unsupported recorded name needs an actionable supervisor remedy");
             let message = refused.message.as_ref();
             if !message.contains(branch) || !message.contains("request_changes")
@@ -2399,7 +2763,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         if discover_with_bare {
             env.set(cas::github_issue_attach::GH_BIN_ENV,
                 ci_check_run::ci_concluded(remote.path(), "failure"));
-            let refused = svc.coordination(Parameters(request.clone())).await
+            let refused = svc.factory(Parameters(request.clone())).await
                 .expect_err("per-task discovery must still reach the normal CI gate");
             if !refused.message.contains("CI RED") {
                 failures.push(format!("per-task source must outrank bare worker branch: {refused}"));
@@ -2416,7 +2780,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 ci_check_run::ci_concluded(remote.path(), "failure"));
             let mut stale_request = request.clone();
             stale_request.id = Some(stale.into());
-            let refused = svc.coordination(Parameters(stale_request)).await
+            let refused = svc.factory(Parameters(stale_request)).await
                 .expect_err("stale remote-only source must refuse before merging another parked round");
             let message = refused.message.as_ref();
             if !message.contains("PARKED DELIVERY SOURCE CHANGED")
@@ -2430,7 +2794,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         if branch == "factory/peer-worker-cas-c28b" || branch.ends_with("-r2") {
             run_git(&["push", "origin", &format!("HEAD:refs/heads/{sibling}")], &peer);
             if task.deliverables.parked_branch.is_none() {
-                let refused = svc.coordination(Parameters(request.clone())).await
+                let refused = svc.factory(Parameters(request.clone())).await
                     .expect_err("two fallback branches are ambiguous even at the same SHA");
                 let message = refused.message.as_ref();
                 assert!(message.contains("AMBIGUOUS DELIVERY SOURCE"), "{message}");
@@ -2446,7 +2810,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             task.assignee = Some("other-worker".into());
             tasks.update(&task).unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("task ownership must bind the pushed branch");
             assert!(
@@ -2458,7 +2822,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             task.deliverables.factory_branch_anchor = Some(before.clone());
             tasks.update(&task).unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("origin must match the recorded anchor");
             assert!(
@@ -2483,7 +2847,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             )
             .unwrap();
             let refused = svc
-                .coordination(Parameters(request.clone()))
+                .factory(Parameters(request.clone()))
                 .await
                 .expect_err("ordinary independent QA still gates remote delivery");
             assert!(
@@ -2509,13 +2873,13 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             ci_check_run::ci_concluded(remote.path(), "failure"),
         );
         let refused = svc
-            .coordination(Parameters(request.clone()))
+            .factory(Parameters(request.clone()))
             .await
             .expect_err("normal CI must refuse remote-only code");
         assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
         let mut worker_request = request.clone();
         worker_request.id = Some("peer-worker".into());
-        let refused = svc.coordination(Parameters(worker_request)).await
+        let refused = svc.factory(Parameters(worker_request)).await
             .expect_err("worker alias must reach the same delivery's CI gate");
         assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
@@ -2524,11 +2888,27 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             ci_check_run::green_ci(remote.path()),
         );
         let merged = svc
-            .coordination(Parameters(request))
+            .factory(Parameters(request))
             .await
             .expect("merge remote delivery through normal handler");
         let text = get_text(&merged);
         assert!(text.contains("Merged worktree"), "{text}");
+        // Refused on red, then merged by the tool: the last gate row is a pass,
+        // so the close that follows is no hand merge.
+        let gate: Vec<_> = cas_store::quality_events_for_task(&cas_root, &task.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                cas_store::QualityPayload::CheckRun { check_id, outcome, .. }
+                    if check_id == "worktree_merge" => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            gate,
+            [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass],
+            "{branch}"
+        );
         let target = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
         assert_eq!(
             target,
@@ -2570,14 +2950,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
     let fixture_cwd = std::env::current_dir().unwrap();
     for corrected_after_rebase in [false, true] {
         let repo = GitRepo::new();
-        std::fs::create_dir(repo.root.join("scripts")).unwrap();
-        std::fs::write(
-            repo.root.join("scripts/fast-rows-pre-push.sh"),
-            "#!/bin/sh\n",
-        )
-        .unwrap();
-        run_git(&["add", "scripts"], &repo.root);
-        run_git(&["commit", "-m", "fixture fast rows contract"], &repo.root);
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
         run_git(
             &["init", "--bare", remote.path().to_str().unwrap()],
@@ -2628,16 +3000,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
         run_git(&["commit", "-m", "fix: task delivery"], &worker);
         let old_anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
         run_git(&["push", "origin", &branch], &worker);
-        let fast_rows = repo.root.join(".git/cas/fast-rows");
-        std::fs::create_dir_all(&fast_rows).unwrap();
-        let receipt_at = |head: &str| {
-            std::fs::write(
-                fast_rows.join(format!("{head}.pass")),
-                format!("fast-rows: PASS {head} fixture\n"),
-            )
-            .unwrap();
-        };
-        receipt_at(&old_anchor);
         env.set_current_dir(&worker);
         let service = delivery_service(&cas_root, "repark-worker");
         let close_request = || {
@@ -2730,23 +3092,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
             sibling.status = TaskStatus::Closed;
             tasks.update(&sibling).unwrap();
         }
-        // The old anchor's receipt cannot authorize the rewritten tip.
-        let missing = service.task(Parameters(close_request())).await.unwrap();
-        assert!(
-            get_text(&missing).contains("FAST ROWS REQUIRED"),
-            "{}",
-            get_text(&missing)
-        );
-        assert_eq!(
-            tasks
-                .get(task_id)
-                .unwrap()
-                .deliverables
-                .factory_branch_anchor
-                .as_deref(),
-            Some(old_anchor.as_str())
-        );
-        receipt_at(&tip);
         let retry = service.task(Parameters(close_request())).await.unwrap();
         assert!(
             get_text(&retry).contains("MERGE REQUIRED"),
@@ -2804,7 +3149,7 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
         merge.task_id = Some(task_id.into());
         merge.cleanup = Some(false);
         let result = delivery_service(&cas_root, "repark-supervisor")
-            .coordination(Parameters(merge))
+            .factory(Parameters(merge))
             .await
             .expect("the re-parked branch must merge without another close");
         assert!(
@@ -3024,7 +3369,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     request.supervisor_override = Some(ci_override);
     request.reason = ci_override.then(|| "Fixture supervisor reviewed failing CI".into());
     let first = service
-        .coordination(Parameters(request.clone()))
+        .factory(Parameters(request.clone()))
         .await
         .expect_err("first request must surface the failed observation write");
     assert!(
@@ -3044,7 +3389,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     conn.execute_batch("DROP TRIGGER fail_fixture_observation;")
         .unwrap();
     let retry = service
-        .coordination(Parameters(request.clone()))
+        .factory(Parameters(request.clone()))
         .await
         .expect("retry should reconcile the already-published merge");
     let text = get_text(&retry);
@@ -3061,6 +3406,11 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         if conclusion == "neutral" {
             assert!(tasks.get(task_id).unwrap().notes.contains("CI unconfirmed"), "{text}");
         }
+        let self_handoffs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(self_handoffs, 1, "the dispatch must reach its owner independently of the merge response");
     } else {
         assert!(!retry.is_error.unwrap_or(false), "{text}");
         assert!(dispatch.is_none(), "override merges do not auto-close");
@@ -3091,7 +3441,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     );
     run_git(&["push", "origin", "epic/observation"], &repo.root);
     let target = git_stdout(&repo.root, &["rev-parse", "epic/observation"]);
-    let third = service.coordination(Parameters(request)).await.unwrap();
+    let third = service.factory(Parameters(request)).await.unwrap();
     let text = get_text(&third);
     assert!(text.contains("Already contained"), "{conclusion}: {text}");
     assert_eq!(
@@ -3106,6 +3456,11 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap(),
         dispatch
     );
+    let self_handoffs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(self_handoffs, i64::from(!ci_override), "a repeated merge must not duplicate the dispatch handoff");
     let after: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
@@ -3166,7 +3521,7 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     req.id = Some("factory/alice".into());
     req.task_id = Some(task_id);
     req.cleanup = Some(false);
-    let result = svc.coordination(Parameters(req)).await.expect("merge parked pushed delivery");
+    let result = svc.factory(Parameters(req)).await.expect("merge parked pushed delivery");
     let text = get_text(&result);
     assert!(text.contains("Merged worktree"), "{text}");
     // pin: operator receipt identifies immutable origin authority and preservation, per cas-cfd1 AC3.
@@ -3229,7 +3584,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let hook = hooks.join("pre-push");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
     std::fs::write(&hook, format!(
-        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n git -C {} push origin refs/heads/epic/race:refs/heads/epic/race || exit 1\nfi\n",
+        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n (unset $(git rev-parse --local-env-vars); git -C {} push origin refs/heads/epic/race:refs/heads/epic/race) || exit 1\nfi\n",
         quote(&hooks.join("peer-pushed")), quote(&peer)
     )).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3249,7 +3604,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let service = make_service(root.clone());
                 start.wait();
-                runtime.block_on(service.coordination(Parameters(req)))
+                runtime.block_on(service.factory(Parameters(req)))
                     .map(|result| get_text(&result)).map_err(|error| error.to_string())
             })
         }).collect();
@@ -3274,7 +3629,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     // not committed anything a supervisor may leave alone: it must not answer
     // COMMITTED, and keeps its NOT PUSHED next step.
     let rejected = runtime
-        .block_on(service.coordination_with_budget_for_testing(
+        .block_on(service.factory_with_budget_for_testing(
             req.clone(),
             std::time::Duration::from_secs(50),
             std::time::Duration::ZERO,
@@ -3282,7 +3637,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         .unwrap();
     assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
     assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
-    let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
     // cas-d8ab: count origin fetches. The containment re-check after the
@@ -3292,7 +3647,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
     std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
     run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
-    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
+    let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
     assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
@@ -3306,7 +3661,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let local_before = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
-    let offline = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let offline = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
     let offline = get_text(&offline);
     // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
     assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
@@ -3320,7 +3675,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &repo.root);
     run_git(&["branch", "-D", "epic/race"], remote.path());
     let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
-    let local_only = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let local_only = runtime.block_on(service.factory(Parameters(request("charlie")))).unwrap();
     let local_only = get_text(&local_only);
     assert!(!local_only.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{local_only}");
     // pin: the existing contained receipt names the local authority.
@@ -3384,7 +3739,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         if local_behind {
             run_git(&["reset", "--hard", &format!("{before}^")], &repo.root);
         }
-        let result = service.coordination(Parameters(request.clone())).await.unwrap();
+        let result = service.factory(Parameters(request.clone())).await.unwrap();
         let text = get_text(&result);
         assert!(text.contains(&format!("Target: origin/main @ {before}")), "{text}");
         if local_behind {
@@ -3413,7 +3768,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         if parked_count == 0 { tasks.add(&sibling).unwrap(); } else { tasks.update(&sibling).unwrap(); }
         for id in ["alice", "factory/alice"] {
             implicit.id = Some(id.into());
-            match service.coordination(Parameters(implicit.clone())).await {
+            match service.factory(Parameters(implicit.clone())).await {
                 Err(error) if error.message.to_ascii_lowercase().contains("ambiguous") => {}
                 outcome => failures.push(format!("{id} with {parked_count} parked tasks must refuse as ambiguous: {outcome:?}")),
             }
@@ -3436,7 +3791,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     task.deliverables.factory_branch_anchor = Some(tip.clone());
     task.deliverables.parked_branch = Some(rework.into());
     tasks.update(&task).unwrap();
-    match service.coordination(Parameters(request)).await {
+    match service.factory(Parameters(request)).await {
         Ok(result) => {
             if !get_text(&result).contains(rework)
                 || !Command::new("git").args(["merge-base", "--is-ancestor", &tip, "main"])
@@ -3456,7 +3811,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     tasks.update(&task).unwrap();
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
     implicit.id = Some("alice".into());
-    match service.coordination(Parameters(implicit)).await {
+    match service.factory(Parameters(implicit)).await {
         Ok(result) => {
             let text = get_text(&result);
             if text.contains("Already contained")
@@ -3532,7 +3887,7 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     request.cleanup = Some(false);
     let target_status = git_stdout(&repo.root, &["status", "--porcelain"]);
     for _ in 0..2 {
-        let error = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+        let error = supervisor.factory(Parameters(request.clone())).await.unwrap_err();
         assert!(error.message.contains("CONTENT CONFLICT"), "{error}");
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), target_tip);
         assert_eq!(git_stdout(&repo.root, &["status", "--porcelain"]), target_status);
@@ -3594,7 +3949,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
     let root = init_cas_dir(&repo.root, &mut env).unwrap();
     let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
-        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
+        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa]\nmode='per_task'\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
     )).unwrap();
     configure("off");
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
@@ -3641,7 +3996,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     request.id = Some(branch.into());
     request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
-    let merged = supervisor.coordination(Parameters(request.clone())).await.unwrap();
+    let merged = supervisor.factory(Parameters(request.clone())).await.unwrap();
     let gate = get_text(&merged);
     assert!(gate.contains("UNOWNED USER-FACING FILE") && gate.contains("src/pages/email.ts"), "{gate}");
     run_git(&["merge-base", "--is-ancestor", &anchor, "epic/upkeep"], &repo.root);
@@ -3678,7 +4033,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(repaired.as_str()));
     assert_ne!(repaired, anchor);
     env.set_current_dir(&repo.root);
-    let qa_required = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+    let qa_required = supervisor.factory(Parameters(request.clone())).await.unwrap_err();
     assert!(qa_required.message.contains("INDEPENDENT QA REQUIRED"), "{qa_required}");
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge,
         "a QA wait must keep its existing ownership, rather than return a source fix");
@@ -3688,8 +4043,112 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
         &root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &repaired,
         "fixture: isolate post-merge source correction from independent QA", chrono::Utc::now(),
     ).unwrap();
-    let accepted = supervisor.coordination(Parameters(request)).await.unwrap();
+    let accepted = supervisor.factory(Parameters(request)).await.unwrap();
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{}", get_text(&accepted));
+}
+
+/// A task's unnamed registry commit precedes a target-sync merge, as in the
+/// delivered cas-0a75 lane. Post-merge generation must not hide that case.
+#[tokio::test]
+async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
+    let mut env = test_env();
+    for case in ["changed", "missing", "unchanged"] {
+        let repo = GitRepo::new();
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+        run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+        let registry_path = "docs/qa/journeys.yaml";
+        let registry = "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/pages/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Open}\n    owners: ['src/pages/signup.ts']\n";
+        let linked = registry.replace("check: Read state", "check: Read state, bug: {task: cas-3712}");
+        for dir in ["docs/qa", "src/pages", "hub-web/dist", "scripts"] {
+            std::fs::create_dir_all(repo.root.join(dir)).unwrap();
+        }
+        std::fs::write(repo.root.join(registry_path), if case == "unchanged" { &linked } else { registry }).unwrap();
+        std::fs::write(repo.root.join("src/pages/signup.ts"), "signup\n").unwrap();
+        std::fs::write(repo.root.join("hub-web/dist/app.js"), "old bundle\n").unwrap();
+        std::fs::write(repo.root.join("scripts/regenerate-generated-artifacts.sh"),
+            "#!/usr/bin/env bash\nset -euo pipefail\ncat src/pages/signup.ts > hub-web/dist/app.js\ngit add hub-web/dist\ngit commit -q -m 'build: regenerate dist from merged sources'\n").unwrap();
+        run_git(&["add", "."], &repo.root);
+        run_git(&["commit", "-m", "base journey registry"], &repo.root);
+        run_git(&["branch", "epic/upkeep"], &repo.root);
+        run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
+        let root = init_cas_dir(&repo.root, &mut env).unwrap();
+        let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
+            "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-generated-upkeep\"\n[qa.registry]\nenforce = \"{stage}\"\n"
+        )).unwrap();
+        configure("off");
+        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+        for (id, name, role) in [
+            ("upkeep-worker", "alice", AgentRole::Worker),
+            ("upkeep-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            register_delivery_agent(&root, id, name, role, "upkeep-session");
+        }
+        let branch = "factory/alice-cas-3712";
+        let worker = root.join("worktrees/alice");
+        repo.add_worktree(&worker, branch);
+        let agents = open_agent_store(&root).unwrap();
+        let mut agent = agents.get("upkeep-worker").unwrap();
+        agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
+        agents.update(&agent).unwrap();
+        let mut task = Task::new("cas-3712".into(), "Repair signup state".into());
+        task.task_type = TaskType::Bug;
+        task.depth = TaskDepth::Light;
+        task.assignee = Some("alice".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:merge-generated-upkeep".into(), target_branch: "epic/upkeep".into(),
+        });
+        let tasks = open_task_store(&root).unwrap();
+        tasks.add(&task).unwrap();
+        env.set_current_dir(&worker);
+        let service = delivery_service(&root, "upkeep-worker");
+        let started = service.task(Parameters(task_req(serde_json::json!({"action": "start", "id": task.id})))).await.unwrap();
+        assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
+        std::fs::write(worker.join("src/pages/signup.ts"), "fixed signup\n").unwrap();
+        run_git(&["commit", "-am", "fix(cas-3712): repair signup state"], &worker);
+        if case == "changed" {
+            std::fs::write(worker.join(registry_path), &linked).unwrap();
+            run_git(&["commit", "-am", "docs: register signup regression"], &worker);
+        }
+        run_git(&["switch", "epic/upkeep"], &repo.root);
+        std::fs::write(repo.root.join("README.md"), "other task\n").unwrap();
+        run_git(&["commit", "-am", "advance target"], &repo.root);
+        run_git(&["push", "origin", "epic/upkeep"], &repo.root);
+        run_git(&["merge", "--no-ff", "epic/upkeep", "-m", "sync target"], &worker);
+        std::fs::write(worker.join("hub-web/dist/app.js"), "worker bundle\n").unwrap();
+        run_git(&["commit", "-am", "build: refresh worker bundle"], &worker);
+        let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", branch], &worker);
+        let parked = service.task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "signup repaired",
+        })))).await.unwrap();
+        assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
+        cas_store::waive_qa_pass(&root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &anchor,
+            "fixture: isolate post-merge registry attribution", chrono::Utc::now()).unwrap();
+        configure("enforce");
+        env.set_current_dir(&repo.root);
+        let supervisor = delivery_service(&root, "upkeep-supervisor");
+        let mut request = coord_req("worktree_merge");
+        request.id = Some(branch.into());
+        request.task_id = Some(task.id.clone());
+        request.cleanup = Some(false);
+        let merged = supervisor.factory(Parameters(request)).await.unwrap();
+        let text = get_text(&merged);
+        assert_eq!(git_stdout(&repo.root, &["log", "-1", "--format=%s", "epic/upkeep"]),
+            "build: regenerate dist from merged sources", "automatic regeneration must still run");
+        let final_task = tasks.get(&task.id).unwrap();
+        if case == "changed" {
+            assert_eq!(final_task.status, TaskStatus::Closed, "{case}: {text}");
+        } else {
+            assert!(text.contains("BUG FIX WITHOUT A CASE"), "{case}: {text}");
+            assert_eq!(final_task.status, TaskStatus::Open, "{case}: {text}");
+        }
+        env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+        // TempDir::drop ignores cleanup failures. A passing integration must
+        // not leave a fixture that invalidates the runner's clean-tip receipt.
+        repo._temp.close().expect("remove merged delivery fixture");
+        remote.close().expect("remove merged delivery remote");
+    }
 }
 
 #[tokio::test]
@@ -3753,7 +4212,7 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         req.id = Some("factory/alice".into());
         req.task_id = Some(task_id);
         req.cleanup = Some(case == "cleanup");
-        let error = svc.coordination(Parameters(req)).await.expect_err(case);
+        let error = svc.factory(Parameters(req)).await.expect_err(case);
         if case == "conflict" {
             assert!(error.message.to_lowercase().contains("conflict"), "{case}: {error:?}");
         } else if case == "anchor_mismatch" {
@@ -3799,7 +4258,7 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/closed-worker".to_string());
     req.task_id = Some(worker_task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(result.is_err(), "closed parent epic must reject the merge");
     let message = format!("{:?}", result.unwrap_err());
@@ -3863,7 +4322,7 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     req.task_id = Some(standalone_task.id);
     req.cleanup = Some(false);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("a declared non-trunk WorkTarget must not require allow_trunk");
     let text = get_text(&result);
@@ -3910,7 +4369,7 @@ async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
     req.id = Some("factory/bob".to_string());
     req.task_id = Some(standalone_task.id);
     let refused = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("missing WorkTarget must require explicit trunk authorization");
     assert!(
@@ -3968,7 +4427,7 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     trunk_ok.task_id = Some(standalone_task.id);
     trunk_ok.allow_trunk = Some(true);
     let result = svc
-        .coordination(Parameters(trunk_ok))
+        .factory(Parameters(trunk_ok))
         .await
         .expect("allow_trunk=true must authorize a genuine trunk fallback");
     let text = get_text(&result);
@@ -4001,7 +4460,7 @@ async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/carol".to_string());
     req.task_id = Some("cas-does-not-exist".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     // A caller-asserted task_id we can't verify must refuse — never guess a
     // merge target (that's exactly how the original wrong-target-to-trunk
@@ -4039,7 +4498,7 @@ async fn test_worktree_merge_refuses_silent_trunk_when_no_task_id_and_no_epic_co
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/dave".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "no task_id / no epic / no focus must refuse silent trunk (cas-0b32)"
@@ -4102,7 +4561,7 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("hv-director".to_string());
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("assignee epic merge should succeed without task_id");
     let text = get_text(&result);
@@ -4216,7 +4675,7 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/reassigned-worker".to_string());
     req.allow_trunk = Some(true);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let text = get_text(&result.expect("allow_trunk merge should succeed"));
     assert!(
@@ -4303,7 +4762,7 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     let error = result.expect_err("focused epic alone must not authorize a merge");
     let text = format!("{error:?}");
@@ -4359,7 +4818,7 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "cross-project focused epic must not authorize merge to that epic/trunk silently"
@@ -4418,7 +4877,7 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/stranger".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "non-member worker must not inherit focused epic merge target"
@@ -4472,7 +4931,7 @@ async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/mixed".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(
         result.is_err(),
         "mixed branchful+branchless parent epics must reject, not pick branchful"
@@ -4516,7 +4975,7 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/nb".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(result.is_err(), "branchless parent epic must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(
@@ -4574,7 +5033,7 @@ async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/multi".to_string());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
     assert!(result.is_err(), "ambiguous assignee epics must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(
@@ -4636,9 +5095,9 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     // Path-resolution fixture has no epic context — allow_trunk (not force).
     req.allow_trunk = Some(true);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
-        .expect("coordination call should succeed");
+        .expect("factory call should succeed");
     let text = get_text(&result);
 
     assert!(
@@ -4686,7 +5145,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("matching worker/task must merge");
     let text = get_text(&result);
@@ -4727,7 +5186,7 @@ async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(foreign_task_id.clone());
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -4776,7 +5235,7 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/carol".to_string());
     req.task_id = Some(orphan_task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -4827,7 +5286,7 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
-    let result = svc.coordination(Parameters(req)).await;
+    let result = svc.factory(Parameters(req)).await;
 
     assert!(
         result.is_err(),
@@ -4879,7 +5338,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     req.id = Some("factory/alice".to_string());
     req.task_id = Some(task_id);
     let result = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("matching lease must authorize task_id");
     let text = get_text(&result);
@@ -5787,6 +6246,13 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         "the new task proof cycle must be authoritative before merge"
     );
 
+    // A real remote distinguishes a held close from a publication failure.
+    let origin = home.path().join("origin.git");
+    run_git(&["init", "--bare", origin.to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", origin.display()),
+        "git@github.com:org/delivery.git"], &repo.root);
+    run_git(&["push", "origin", "--all"], &repo.root);
+
     // The production merge must persist CloseReady before cleanup removes
     // the source. The newer close gate then simulates interruption after
     // cleanup but before Delivered.
@@ -5802,10 +6268,12 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(true);
     let result = supervisor_service
-        .coordination(Parameters(merge))
+        .factory(Parameters(merge))
         .await
         .expect("public cleanup-before-close-gate merge");
     let gate_text = get_text(&result);
+    assert!(!result.is_error.unwrap_or(false), "Git landed; only close is held: {gate_text}");
+    assert!(gate_text.contains("Merge landed; close held"), "{gate_text}");
     assert!(
         gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
         "worktree_merge must return the exact actionable close gate, got:\n{gate_text}"
@@ -5882,11 +6350,6 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     if !system_a {
         // Legacy park metadata survives cleanup; the immutable receipt owns resume.
         gate_cleared_task.deliverables.parked_branch = Some(receipt.source_branch.clone());
-        let cleaned_origin = home.path().join("cleaned-origin.git");
-        run_git(&["init", "--bare", cleaned_origin.to_str().unwrap()], &repo.root);
-        run_git(&["config", &format!("url.{}.insteadOf", cleaned_origin.display()),
-            "git@github.com:org/delivery.git"], &repo.root);
-        run_git(&["push", "origin", "main"], &repo.root);
     }
     task_store
         .update(&gate_cleared_task)
@@ -5902,7 +6365,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     retry.allow_trunk = Some(true);
     retry.cleanup = Some(true);
     let retry_result = supervisor_service
-        .coordination(Parameters(retry))
+        .factory(Parameters(retry))
         .await
         .expect("source-less idempotent close-ready retry");
     assert!(
@@ -6113,7 +6576,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
     let result = supervisor_service
-        .coordination(Parameters(merge))
+        .factory(Parameters(merge))
         .await
         .expect("public stale-tip merge response");
     assert!(get_text(&result).contains("tip_changed"));
@@ -7059,7 +7522,7 @@ async fn test_worktree_cleanup_removes_retired_system_b_worktree() {
     let svc = make_service(cas_root.clone());
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("retired-fox".to_string());
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         !text.contains("experimental and disabled"),
@@ -7093,7 +7556,7 @@ async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("no-such-worker".to_string());
     let err = svc
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect_err("unknown target must be an error, not a success message");
 
@@ -7139,7 +7602,7 @@ async fn test_worktree_cleanup_refuses_unmerged_branch_without_force() {
     let svc = make_service(cas_root.clone());
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("unmerged-owl".to_string());
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         text.contains("Refused") && text.contains("exist on no other branch"),
@@ -7176,7 +7639,7 @@ async fn test_worktree_cleanup_refuses_live_assignee_even_with_force() {
     let mut req = coord_req("worktree_cleanup");
     req.id = Some("busy-lynx".to_string());
     req.force = Some(true);
-    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+    let text = get_text(&svc.factory(Parameters(req)).await.expect("cleanup"));
 
     assert!(
         text.contains("Refused") && text.contains("still a live agent"),
@@ -7213,7 +7676,7 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
         let mut req = coord_req(action);
         req.id = Some("anything".to_string());
         req.task_id = Some("anything".to_string());
-        let text = get_text(&svc.coordination(Parameters(req)).await.expect(action));
+        let text = get_text(&svc.factory(Parameters(req)).await.expect(action));
         assert!(
             text.contains("System A worktrees are disabled by `[worktrees].enabled`")
                 && text.contains(
@@ -7304,6 +7767,43 @@ fn c85e_trunk_target() -> WorkTarget {
     }
 }
 
+/// Routine receipts must be exercised through the merge handler, not its formatter.
+#[tokio::test]
+async fn validated_epic_merge_returns_compact_receipt() {
+    let (repo, _env, cas_root, wt, _origin) = c85e_repo_with_alice_work();
+    let source_sha = git_stdout(&wt, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("compact-merge".into(), "Compact merge".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("alice".into());
+    task.depth = TaskDepth::Light;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: C85E_SELECTOR.into(), target_branch: "epic/c85e".into(),
+    });
+    tasks.add(&task).unwrap();
+    park_merge_fixture(&cas_root, &wt, "alice", &task.id);
+    let service = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".into());
+    req.task_id = Some(task.id);
+    req.cleanup = Some(false);
+    let text = get_text(&service.factory(Parameters(req)).await.unwrap());
+    eprintln!("real merge reply: {} chars\n{text}", text.chars().count());
+    assert!(text.chars().count() <= 800, "{text}");
+    assert_eq!(tasks.get("compact-merge").unwrap().status, TaskStatus::Closed);
+    assert!(text.contains("next: none."), "{text}");
+    let path = text.split_once("Details: ").expect("immutable detail reference").1
+        .split_once(" (SHA-256 ").unwrap().0;
+    let detail = std::fs::read_to_string(path).unwrap();
+    // pin: immutable details retain the original successful merge receipt.
+    assert!(detail.contains("Merged worktree") && detail.contains(&source_sha), "{detail}");
+    // pin: the public receipt must state why CI admitted this merge.
+    assert!(text.contains("Merge policy: merge proceeded on successful validation."), "{text}");
+    assert!(text.contains(&format!("CI SHA: {source_sha}")), "{text}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+        git_stdout(_origin.path(), &["rev-parse", "refs/heads/epic/c85e"]));
+}
+
 /// cas-c85e (GH #997), the incident shape end to end through the public
 /// surface: a task created on main is moved into an epic with
 /// `task update epic=`, and worktree_merge (with or without task_id) lands on
@@ -7359,7 +7859,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
         req.task_id = task_id.clone();
         req.cleanup = Some(false);
         let text = get_text(
-            &svc.coordination(Parameters(req))
+            &svc.factory(Parameters(req))
                 .await
                 .unwrap_or_else(|e| panic!("merge (task_id={task_id:?}): {}", e.message)),
         );
@@ -7432,7 +7932,7 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
         req.task_id = task_id.clone();
         req.cleanup = Some(false);
         let refused = svc
-            .coordination(Parameters(req))
+            .factory(Parameters(req))
             .await
             .expect_err("trunk must not replace the epic lane silently");
         assert!(
@@ -7455,7 +7955,7 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let text = get_text(
-        &svc.coordination(Parameters(req))
+        &svc.factory(Parameters(req))
             .await
             .unwrap_or_else(|e| panic!("authorized trunk merge: {}", e.message)),
     );

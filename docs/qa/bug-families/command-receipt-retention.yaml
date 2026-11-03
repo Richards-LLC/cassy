@@ -1,0 +1,4 @@
+title: Supervisor-command receipts expire after their replay window instead of filling a fixed cap, a replay inside the window returns its stored receipt without re-running, and a refused unconfirmed command is audited as denied
+tasks: [cas-7629]
+invariants: [HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME]
+journeys: [HUB-J27]

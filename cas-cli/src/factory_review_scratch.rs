@@ -703,6 +703,7 @@ struct ReviewBytes {
 }
 
 /// One walk supplies the row size and both disposable payload sizes.
+#[cfg(test)]
 fn review_bytes(directory: &Path) -> ReviewBytes {
     review_bytes_until(directory, None).unwrap_or_default()
 }

@@ -160,6 +160,18 @@ pub(crate) struct TestEnvGuard {
 }
 
 impl TestEnvGuard {
+    /// The operator-only headful fixture uses the selected Claude account.
+    /// Restore only its scrubbed credentials, under the guard's existing lock;
+    /// ambient Cassy identity, Git selectors and other provider secrets stay isolated.
+    pub(crate) fn preserve_claude_credentials(&mut self) {
+        let credentials: Vec<_> = self.saved.iter()
+            .filter(|(key, _)| key.to_str().is_some_and(|key|
+                key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_")))
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key.clone(), value.clone())))
+            .collect();
+        for (key, value) in credentials { self.set(key, value); }
+    }
+
     pub(crate) fn new() -> Self {
         // Mark this thread before taking the process-wide lock. A nested
         // constructor can then fail immediately instead of blocking forever

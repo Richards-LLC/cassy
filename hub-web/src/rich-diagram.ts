@@ -41,9 +41,5 @@ export async function diagram(document: Document, source: string): Promise<HTMLE
   const figure = document.createElement("figure"); figure.className = "rich-diagram";
   svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Mermaid diagram");
   figure.append(document.importNode(svg, true));
-  const sourceDetails = document.createElement("details");
-  const summary = document.createElement("summary"); summary.textContent = "Diagram source";
-  const code = document.createElement("pre"); code.className = "markdown-code"; code.textContent = source;
-  sourceDetails.append(summary, code); figure.append(sourceDetails);
   return figure;
 }

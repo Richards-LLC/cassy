@@ -1,4 +1,4 @@
-//! Merge idle prompts require settled CI and live target evidence.
+//! Merge idle prompts require worker completion, settled CI and live target evidence.
 use super::{DirectorData, DirectorEvent};
 use crate::ui::factory::director::{
     MergeAlertEvidence, MergeAlertFreshness, check_merge_alert_freshness,
@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
-const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
 const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
 const SETTLED_RETRY: chrono::Duration = chrono::Duration::minutes(10);
 
@@ -100,7 +99,7 @@ pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
 
 /// Local ref reads are cheap; network evidence belongs to the external lane.
 /// Keep both refs: a push can change origin without moving the local tip.
-fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String)> {
+fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String, bool)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event else { return None; };
     let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(&active.task_id).ok()?;
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch);
@@ -114,8 +113,33 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
     // a ref, so they belong to the fingerprint that decides when to re-read.
     let staged = task.deliverables.integration_batch.is_some();
     let declined = tip.as_ref().is_some_and(|tip| task.deliverables.declined_factory_anchors().contains(tip));
-    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined));
-    Some((task.id, tip.unwrap_or_default(), refs))
+    let marked_ready = tip.as_deref().is_some_and(|tip| {
+        crate::ui::factory::director::delivery_marked_ready(&task, tip)
+            && (task.status == cas_types::TaskStatus::AwaitingMerge
+                || crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+                    repo, &task, &branch, tip,
+                ))
+    });
+    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined, marked_ready));
+    Some((task.id, tip.unwrap_or_default(), refs, marked_ready))
+}
+
+/// Missing CI is not an actionable merge decision for a no-code or
+/// documentation-only delivery. Unknown Git evidence stays eligible so a
+/// failed path read cannot silently hide a code delivery.
+fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, tip: &str) -> bool {
+    let Some(task) = crate::store::open_task_store_local(&repo.join(".cas"))
+        .ok().and_then(|store| store.get(task_id).ok()) else { return false; };
+    if task.execution_note.as_deref() == Some("no-code") { return true; }
+    let (_, target, _) = crate::ui::factory::director::resolve_merge_target_for_task(data, task_id);
+    let Some(target) = target else { return false; };
+    let base = format!("origin/{target}");
+    let Some(paths) = crate::git_evidence::git_text(repo, &["diff", "--name-only", &base, tip, "--"])
+    else { return false; };
+    !paths.is_empty() && paths.lines().all(|path| {
+        let path = path.to_ascii_lowercase();
+        path.ends_with(".md") || path.starts_with("docs/") || path.contains("/docs/")
+    })
 }
 
 /// One observation supplies both readiness and worker waits. Settled results
@@ -123,9 +147,23 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
 /// reruns, while pending/unknown retains the existing retry cadence.
 pub(super) fn read_delivery(
     cache: &ProbeCache, event: &DirectorEvent, data: &DirectorData, repo: &Path, now: DateTime<Utc>,
+    supervisor: &str,
 ) -> (Option<Ready>, Option<(String, WorkerWait)>) {
     let cas_dir = repo.join(".cas");
-    let Some((task, tip, refs)) = fingerprint(event, data, repo) else { return (None, None); };
+    let Some((task, tip, refs, marked_ready)) = fingerprint(event, data, repo) else {
+        return (None, read_worker_wait(event, data, &cas_dir, repo, supervisor));
+    };
+    // Check live task evidence before reusing either an in-memory read or a
+    // durable READY receipt: a same-tip checkpoint note can withdraw readiness.
+    // Completion controls merge readiness, not the separate idle/build/CI
+    // wait signal. An unfinished checkpoint still has its own pushed tip.
+    if !marked_ready { return (None, read_worker_wait(event, data, &cas_dir, repo, supervisor)); }
+    if crate::store::open_task_store_local(&cas_dir).ok()
+        .and_then(|store| store.get(&task).ok())
+        .is_some_and(|task| crate::ui::factory::director::hold_decision_after_park(&task.notes))
+    {
+        return (None, None);
+    }
     if let Some(ready) = prior_ready(&cas_dir, &task, &tip) {
         return (Some(ready), None);
     }
@@ -140,13 +178,20 @@ pub(super) fn read_delivery(
         let mut wait = previous.wait.clone();
         if let Some((worker, read)) = &mut wait {
             read.waiting = worker_build_pending(data, &cas_dir, worker) || read.ci == "pending";
+            read.completion = crate::factory_worker_runs::snapshot(&cas_dir, worker, Some(&read.task), now)
+                .ok().and_then(|snapshot| snapshot.completion);
         }
         return (previous.ready.clone(), wait);
     }
-    let wait = read_worker_wait(event, data, &cas_dir, repo);
+    let wait = read_worker_wait(event, data, &cas_dir, repo, supervisor);
     let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
     let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
-    let refs = fingerprint(event, data, repo).map(|(_, _, refs)| refs).unwrap_or(refs);
+    if (ci == "unknown" || ready.as_ref().is_some_and(|ready| ready.ci == "unknown"))
+        && suppress_unknown_ci(repo, data, &task, &tip)
+    {
+        return (None, None);
+    }
+    let refs = fingerprint(event, data, repo).map(|(_, _, refs, _)| refs).unwrap_or(refs);
     let mut reads = cache.reads.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // An older in-flight observation cannot overwrite a newer request's read.
     if reads.get(&task).is_none_or(|previous| previous.checked_at <= now) {
@@ -160,6 +205,7 @@ struct IdleSignal {
     task: String,
     tip: Option<String>,
     ci: &'static str,
+    completed_run: Option<String>,
 }
 
 struct Retry {
@@ -172,7 +218,9 @@ struct Retry {
 pub(super) struct Retries {
     pub(super) probes: ProbeCache,
     entries: HashMap<String, Retry>,
-    idle_signals: HashMap<String, (IdleSignal, DateTime<Utc>)>,
+    /// One relay per unchanged worker/task/delivery/completed-run episode.
+    /// Timer expiration and temporary waits never create another episode.
+    idle_signals: HashMap<String, IdleSignal>,
     #[cfg(test)]
     pub now: Option<DateTime<Utc>>,
 }
@@ -204,20 +252,18 @@ impl Retries {
         }
     }
 
-    pub fn waiting(&mut self, worker: &str) {
-        // A later completed wait is a changed state, even at the same tip.
-        self.idle_signals.remove(worker);
-    }
-
-    /// Consume only a rendered, live relay. Suppressed waits never consume it.
-    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
-        let signal = IdleSignal { task: read.task.clone(), tip: read.tip.clone(), ci: read.ci };
-        if let Some((previous, sent_at)) = self.idle_signals.get(worker)
-            && previous == &signal && now.signed_duration_since(*sent_at) < IDLE_RELAY_BACKOFF
-        {
-            return false;
-        }
-        self.idle_signals.insert(worker.to_string(), (signal, now));
+    /// Consume only a rendered live relay. A new completed run re-arms the
+    /// episode even at the same tip; changing message ages never does.
+    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait) -> bool {
+        let signal = IdleSignal {
+            task: read.task.clone(), tip: read.tip.clone(), ci: read.ci,
+            completed_run: read.completion.as_ref().map(|run| run.id.clone()).or_else(|| {
+                self.idle_signals.get(worker).filter(|old| old.task == read.task)
+                    .and_then(|old| old.completed_run.clone())
+            }),
+        };
+        if self.idle_signals.get(worker) == Some(&signal) { return false; }
+        self.idle_signals.insert(worker.to_string(), signal);
         true
     }
 
@@ -325,9 +371,9 @@ pub(super) fn ready_prompt(
         format!("Merge now: `{prefix}factory action=worktree_merge id={worker} task_id={}` into {target}.", ready.evidence.task_id)
     };
     Some(crate::ui::factory::director::Prompt {
-        merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
+        merge_ready: true, merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
         text: format!(
-            "READY TO MERGE — pushed delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nDo not wait for park or a merge request; the merge needs no worker action. Existing CI and QA merge gates still apply.",
+            "READY TO MERGE — worker-declared delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nThe worker declared this exact tip ready. Existing CI and QA merge gates still apply.",
             ready.tip, ready.evidence.task_id, ready.evidence.factory_branch,
             ready.evidence.unmerged_count, ready.evidence.factory_branch,
             ready.evidence.checked_epic_ref, ready.evidence.epic_sha,
@@ -359,6 +405,7 @@ pub(super) struct WorkerWait {
     pub tip: Option<String>,
     pub ci: &'static str,
     pub waiting: bool,
+    pub completion: Option<crate::factory_worker_runs::Completion>,
 }
 
 /// A self-reminder is a promised wake, not a stalled worker. Old-task,
@@ -400,25 +447,44 @@ pub(super) fn worker_has_pending_reminder(
     })
 }
 
+/// Live registered commands and candidate requests outlive harness turns.
+/// Lane locks and native descendants remain additional positive evidence.
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
+    use crate::cli::factory::wedged;
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;
     };
-    stored.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
-        && stored.metadata.get("clone_path").is_some_and(|clone| {
-            crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
-        })
+    if stored.machine_id != Some(cas_types::Agent::get_or_generate_machine_id()) { return false; }
+    if crate::factory_worker_runs::snapshot(cas_dir, worker, None, Utc::now())
+        .is_ok_and(|run| run.running)
+        || crate::factory_candidate_queue::worker_build_pending(cas_dir, worker, stored.factory_session.as_deref())
+    { return true; }
+    if stored.metadata.get("clone_path").is_some_and(|clone| {
+        crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
+    }) { return true; }
+    // Match worker_status's harness discovery. Trust a stored PID only while
+    // alive and, when recorded, still the same process incarnation.
+    let pid = wedged::find_worker_pid(&wedged::RealProcessTable, &stored.name)
+        .or_else(|| stored.pid.filter(|&pid| {
+            stored.pid_starttime.map_or_else(
+                || crate::mcp::daemon::pid_alive(pid),
+                |start| crate::mcp::daemon::pid_matches_fingerprint(pid, start),
+            )
+        }));
+    // An unavailable tree is not positive evidence of background work.
+    pid.is_some_and(|pid| wedged::background_processes_for(pid).is_active())
 }
 
 /// Read the current delivery, not the remembered event's task. Local build
-/// evidence comes from the registered clone's OS lane lock; CI is exact-tip.
+/// evidence comes from its OS lane lock or live harness children; CI is exact-tip.
 /// Runs with the existing external delivery job, never on the control lane.
 pub(super) fn read_worker_wait(
     event: &DirectorEvent,
     data: &DirectorData,
     cas_dir: &Path,
     repo: &Path,
+    _supervisor: &str,
 ) -> Option<(String, WorkerWait)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(_), .. } = event else {
         return None;
@@ -434,7 +500,9 @@ pub(super) fn read_worker_wait(
             })
     })?;
     let build_pending = worker_build_pending(data, cas_dir, worker);
-    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending };
+    let completion = crate::factory_worker_runs::snapshot(cas_dir, worker, Some(&task.id), Utc::now())
+        .ok().and_then(|snapshot| snapshot.completion);
+    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending, completion };
     if build_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
         .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));
@@ -518,6 +586,10 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
         task_id, worker, task.deliverables.parked_branch.as_deref(), None, resolve, |_, _| false,
     );
     let tip = tip?;
+    if !crate::ui::factory::director::delivery_marked_ready(&task, &tip) {
+        *observed_ci = "not-ready";
+        return None;
+    }
     let known = known.filter(|known| known.task == task_id && known.tip.as_deref() == Some(&tip));
     // cas-43d2: a rejected tip stays rejected until the worker commits, which
     // moves the fingerprint; settle it instead of re-reading every minute.
@@ -535,7 +607,9 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     // ordinary slow-retry interval, like a failed CI read.
     if crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
         repo, &task, &branch, &tip,
-    ).is_err() {
+    ).is_err() || !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+        repo, &task, &branch, &tip,
+    ) {
         *observed_ci = "not-ready";
         return None;
     }

@@ -16,6 +16,10 @@ pub(super) struct MediaQuery {
 pub(crate) struct AdditionalContentSecurityPolicy(pub HeaderValue);
 
 const MEDIA_MIME_ALLOWLIST: &[&str] = &["image/*", "video/*", "audio/*", "application/pdf"];
+/// The other types this hub's own upload sniffer assigns. The media routes admit
+/// them only for the session's own composer upload, and never as a document:
+/// text is served as sandboxed UTF-8 plain text and anything else downloads.
+const OWN_UPLOAD_MIME_ALLOWLIST: &[&str] = &["text/plain", "application/zip"];
 
 fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
     let valid_token = |part: &str| {
@@ -37,12 +41,42 @@ fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
         })
 }
 
-/// Fetch no URL until both the session and the thread's published ref match.
+enum ArtifactSource {
+    Cloud(std::path::PathBuf),
+    Composer(std::fs::File),
+}
+
+struct ScopedArtifact {
+    record: PublishedArtifact,
+    source: ArtifactSource,
+}
+
+impl ScopedArtifact {
+    /// `Some(false)` admits by the route's allowlist; `Some(true)` only as a
+    /// session's own upload, which the caller must serve as a non-document.
+    fn admission(
+        &self,
+        allowlist: &'static [&'static str],
+        own_uploads: &'static [&'static str],
+    ) -> Option<bool> {
+        if mime_allowed(&self.record.mime, allowlist) {
+            Some(false)
+        } else if matches!(self.source, ArtifactSource::Composer(_))
+            && mime_allowed(&self.record.mime, own_uploads)
+        {
+            Some(true)
+        } else {
+            None
+        }
+    }
+}
+
+/// Resolve only a published thread ref or the session's own composer upload.
 async fn scoped<R: SessionReadModel>(
     state: &HubState<R>,
     session: &str,
     artifact: &str,
-) -> Result<(std::path::PathBuf, PublishedArtifact), Response> {
+) -> Result<ScopedArtifact, Response> {
     let found = state
         .catalog
         .list()
@@ -57,6 +91,15 @@ async fn scoped<R: SessionReadModel>(
     tokio::task::spawn_blocking(move || {
         let root = crate::store::find_cas_root_ignoring_env(std::path::Path::new(&project)).ok()?;
         let store = cas_store::SqliteArtifactStore::open(&root).ok()?;
+        if let Some(record) = store.get(&artifact).ok()?
+            && record.task_id == format!("commander-{session}")
+        {
+            let file = super::composer_upload::open_preview(&root, &session, &record).ok()?;
+            return Some(ScopedArtifact {
+                record,
+                source: ArtifactSource::Composer(file),
+            });
+        }
         let record = store.get_for_session(&artifact, &session).ok()??;
         if record.status != "committed"
             || record
@@ -68,7 +111,10 @@ async fn scoped<R: SessionReadModel>(
         {
             return None;
         }
-        Some((root, record))
+        Some(ScopedArtifact {
+            record,
+            source: ArtifactSource::Cloud(root),
+        })
     })
     .await
     .ok()
@@ -97,7 +143,7 @@ fn refusal(error: &anyhow::Error) -> Response {
 }
 
 /// Issue a reusable ticket only for a live SessionRead context and a committed
-/// ref in that session's thread. `allowlist` is a static, server-owned MIME list,
+/// ref in that session's thread or its own upload. `allowlist` is a static, server-owned MIME list,
 /// never request input; page routes can admit HTML without relaxing media routes.
 pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     state: &HubState<R>,
@@ -106,14 +152,28 @@ pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     artifact: &str,
     allowlist: &'static [&'static str],
 ) -> Result<MediaTicket, Response> {
+    issue_ticket(state, context, session, artifact, allowlist, &[]).await
+}
+
+async fn issue_ticket<R: SessionReadModel>(
+    state: &HubState<R>,
+    context: &AuthContext,
+    session: &str,
+    artifact: &str,
+    allowlist: &'static [&'static str],
+    own_uploads: &'static [&'static str],
+) -> Result<MediaTicket, Response> {
     let auth = state.auth.as_ref().ok_or_else(unauthorized)?;
     if !context.has(Scope::SessionRead) {
         return Err(refusal(&ScopeDenied.into()));
     }
     auth.ensure_active_context(context, chrono::Utc::now())
         .map_err(|error| refusal(&error))?;
-    let (_, record) = scoped(state, session, artifact).await?;
-    if !mime_allowed(&record.mime, allowlist) {
+    if scoped(state, session, artifact)
+        .await?
+        .admission(allowlist, own_uploads)
+        .is_none()
+    {
         return Err(generic_not_found());
     }
     auth.issue_media_ticket(context, session, artifact, chrono::Utc::now())
@@ -154,8 +214,15 @@ pub(super) async fn ticket<R: SessionReadModel>(
         Ok(None) => return private(unauthorized(), &headers),
         Err(error) => return private(refusal(&error), &headers),
     };
-    match issue_session_artifact_ticket(&state, &context, &session, &artifact, MEDIA_MIME_ALLOWLIST)
-        .await
+    match issue_ticket(
+        &state,
+        &context,
+        &session,
+        &artifact,
+        MEDIA_MIME_ALLOWLIST,
+        OWN_UPLOAD_MIME_ALLOWLIST,
+    )
+    .await
     {
         Ok(ticket) => private(Json(ticket).into_response(), &headers),
         Err(response) => private(response, &headers),
@@ -272,13 +339,14 @@ pub(crate) async fn fetch_session_media<R: SessionReadModel>(
     if origin(headers).is_some_and(|origin| origin != context.controller_origin) {
         return private(unauthorized(), headers);
     }
-    let mut response = fetch_session_artifact(
+    let mut response = fetch_artifact(
         state,
         context,
         session,
         artifact,
         headers,
         MEDIA_MIME_ALLOWLIST,
+        OWN_UPLOAD_MIME_ALLOWLIST,
     )
     .await;
     if response.status().is_success()
@@ -309,6 +377,18 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     headers: &HeaderMap,
     allowlist: &'static [&'static str],
 ) -> Response {
+    fetch_artifact(state, context, session, artifact, headers, allowlist, &[]).await
+}
+
+async fn fetch_artifact<R: SessionReadModel>(
+    state: &HubState<R>,
+    context: AuthContext,
+    session: &str,
+    artifact: &str,
+    headers: &HeaderMap,
+    allowlist: &'static [&'static str],
+    own_uploads: &'static [&'static str],
+) -> Response {
     let Some(auth) = state.auth.clone() else {
         return private(unauthorized(), headers);
     };
@@ -318,11 +398,15 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     if let Err(error) = auth.ensure_active_context(&context, chrono::Utc::now()) {
         return private(refusal(&error), headers);
     }
-    let (root, record) = match scoped(state, session, artifact).await {
+    let found = match scoped(state, session, artifact).await {
         Ok(found) => found,
         Err(response) => return private(response, headers),
     };
-    if !mime_allowed(&record.mime, allowlist) || HeaderValue::from_str(&record.mime).is_err() {
+    let Some(own_upload) = found.admission(allowlist, own_uploads) else {
+        return private(generic_not_found(), headers);
+    };
+    let ScopedArtifact { record, source } = found;
+    if HeaderValue::from_str(&record.mime).is_err() {
         return private(generic_not_found(), headers);
     }
     let requested = match range(headers, record.size_bytes) {
@@ -333,6 +417,7 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     let size = record.size_bytes;
     let count = end - start + 1;
     let mime = record.mime.clone();
+    let record_name = record.name.clone();
     #[cfg(test)]
     let injected = state.artifact_cloud_client.clone();
     #[cfg(test)]
@@ -342,12 +427,16 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     tokio::task::spawn_blocking(move || {
         // Resolve only the server-owned cloud id after all local checks. The
         // signed URL and upstream errors never appear in client errors/logs.
-        #[cfg(test)]
-        let client = injected.or_else(|| crate::artifacts::cloud_client(&root));
-        #[cfg(not(test))]
-        let client = crate::artifacts::cloud_client(&root);
-        let opened = (|| -> anyhow::Result<_> {
+        let opened = (|| -> anyhow::Result<(Box<dyn Read + Send + Sync>, bool)> {
             auth.ensure_active_context(&context, chrono::Utc::now())?;
+            let root = match source {
+                ArtifactSource::Composer(file) => return Ok((Box::new(file), false)),
+                ArtifactSource::Cloud(root) => root,
+            };
+            #[cfg(test)]
+            let client = injected.or_else(|| crate::artifacts::cloud_client(&root));
+            #[cfg(not(test))]
+            let client = crate::artifacts::cloud_client(&root);
             let client = client.context("media unavailable")?;
             let view = client.view_url(
                 record
@@ -479,10 +568,30 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
         StatusCode::OK
     };
     let out = response.headers_mut();
-    out.insert(
-        "content-type",
-        HeaderValue::from_str(&mime).expect("validated media MIME"),
-    );
+    if !own_upload {
+        out.insert(
+            "content-type",
+            HeaderValue::from_str(&mime).expect("validated media MIME"),
+        );
+    } else if mime == "text/plain" {
+        // The upload sniffer admitted only UTF-8 text without control bytes.
+        out.insert(
+            "content-type",
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        out.insert("content-disposition", HeaderValue::from_static("inline"));
+    } else {
+        out.insert(
+            "content-type",
+            HeaderValue::from_str(&mime).expect("validated upload MIME"),
+        );
+        // open_preview admitted only a safe_name: [A-Za-z0-9._-], no quotes.
+        out.insert(
+            "content-disposition",
+            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", record_name))
+                .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+        );
+    }
     out.insert(
         "content-length",
         HeaderValue::from_str(&count.to_string()).unwrap(),
@@ -497,6 +606,13 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
             "content-range",
             HeaderValue::from_str(&format!("bytes {start}-{end}/{size}")).unwrap(),
         );
+    }
+    if own_upload {
+        response
+            .extensions_mut()
+            .insert(AdditionalContentSecurityPolicy(HeaderValue::from_static(
+                "default-src 'none'; sandbox",
+            )));
     }
     private(response, headers)
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One resolver for the release environment: Zig and the scratch base (cas-9f61).
 
-assembly-proof.py, check-lane-compile.py, release-gate.sh and release-train.sh
+assembly-proof.py and release-gate.sh
 (with its preflight) all ask this module, so they agree without anything being
 exported by hand. Resolution is deterministic and takes milliseconds, so it
 runs every time and nothing is persisted beyond creating
@@ -47,7 +47,6 @@ import time
 GATE_VAR = "CAS_RELEASE_GATE_HOME_DIR"
 HISTORY_NAME = ".cas-release-gate-last-archive-size-bytes"
 TEMP_ROOTS = ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")
-# Keep in sync with cut_preflight_merge_queue_query in release-train.d/preflight.sh
 # (scripts/test-release-env.py asserts they match).
 MERGE_QUEUE_QUERY = ('query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") '
                      '{ entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }')

@@ -1,7 +1,6 @@
 use crate::Result;
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
-use crate::recording_store::capture_memory_event;
 use crate::sqlite::{ENTRIES_RULES_SCHEMA, SqliteStore};
 use crate::tracing::{DevTracer, TraceTimer};
 use cas_types::{Entry, Event, EventEntityType, EventType, Scope};
@@ -125,9 +124,6 @@ impl SqliteStore {
             )
             .with_session(entry.session_id.as_deref().unwrap_or(""));
             let _ = record_event_with_conn(&tx, &event);
-
-            // Capture event for recording playback (within same transaction)
-            let _ = capture_memory_event(&tx, &entry.id, None);
 
             tx.commit()?;
             Ok(())

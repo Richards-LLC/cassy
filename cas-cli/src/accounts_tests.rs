@@ -286,7 +286,7 @@ fn cas_e1f4_new_account_comes_out_linked_and_doctor_flags_drift() {
 }
 
 #[test]
-fn cas_e1f4_codex_retires_the_default_home_by_its_token_email() {
+fn codex_keeps_the_default_home_when_email_is_only_in_a_credential() {
     use base64::Engine as _;
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
@@ -305,17 +305,12 @@ fn cas_e1f4_codex_retires_the_default_home_by_its_token_email() {
         .unwrap();
     assert_eq!(
         Provider::Codex.login_email(h, &h.join(".codex")).as_deref(),
-        Some("p@x.com")
+        None
     );
     let plan = plan(Provider::Codex, h).unwrap();
-    assert_eq!(
-        plan.dir_changes,
-        [DirChange::Retire {
-            label: ".codex".into(),
-            reason: "login p@x.com duplicates .codex-p@x.com".into(),
-        }]
-    );
+    assert!(plan.dir_changes.is_empty(), "unverified token email cannot retire or rename an account");
     apply(&plan, h, "20261016T150003Z").unwrap();
+    assert!(h.join(".codex/auth.json").exists() && h.join(".codex-p@x.com/auth.json").exists());
     let base = Provider::Codex.base_dir(h);
     let p = h.join(".codex-p@x.com");
     assert_eq!(std::fs::read_link(p.join("config.toml")).unwrap(), base.join("config.toml"));

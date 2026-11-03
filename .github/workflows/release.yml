@@ -16,7 +16,8 @@ name: Release
 #      archive: the bytes that ship;
 #   4. creates the annotated tag v<version> and the GitHub release
 #      (scripts/release-publish.sh), whose notes carry the PR-opened timer;
-#   5. dispatches the install-path proof.
+#   5. dispatches the install-path proof;
+#   6. deploys the tagged Commander dist to hub.petrastella.io after publication.
 # The supervisor host installs on publish (scripts/install-on-publish.sh).
 #
 # workflow_dispatch with dry_run=true (the default) runs every step for the
@@ -113,11 +114,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "pending=$PENDING tag=$TAG reason=$REASON" >> "$GITHUB_STEP_SUMMARY"
 
-  # Adopt the archives the merge queue built for this tree (cas-28eb finder).
-  # The queue may land before its non-required release builds finish, so the
-  # finder waits for an in-flight matching run before declaring a miss.
-  lookup:
-    name: Look up prebuilt release artifacts
+  # Look up each platform independently: a successful Linux upload can be
+  # audited while macOS compiles or either producer saves its caches.
+  lookup-linux:
+    name: Look up Linux prebuilt artifact
     needs: detect
     if: needs.detect.outputs.pending == 'true'
     runs-on: ubuntu-latest
@@ -133,30 +133,65 @@ jobs:
           ref: ${{ github.sha }}
 
       - id: lookup
-        name: Find a successful prebuild for this exact commit or tree
+        name: Find an uploaded Linux archive for this exact commit or tree
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PREBUILD_PLATFORM: linux
           RELEASE_PREBUILD_WAIT_SECONDS: 1800
           RELEASE_PREBUILD_POLL_SECONDS: 15
         run: ./scripts/find-release-prebuild.sh | tee -a "$GITHUB_OUTPUT"
 
-  # FALLBACK ONLY: no prebuild exists for this tree. The same build steps as
-  # the queue run, called rather than copied.
-  build:
-    name: Build release artifacts (fallback)
-    needs: lookup
-    if: needs.lookup.result == 'success' && needs.lookup.outputs.found != 'true'
+  build-linux:
+    name: Build Linux release artifact (fallback)
+    needs: lookup-linux
+    if: needs.lookup-linux.result == 'success' && needs.lookup-linux.outputs.found != 'true'
     uses: ./.github/workflows/release-prebuild.yml
+    with:
+      platform: linux
+
+  lookup-macos:
+    name: Look up macOS prebuilt artifact
+    needs: detect
+    if: needs.detect.outputs.pending == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      found: ${{ steps.lookup.outputs.found }}
+      run-id: ${{ steps.lookup.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - id: lookup
+        name: Find an uploaded macOS archive for this exact commit or tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PREBUILD_PLATFORM: macos
+          RELEASE_PREBUILD_WAIT_SECONDS: 1800
+          RELEASE_PREBUILD_POLL_SECONDS: 15
+        run: ./scripts/find-release-prebuild.sh | tee -a "$GITHUB_OUTPUT"
+
+  build-macos:
+    name: Build macOS release artifact (fallback)
+    needs: lookup-macos
+    if: needs.lookup-macos.result == 'success' && needs.lookup-macos.outputs.found != 'true'
+    uses: ./.github/workflows/release-prebuild.yml
+    with:
+      platform: macos
 
   audit-linux:
     name: Audit packaged Linux asset
-    needs: [detect, lookup, build]
+    needs: [detect, lookup-linux, build-linux]
     if: >-
       !cancelled()
-      && needs.lookup.result == 'success'
-      && ((needs.lookup.outputs.found == 'true' && needs.build.result == 'skipped')
-      || (needs.lookup.outputs.found != 'true' && needs.build.result == 'success'))
+      && needs.lookup-linux.result == 'success'
+      && ((needs.lookup-linux.outputs.found == 'true' && needs.build-linux.result == 'skipped')
+      || (needs.lookup-linux.outputs.found != 'true' && needs.build-linux.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -171,7 +206,7 @@ jobs:
         with:
           name: cas-x86_64-unknown-linux-gnu
           path: release
-          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          run-id: ${{ needs.lookup-linux.outputs.found == 'true' && needs.lookup-linux.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
       - name: ISA audit of the packaged executable
@@ -187,12 +222,12 @@ jobs:
 
   audit-macos:
     name: Audit packaged macOS asset
-    needs: [detect, lookup, build]
+    needs: [detect, lookup-macos, build-macos]
     if: >-
       !cancelled()
-      && needs.lookup.result == 'success'
-      && ((needs.lookup.outputs.found == 'true' && needs.build.result == 'skipped')
-      || (needs.lookup.outputs.found != 'true' && needs.build.result == 'success'))
+      && needs.lookup-macos.result == 'success'
+      && ((needs.lookup-macos.outputs.found == 'true' && needs.build-macos.result == 'skipped')
+      || (needs.lookup-macos.outputs.found != 'true' && needs.build-macos.result == 'success'))
     runs-on: macos-26
     permissions:
       contents: read
@@ -209,7 +244,7 @@ jobs:
         with:
           name: cas-aarch64-apple-darwin
           path: release
-          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          run-id: ${{ needs.lookup-macos.outputs.found == 'true' && needs.lookup-macos.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
       # Mach-O signatures can be verified only on macOS; this is the archive
@@ -230,14 +265,16 @@ jobs:
     # Both packaged assets passed their audit and launch smoke. `!cancelled()`
     # lets this job see a skipped fallback build; every real condition below
     # is explicit and fail-closed.
-    needs: [detect, lookup, audit-linux, audit-macos]
+    needs: [detect, lookup-linux, lookup-macos, audit-linux, audit-macos]
     if: >-
       !cancelled()
       && needs.detect.outputs.pending == 'true'
       && needs.audit-linux.result == 'success'
       && needs.audit-macos.result == 'success'
-    # This is the only job that holds a `contents: write` token.
+    # Publication and the post-publish hub provenance asset need contents: write.
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
     permissions:
       contents: write
       actions: write
@@ -246,18 +283,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Download both archives
+      - name: Download audited linux archive
         uses: actions/download-artifact@v4
         with:
-          pattern: cas-*
-          merge-multiple: true
+          name: cas-x86_64-unknown-linux-gnu
           path: release
-          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          run-id: ${{ needs.lookup-linux.outputs.found == 'true' && needs.lookup-linux.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
-      - name: Create Release
+      - name: Download audited macos archive
+        uses: actions/download-artifact@v4
+        with:
+          name: cas-aarch64-apple-darwin
+          path: release
+          run-id: ${{ needs.lookup-macos.outputs.found == 'true' && needs.lookup-macos.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - id: publish
+        name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.detect.outputs.version }}
@@ -269,6 +314,7 @@ jobs:
           args=(--version "$VERSION" --sha "$GITHUB_SHA" --assets release --tag "$TAG" --notes-out "$RUNNER_TEMP/notes.md")
           [[ "$DRY_RUN" != true ]] || args+=(--prerelease)
           ./scripts/release-publish.sh "${args[@]}"
+          echo 'published=true' >> "$GITHUB_OUTPUT"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       # GITHUB_TOKEN-created releases do not fan out a release.published event
@@ -328,3 +374,49 @@ jobs:
             git push origin --delete "refs/tags/$TAG"
           fi
           echo "deleted dry-run prerelease $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  # No dependency points back to this job: uploads and verification add no work
+  # to commit -> main or main -> published. A later install-proof dispatch error
+  # must not suppress a hub update for a release already published successfully.
+  deploy-hub:
+    name: Deploy released Commander to hosted hub
+    needs: [detect, release]
+    if: >-
+      !cancelled()
+      && needs.release.outputs.published == 'true'
+      && needs.detect.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Serialize alias changes and rollback across distinct release workflow runs.
+    concurrency:
+      group: hub-static-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pinned static-upload CLI
+        run: npm install --global vercel@59.1.3
+
+      - name: Upload, verify, promote or restore, and record provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERCEL_HUB_TOKEN: ${{ secrets.VERCEL_HUB_TOKEN }}
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: python3 scripts/deploy-hub-release.py "$TAG" --receipt "$RUNNER_TEMP/hub-deployment.json"
+
+      - name: Retain hosted hub receipt (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-deployment
+          path: ${{ runner.temp }}/hub-deployment.json
+          if-no-files-found: ignore

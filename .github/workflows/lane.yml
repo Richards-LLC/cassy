@@ -2,8 +2,8 @@
 #
 # Every push to refs/heads/factory/** lands here; ci.yml no longer triggers on
 # those pushes directly. With CAS_LANE_SLIM=true a slim lane runs only the jobs
-# that still do work: classify, the two "Scoped Validation" checks (Docs Lint
-# for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
+# that still do work: classify with no-build fast rows, the two "Scoped
+# Validation" checks (Docs Lint for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
 # admission and the CI watchers read them unchanged. Skipped ci.yml jobs used
 # to resolve one by one (~30 s each, 13.3 min for run 39285508460 that did 21 s
 # of work); this workflow has none to wait for.
@@ -40,7 +40,10 @@ jobs:
     name: Full lane
     if: vars.CAS_LANE_SLIM != 'true'
     permissions:
-      contents: read
+      # Reusable-workflow ceiling: GitHub validates even skipped queue jobs.
+      # ci.yml still defaults to read-only; only its merge_group publisher writes.
+      contents: write
+      issues: write
       actions: read
       pull-requests: read
     uses: ./.github/workflows/ci.yml
@@ -57,6 +60,7 @@ jobs:
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
       fast-admission-reason: ${{ steps.classify-diff.outputs.fast-admission-reason }}
+      script-tests-needed: ${{ steps.script-tests.outputs.needed }}
     steps:
       # Classification needs the merge base with the epic parent, so history
       # stays complete; a warm self-hosted workspace fetches incrementally.
@@ -74,6 +78,30 @@ jobs:
       - name: Check Violet references before queue admission
         run: bash scripts/test-no-mecha-references.sh
 
+      - id: script-tests
+        name: Classify script suite inputs
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          comparison=(--all)
+          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+          python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
+            --provisioned --github-output "$GITHUB_OUTPUT"
+
+      # Local pre-push feedback is worker-writable. CI owns the proof: run
+      # once for every slim factory diff before downstream admission jobs.
+      - name: Run no-build release gate rows
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          npm ci --no-audit --no-fund
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
+
   docs-lint:
     name: Docs Lint
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class == 'docs-only'
@@ -85,8 +113,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # Same check as ci.yml's Docs Lint; the worker's pre-push fast rows
-      # already ran Markdown lint and the release-note draft check.
+      # The classification job already ran Markdown lint and the release-note
+      # draft check through the fast rows.
       - name: Instruction files are current and within the size cap
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,30 +144,27 @@ jobs:
 
   scoped-validation-fast:
     name: Scoped Validation (fast)
-    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only'
+    if: >-
+      vars.CAS_LANE_SLIM == 'true' && (needs.ci-diff.outputs.class != 'docs-only' || needs.ci-diff.outputs.script-tests-needed == 'true')
     needs: ci-diff
     runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
+    env:
+      LEGACY_SCOPED: ${{ vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
-      # Slim lanes omit the fast rows; retain this product-script regression
-      # in the existing fast job. Non-slim lanes run it through those rows.
-      - name: Run changed terminal QA tests on slim lanes
-        env:
-          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: |
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
-            comparison_base="$ZERO_BASE_REF"
-          fi
-          python3 scripts/ci-script-tests-for-diff.py --base "$comparison_base" --only scripts/terminal-qa.test.mjs
+      - uses: ./.github/actions/run-script-suite-tests
+        if: needs.ci-diff.outputs.script-tests-needed == 'true'
+        with:
+          base-sha: ${{ needs.ci-diff.outputs.comparison-base }}
 
       - name: Detect runner lock fixture changes
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         id: runner-lock-diff
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
@@ -159,15 +184,18 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - name: Test runner cache job lock lifecycle
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
       - name: Test runner repository registration arguments
-        if: steps.runner-lock-diff.outputs.changed == 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (steps.runner-lock-diff.outputs.changed == 'true')
         run: ./scripts/test-cassy-actions-runner-registration.sh
 
       - name: Report full-tier routing
-        if: needs.ci-diff.outputs.fast-admission != 'true'
+        if: >-
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission != 'true')
         env:
           FAST_ADMISSION_REASON: ${{ needs.ci-diff.outputs.fast-admission-reason }}
         run: >-
@@ -176,8 +204,7 @@ jobs:
 
       - name: Typecheck and test Commander web assets
         if: >-
-          needs.ci-diff.outputs.fast-admission == 'true'
-          && needs.ci-diff.outputs.web-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission == 'true' && needs.ci-diff.outputs.web-check-needed == 'true')
         working-directory: hub-web
         run: |
           npm ci
@@ -186,8 +213,7 @@ jobs:
 
       - name: Build and test the Slack bridge
         if: >-
-          needs.ci-diff.outputs.fast-admission == 'true'
-          && needs.ci-diff.outputs.bridge-check-needed == 'true'
+          env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission == 'true' && needs.ci-diff.outputs.bridge-check-needed == 'true')
         working-directory: slack-bridge
         run: |
           npm ci
@@ -195,6 +221,8 @@ jobs:
           npm run build
 
       - name: Report Rust test ownership
+        if: >-
+          env.LEGACY_SCOPED == 'true'
         run: >-
           echo "No Rust tests ran here: worker focused-test receipts at this
           SHA (checked at park) and the merge-queue full suite own them."
@@ -229,6 +257,27 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && needs.ci-diff.outputs.fast-admission != 'true'
         run: ./scripts/test-cas-install.sh
+
+      - name: Test release and install script fixtures
+        if: steps.pr-dedupe.outputs.covered != 'true'
+        env:
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+        run: |
+          # Use the same resolved comparison base as the other scoped checks.
+          # Unknown bases run the fixtures, matching the classifier's fail-closed policy.
+          if [[ -n "$BASE_SHA" ]]; then
+            changed_scripts="$(git diff --name-only "$BASE_SHA" HEAD -- scripts/)"
+            if [[ -z "$changed_scripts" ]]; then
+              echo 'No scripts/ changes; skipping release and install fixtures.'
+              exit 0
+            fi
+          fi
+          # Report Python availability for the script fixtures.
+          python3 --version
+          ./scripts/test-release.sh
+          ./scripts/test-release-publish.sh
+          ./scripts/test-install-on-publish.sh
+          ./scripts/test-hub-pin.sh
 
       # Larger pushes own these checks here; small pushes ran them in the fast job.
       - name: Typecheck and test Commander web assets

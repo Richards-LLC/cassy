@@ -1,0 +1,41 @@
+⚠ 8 warnings · 28 ok · 2 info · controls · 3.91.0
+────────────────────────────────────────────────────────────────────────────────
+Host          ✓ registered project roots
+  ⚠ host  host: 3 findings — see `cas doctor --host`
+Store         ✓ cas directory  ✓ prompt hook  ✓ database  ✓ schema  ✓ tables
+              ✓ entry store  ✓ memory stats  ✓ memory decay  ✓ rules  ✓ tasks
+              ✓ cloud team-only
+  ⚠ managed file drift  3 managed file drift item(s)
+    → run `cas update`
+  ⚠ backlog hygiene     3 delivered but open, 0 finished epics open, 0 idle 14+
+                        days, 0 citing removed code delivered but open: cas-a001
+                        (open) "Doctor receipt QA cas-a001": on main as …
+Indexes       ✓ legacy search index  ✓ symbol index  ✓ code index copies
+              ✓ embedding drain  ✓ embeddings
+  ⚠ search index        Index not found at
+                        <artifacts>/cassy-ee10031b42e3c202402…
+                        Will be created on first search; Run a search to build …
+  ⚠ code history index  never indexed: 0 of 6 commit(s)
+    → run `cas history backfill`; provenance coverage unmeasurable
+Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
+              ✓ cloud sync queue
+  ℹ communication SLOs
+    UNKNOWN communication: no factory session recorded
+  ⚠ cross-project rows  0 project DB(s) compared (3 local task row(s), 0 DB(s)
+                        unreadable) — task replication was not checked; 0
+                        foreign knowledge page(s): 0 attributed page(s) checked…
+    → Review the full list with `cas doctor --foreign-rows` (read-only), then
+      inspect the eligible delete set with `cas cloud purge-foreign --dry-run`.
+      Run the purge without `--dry-run` only for rows present in that delete …
+Config        ✓ SessionStart budget  ✓ configuration  ✓ MCP stdio upstreams
+              ✓ MCP upstream reachability  ✓ sync target  ✓ mcp config
+  ⚠ issue repositories  issues.repo unset; no usable GitHub origin; set `cas
+                        config set issues.repo owner/repo` |
+                        cassy=Richards-LLC/cassy | violet=Richards-LLC/violet_p…
+  ⚠ journey registry    Missing
+    → run `cas qa journeys --seed`
+  ℹ shipped issues      skipped: no GitHub repository resolved for this project
+Integrations  ✓ integrations
+
+28 ok · 2 info · 8 warnings · 0 errors · 503ms
+cas doctor --verbose for timings and full messages

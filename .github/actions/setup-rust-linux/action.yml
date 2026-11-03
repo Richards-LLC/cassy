@@ -1,7 +1,7 @@
 name: Setup Rust (Linux)
 description: >-
   Shared toolchain setup for every ubuntu-latest CI job: apt deps aligned with
-  .cargo/config.toml, stable Rust, Zig (ghostty_vt_sys builds its native library
+  .cargo/config.toml, repository-pinned Rust, Zig (ghostty_vt_sys builds its native library
   with Zig even for cargo check), sccache, and the cargo cache.
 
 inputs:
@@ -11,6 +11,18 @@ inputs:
       DIFFERENT profile or feature set must pass a distinct value so they do not
       evict each other's artifacts through one shared key.
     required: true
+  shared-key:
+    description: Explicit cache job identity shared by compatible producers and consumers; replaces cache-key identity.
+    required: false
+    default: ""
+  cache-on-failure:
+    description: Save partial dependencies after failure or cancellation; disable for exact-hit priming.
+    required: false
+    default: "true"
+  cache-save-if:
+    description: Allow cache writes independently of target restoration.
+    required: false
+    default: "true"
   save-cache:
     description: >-
       Set to "false" for jobs that run `cargo clean` mid-job. Saving from such a
@@ -18,6 +30,11 @@ inputs:
       build (see the Build Benchmark job).
     required: false
     default: "true"
+
+outputs:
+  cache-hit:
+    description: Whether an exact dependency cache entry was restored.
+    value: ${{ steps.cargo-cache.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -31,14 +48,12 @@ runs:
         gcc --version
         mold --version
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
     - name: Install Zig
       shell: bash
       run: ./scripts/bootstrap-zig.sh
 
     - name: Setup sccache
+      if: env.RUSTC_WRAPPER != ''
       # v0.0.5 speaks GitHub's retired cache-service protocol and silently
       # fell back to a runner-local cache (0 hits across repeated CI runs).
       # v0.0.9+ uses ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN (cache v2).
@@ -49,6 +64,7 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.11
 
     - name: Probe sccache backend
+      if: env.RUSTC_WRAPPER != ''
       shell: bash
       run: |
         if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -59,8 +75,13 @@ runs:
         fi
 
     - name: Cache cargo
+      id: cargo-cache
       uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.cache-key }}
-        cache-on-failure: true
-        save-if: ${{ inputs.save-cache == 'true' }}
+        shared-key: ${{ inputs.shared-key }}
+        # Cold-build measurements immediately clean target; retain only the
+        # registry cache instead of restoring binaries with no consumer.
+        cache-targets: ${{ inputs.save-cache }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+        save-if: ${{ inputs.save-cache == 'true' && inputs.cache-save-if == 'true' }}

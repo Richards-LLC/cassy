@@ -1,0 +1,109 @@
+.code-frame {
+  min-width: 0;
+  max-width: 100%;
+  margin-block-start: var(--space-2);
+  border: var(--line-width) solid var(--line-subtle);
+  border-radius: var(--radius-pane);
+  background: var(--sheet-bg);
+  color: var(--ink);
+}
+.code-frame-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-block-end: var(--line-width) solid var(--line-subtle);
+}
+.code-frame-label {
+  flex: 1 1 8ch;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-mid);
+  font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono);
+}
+.code-frame-actions { display: flex; flex: none; gap: var(--space-1); }
+.code-frame-actions button {
+  min-height: var(--button-height);
+  padding-inline: var(--space-2);
+  background: var(--sheet-bg);
+  color: var(--ink);
+  font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui);
+}
+.code-frame-actions button[aria-pressed="true"] { background: var(--bg-active); color: var(--color-action); }
+.code-frame-content { min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; }
+.code-frame[data-expanded="true"] > .code-frame-content { max-height: none; }
+/* The cap bounds long source. A rendered diagram is read whole, so none of it is
+   cut and there is nothing to expand or wrap; its source view keeps the cap and
+   both controls. */
+.code-frame-content:has(> .rich-diagram:not([hidden])) { max-height: none; }
+.code-frame:has(> .code-frame-content > .rich-diagram:not([hidden])) :is([data-action="wrap"], [data-action="expand"]) { display: none; }
+.code-frame-content > [hidden] { display: none; }
+.code-frame .rich-diagram { margin: 0; }
+.code-frame-actions button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+/* Scoped specificity overrides the legacy thread, pinned ask and inbox pre. */
+.code-frame .code-frame-content pre.markdown-code {
+  max-width: 100%;
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: 0 0 var(--radius-pane) var(--radius-pane);
+  background: var(--sheet-bg);
+  color: var(--ink);
+  font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono);
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  overflow-x: auto;
+}
+.code-frame[data-wrap="true"] .code-frame-content pre,
+.code-frame[data-wrap="true"] .diff-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  min-width: 0;
+}
+.code-frame[data-wrap="true"] .diff-line > :last-child { min-width: 0; }
+.code-frame-status:not(:empty) {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  color: var(--ink-mid);
+  font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui);
+  overflow-wrap: anywhere;
+}
+.code-frame-content > :is(.rich-diagram, .rich-diff) { margin-block-start: 0; }
+.code-frame pre:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+@media (max-width: 53rem) {
+  .code-frame-actions button { min-height: var(--rail-item-min); min-width: var(--rail-item-min); }
+}
+@media print {
+  .code-frame-actions, .code-frame-status { display: none; }
+  .code-frame-content { max-height: none; overflow: visible; }
+  .code-frame .code-frame-content pre.markdown-code { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+}
+
+/* Syntax roles are independent of action and status colors; see code-syntax.brief.md. */
+.code-frame {
+  --syntax-keyword: #5B3FE0;
+  --syntax-string: #14635F;
+  --syntax-comment: var(--ink-mid);
+  --syntax-literal: #854321;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-scheme="light"]) .code-frame {
+    --syntax-keyword: #C4B5FD;
+    --syntax-string: #81D8CB;
+    --syntax-literal: #DCB590;
+  }
+}
+html[data-scheme="dark"] .code-frame {
+  --syntax-keyword: #C4B5FD;
+  --syntax-string: #81D8CB;
+  --syntax-literal: #DCB590;
+}
+.code-frame .syntax-keyword { color: var(--syntax-keyword); }
+.code-frame .syntax-string { color: var(--syntax-string); }
+.code-frame .syntax-comment { color: var(--syntax-comment); }
+.code-frame .syntax-literal { color: var(--syntax-literal); }
+@media (forced-colors: active) {
+  .code-frame :is(.syntax-keyword, .syntax-string, .syntax-comment, .syntax-literal) { color: CanvasText; }
+}

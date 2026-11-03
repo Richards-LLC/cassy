@@ -328,6 +328,7 @@ pub(crate) fn admitted(root: &Path, repo: &Path) -> Result<()> {
 }
 
 /// Read-only view, including stale-lease rejection, shared by status and tests.
+#[cfg(test)]
 pub(crate) fn view(root: &Path, worker: &str, now: DateTime<Utc>) -> Result<Option<CapacityWait>> {
     match read(&path(root, worker))? {
         Some(wait) if admission_current(root, &wait, now)? => Ok(Some(wait)),

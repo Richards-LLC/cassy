@@ -645,6 +645,7 @@ fn publish_target_seed(staging: &Path, target: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn hardlink_seed_tree(
     source: &Path,
     destination: &Path,
@@ -1205,6 +1206,8 @@ pub struct FactoryApp {
     /// focused epic or None to clear)`. A later change replaces an earlier
     /// one, so the last focus wins.
     pending_epic_focus_write: Option<(PathBuf, Option<String>)>,
+    /// Actual pane roster last handed to the off-loop session writer.
+    last_worker_roster_write: Option<Vec<(String, Option<u32>)>>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1327,10 +1330,13 @@ pub struct FactoryApp {
     pub sidecar_collapsed: bool,
     /// Worktree manager for worker isolation (None if worktrees disabled)
     worktree_manager: Option<WorktreeManager>,
-    /// cas-58a3 review H1: crashed workers whose reap and worktree cleanup
+    /// cas-58a3 review H1: retired workers whose reap or worktree cleanup
     /// have not been applied yet. Their names stay reserved, so a respawn
     /// never reuses the cgroup scope or worktree the late cleanup acts on.
     crash_cleanups_pending: std::collections::HashMap<String, usize>,
+    /// Target retirement and worktree removal run independently of control and delivery.
+    /// Names remain reserved until these results have been applied.
+    worktree_cleanup_jobs: Vec<render_and_ops::epic_workers::WorkerCleanupJob>,
     /// Index of the currently selected worker tab (0-based, used in tabbed mode)
     pub selected_worker_tab: usize,
     /// Use tabbed worker view instead of side-by-side (config preference)
@@ -1671,7 +1677,6 @@ impl FactoryApp {
 
         let DeliveryInputs {
             answered_blocked_workers,
-            verification_waits,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1772,7 +1777,6 @@ impl FactoryApp {
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting
                     }) {
-                        self.merge_alert_retries.waiting(worker);
                         return None;
                     }
                     Some(current)
@@ -1868,14 +1872,6 @@ impl FactoryApp {
                 merge_alert_evidence,
                 snapshot_at,
             ) {
-                if let DirectorEvent::TaskBlocked { task_id, worker, .. } = event
-                    && let Some(dispatch) = verification_waits.get(task_id)
-                {
-                    prompt.text = format!(
-                        "{}\nWorker {worker} is waiting for verification on task {task_id}; active dispatch {dispatch} is already owned by {}.",
-                        crate::supervisor_message_wakes::QUIET, self.supervisor_name,
-                    );
-                }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
                     // cas-223f: observed off the loop beside the delivery read
                     // (cas-3b16: on the blocking lane). A worker it could not
@@ -1890,6 +1886,7 @@ impl FactoryApp {
                     }
                 }
                 if let Some(ready) = ready {
+                    prompt.merge_ready = ready.ci == "success";
                     prompt.merge_alert = Some(ready.evidence.clone());
                     if ready.ci == "success" && !merge_alert::admit_ready(&self.cas_dir, &ready) {
                         continue;
@@ -1923,12 +1920,15 @@ impl FactoryApp {
                     // Missing refs or an unavailable fresh read still owe one
                     // liveness relay, not an unbounded relay every retry minute.
                     let unknown = merge_alert::WorkerWait {
-                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false,
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, completion: None,
                     };
                     let read = worker_waits.get(worker)
                         .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
-                    if !self.merge_alert_retries.admit_idle(worker, read, merge_now) {
+                    if !self.merge_alert_retries.admit_idle(worker, read) {
                         continue;
+                    }
+                    if let Some(completion) = &read.completion {
+                        prompt.text = format!("{}\n{}", completion.detail(), prompt.text);
                     }
                 }
                 prompts.push(prompt);
@@ -2047,15 +2047,15 @@ impl FactoryApp {
         let mut tracker = self.supervisor_stall_tracker.clone().unwrap_or(file_tracker);
         let before = tracker.clone();
         let now = Utc::now();
-        let held_workers = self.session_progress.held_workers.clone().unwrap_or_default();
         // cas-223f: the git, CI and task-store evidence arrived with the
         // snapshot; this only looks it up.
         let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
-        let actionable = self.supervisor_actionable_from_evidence(
+        let actionable = self.supervisor_actionable_from_ownership(
             &self.unfiltered_director_data,
             &evidence,
-            &held_workers,
+            self.session_progress.held_workers.as_ref(),
             now,
+            &self.assignment_evidence,
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -2111,12 +2111,13 @@ impl FactoryApp {
         let DirectorEvent::SupervisorStalled {
             next_step,
             occurrence,
+            actionable_idle_secs,
             ..
         } = event
         else {
             return false;
         };
-        if self.factory_session.is_none() {
+        if self.factory_session.is_none() || *actionable_idle_secs < self.supervisor_stall_after_secs.max(60) {
             return false;
         }
         // cas-3b16: read with the fresh delivery read, off the loop.
@@ -2129,8 +2130,7 @@ impl FactoryApp {
         if last_call.is_some_and(|last| last > detected_at) {
             return false;
         }
-        let held_workers = session_progress.held_workers.clone().unwrap_or_default();
-        self.supervisor_actionable_from_ownership(data, evidence, &held_workers, Utc::now(),
+        self.supervisor_actionable_from_ownership(data, evidence, session_progress.held_workers.as_ref(), Utc::now(),
             assignment.unwrap_or(&Default::default()))
             .as_ref()
             == Some(next_step)
@@ -2145,22 +2145,26 @@ impl FactoryApp {
         held_workers: &HashSet<String>,
         now: DateTime<Utc>,
     ) -> Option<super::director::SupervisorActionableState> {
-        self.supervisor_actionable_from_ownership(data, evidence, held_workers, now, &self.assignment_evidence)
+        self.supervisor_actionable_from_ownership(data, evidence, Some(held_workers), now, &self.assignment_evidence)
     }
 
+    /// cas-f497: an unreadable hold set refuses only assignment, which could
+    /// otherwise pick a held worker. Merge and close prompts still reach the
+    /// supervisor; delivery evidence carries their own holds.
     fn supervisor_actionable_from_ownership(
         &self,
         data: &DirectorData,
         evidence: &delivery_evidence::DeliveryEvidenceMap,
-        held_workers: &HashSet<String>,
+        held_workers: Option<&HashSet<String>>,
         now: DateTime<Utc>,
         assignment: &assignment_evidence::AssignmentEvidence,
     ) -> Option<super::director::SupervisorActionableState> {
+        let no_holds = HashSet::new();
         supervisor_actionable_state_with_ownership(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
-            held_workers,
+            held_workers.unwrap_or(&no_holds),
             now,
             self.supervisor_stall_after_secs,
             |task, worker| delivery_evidence::evidence_delivery(evidence, task, worker),
@@ -2170,6 +2174,10 @@ impl FactoryApp {
             |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
             |task| assignment.allows(&task.id),
         )
+        .filter(|state| {
+            held_workers.is_some()
+                || !matches!(state, super::director::SupervisorActionableState::AssignReadyWork { .. })
+        })
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.
@@ -2329,6 +2337,30 @@ impl FactoryApp {
         self.pending_epic_focus_write.take()
     }
 
+    /// Publish changed pane identities, including a same-name replacement's
+    /// new PID. This never performs filesystem work on the daemon loop.
+    pub(crate) fn take_worker_roster_write(
+        &mut self,
+    ) -> Option<(PathBuf, Vec<crate::ui::factory::protocol::AgentInfo>)> {
+        let session = self.factory_session.as_deref()?;
+        let roster: Vec<_> = self
+            .worker_names
+            .iter()
+            .map(|name| (name.clone(), self.mux.pane_process_group_id(name)))
+            .collect();
+        if self.last_worker_roster_write.as_ref() == Some(&roster) {
+            return None;
+        }
+        self.last_worker_roster_write = Some(roster.clone());
+        let workers = roster.into_iter().map(|(name, pid)| {
+            let worktree_path = self.worktree_manager.as_ref().map(|manager| {
+                manager.worktree_path_for_worker(&name).to_string_lossy().into_owned()
+            });
+            crate::ui::factory::protocol::AgentInfo { name, pid, worktree_path }
+        }).collect();
+        Some((crate::ui::factory::session::metadata_path(session), workers))
+    }
+
     #[cfg(test)]
     fn apply_session_metadata_focus(&mut self) {
         let focus = preferred_epic_focus_from_session_metadata();
@@ -2462,7 +2494,7 @@ impl FactoryApp {
                     "failed to clear removed worker from durable hold set"
                 );
             }
-            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
+            cancel_worker_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
         };
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
@@ -2494,11 +2526,10 @@ impl FactoryApp {
             .collect()
     }
 
-    /// cas-c5ab/cas-5f4b: a session shutdown ends every hold, so re-arm all
-    /// its workers' held reminders before their agents are unregistered.
-    pub(crate) fn rearm_held_reminders_at_shutdown(&self, session_name: &str) {
+    /// A session shutdown ends every worker wait before agents are unregistered.
+    pub(crate) fn cancel_worker_reminders_at_shutdown(&self, session_name: &str) {
         let workers = self.worker_names.clone();
-        resume_held_reminders(
+        cancel_worker_reminders(
             self.cas_dir(),
             session_name,
             &workers,
@@ -2904,6 +2935,19 @@ impl FactoryApp {
         self.lead_session_id.as_deref()
     }
 
+    /// Swap in a new supervisor pane under a new lead session (cas-b492).
+    /// Returns the previous pane for the caller to drop off the control loop.
+    pub(crate) fn restart_supervisor_pane(
+        &mut self,
+        lead_session_id: &str,
+    ) -> anyhow::Result<Option<cas_mux::Pane>> {
+        let previous = self.mux.restart_supervisor(&self.worker_names, Some(lead_session_id))?;
+        self.lead_session_id = Some(lead_session_id.to_string());
+        self.supervisor_stall_tracker = None;
+        let _ = self.sync_pane_sizes();
+        Ok(previous)
+    }
+
     /// Get the director data
     /// Replace the cached director snapshot (tests: a stale cache).
     #[cfg(test)]
@@ -3171,6 +3215,49 @@ pub(crate) fn queue_supervisor_intro_prompt(
     session_id: Option<&str>,
     factory_session: Option<&str>,
 ) {
+    queue_supervisor_startup_prompt(
+        cas_dir,
+        supervisor_name,
+        supervisor_cli,
+        worker_names,
+        session_id,
+        factory_session,
+        None,
+    );
+}
+
+/// The intro for a supervisor that replaced its predecessor in a running
+/// factory (cas-b492). `session_id` must be new: it scopes the intro's dedupe.
+pub(crate) fn queue_supervisor_restart_prompt(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    supervisor_cli: cas_mux::SupervisorCli,
+    worker_names: &[String],
+    session_id: &str,
+    factory_session: &str,
+) {
+    queue_supervisor_startup_prompt(
+        cas_dir,
+        supervisor_name,
+        supervisor_cli,
+        worker_names,
+        Some(session_id),
+        Some(factory_session),
+        Some(SUPERVISOR_RESTART_PREFACE),
+    );
+}
+
+pub(crate) const SUPERVISOR_RESTART_PREFACE: &str = "Supervisor restart: this session replaced the previous supervisor of a running factory, at its request. Every current worker named below is still running with its task, pane and lease; do not respawn them. Read your handoff, then check factory action=worker_status.";
+
+fn queue_supervisor_startup_prompt(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    supervisor_cli: cas_mux::SupervisorCli,
+    worker_names: &[String],
+    session_id: Option<&str>,
+    factory_session: Option<&str>,
+    preface: Option<&str>,
+) {
     let worker_list = if worker_names.is_empty() {
         "(none)".to_string()
     } else {
@@ -3178,11 +3265,13 @@ pub(crate) fn queue_supervisor_intro_prompt(
     };
     let mut prompt = match supervisor_cli {
         cas_mux::SupervisorCli::Codex => format!(
-            "Codex supervisor startup:\n\
-- Use skills: cas-supervisor, cas-codex-supervisor-checklist, cas-codebase-design\n\
-- No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
-- Canonical current workers for this session: {worker_list}\n\
-- First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
+            "Codex supervisor startup: {} current workers.\n\
+Context and handoff receipts arrive through native SessionStart hooks.\n\
+Run cas-codex-supervisor-checklist once; triage from the supervisor core in your developer instructions.\n\
+Use cas-supervisor for planning, releases or recovery; cas-codebase-design for module design.\n\
+First: mcp__cs__coordination action=whoami; inspect current epics and ready work.\n\
+Current workers: {worker_list}",
+            worker_names.len()
         ),
         // cas-0263: Claude has no --rules/developer_instructions launch flag, so
         // the canonical supervisor role contract is delivered as this launch-time
@@ -3209,7 +3298,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
         ),
         // OpenCode's generated primary agent owns the durable role contract;
         // this queued intro carries the launch-specific skill names and
-        // ambient-recall delivery that arrive before the agent config is
+        // context delivery that arrive before the agent config is
         // inspected.
         cas_mux::SupervisorCli::OpenCode => format!(
             "OpenCode supervisor startup:\n\
@@ -3219,8 +3308,9 @@ pub(crate) fn queue_supervisor_intro_prompt(
         ),
     };
 
-    // Claude already receives the complete role contract above.
-    if supervisor_cli != cas_mux::SupervisorCli::Claude {
+    // Claude receives its role contract above; Codex has resident developer
+    // guidance and trusted native hooks. Avoid echoing that policy into its pane.
+    if !matches!(supervisor_cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex) {
         prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
     }
 
@@ -3246,47 +3336,29 @@ pub(crate) fn queue_supervisor_intro_prompt(
         }
     }
 
-    // cas-3413 / cas-91df: Codex has no SessionStart hooks and Grok discards
-    // SessionStart stdout. Their queued launch intro is therefore the real
-    // delivery seam. Reuse one bundle so both receive the normal context and
-    // independently bounded ambient-recall packet, with explicit child
-    // identity because the parent env is not the supervisor's env yet.
+    // Grok discards SessionStart stdout; OpenCode also needs queued context.
     if matches!(
         supervisor_cli,
-        cas_mux::SupervisorCli::Codex
-            | cas_mux::SupervisorCli::Grok
-            | cas_mux::SupervisorCli::OpenCode
+        cas_mux::SupervisorCli::Grok | cas_mux::SupervisorCli::OpenCode
     ) {
-        if let Some(bundle) = queued_supervisor_session_start_bundle(
+        if let Some(context) = queued_supervisor_session_start_context(
             cas_dir,
-            supervisor_name,
             session_id.unwrap_or(supervisor_name),
-            factory_session.unwrap_or(supervisor_name),
         ) {
-            // Reuse the established supervisor-guidance ceiling for queued
-            // delivery. Ambient recall stays protected because it is the
-            // purpose of this fallback; ordinary SessionStart context can
-            // compact to its retrieval command rather than being truncated.
             use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
-            let mut assembler =
-                SessionContextAssembler::new(format!("{prompt}\n\n<cas-queued-session-start>"))
-                    .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
-            if let Some(context) = bundle.context {
-                let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
-                assembler.append_degradable(
-                    context,
-                    format!(
-                        "[session-start context omitted to fit the queued launch payload — run `{tool_prefix}search action=context`]"
-                    ),
-                );
-            }
-            if let Some(packet) = bundle.ambient_recall {
-                assembler.append_protected(packet.full);
-            }
+            // Preserve the normal per-section budget and the current-handoff
+            // pointer when a queued launch needs to compact its context.
+            let mut assembler = SessionContextAssembler::new(context)
+                .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
+            assembler.prepend_protected(format!("{prompt}\n\n<cas-queued-session-start>"));
             assembler.append_protected("</cas-queued-session-start>".to_string());
             prompt = assembler.render();
         }
+    }
+
+    if let Some(preface) = preface {
+        prompt = format!("{preface}\n\n{prompt}");
     }
 
     if let Ok(queue) = open_prompt_queue_store(cas_dir) {
@@ -3346,17 +3418,10 @@ fn claude_custom_config_context_fallback(
         .filter(|context| !context.trim().is_empty())
 }
 
-struct QueuedSupervisorSessionStartBundle {
-    context: Option<String>,
-    ambient_recall: Option<crate::ambient_recall::RecallPacket>,
-}
-
-fn queued_supervisor_session_start_bundle(
+fn queued_supervisor_session_start_context(
     cas_dir: &std::path::Path,
-    supervisor_name: &str,
     session_id: &str,
-    factory_session: &str,
-) -> Option<QueuedSupervisorSessionStartBundle> {
+) -> Option<String> {
     let input = cas_core::hooks::HookInput {
         session_id: session_id.to_string(),
         cwd: cas_dir.parent()?.to_string_lossy().into_owned(),
@@ -3368,20 +3433,9 @@ fn queued_supervisor_session_start_bundle(
     let limit = crate::config::Config::load(cas_dir)
         .unwrap_or_default()
         .context_limit();
-    let context = crate::hooks::build_context(&input, limit, cas_dir)
+    crate::hooks::build_context(&input, limit, cas_dir)
         .ok()
-        .filter(|context| !context.trim().is_empty());
-    let ambient_recall = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(
-        &input,
-        cas_dir,
-        None,
-        supervisor_name,
-        factory_session,
-    );
-    (context.is_some() || ambient_recall.is_some()).then_some(QueuedSupervisorSessionStartBundle {
-        context,
-        ambient_recall,
-    })
+        .filter(|context| !context.trim().is_empty())
 }
 
 pub(crate) fn queue_codex_worker_intro_prompt(
@@ -3655,13 +3709,9 @@ pub(crate) fn persist_session_metadata_delivery_mode_at(
     })
 }
 
-/// cas-c5ab: re-arm the suspended reminders of workers leaving a factory
-/// session (removed, or the session shutting down). Their hold ends with
-/// them, so nothing else would ever resume or cancel those reminders.
-/// cas-5f4b: `known_ids` come from the director snapshot taken before the
-/// worker left, so a worker record deleted before this runs still has its
-/// reminders re-armed; the store lookup only adds ids the snapshot missed.
-pub(crate) fn resume_held_reminders(
+/// End pending and suspended waits when workers leave this factory. Captured
+/// IDs keep cancellation possible after SessionEnd has deleted the agent row.
+pub(crate) fn cancel_worker_reminders(
     cas_dir: &std::path::Path,
     session_name: &str,
     workers: &[String],
@@ -3670,7 +3720,7 @@ pub(crate) fn resume_held_reminders(
     let reminders = match crate::store::open_reminder_store(cas_dir) {
         Ok(reminders) => reminders,
         Err(error) => {
-            tracing::warn!(factory_session = %session_name, %error, "failed to open reminders to re-arm held reminders");
+            tracing::warn!(factory_session = %session_name, %error, "failed to open leaving workers reminder store");
             return;
         }
     };
@@ -3681,14 +3731,21 @@ pub(crate) fn resume_held_reminders(
         Ok(agents) => ids.extend(agents.into_iter().filter(|agent| {
             workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
         }).map(|agent| agent.id)),
-        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders"),
+        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list leaving workers"),
     }
     ids.sort();
     ids.dedup();
-    for id in ids {
-        if let Err(error) = reminders.resume_suspended_for_target(&id) {
-            tracing::warn!(agent_id = %id, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
-        }
+    let rows = reminders.list_all_pending().and_then(|mut pending| {
+        pending.extend(reminders.list_suspended(None)?);
+        Ok(pending)
+    });
+    match rows {
+        Ok(rows) => for row in rows.into_iter().filter(|row| ids.contains(&row.owner_id) || ids.contains(&row.target_id)) {
+            if let Err(error) = reminders.cancel(row.id, &row.owner_id) {
+                tracing::warn!(reminder_id = row.id, %error, "failed to cancel leaving worker reminder");
+            }
+        },
+        Err(error) => tracing::warn!(%error, "failed to read leaving workers reminders"),
     }
 }
 
@@ -4159,11 +4216,9 @@ mod tests {
         );
     }
 
-    /// Codex has no SessionStart hook, so its queued startup intro is the
-    /// delivery path for both explicit supervisor skills and a real
-    /// ambient-recall packet.
+    /// Native Codex hooks own context; the queued intro is a readable trigger.
     #[test]
-    fn codex_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
+    fn codex_supervisor_intro_uses_native_context_and_compact_trigger() {
         use crate::store::{
             detect::open_prompt_queue_store, init_cas_dir, open_store, open_task_store_local,
         };
@@ -4180,10 +4235,12 @@ mod tests {
         open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
             "codex-supervisor-ambient".to_string(),
-            "Current Codex release recovery audit preserves operator intent".to_string(),
+            "Operator prefers Codex release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Codex release recovery guidance".to_string());
-        entry.tags = vec!["release".to_string(), "recovery".to_string()];
+        // Exercise launch delivery with evidence the supervisor policy admits.
+        entry.entry_type = crate::types::EntryType::Learning;
+        entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4203,27 +4260,27 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let prompt = &rows[0].prompt;
         assert!(
-            prompt.contains("[ambient recall v1 role=supervisor"),
-            "Codex's queued startup intro must carry a non-empty ambient packet: {prompt}"
+            // pin: the old fallback marker must never enter the native launch prompt.
+            !prompt.contains("<cas-queued-session-start>"),
+            "Native Codex startup must not echo hook context into the pane: {prompt}"
         );
         assert!(
-            prompt.contains("codex-supervisor-ambient"),
-            "ambient packet must surface the matched high-importance Codex supervisor memory: {prompt}"
+            !prompt.contains("codex-supervisor-ambient") && !prompt.contains("No hooks"),
+            "Native hook context must remain off the queued operator surface: {prompt}"
         );
-        for required in [
-            "authoritative assignment acceptance",
-            "no prose ACK is required",
-            "inbox on the next turn",
-            "Directed messages wake",
-            "blocker=true",
-            "merge_request=true",
-        ] {
+        // pin: startup names the context owner and the first identity call.
+        for required in ["native SessionStart", "mcp__cs__coordination action=whoami"] {
             assert!(
                 prompt.contains(required),
                 "Codex startup missing {required}"
             );
         }
         assert!(!prompt.contains("/cas-supervisor-checklist"));
+        // cas-ef39: startup triage comes from the resident core, not a full
+        // skill load that compaction would make the supervisor repeat.
+        // pin: this sentence is the routing instruction under test.
+        let routes_to_core = prompt.contains("triage from the supervisor core in your developer instructions");
+        assert!(routes_to_core, "Codex startup must point triage at the resident core: {prompt}");
         for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
             assert!(
                 prompt.contains(skill),
@@ -4231,17 +4288,17 @@ mod tests {
             );
         }
         assert!(
-            prompt.len() <= 8_000,
-            "Codex's measured queued supervisor payload is {} bytes, over the 8KB supervisor-guidance soft ceiling",
+            prompt.len() <= 700,
+            "Codex's measured queued supervisor payload is {} bytes, over the 700B readable startup ceiling",
             prompt.len()
         );
     }
 
     /// Grok discards SessionStart hook stdout. Its queued startup intro is the
     /// harness-specific delivery path, so it must carry both the explicit
-    /// supervisor skills and a real ambient-recall packet.
+    /// supervisor skills and the saved session handoff.
     #[test]
-    fn grok_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
+    fn grok_supervisor_intro_carries_handoff_and_supervisor_skills() {
         use crate::store::{
             detect::open_prompt_queue_store, init_cas_dir, open_store, open_task_store_local,
         };
@@ -4257,11 +4314,12 @@ mod tests {
         task.status = TaskStatus::InProgress;
         open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
-            "grok-supervisor-ambient".to_string(),
-            "Current Grok release recovery audit preserves operator intent".to_string(),
+            "grok-supervisor-handoff".to_string(),
+            "Operator prefers Grok release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Grok release recovery guidance".to_string());
-        entry.tags = vec!["release".to_string(), "recovery".to_string()];
+        entry.entry_type = crate::types::EntryType::Learning;
+        entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4281,12 +4339,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let prompt = &rows[0].prompt;
         assert!(
-            prompt.contains("[ambient recall v1 role=supervisor"),
-            "Grok's actual SessionStart delivery payload must carry a non-empty ambient packet: {prompt}"
-        );
-        assert!(
-            prompt.contains("grok-supervisor-ambient"),
-            "ambient packet must surface the matched high-importance Grok supervisor memory: {prompt}"
+            prompt.contains("grok-supervisor-handoff"),
+            "Grok startup must retain the saved handoff: {prompt}"
         );
         for skill in ["cas-supervisor", "cas-supervisor-checklist"] {
             assert!(
@@ -5159,15 +5213,15 @@ mod tests {
             metadata.held_workers.is_empty(),
             "worker removal must clear durable state so a reused name cannot inherit it"
         );
-        assert_eq!(reminders.list_pending_for_target("worker-id").unwrap().len(), 1);
+        assert!(reminders.list_pending_for_target("worker-id").unwrap().is_empty());
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
     }
 
     /// A normal worker shutdown deletes the agent row before its final
     /// director refresh and reminder cleanup. The pre-shutdown ID must survive
-    /// that order so its held reminder is re-armed.
+    /// that order so its held reminder is cancelled.
     #[test]
-    fn normal_worker_shutdown_rearms_held_reminder_after_agent_deletion() {
+    fn normal_worker_shutdown_cancels_held_reminder_after_agent_deletion() {
         use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
         use crate::types::{Agent, AgentRole};
 
@@ -5244,7 +5298,7 @@ mod tests {
         );
 
         // Match shutdown_worker_inner: the row is gone before its refresh and
-        // the cleanup that clears the hold and re-arms reminders.
+        // the cleanup that clears the hold and cancels reminders.
         app.last_db_fingerprint = None;
         app.refresh_data().unwrap();
         assert!(
@@ -5265,7 +5319,7 @@ mod tests {
                 .list_pending_for_target("worker-id")
                 .unwrap()
                 .len(),
-            1
+            0
         );
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
 
@@ -5277,7 +5331,7 @@ mod tests {
     /// Same-name cache entries from another factory session must not release
     /// that session's held reminders.
     #[test]
-    fn worker_removal_does_not_rearm_same_named_foreign_session_reminder() {
+    fn worker_removal_does_not_cancel_same_named_foreign_session_reminder() {
         use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
         use crate::types::{Agent, AgentRole};
 
@@ -5336,7 +5390,7 @@ mod tests {
                 .list_pending_for_target("current-worker-id")
                 .unwrap()
                 .len(),
-            1
+            0
         );
         assert!(
             reminders
@@ -5347,9 +5401,9 @@ mod tests {
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 1);
     }
 
-    /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
+    /// A session shutdown cancels every held worker's reminders.
     #[test]
-    fn session_shutdown_rearms_held_workers_reminders_cas_5f4b() {
+    fn session_shutdown_cancels_held_workers_reminders_cas_5f4b() {
         use crate::store::AgentStore;
         use crate::types::{Agent, AgentRole};
 
@@ -5373,10 +5427,10 @@ mod tests {
 
         let mut app = super::FactoryApp::for_test_at(cas_dir);
         app.worker_names = vec!["lively-crow".into(), "quiet-wren".into()];
-        app.rearm_held_reminders_at_shutdown("shutdown-5f4b");
+        app.cancel_worker_reminders_at_shutdown("shutdown-5f4b");
 
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
-        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 1);
+        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 0);
     }
 
     /// A hold update touches session metadata, not cas.db. The ordinary

@@ -55,14 +55,14 @@ pub(crate) fn task_risk(task: &Task) -> String {
     }
 }
 
-/// Links to the evidence recorded on the task (`qa-bundle:` and
-/// `base-vs-change:` note lines).
+/// Links to producer and independent-review bundles plus comparison runs.
 fn task_evidence_references(task: &Task) -> Vec<String> {
     task.notes
         .lines()
         .filter_map(|line| {
             for (marker, label) in [
                 ("qa-bundle:", "QA bundle"),
+                (crate::qa_evidence::REVIEW_BUNDLE_CITATION, "Independent QA bundle"),
                 ("base-vs-change:", "Base-vs-change run"),
             ] {
                 if let Some((_, reference)) = line.split_once(marker) {
@@ -151,6 +151,78 @@ pub(crate) fn merge_request_review(
          **Risk:** {risk}\n\n**Door:** {door}\n",
         evidence.join("\n")
     )
+}
+
+/// Preserve copied proof once, with the same immutable file used by local reads
+/// and the published artifact. Publication errors leave the caller's full text
+/// in-band; a missing evidence store must never hide evidence.
+pub(crate) fn relay_evidence_manifest(
+    cas_root: &Path,
+    task_id: &str,
+    body: &str,
+) -> Result<String> {
+    use crate::artifacts::{PublishContext, paths::PublishRoots};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    anyhow::ensure!(
+        !task_id.is_empty()
+            && task_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+        "manifest task id must be a single safe path component"
+    );
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let root =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = PublishRoots::new(cas_root, &root, task_id);
+    std::fs::create_dir_all(&roots.task_artifacts_dir)?;
+    let name = format!("relay-evidence-{:x}.md", Sha256::digest(body.as_bytes()));
+    let path = roots.task_artifacts_dir.join(&name);
+    let mut file = tempfile::NamedTempFile::new_in(&roots.task_artifacts_dir)?;
+    file.write_all(body.as_bytes())?;
+    match file.persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::ensure!(
+                std::fs::read(&path)? == body.as_bytes(),
+                "existing manifest does not match its evidence"
+            );
+        }
+        Err(error) => return Err(error.error.into()),
+    }
+    let store = cas_store::SqliteArtifactStore::open(cas_root)?;
+    let artifact = match store
+        .list_for_task(task_id)?
+        .into_iter()
+        .find(|artifact| artifact.name == name)
+    {
+        Some(artifact) => artifact,
+        None => {
+            crate::artifacts::publish(
+                &PublishContext {
+                    store: &store,
+                    roots,
+                    task_id: task_id.into(),
+                    cloud: crate::artifacts::cloud_client(cas_root),
+                },
+                &path,
+            )?
+            .artifact
+        }
+    };
+    let read = if artifact.status == "committed" {
+        format!(
+            "Evidence manifest: artifact action=fetch task_id={task_id} id={}",
+            artifact.id
+        )
+    } else {
+        format!(
+            "Evidence manifest: {} (local). Read file {}",
+            artifact.id,
+            path.display()
+        )
+    };
+    Ok(read)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -418,7 +490,7 @@ mod tests {
         let mut task = Task::new("cas-fixture".into(), "Fixture".into());
         task.risk = vec![cas_types::TaskRisk::BlastRadius];
         task.door = Some(cas_types::TaskDoor::OneWay);
-        task.notes = "qa-bundle: /proof/qa/bundle.json".into();
+        task.notes = "qa-bundle: /proof/qa/bundle.json\nqa-review-bundle: /review/qa/bundle.json".into();
         let body = delivery_body(
             repo,
             Some(&task),
@@ -433,6 +505,7 @@ mod tests {
         assert!(body.contains("**Before:** fails"));
         assert!(body.contains("**After:** passes"));
         assert!(body.contains("/proof/qa/bundle.json"));
+        assert!(body.contains("[Independent QA bundle](</review/qa/bundle.json>)"));
         assert!(body.contains("**Risk:** blast-radius"));
         assert!(body.contains("**Door:** one-way"));
         let legacy = delivery_body(repo, None, &base, "HEAD", None, None, None).unwrap();
@@ -461,7 +534,21 @@ mod tests {
     /// return-contract proof and renders unsupplied fields neutrally.
     #[test]
     fn merge_request_review_shows_contract_proof_and_neutral_gaps() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, base, head) = two_commit_repo();
+        let outside = temp.path().join("outside-manifest");
+        assert!(
+            relay_evidence_manifest(
+                &temp.path().join(".cas"),
+                outside.to_str().unwrap(),
+                "proof"
+            )
+            .is_err()
+        );
+        assert!(
+            !outside.exists(),
+            "invalid task IDs must be rejected before any evidence write"
+        );
         let task = Task::new("cas-fixture".into(), "Fixture".into());
         let worker = "status: ready\n\
                       tip: abc on factory/w; worktree: clean\n\
@@ -486,7 +573,10 @@ mod tests {
         assert_eq!(contract_evidence("no contract"), Vec::<String>::new());
         assert!(review.contains("/proof/qa/bundle.json"), "{review}");
         assert!(review.contains(&task_risk(&recorded)), "{review}");
-        assert!(review.contains(&cas_types::TaskDoor::OneWay.to_string()), "{review}");
+        assert!(
+            review.contains(&cas_types::TaskDoor::OneWay.to_string()),
+            "{review}"
+        );
 
         let missing = merge_request_review(temp.path(), &task, "missing-ref", &head, "");
         assert!(missing.contains("missing-ref -> "), "{missing}");
@@ -549,7 +639,13 @@ mod tests {
             "  Proof: 3/3 PASS\nci:\nCI: run 7 green\nproofs: nope\nnote: proof: inline",
         );
         assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[0].starts_with("proof: ") && lines[0].ends_with("3/3 PASS"), "{lines:?}");
-        assert!(lines[1].starts_with("ci: ") && lines[1].ends_with("run 7 green"), "{lines:?}");
+        assert!(
+            lines[0].starts_with("proof: ") && lines[0].ends_with("3/3 PASS"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("ci: ") && lines[1].ends_with("run 7 green"),
+            "{lines:?}"
+        );
     }
 }

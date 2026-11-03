@@ -39,6 +39,7 @@ fn test_codex_help_shows_shortcut_description() {
 
     assert!(normalized.contains("supervisor"), "{help}");
     assert!(normalized.contains("--list-profiles"), "{help}");
+    assert!(normalized.contains("profile listings"), "{help}");
     assert!(
         normalized.contains("`cas factory` flags pass through"),
         "{help}"
@@ -80,12 +81,28 @@ fn test_codex_accepts_factory_flags() {
 
 /// The profile-first spelling reaches the same factory arg parser.
 #[test]
-fn test_codex_accepts_profile_then_factory_flags() {
-    cas_cmd()
-        .args(["codex", "main", "--workers", "0", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--default"));
+fn test_providers_accept_profile_then_factory_flags() {
+    // Help is available before login, without inspecting or repairing a real
+    // account. The registry must not turn this parser check into a launch.
+    for provider in ["codex", "claude"] {
+        let home = TempDir::new().unwrap();
+        cas_cmd()
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CLAUDE_HOME")
+            .args([provider, "main", "--workers", "0", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--default"))
+            .stderr(predicate::str::is_empty());
+        assert_eq!(
+            std::fs::read_dir(home.path()).unwrap().count(),
+            0,
+            "{provider} help must not create state"
+        );
+    }
 }
 
 #[test]

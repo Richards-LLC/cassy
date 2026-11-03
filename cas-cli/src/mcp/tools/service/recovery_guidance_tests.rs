@@ -76,7 +76,7 @@ async fn recovery_guidance_missing_parameters_four_harnesses() {
         );
         assert!(!error.message.contains("task ID"), "{error}");
         let error = service
-            .coordination(Parameters(
+            .factory(Parameters(
                 serde_json::from_value(serde_json::json!({"action": "epic_status"})).unwrap(),
             ))
             .await
@@ -117,7 +117,9 @@ async fn recovery_guidance_start_success_and_delegation_four_harnesses() {
         let result = service
             .task(Parameters(
                 serde_json::from_value(
-                    serde_json::json!({"action": "start", "id": "cas-recovery"}),
+                    // a8fed56db defaults to a bounded receipt. Full workflow
+                    // guidance remains available through explicit full start.
+                    serde_json::json!({"action": "start", "id": "cas-recovery", "brief": false}),
                 )
                 .unwrap(),
             ))

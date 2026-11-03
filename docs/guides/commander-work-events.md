@@ -1,4 +1,4 @@
-# Commander work events (schema v1)
+# Commander work events (schema v2)
 
 Commander can show what a factory session is doing between its replies: the
 supervisor's thinking, its tool calls, todo updates, task transitions and
@@ -51,7 +51,7 @@ events before `before`, listed oldest first. While `has_earlier` is true, pass
 ```json
 {"WorkEvents": {
   "request_id": "events-1",
-  "schema_version": 1,
+  "schema_version": 2,
   "events": [
     {"id": "t:sup-1:000000000001234:001", "kind": "tool", "session": "factory-1",
      "agent": "calm-otter-1", "turn": "prompt-1", "at": "2026-10-27T12:00:02+00:00",
@@ -89,7 +89,7 @@ A daemon that advertises `work_events_live` tells each client that has read a
 page when the stream gains events:
 
 ```json
-{"WorkEventsAppended": {"schema_version": 1}}
+{"WorkEventsAppended": {"schema_version": 2}}
 ```
 
 The notice carries no event content. The client then reads the newest page
@@ -110,5 +110,88 @@ the daemon:
 
 ## Versioning
 
-Additions that older clients can ignore, such as a new optional field or a new
-kind, keep `schema_version` 1. A change to an existing field's meaning raises it.
+Version 2 is additive: all v1 fields, IDs, kinds and detail requests retain their
+meaning. Old daemons omit extensions and remain readable. Old clients ignore
+extensions; unknown kinds still read as notices. Unknown tool operations,
+lifecycle stages, outcomes and provenance strings must not reject a base row.
+The page and change notice advertise `schema_version: 2`; clients validate each
+optional family independently instead of refusing unfamiliar versions.
+
+## Optional v2 facts
+
+| Field | Shape and meaning |
+| --- | --- |
+| `tool` | `{name, operation, targets, command?, cwd?, exit_code?, counts?: {files?, matches?}}`. Operations are `read`, `search`, `command`, `edit`, or `other`. Unknown tools retain their name, label and detail. Targets come from explicit tool arguments or patch headers, never shell-command guesses. Missing counts/exit codes mean unknown. |
+| `lifecycle` | `{id, stage, phase?, outcome?, started_at?, ended_at?}`. A tool row starts at `start`, becomes `phase` while a command session is running, and becomes `end` on its matching final output. ID and row timestamp remain stable. Outcomes include `success`, `error`, `unknown`. Turn/compaction records become notice rows with lifecycle metadata. |
+| `reasoning` | `{summary, source}`. Source is `codex_summary` or `claude_thinking`; summary is the first published nonempty line. The existing on-demand `detail` contains only the recorded published text. Encrypted content, signatures, analysis messages and unrecorded reasoning are never interpreted or returned. |
+| `changed_files` | `{files: [{path, operation, source_event_id, line_counts?: {added, removed}}], provenance: "successful_tool_calls", complete: false}`. A cumulative snapshot of successful explicit edit targets for this turn. Use the newest snapshot per agent/turn. It proves tool results, not a Git diff or a commit. Shell side effects and other agents' edits are unknown. |
+
+```json
+{"id":"t:agent:000000000001234:001","kind":"tool","session":"factory-1",
+ "at":"2026-10-28T12:00:00Z","label":"Read: src/lib.rs","has_detail":true,
+ "tool":{"name":"Read","operation":"read","targets":["src/lib.rs"],"counts":{"files":1}},
+ "lifecycle":{"id":"call-1","stage":"end","outcome":"success",
+ "started_at":"2026-10-28T12:00:00Z","ended_at":"2026-10-28T12:00:01Z"}}
+```
+
+`changed_files.files[].line_counts` is an optional additive v2 field, with no
+nested version. Both counts are nonnegative integers. They describe only the
+latest successful edit event identified by that path's `source_event_id`.
+They are neither cumulative counts for the turn nor a net Git diff. A later
+successful edit replaces that path's earlier counts; if its counts are unknown,
+the field is omitted rather than retaining earlier numbers or inventing zeroes.
+Clients keep the file provenance when the optional count field is absent or
+malformed, and accept zero as a known count.
+
+Counts come from explicit signed lines in a complete successful Codex
+`apply_patch` add/update input or a Claude `Edit`, `MultiEdit` or `Write` result's
+nonempty `structuredPatch`, attributed to its `filePath`. Context lines do not
+count. Delete/move patch inputs, truncated or malformed patches, empty structured
+patches (including some creates), and results without this metadata omit counts.
+Input replacement strings, command output prose and the current filesystem do
+not establish line counts. The adapter retains only numeric patch facts in its
+index; this field adds no patch text to the event.
+
+The source adapters are in `daemon/runtime/work_events.rs`. Claude publishes
+`assistant.message.content[].tool_use` and `user` tool results, and system
+`turn_duration`/`compact_boundary` records where available. Codex publishes
+`response_item` calls, outputs and `reasoning.summary`, and `event_msg`
+`task_started`/`task_complete` records. Codex command outputs with a session ID
+are still running; a later `write_stdin` result can finish that operation.
+Claude background Bash results (`isAsync`/`backgroundTaskId`) similarly stay
+running until `TaskOutput` returns a completed task. Continuation rows carry the
+original tool scope and lifecycle ID, so clients can group by `lifecycle.id`
+even after the initial call has paged out. A Claude `turn_duration` record
+reports an end with unknown outcome; it does not prove the turn succeeded.
+Compaction boundary records publish the completed `compacted` phase, not an
+invented in-progress interval. Opaque wrapper tools remain `other`: the adapter
+does not interpret JavaScript or shell scripts to guess their inner operations.
+No adapter invents setup, approval waiting, completion or file changes from
+prose. Some harness versions do not publish every phase; absence is unknown.
+
+Session status also carries optional `supervisor_phase`: the selected supervisor's
+latest lifecycle, kind, event identity, observation time and stale flag, without
+labels, tool input/output or reasoning. It uses the same incremental v2 adapter.
+The hub resolves the selected session's project independently of its own
+`CAS_ROOT`. Native factory SessionStart records bind the exact session and
+supervisor to the harness-provided transcript path; this also covers a lagging
+auto-registration or a context changed by `/clear`, without guessing an alias
+or using the hub's account. Only that supervisor's scoped hook records apply.
+Claude's native PreCompact hook supplies an actual compaction start;
+SessionStart with `source=compact` supplies its end. Matching native session IDs
+recover the duration. A boundary without a start still has no duration. A new
+or cleared context drops the preceding compaction phase. These hook facts are
+read from bounded current/prior-day log tails; missing records stay unknown.
+Commander can display this while Show work is off. The existing five-second
+machine health heartbeat refreshes the open session's status even without a
+fleet event, independently of catalog reads. Its local clock advances from the observed server duration,
+freezes for stale/disconnected snapshots and stops at an explicit end. A missing
+start reports no duration; a completed compaction boundary never becomes a live
+compaction interval. An explicit unresolved operator ask can show Waiting on you
+without inventing its start time.
+
+All new text passes the same redactor as labels/details. Lists and strings are
+bounded. The hub validates correlation using the shared protocol and forwards
+the original frame bytes, preserving optional fields through mixed versions.
+Change probes include transcript lengths so completion of an existing row also
+triggers a refresh; clients merge repeated IDs to replace their earlier state.

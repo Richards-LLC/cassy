@@ -78,42 +78,54 @@ fn setup_test_db() -> (TempDir, SqliteCodeStore) {
 
 #[test]
 fn test_file_crud() {
-    let (_temp, store) = setup_test_db();
+    crate::hash_id::with_fixed_timestamp(1_700_000_000_000_000_000, || {
+        let (_temp, store) = setup_test_db();
 
-    let file = CodeFile {
-        id: store.generate_file_id().unwrap(),
-        path: "src/lib.rs".to_string(),
-        repository: "test-repo".to_string(),
-        language: Language::Rust,
-        size: 1024,
-        line_count: 50,
-        commit_hash: Some("abc123".to_string()),
-        content_hash: "hash123".to_string(),
-        ..Default::default()
-    };
+        let file = CodeFile {
+            id: store.generate_file_id().unwrap(),
+            path: "src/lib.rs".to_string(),
+            repository: "test-repo".to_string(),
+            language: Language::Rust,
+            size: 1024,
+            line_count: 50,
+            commit_hash: Some("abc123".to_string()),
+            content_hash: "hash123".to_string(),
+            ..Default::default()
+        };
 
-    // Add
-    store.add_file(&file).unwrap();
+        // Add
+        store.add_file(&file).unwrap();
 
-    // Get
-    let retrieved = store.get_file(&file.id).unwrap();
-    assert_eq!(retrieved.path, "src/lib.rs");
-    assert_eq!(retrieved.language, Language::Rust);
+        // Distinct files created during one clock tick must both remain addressable.
+        let second = CodeFile {
+            id: store.generate_file_id().unwrap(),
+            path: "src/other.rs".to_string(),
+            ..file.clone()
+        };
+        store.add_file(&second).unwrap();
 
-    // Get by path
-    let by_path = store
-        .get_file_by_path("test-repo", "src/lib.rs")
-        .unwrap()
-        .unwrap();
-    assert_eq!(by_path.id, file.id);
+        // Get
+        let retrieved = store.get_file(&file.id).unwrap();
+        assert_eq!(retrieved.path, "src/lib.rs");
+        assert_eq!(retrieved.language, Language::Rust);
 
-    // List
-    let files = store.list_files("test-repo", None).unwrap();
-    assert_eq!(files.len(), 1);
+        // Get by path
+        let by_path = store
+            .get_file_by_path("test-repo", "src/lib.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_path.id, file.id);
 
-    // Delete
-    store.delete_file(&file.id).unwrap();
-    assert!(store.get_file(&file.id).is_err());
+        // List
+        let files = store.list_files("test-repo", None).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(store.get_file(&second.id).unwrap().path, "src/other.rs");
+
+        // Delete
+        store.delete_file(&file.id).unwrap();
+        assert!(store.get_file(&file.id).is_err());
+        assert!(store.get_file(&second.id).is_ok());
+    });
 }
 
 #[test]

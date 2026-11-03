@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::artifacts::{
-    PublishContext, PublishDisposition, PublishOutcome, cloud::ArtifactUploadClient,
+    PublishContext, PublishOutcome, StorageDisposition, cloud::ArtifactUploadClient,
     paths::PublishRoots, publish,
 };
 use crate::config::Config;
@@ -104,8 +104,10 @@ pub fn execute(
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
         ArtifactCommands::Fetch(args) => {
-            let (artifact, path) =
-                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id)?;
+            let (artifact, path) = metadata_result(
+                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id),
+                cli.json,
+            )?;
             if cli.json {
                 println!(
                     "{}",
@@ -161,11 +163,12 @@ fn execute_publish(args: &PublishArgs, cas_root: &Path, json: bool) -> anyhow::R
 
 fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
     let artifact = &outcome.artifact;
-    let (storage, detail) = match &outcome.disposition {
-        PublishDisposition::Committed { .. } => ("committed", None),
-        PublishDisposition::StorageNotLive { reason } => ("not_live", Some(reason.clone())),
-        PublishDisposition::NotLoggedIn => ("not_logged_in", None),
-        PublishDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.clone())),
+    let (storage, detail) = match outcome.disposition.storage_disposition() {
+        StorageDisposition::Committed => ("committed", None),
+        StorageDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.to_string())),
+        StorageDisposition::StorageNotLive { reason } => ("not_live", Some(reason.to_string())),
+        StorageDisposition::NotLoggedIn => ("not_logged_in", None),
+        StorageDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.to_string())),
     };
     serde_json::json!({
         "artifact_id": artifact.id,
@@ -177,6 +180,8 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
         "status": artifact.status,
         "storage": storage,
         "storage_detail": detail,
+        "metadata_state": outcome.disposition.metadata_state(),
+        "qa_portability_error": outcome.disposition.qa_portability_error(),
         "cloud_url": artifact.cloud_url,
         "source": outcome.source.display().to_string(),
     })
@@ -184,7 +189,9 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
 
 fn print_publish(outcome: &PublishOutcome) {
     let artifact = &outcome.artifact;
-    let verdict = if outcome.disposition.is_committed() {
+    let verdict = if outcome.disposition.qa_portability_error().is_some() {
+        "[WARN] QA bundle not portable"
+    } else if outcome.disposition.is_committed() {
         "[OK] published"
     } else {
         "[WARN] local-only"
@@ -195,29 +202,32 @@ fn print_publish(outcome: &PublishOutcome) {
         human_size(artifact.size_bytes),
         artifact.id
     );
-    println!("     {}", outcome.disposition.summary());
+    for line in crate::cloud::presence::wrap_line(&outcome.disposition.summary()).lines() {
+        println!("     {line}");
+    }
     println!("     sha256 {}", artifact.sha256);
-    match &outcome.disposition {
-        PublishDisposition::UploadFailed { reason } => {
+    match outcome.disposition.storage_disposition() {
+        StorageDisposition::UploadFailed { reason } | StorageDisposition::CommittedMetadataUnavailable { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
             for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
+            if matches!(outcome.disposition.storage_disposition(), StorageDisposition::CommittedMetadataUnavailable { .. }) {
+                println!("  -> cas cloud sync");
+            } else {
+                println!("  -> cas artifact show {}", artifact.id);
+            }
+        }
+        StorageDisposition::StorageNotLive { .. } | StorageDisposition::NotLoggedIn => {
             println!("  -> cas artifact show {}", artifact.id);
         }
-        PublishDisposition::StorageNotLive { .. } | PublishDisposition::NotLoggedIn => {
-            println!("  -> cas artifact show {}", artifact.id);
-        }
-        PublishDisposition::Committed { .. } => {}
+        StorageDisposition::Committed => {}
     }
 }
 
 fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let store = SqliteArtifactStore::open(cas_root).context("opening the artifact store")?;
-    let Some(artifact) = store.get(&args.id)? else {
-        anyhow::bail!("no artifact {}", args.id);
-    };
+    let artifact = metadata_result(crate::artifacts::lookup_metadata(cas_root, None, &args.id), json)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&artifact)?);
@@ -244,6 +254,22 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
     }
     println!("     created {}", artifact.created_at);
     Ok(())
+}
+
+fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T> {
+    result.map_err(|error| {
+        if json {
+            if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
+                println!("{}", serde_json::json!({
+                    "status": "error", "state": "metadata_unavailable",
+                    "artifact_id": missing.artifact_id, "task_id": missing.task_id,
+                    "message": error.to_string(),
+                }));
+                return super::JsonReportedFailure(error).into();
+            }
+        }
+        error
+    })
 }
 
 fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {

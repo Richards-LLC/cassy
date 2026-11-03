@@ -1,7 +1,8 @@
 import { test, expect, type Request } from "@playwright/test";
 import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { claimReceiptDirectory } from "./receipt-directory.mjs";
+import { claimReceiptDirectory, showRecordingChapter } from "./receipt-directory.mjs";
+import { RECORD } from "./journey";
 import {
   saveQaTrace,
   redactQaText,
@@ -110,7 +111,7 @@ test(
     const header = page.locator("#conversation-connection");
     const stage = async (title: string, body: () => Promise<void>) =>
       test.step(title, async () => {
-        await page.screencast.showChapter(title, { duration: 1000 });
+        await showRecordingChapter(page, title, { duration: 1000 });
         const started = performance.now();
         await body();
         const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
@@ -170,7 +171,8 @@ test(
         await expect(dialog).toBeHidden();
         await page
           .getByRole("navigation", { name: "Choose a supervisor" })
-          .getByRole("button", { name: /project on/ })
+          .getByRole("button", { name: /project on/ }).and(page
+          .getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
           .click();
         await expect(header).toContainText("Live");
         await command("queue", {
@@ -275,9 +277,19 @@ test(
         const before = welcomes.length;
         const stopped = await command("daemon-stop");
         await expect(header).toContainText("Reconnecting");
+        // cas-8801: a confirmed stop removes the conversation from navigation.
+        // Observe that gap before starting the replacement; a rapid restart
+        // must not hide an ended row lingering in the running-only list.
+        const runningRows = page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row");
+        await expect(runningRows).toHaveCount(0);
+        await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true })).toBeVisible();
         const replacement = await command("daemon-start");
         expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
         fixture!.daemonPid = replacement.daemonPid;
+        // A new birth is a new conversation. Open it without reloading the
+        // phone, then prove its real Welcome and completed attachment pass.
+        await expect(runningRows).toHaveCount(1);
+        await runningRows.click();
         await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
         await expect(header).toContainText("Live");
         await countAttached(welcomes.at(-1)!);
@@ -606,24 +618,59 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
 
 // The disposable project's config must load when the real upload stores bytes;
 // protocol doubles cannot catch a malformed config in real-hub-server.mjs.
-test("HUB-J24 real hub composer upload stores the picked file", {
+test("HUB-J24 real hub composer decodes a local raster preview and stores the picked file", {
   annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
-}, async ({ page }) => {
+}, async ({ page }, info) => {
   try {
-    const fixture = await command("reset", { messageControl: true });
-    const pairing = new URL(fixture.pairUrl);
+    const fixture = await command("reset", { messageControl: true, nativeCommander: true });
+    const pairing = new URL(fixture!.pairUrl);
     pairing.pathname = "/commander/";
     await page.setViewportSize({ width: 390, height: 844 });
     await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
-    await page.goto(pairing.href);
+    const documentResponse = await page.goto(pairing.href);
+    expect(documentResponse!.headers()["content-security-policy"]).toContain("default-src 'none'");
     await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
     await page.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(page.locator("#pair-dialog")).toBeHidden();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
-    const bytes = Buffer.from("Real fixture upload must load the project config.\n");
+    if (RECORD) {
+      await page.evaluate(() => {
+        const violations: string[] = [];
+        (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations = violations;
+        document.addEventListener("securitypolicyviolation", event => {
+          if (event.effectiveDirective.startsWith("style-src")) violations.push(event.effectiveDirective);
+        });
+      });
+      await page.screencast.start({ path: info.outputPath("native-chapter.webm"), size: { width: 390, height: 844 } });
+      const chapter = showRecordingChapter(page, "M01 Choose a local image", { duration: 5000 });
+      await expect(page.getByText("M01 Choose a local image", { exact: true })).toBeVisible();
+      await page.screenshot({ path: info.outputPath("native-chapter.png") });
+      await chapter;
+      expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
+    }
+    await expect(page.getByText("M01 Choose a local image", { exact: true })).toHaveCount(0);
+    const imageViolations: string[] = [];
+    await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));
+    await page.evaluate(() => document.addEventListener("securitypolicyviolation", event => {
+      if (event.effectiveDirective === "img-src")
+        (window as unknown as { recordImageViolation: (blocked: string) => void }).recordImageViolation(event.blockedURI);
+    }));
+    // Untrusted active formats stay named files, never mounted as previews.
+    const unsafeChooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await unsafeChooser).setFiles({ name: "untrusted.svg", mimeType: "image/svg+xml", buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') });
+    await expect(page.locator(".composer-file")).toContainText("untrusted.svg");
+    await expect(page.locator(".composer-file img")).toHaveCount(0);
+    await page.getByRole("button", { name: "Remove untrusted.svg", exact: true }).click();
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
     const chooser = page.waitForEvent("filechooser");
     await page.getByRole("button", { name: "Attach files", exact: true }).click();
-    await (await chooser).setFiles({ name: "fixture-config.txt", mimeType: "text/plain", buffer: bytes });
+    await (await chooser).setFiles({ name: "fixture.png", mimeType: "image/png", buffer: bytes });
+    const thumbnail = page.locator(".composer-file img");
+    await expect(thumbnail).toHaveAttribute("src", /^blob:/);
+    await expect.poll(() => thumbnail.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    expect(imageViolations).toEqual([]);
+    await page.screenshot({ path: info.outputPath("pending-thumbnail.png") });
     const uploaded = page.waitForResponse(response =>
       response.request().method() === "POST" && new URL(response.url()).pathname.includes("/uploads/"));
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/, exact: true }).click();
@@ -633,6 +680,7 @@ test("HUB-J24 real hub composer upload stores the picked file", {
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
   } finally {
+    if (RECORD) await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }
 });
@@ -665,7 +713,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     "HUB-J13", "parts", `real-hub-run-${info.repeatEachIndex}`);
   claimReceiptDirectory(directory, info.title);
   const fixture = await command("reset", { newSession: true });
-  const pairing = new URL(fixture.pairUrl);
+  const pairing = new URL(fixture!.pairUrl);
   pairing.pathname = "/commander/";
   const secrets = [fixture.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? ""];
   const redactions: Promise<void>[] = [];
@@ -703,6 +751,21 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     await page.getByRole("button", { name: "Send to the project supervisor", exact: true }).click();
     await expect(page.getByRole("log").getByText("Launch supervisor answered", { exact: true })).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: join(directory, "J03-answer.png") });
+    const composer = page.getByRole("textbox", { name: "Your message", exact: true });
+    await composer.fill("/exit");
+    await composer.press("Enter");
+    const confirmation = page.getByRole("alertdialog", { name: /Exit/ });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Exit", exact: true }).click();
+    const exitReceipt = page.locator(".supervisor-command-receipt");
+    await expect(exitReceipt).toContainText("/exit");
+    // cas-befb: confirmed exit removes the stopped conversation, including its
+    // command receipt. Assert the running-only catalog's terminal state.
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
+      .toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true }))
+      .toBeVisible();
+    await page.screenshot({ path: join(directory, "J04-exit-ended.png") });
     passed = true;
   } finally {
     try {
@@ -720,5 +783,103 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
       await command("cleanup");
       await expect(access(dirname(fixture.project))).rejects.toMatchObject({ code: "ENOENT" });
     }
+  }
+});
+
+// cas-f8ab: process-owned stopped fixtures, the actual hub catalog and embedded
+// candidate client. Real wall time proves a two-minute absence of attach traffic.
+test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
+  annotation: { type: "journey-part", description: "crash without receipt, ended daemon, machine outage and pending send" },
+}, async ({ page, context }, info) => {
+  test.setTimeout(240_000);
+  const directory = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env.JOURNEY_OUTPUT ?? "e2e/.results/real-hub", "journeys"), "HUB-J14", "parts", `real-stopped-run-${info.repeatEachIndex}`);
+  claimReceiptDirectory(directory, info.title);
+  const traffic: { path: string; frame?: unknown; at: number }[] = [];
+  const catalogs: unknown[] = [];
+  let passed = false;
+  let fixture: { pairUrl: string; version: string } | undefined;
+  let stopped: { name: string; pid: number; signal: string }[] = [];
+  let observationMs = 0;
+  let journalSends: unknown[] = [];
+  const secrets: string[] = [];
+  try {
+    fixture = await command("reset", { messageControl: true });
+    stopped = await command("stopped-sessions");
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path.includes("/attach")) traffic.push({ path, at: performance.now() });
+    });
+    page.on("response", response => {
+      if (new URL(response.url()).pathname !== "/v1/sessions") return;
+      void response.json().then(body => catalogs.push(body)).catch(() => {});
+    });
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      if (typeof payload !== "string") return;
+      try { const frame = JSON.parse(payload); if (frame.subscribe) traffic.push({ path: new URL(socket.url()).pathname, frame, at: performance.now() }); } catch { /* Pane bytes. */ }
+    }));
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    const pairing = new URL(fixture!.pairUrl); pairing.pathname = "/commander/";
+    secrets.push(fixture!.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? "");
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Session lifecycle QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await context.tracing.start({ screenshots: false, snapshots: { dom: true, aria: true, screen: true }, sources: true });
+    const rows = page.locator("#conversation-list .conversation-row");
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toContainText("journey-supervisor");
+    await expect(page.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
+    for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme });
+      const back = page.locator("#conversation-back"); if (await back.isVisible()) await back.click();
+      await expect(rows).toHaveCount(1);
+      await page.screenshot({ path: join(directory, `running-only-${colorScheme}-${width}.png`) });
+    }
+    const started = performance.now();
+    await expect.poll(() => performance.now() - started, { timeout: 125_000, intervals: [1000] }).toBeGreaterThanOrEqual(120_000);
+    observationMs = performance.now() - started;
+    expect(traffic.filter(entry => /crashed-journey|ended-journey/.test(JSON.stringify(entry)))).toEqual([]);
+    // The running session remains through a machine outage, without one retry
+    // line per row. Its own fresh Welcome proves automatic recovery.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await rows.click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await command("stop");
+    await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+    await expect(rows).toHaveCount(1);
+    await expect(rows).not.toContainText(/retry|Reconnecting|message pending/i);
+    await page.screenshot({ path: join(directory, "machine-outage.png") });
+    await command("start");
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    // A held message to a recipient now gone becomes Not sent, with its
+    // original words accessible in machine Attention. It never auto-replays.
+    await command("stop");
+    await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+    await page.getByRole("textbox", { name: "Your message", exact: true }).fill("Keep this stopped-session instruction");
+    await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
+    await expect(page.getByText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.", { exact: true })).toBeVisible();
+    await command("daemon-stop");
+    await command("start");
+    await expect(rows).toHaveCount(0);
+    await expect(page.locator(".project-card")).toHaveCount(0);
+    await expect(page.getByText("Waiting message not sent", { exact: true })).toBeVisible();
+    const readSaved = async () => journalSends = await page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open("cas-commander-delivery-v1", 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+      try { return await new Promise<unknown[]>((resolve, reject) => { const r = db.transaction("sends").objectStore("sends").getAll(); r.onsuccess = () => resolve(r.result.map(row => row.send).filter(Boolean)); r.onerror = () => reject(r.error); }); } finally { db.close(); }
+    });
+    await expect.poll(readSaved).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Keep this stopped-session instruction", state: "error" })]));
+    await page.screenshot({ path: join(directory, "stopped-message.png") });
+    await command("daemon-start");
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toContainText("journey-supervisor");
+    passed = true;
+  } finally {
+    try {
+      await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
+      await writeFile(join(directory, "final.aria.json"), JSON.stringify(await page.locator("body").ariaSnapshotJSON().catch(() => null)));
+      await writeFile(join(directory, "result.json"), JSON.stringify({ id: "HUB-J14", status: passed ? "PASS" : "FAIL", binary: fixture?.version, stopped, observationMs, traffic, catalogs, journalSends }, null, 2));
+      await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
+    } finally { await context.close(); await command("cleanup"); }
   }
 });

@@ -3,10 +3,43 @@
  * stream (`docs/guides/commander-work-events.md`). Pages are read by cursor,
  * details on demand, and a daemon that pushes `WorkEventsAppended` says when
  * to read the newest page again. Everything here is data: labels and details
- * are agent-supplied text, and the views set them only as `textContent`.
+ * are agent-supplied text. Only explicitly published reasoning is rendered
+ * through the safe Markdown dialect; tool records and legacy rows stay literal.
  */
 
 export type WorkEventKind = "thinking" | "tool" | "todo" | "task" | "worker" | "notice";
+
+/** Optional v2 facts. Unknown string values remain readable by future clients. */
+export interface WorkTool {
+  readonly name: string;
+  readonly operation: string;
+  readonly targets: readonly string[];
+  readonly command?: string;
+  readonly cwd?: string;
+  readonly exit_code?: number;
+  readonly counts?: { readonly files?: number; readonly matches?: number };
+}
+export interface WorkLifecycle {
+  readonly id: string;
+  readonly stage: string;
+  readonly phase?: string;
+  readonly outcome?: string;
+  readonly started_at?: string;
+  readonly ended_at?: string;
+}
+export interface WorkReasoning { readonly summary: string; readonly source: string }
+export interface WorkChangedFile {
+  readonly path: string;
+  readonly operation: string;
+  readonly source_event_id: string;
+  /** Counts from this source event's edit, never cumulative or a net Git diff. */
+  readonly line_counts?: { readonly added: number; readonly removed: number };
+}
+export interface WorkChangedFiles {
+  readonly files: readonly WorkChangedFile[];
+  readonly provenance: string;
+  readonly complete: boolean;
+}
 
 export interface WorkEvent {
   readonly id: string;
@@ -19,9 +52,14 @@ export interface WorkEvent {
   readonly label: string;
   readonly hasDetail: boolean;
   readonly error: boolean;
+  readonly tool?: WorkTool;
+  readonly lifecycle?: WorkLifecycle;
+  readonly reasoning?: WorkReasoning;
+  readonly changed_files?: WorkChangedFiles;
 }
 
 export interface WorkEventsPage {
+  readonly schema_version?: number;
   readonly request_id: string;
   readonly events: WorkEvent[];
   readonly has_earlier: boolean;
@@ -45,6 +83,57 @@ export function workEventSupport(capabilities: unknown): WorkEventSupport {
   return capabilities.includes("work_events_live") ? "live" : "pull";
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function integer(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }
+function workTool(value: unknown): WorkTool | undefined {
+  const row = record(value);
+  if (!row || typeof row.name !== "string" || typeof row.operation !== "string" || !Array.isArray(row.targets) || !row.targets.every((target) => typeof target === "string")) return undefined;
+  const counts = record(row.counts);
+  return {
+    name: row.name, operation: row.operation, targets: row.targets as string[],
+    ...(typeof row.command === "string" ? { command: row.command } : {}),
+    ...(typeof row.cwd === "string" ? { cwd: row.cwd } : {}),
+    ...(integer(row.exit_code) ? { exit_code: row.exit_code } : {}),
+    ...(counts ? { counts: {
+      ...(integer(counts.files) && counts.files >= 0 ? { files: counts.files } : {}),
+      ...(integer(counts.matches) && counts.matches >= 0 ? { matches: counts.matches } : {}),
+    } } : {}),
+  };
+}
+function workLifecycle(value: unknown): WorkLifecycle | undefined {
+  const row = record(value);
+  if (!row || typeof row.id !== "string" || typeof row.stage !== "string") return undefined;
+  return {
+    id: row.id, stage: row.stage,
+    ...(typeof row.phase === "string" ? { phase: row.phase } : {}),
+    ...(typeof row.outcome === "string" ? { outcome: row.outcome } : {}),
+    ...(typeof row.started_at === "string" && Number.isFinite(Date.parse(row.started_at)) ? { started_at: row.started_at } : {}),
+    ...(typeof row.ended_at === "string" && Number.isFinite(Date.parse(row.ended_at)) ? { ended_at: row.ended_at } : {}),
+  };
+}
+function workReasoning(value: unknown): WorkReasoning | undefined {
+  const row = record(value);
+  return row && typeof row.summary === "string" && typeof row.source === "string" ? { summary: row.summary, source: row.source } : undefined;
+}
+function workChangedFiles(value: unknown): WorkChangedFiles | undefined {
+  const row = record(value);
+  if (!row || typeof row.provenance !== "string" || typeof row.complete !== "boolean" || !Array.isArray(row.files)) return undefined;
+  const files: WorkChangedFile[] = [];
+  for (const file of row.files) {
+    const item = record(file);
+    if (!item || typeof item.path !== "string" || typeof item.operation !== "string" || typeof item.source_event_id !== "string") return undefined;
+    const counts = record(item.line_counts);
+    files.push({
+      path: item.path, operation: item.operation, source_event_id: item.source_event_id,
+      ...(counts && integer(counts.added) && counts.added >= 0 && integer(counts.removed) && counts.removed >= 0
+        ? { line_counts: { added: counts.added, removed: counts.removed } } : {}),
+    });
+  }
+  return { files, provenance: row.provenance, complete: row.complete };
+}
+
 function workEvent(value: unknown): WorkEvent | undefined {
   if (!value || typeof value !== "object") return undefined;
   const row = value as Record<string, unknown>;
@@ -52,7 +141,13 @@ function workEvent(value: unknown): WorkEvent | undefined {
   if (typeof row.id !== "string" || !row.id || !Number.isFinite(at) || typeof row.label !== "string") return undefined;
   // An unknown kind reads as a notice (schema v1).
   const kind = KINDS.includes(row.kind as WorkEventKind) ? row.kind as WorkEventKind : "notice";
+  const tool = workTool(row.tool), lifecycle = workLifecycle(row.lifecycle);
+  const reasoning = workReasoning(row.reasoning), changedFiles = workChangedFiles(row.changed_files);
   return {
+    ...(tool ? { tool } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(changedFiles ? { changed_files: changedFiles } : {}),
     id: row.id,
     kind,
     session: typeof row.session === "string" ? row.session : "",
@@ -71,6 +166,7 @@ export function workEventsPage(value: unknown): WorkEventsPage | undefined {
   if (typeof page.request_id !== "string" || !Array.isArray(page.events)) return undefined;
   return {
     request_id: page.request_id,
+    ...(integer(page.schema_version) && page.schema_version > 0 ? { schema_version: page.schema_version } : {}),
     events: page.events.map(workEvent).filter((event): event is WorkEvent => event !== undefined),
     has_earlier: page.has_earlier === true,
     ...(typeof page.next_before === "string" ? { next_before: page.next_before } : {}),
@@ -91,6 +187,7 @@ export function workEventDetail(value: unknown): WorkEventDetail | undefined {
 
 export type DetailState =
   | { readonly state: "loading" }
+  | { readonly state: "offline" }
   | { readonly state: "ready"; readonly text: string; readonly truncated: boolean }
   | { readonly state: "gone" }
   | { readonly state: "failed"; readonly reason: string };
@@ -138,9 +235,12 @@ export class WorkEventStream {
 
   owns(requestId: string): boolean { return this.inFlight.has(requestId); }
 
-  /** Note a sent request; `undefined` (not sent) is ignored. */
+  /** Note a request; an unsent detail waits for the next connection. */
   requested(requestId: string | undefined, kind: "newest" | "older" | "gap" | { detail: string }): void {
-    if (requestId === undefined) return;
+    if (requestId === undefined) {
+      if (typeof kind === "object") { this.details.set(kind.detail, { state: "offline" }); this.version += 1; }
+      return;
+    }
     this.inFlight.set(requestId, kind);
     if (typeof kind === "object") { this.details.set(kind.detail, { state: "loading" }); this.version += 1; }
   }
@@ -215,8 +315,16 @@ export class WorkEventStream {
   /** Forget in-flight requests whose answers can no longer arrive (the socket closed). */
   abandon(): void {
     for (const [id, kind] of this.inFlight) {
-      if (typeof kind === "object") this.details.delete(kind.detail);
+      if (typeof kind === "object") this.details.set(kind.detail, { state: "offline" });
       this.inFlight.delete(id);
+    }
+    this.version += 1;
+  }
+
+  /** An offline detail can be requested once again on the new connection. */
+  reconnected(): void {
+    for (const [id, detail] of this.details) {
+      if (detail.state === "offline") this.details.delete(id);
     }
     this.version += 1;
   }
@@ -239,6 +347,17 @@ export type ChipTone = "ok" | "warn" | "crit" | "idle";
 
 export interface TaskChip { readonly id: string; readonly subject: string; readonly verb: string; readonly tone: ChipTone; readonly label: string }
 
+/** Explicit tool results can report failure even when the legacy flag is absent. */
+export function workFailed(event: WorkEvent): boolean {
+  return event.error || event.lifecycle?.outcome === "error" || (event.tool?.exit_code !== undefined && event.tool.exit_code !== 0);
+}
+
+/** Routine turn bookends stay available together, without two rows per turn. */
+export function turnNotice(event: WorkEvent): boolean {
+  return event.kind === "notice" && !workFailed(event) && event.lifecycle?.phase === undefined
+    && (event.lifecycle?.stage === "start" || event.lifecycle?.stage === "end");
+}
+
 /** A task event as a chip: its task id and transition. Others stay rows. */
 export function taskChip(event: WorkEvent): TaskChip | undefined {
   if (event.kind !== "task") return undefined;
@@ -252,21 +371,47 @@ export function taskChip(event: WorkEvent): TaskChip | undefined {
 export function workSummary(events: readonly WorkEvent[]): string {
   const count = (kind: WorkEventKind): number => events.filter((event) => event.kind === kind).length;
   const tools = count("tool"), thinking = count("thinking"), todos = count("todo");
-  const failed = events.filter((event) => event.kind === "tool" && event.error).length;
-  const others = events.length - tools - thinking - todos - events.filter((event) => taskChip(event) !== undefined).length;
+  const failed = events.filter((event) => event.kind === "tool" && workFailed(event)).length;
+  const others = events.filter((event) => !["tool", "thinking", "todo"].includes(event.kind) && !taskChip(event) && !turnNotice(event)).length;
   const parts: string[] = [];
-  if (thinking > 0) parts.push("Thought");
+  if (thinking > 0) parts.push(events.filter(event => event.kind === "thinking").every(event => event.lifecycle?.stage === "end") ? "Thought" : "Reasoning");
   if (tools > 0) parts.push(`ran ${tools} tool${tools === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}`);
   if (todos > 0) parts.push(`updated todos`);
   if (others > 0) parts.push(`${others} event${others === 1 ? "" : "s"}`);
-  if (parts.length === 0) return "Task updates";
+  if (parts.length === 0) return events.some((event) => taskChip(event)) ? "Task updates" : "Turn activity";
   const text = parts.join(", ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-/** The words a row shows: thinking reads as "Thinking", the rest as labelled. */
+/** A lifecycle label needs a reported boundary; summaries alone imply no state. */
+export function reasoningLabel(event: WorkEvent): string {
+  const stage = event.lifecycle?.stage;
+  return stage === "end" ? "Thought" : stage === "start" || stage === "phase" ? "Thinking" : "Reasoning summary";
+}
+
+/** The words a row shows, with no lifecycle inferred from its presence. */
 export function rowText(event: WorkEvent): string {
-  if (event.kind === "thinking") return event.label ? `Thinking: ${event.label}` : "Thinking…";
+  if (event.kind === "thinking") return event.label ? `${reasoningLabel(event)}: ${event.label}` : reasoningLabel(event);
+  const tool = event.kind === "tool" ? event.tool : undefined;
+  if (tool) {
+    const files = tool.counts?.files;
+    const fileScope = files === undefined ? tool.targets.join(", ") : `${files} file${files === 1 ? "" : "s"}`;
+    const scope = (verb: string, value: string): string => value ? `${verb} · ${value}` : verb;
+    const running = event.lifecycle?.stage === "start" || event.lifecycle?.stage === "phase";
+    if (tool.operation === "read") return scope("Read", fileScope);
+    if (tool.operation === "search") {
+      const matches = tool.counts?.matches;
+      return scope("Search", matches === undefined ? tool.targets.join(", ") : `${matches} match${matches === 1 ? "" : "es"}`);
+    }
+    if (tool.operation === "command") return tool.exit_code === undefined
+      ? (running ? "Running command" : "Command") : `Ran command · exit ${tool.exit_code}`;
+    if (tool.operation === "edit") {
+      const verb = running ? "Editing" : event.lifecycle?.outcome === "success" ? "Edited" : "Edit";
+      return files === undefined ? scope(verb, fileScope) : `${verb} ${files} file${files === 1 ? "" : "s"}`;
+    }
+    // Opaque wrappers remain opaque. Their original hint is more useful than "Other".
+    return event.label || tool.name;
+  }
   return event.label || event.kind;
 }
 

@@ -16,6 +16,13 @@ pub const QA_BATCH_SCHEMA_STATEMENTS: &[&str] = &[
         task_id TEXT PRIMARY KEY, delivered_head TEXT NOT NULL, deferred_at TEXT NOT NULL)",
 ];
 
+/// The schema of a QA walk's receipt.
+pub const QA_BATCH_RECEIPT_SCHEMA: u32 = 1;
+/// A release verdict has a QA receipt's shape but attests one code review of the
+/// assembled tip, never a QA walk. Binaries that know only schema 1 skip it as QA
+/// evidence, so the two cannot be mistaken across an upgrade.
+pub const RELEASE_VERDICT_SCHEMA: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QaBatchReceipt {
     pub schema_version: u32,
@@ -30,6 +37,20 @@ pub struct QaBatchReceipt {
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
     pub recorded_at: String,
+    /// Who walked the ledger (cas-26ac). Absent on receipts recorded before
+    /// authors were tracked; present ones must stay outside each task's
+    /// implementation lineage unless the operator overrode it for that task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_author_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_author_role: Option<String>,
+    /// Task ID to the operator's recorded words for an author-lineage override.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub author_overrides: BTreeMap<String, String>,
+    /// Set locally when the receipt arrived from a peer machine through task
+    /// sync (cas-6048); its ledger bytes were validated where it was recorded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
@@ -43,8 +64,8 @@ fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::C
     Ok(conn)
 }
 
-pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
-    if receipt.schema_version != 1
+fn check_receipt(receipt: &QaBatchReceipt) -> Result<String> {
+    if !matches!(receipt.schema_version, QA_BATCH_RECEIPT_SCHEMA | RELEASE_VERDICT_SCHEMA)
         || receipt.id.is_empty()
         || receipt.project_id.is_empty()
         || receipt.task_heads.is_empty()
@@ -53,7 +74,11 @@ pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<
     {
         return Err(StoreError::Parse("incomplete QA batch receipt".into()));
     }
-    let json = serde_json::to_string(receipt).map_err(|e| StoreError::Parse(e.to_string()))?;
+    serde_json::to_string(receipt).map_err(|e| StoreError::Parse(e.to_string()))
+}
+
+pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+    let json = check_receipt(receipt)?;
     let conn = connection(root)?;
     let guard = crate::shared_db::lock_connection(&conn)?;
     // INSERT only: corrections create a new receipt, never rewrite an attestation.
@@ -63,6 +88,42 @@ pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<
         params![receipt.id, receipt.project_id, json, receipt.recorded_at],
     )?;
     Ok(())
+}
+
+/// Store a receipt recorded on a peer machine (cas-6048). Receipts are
+/// immutable, so one already present, local or imported, is kept as is.
+pub fn import_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+    let receipt = QaBatchReceipt {
+        imported: true,
+        ..receipt.clone()
+    };
+    let json = check_receipt(&receipt)?;
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    guard.execute(
+        "INSERT OR IGNORE INTO qa_batch_receipts (id, project_id, receipt_json, recorded_at)
+        VALUES (?1, ?2, ?3, ?4)",
+        params![receipt.id, receipt.project_id, json, receipt.recorded_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_qa_batch_receipt(root: &Path, id: &str) -> Result<Option<QaBatchReceipt>> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let json: Option<String> = guard
+        .query_row(
+            "SELECT receipt_json FROM qa_batch_receipts WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            error => Err(error),
+        })?;
+    json.map(|json| serde_json::from_str(&json).map_err(|e| StoreError::Parse(e.to_string())))
+        .transpose()
 }
 
 pub fn list_qa_batch_receipts(root: &Path, project: &str) -> Result<Vec<QaBatchReceipt>> {
@@ -111,14 +172,55 @@ pub fn has_qa_batch_deferral(root: &Path, task: &str) -> Result<bool> {
     )?)
 }
 
+/// Deferred deliveries whose task is still open. Reads only, and has no debt on a
+/// database that predates the batch tables.
+pub fn pending_qa_batch_deferrals(root: &Path) -> Result<Vec<String>> {
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let exists: bool = guard.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_batch_deferrals')",
+        [], |row| row.get(0))?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut statement = guard.prepare(
+        "SELECT d.task_id FROM qa_batch_deferrals d JOIN tasks t ON t.id=d.task_id
+         WHERE t.status NOT IN ('closed', 'cancelled')",
+    )?;
+    let rows = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
 pub fn qa_batch_receipts_for_task(
     root: &Path,
     project: &str,
     task: &str,
 ) -> Result<Vec<QaBatchReceipt>> {
+    receipts_for_task(root, project, task, QA_BATCH_RECEIPT_SCHEMA)
+}
+
+/// The release verdicts naming `task`. They are kept apart from QA receipts: a
+/// review is not a QA walk, and a QA walk never replaces the review. The close
+/// policy may accept an exact release verdict for deferred Tier 1 batch debt.
+pub fn release_verdicts_for_task(
+    root: &Path,
+    project: &str,
+    task: &str,
+) -> Result<Vec<QaBatchReceipt>> {
+    receipts_for_task(root, project, task, RELEASE_VERDICT_SCHEMA)
+}
+
+fn receipts_for_task(
+    root: &Path,
+    project: &str,
+    task: &str,
+    schema: u32,
+) -> Result<Vec<QaBatchReceipt>> {
     Ok(list_qa_batch_receipts(root, project)?
         .into_iter()
-        .filter(|receipt| receipt.task_heads.contains_key(task))
+        .filter(|receipt| receipt.schema_version == schema && receipt.task_heads.contains_key(task))
         .collect())
 }
 
@@ -232,6 +334,10 @@ mod tests {
             staging_sha: "b".repeat(40),
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
+            ledger_author_id: None,
+            ledger_author_role: None,
+            author_overrides: BTreeMap::new(),
+            imported: false,
             task_heads: tasks
                 .iter()
                 .map(|id| ((*id).into(), "c".repeat(40)))

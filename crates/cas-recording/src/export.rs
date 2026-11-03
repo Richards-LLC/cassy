@@ -426,10 +426,4 @@ mod tests {
         assert_eq!(manifest.agents.len(), parsed.agents.len());
     }
 
-    #[test]
-    fn test_export_config_default() {
-        let config = ExportConfig::default();
-        assert_eq!(config.compression_level, 3);
-        assert!(config.include_events);
-    }
 }

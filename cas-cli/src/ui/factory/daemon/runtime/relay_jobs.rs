@@ -202,6 +202,7 @@ pub(crate) enum RelayOutput {
     EscalationWritten(Vec<RelayOperatorAlert>),
     /// A bounded request-journal reconciliation batch ran on the external lane.
     ExternalWorkReconciled(Result<usize, String>),
+    WorkerTaskQueuesReconciled(Result<usize, String>),
 }
 
 /// A finished relay job: its output, and the generation it ran under.
@@ -374,6 +375,24 @@ impl RelayJobs {
             budget: crate::coordination::external_work::TOTAL_REMOTE_BUDGET,
         };
         self.submit(jobs, spec, move || RelayOutput::ExternalWorkReconciled(work()))
+    }
+
+    /// Git/start reconciliation runs on the external lane, never the loop
+    /// or the SQLite writer lane. Durable queue state survives any dropped job.
+    pub(crate) fn submit_worker_task_queue_reconciliation(
+        &mut self, jobs: &mut QueueJobs, root: PathBuf, session: String,
+    ) -> bool {
+        let key = "RelayRead:worker-task-queue-reconcile";
+        if self.in_flight.contains_key(key) { return false; }
+        let spec = JobSpec {
+            kind: RELAY_READ, key: key.into(), lane: Lane::External,
+            criticality: Criticality::Critical, generation: self.next_generation(),
+            budget: Duration::from_secs(30),
+        };
+        let runtime = tokio::runtime::Handle::current();
+        self.submit(jobs, spec, move || RelayOutput::WorkerTaskQueuesReconciled(
+            runtime.block_on(crate::worker_task_queue::reconcile_worker_task_queues(&root, &session))
+                .map_err(|error| error.to_string())))
     }
 
     /// Run `write` on the write lane (the store worker), unless the write

@@ -278,6 +278,46 @@ PYKILL
 expect pass 'signal cleanup passed' 'terminated discovery wrapper leaves no live children' \
     python3 "${tmpdir}/kill-discovery.py" "${guard}" "${tmpdir}"
 
+cat >"${tmpdir}/lease-discovery.py" <<'PYLEASE'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+guard, root = sys.argv[1], Path(sys.argv[2])
+fake = root / 'lease-cargo.py'
+fake.write_text('''#!/usr/bin/env python3
+import os
+lease = int(os.environ['CAS_TARGET_LEASE_FD'])
+assert os.fstat(lease).st_ino == int(os.environ['EXPECTED_LEASE_INODE']), 'admitted lease was lost'
+try:
+    os.fstat(20)
+except OSError:
+    pass
+else:
+    raise AssertionError('unrelated inherited descriptor leaked into Cargo')
+print('     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped')
+''')
+fake.chmod(0o755)
+with (root / 'lease').open('w') as lease, (root / 'unrelated').open('w') as unrelated:
+    # FD 3 is the wrapper's output log; use a different descriptor so an
+    # unrelated open log can never masquerade as the admitted target lease.
+    os.dup2(lease.fileno(), 19, inheritable=True)
+    os.dup2(unrelated.fileno(), 20, inheritable=True)
+    env = dict(os.environ, CARGO=str(fake), CAS_TARGET_LEASE_FD='19',
+               EXPECTED_LEASE_INODE=str(os.fstat(19).st_ino),
+               CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+    try:
+        subprocess.run([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                       env=env, pass_fds=(19, 20), check=True)
+    finally:
+        os.close(19)
+        os.close(20)
+print('only admitted lease survives discovery watchdog')
+PYLEASE
+expect pass 'only admitted lease survives' 'watchdog preserves only the admitted target lease' \
+    python3 "${tmpdir}/lease-discovery.py" "${guard}" "${tmpdir}"
+
 if [[ "${fail}" -ne 0 ]]; then
     echo "FAIL: ${fail} verified-test guard self-test(s) failed" >&2
     exit 1

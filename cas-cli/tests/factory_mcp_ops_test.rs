@@ -1,6 +1,6 @@
 //! Factory MCP Tool Integration Tests
 //!
-//! Tests the factory MCP tool handlers (`mcp__cas__coordination`) by constructing
+//! Tests the factory and agent MCP tool handlers (`mcp__cas__factory`, `mcp__cas__coordination`) by constructing
 //! a `CasService` with a temp CAS directory and calling `factory()` directly.
 //! Verifies input validation, queue side effects, and response formatting.
 //!
@@ -369,11 +369,61 @@ enum IsolatedCodexState {
     Unavailable,
 }
 
+/// A real ChatGPT catalogue keeps model admission active in spawn fixtures.
+fn write_codex_account_fixture(account: &std::path::Path, models: &[&str]) {
+    std::fs::create_dir_all(account).expect("create synthetic Codex account");
+    std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#)
+        .expect("write synthetic Codex auth");
+    std::fs::write(
+        account.join("models_cache.json"),
+        serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "client_version": "0.0.0-test",
+            "models": models.iter().map(|slug| serde_json::json!({"slug": slug})).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    )
+    .expect("write synthetic Codex model catalogue");
+}
+
+const ACCOUNT_SELECTOR_ENV: &[&str] = &[
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    "GROK_HOME",
+];
+
+fn clear_account_selectors(command: &mut std::process::Command) {
+    for name in ACCOUNT_SELECTOR_ENV {
+        command.env_remove(name);
+    }
+}
+
+fn assert_no_account_selectors() {
+    let codex_child = std::env::var_os("CAS_FACTORY_CODEX_ISOLATED_CHILD").is_some();
+    for name in ACCOUNT_SELECTOR_ENV {
+        let fixture = match (*name, codex_child) {
+            ("CODEX_HOME", true) => Some(".codex"),
+            ("CLAUDE_CONFIG_DIR", true) => Some(".claude"),
+            _ => None,
+        };
+        let expected = fixture.map(|directory| {
+            std::path::PathBuf::from(std::env::var_os("HOME").expect("isolated child HOME"))
+                .join(directory)
+        });
+        assert_eq!(
+            std::env::var_os(name).map(std::path::PathBuf::from),
+            expected,
+            "isolated child leaked or changed account selector {name}"
+        );
+    }
+}
+
 /// Run one availability-sensitive integration test in its own process.
 ///
-/// The production probe reads process HOME/PATH internally, so a per-Command
-/// environment can reach it only when the whole service call runs in this
-/// child. The parent test process never mutates PATH.
+/// The production probe reads HOME/PATH and the requesting account selectors,
+/// so the whole service call runs in a child with a synthetic account and
+/// model catalogue. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // libtest names include the suite module in a grouped integration harness.
     // Strip the binary crate name; keep standalone and nested-module support.
@@ -388,30 +438,40 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     });
     std::fs::create_dir(&bin_dir).expect("create isolated child PATH");
 
+    let account = home.path().join(".codex");
     if matches!(state, IsolatedCodexState::Available) {
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
-        let auth = home.path().join(".codex/auth.json");
-        std::fs::create_dir_all(auth.parent().expect("auth parent"))
-            .expect("create fake codex auth directory");
-        std::fs::write(auth, "{}").expect("write fake codex auth marker");
+        write_codex_account_fixture(
+            &account,
+            &[cas::config::STOCK_WORKER_MODEL, "o3", "o4-mini"],
+        );
     }
 
-    let output = std::process::Command::new(
+    let mut command = std::process::Command::new(
         std::env::current_exe().expect("current integration-test executable"),
-    )
-    .args(["--exact", &child_filter, "--ignored", "--nocapture"])
-    .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
-    // The child deliberately supplies HOME/PATH itself, so it cannot inherit
-    // the TestEnvGuard-owned override from the parent test process. Keep the
-    // factory build probe deterministic in this process too.
-    .env("CAS_FACTORY_BUILD_GUARD", "off")
-    .env("HOME", home.path())
-    .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
-    .env("PATH", &bin_dir)
-    .output()
-    .expect("spawn isolated Codex integration test");
+    );
+    command
+        .args(["--exact", &child_filter, "--ignored", "--nocapture"])
+        .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
+        // The child deliberately supplies HOME/PATH itself, so it cannot inherit
+        // the TestEnvGuard-owned override from the parent test process. Keep the
+        // factory build probe deterministic in this process too.
+        .env("CAS_FACTORY_BUILD_GUARD", "off")
+        .env("HOME", home.path())
+        // Account overrides otherwise escape the temporary HOME and make model
+        // preflight read the operator's real auth/catalogue (cas-cba9, cas-0ad2).
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("PATH", &bin_dir);
+    clear_account_selectors(&mut command);
+    // Only these synthetic homes may override the default in a Codex child.
+    command
+        .env("CODEX_HOME", &account)
+        .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"));
+    let output = command
+        .output()
+        .expect("spawn isolated Codex integration test");
 
     assert!(
         output.status.success(),
@@ -428,6 +488,7 @@ fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
         Ok(child_test),
         "isolated helper must run only through its matching parent test"
     );
+    assert_no_account_selectors();
     FactoryTestEnv::with_agent_id_and_env("test-agent-id", None)
 }
 
@@ -474,6 +535,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         json: None,
         full: None,
+        detail: None,
         action: action.to_string(),
         id: None,
         name: None,
@@ -483,6 +545,8 @@ fn factory_req(action: &str) -> FactoryRequest {
         summary: None,
         worker_names: None,
         task_id: None,
+        task_ids: None,
+        expected_generation: None,
         status: None,
         owner: None,
         delivery_mode: None,
@@ -516,6 +580,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         cwd: None,
         port: None,
         shared: None,
+        revision: None,
         mine: None,
         theirs: None,
         decision: None,
@@ -541,6 +606,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,
@@ -607,6 +673,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        revision: None,
         mine: None,
         theirs: None,
         decision: None,
@@ -936,6 +1003,37 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
     let request = cas::factory_daemon_health::pending_reset(&env.cas_root, "session-wedged-loop")
         .expect("reset request recorded for the daemon");
     assert_eq!(request.requester, "test-agent-id");
+}
+
+#[tokio::test]
+async fn restart_supervisor_requests_the_daemon_only_for_a_supervisor() {
+    let worker = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let path = cas::factory_daemon_health::supervisor_restart_path(
+        &env.cas_root,
+        "session-restart-supervisor",
+    );
+    let error = env
+        .service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect_err("a worker may not restart the supervisor");
+    assert!(error.message.contains("only the supervisor"), "{}", error.message);
+    assert!(!path.exists());
+
+    drop(worker);
+    let _supervisor = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-restart-supervisor"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
+    env.service
+        .factory_request(Parameters(factory_req("restart_supervisor")))
+        .await
+        .expect("a supervisor may request its own restart");
+    assert!(path.exists(), "the daemon reads this request file");
 }
 
 #[tokio::test]
@@ -1407,7 +1505,7 @@ async fn test_focus_epic_clear_removes_pin_and_preserves_session_default() {
 }
 
 #[tokio::test]
-async fn test_coordination_focus_epic_routes_clear_field() {
+async fn test_factory_focus_epic_routes_clear_field() {
     let home = TempDir::new().expect("home tempdir");
     let home_path = home.path().to_str().unwrap();
     let _guard = EnvGuard::set(&[
@@ -1421,9 +1519,9 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut pin = coord_req("focus_epic");
     pin.id = Some(epic_id.clone());
     env.service
-        .coordination(Parameters(pin))
+        .factory(Parameters(pin))
         .await
-        .expect("coordination focus_epic should pin");
+        .expect("factory focus_epic should pin");
     assert_eq!(
         read_session_metadata("session-focus-coordination").pinned_epic_id,
         Some(epic_id)
@@ -1432,9 +1530,9 @@ async fn test_coordination_focus_epic_routes_clear_field() {
     let mut clear = coord_req("focus_epic");
     clear.clear = Some(true);
     env.service
-        .coordination(Parameters(clear))
+        .factory(Parameters(clear))
         .await
-        .expect("coordination focus_epic should forward clear=true");
+        .expect("factory focus_epic should forward clear=true");
     let metadata = read_session_metadata("session-focus-coordination");
     assert_eq!(metadata.epic_id, Some("cas-session".to_string()));
     assert_eq!(metadata.pinned_epic_id, None);
@@ -1484,7 +1582,7 @@ async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     req.task_id = Some("cas-example".into());
     req.prompt = Some("Send a plan and wait before coding.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
     assert!(err.message.contains("loop_start"), "{err:?}");
     // pin: the refusal names spawn_brief, the path that reaches the worker before task start (cas-ee68).
@@ -1498,7 +1596,7 @@ async fn spawn_workers_rejects_unscoped_prompt_without_queueing() {
     let mut req = coord_req("spawn_workers");
     req.prompt = Some("A brief must not be lost.".into());
 
-    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    let err = env.service.factory(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("no spawn was queued"), "{err:?}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
@@ -1684,9 +1782,11 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
         ))
         .expect("add follow-up task");
 
+    let second = task_store.generate_id().unwrap();
+    task_store.add(&Task::new(second.clone(), "Queued follow-up".into())).unwrap();
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
-    req.task_id = Some(task_id.clone());
+    req.task_ids = Some(vec![task_id.clone(), second.clone()]);
 
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(
@@ -1697,6 +1797,15 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1, "the spawn must actually be queued");
     assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
+    assert!(entries[0].isolate, "An ordered spawn must provide an owned checkout for subsequent branches");
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&env.cas_root).unwrap();
+    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
+    let queue = queues.get("spawn-session", "spawn-worker").unwrap();
+    assert_eq!(queue.current_task.as_deref(), Some(task_id.as_str()));
+    assert_eq!(queue.pending, vec![second]);
+    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
+    assert_eq!(queues.get("spawn-session", "spawn-worker").unwrap(), queue);
+
 }
 
 /// cas-549c: the same relaxation must hold when no epic has ever existed —
@@ -2288,6 +2397,53 @@ async fn test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child() {
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
+#[test]
+fn test_spawn_workers_logged_out_default_names_account_remedies() {
+    run_isolated_codex_test(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic logged-out default Codex probe"]
+async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+    );
+    // This scenario exercises the default home, not the common selected fixture.
+    let mut selector = TestEnvGuard::new();
+    selector.remove("CODEX_HOME");
+    env.create_epic("Test Epic");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    cas::test_paths::warm_stub(
+        &home.join("fake-bin/codex"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.0.0-test\\n'; exit 0; fi\nif [ \"$1 $2\" = 'login status' ]; then if [ -f \"$CODEX_HOME/auth.json\" ]; then printf 'Logged in\\n'; else printf 'Not logged in\\n'; exit 1; fi; fi\nexit 2\n",
+    );
+    std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
+    let registered = home.join(".codex-registered@example.com");
+    std::fs::create_dir_all(&registered).expect("registered account directory");
+    std::fs::write(registered.join("auth.json"), "{}").expect("registered auth marker");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.cli = Some("codex".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect_err("logged-out default must refuse before enqueue");
+    for detail in [
+        "default Codex home is absent or logged out",
+        "Pass config_dir",
+        "project worker config_dir",
+        registered.to_str().unwrap(),
+    ] {
+        assert!(error.message.contains(detail), "missing {detail:?}: {error}");
+    }
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
 #[tokio::test]
 async fn test_spawn_workers_invalid_cli_returns_error() {
     // An unrecognised cli value should return an MCP error, not silently use defaults.
@@ -2413,7 +2569,7 @@ async fn test_shutdown_workers_rejects_unsupported_known_param_without_queueing(
     // destructive action. It must not disappear during domain conversion.
     req.task_id = Some("cas-wrong-field".to_string());
 
-    let result = env.service.coordination(Parameters(req)).await;
+    let result = env.service.factory(Parameters(req)).await;
     let err = result.expect_err("unsupported shutdown field must hard-error");
     assert!(err.message.contains("task_id"), "unexpected error: {err:?}");
     assert!(
@@ -2436,7 +2592,7 @@ async fn test_shutdown_workers_id_targets_exact_worker() {
 
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("id target should be accepted");
     let text = get_text(&result);
@@ -3228,9 +3384,17 @@ async fn worker_status_usage_limit_names_each_provider() {
             // pin: status must not fetch live usage or guess a reset from prose.
             assert!(block.contains("5h: reset time unknown") && block.contains("weekly: reset time unknown"), "{block}");
         } else {
-            for reset in [reset_five, reset_week] {
-                let stamp = reset.with_timezone(&chrono::Local).format("%H:%M").to_string();
-                assert!(block.contains(&stamp) && block.contains("(in "), "{block}");
+            let reset_rows: Vec<_> = block.lines().filter(|line| line.contains(": resets ")).collect();
+            assert_eq!(reset_rows.len(), 2, "{block}");
+            for row in reset_rows {
+                let stamp = row.split_once("resets ").unwrap().1;
+                let (eastern_stamp, relative) = stamp.split_once(" ET ").expect("reset is labeled ET");
+                assert!(relative.starts_with("(in "), "{row}");
+                let fields: Vec<_> = eastern_stamp.split_whitespace().collect();
+                assert!(matches!(fields.last().copied(), Some("AM" | "PM")), "{row}");
+                let hour = fields.iter().rev().nth(1).and_then(|time| time.split(':').next())
+                    .and_then(|hour| hour.parse::<u8>().ok()).expect("12-hour time");
+                assert!((1..=12).contains(&hour), "{row}");
             }
         }
     }
@@ -3566,10 +3730,10 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
 
 /// cas-9fd4 (GH #341): the normal AwaitingMerge advice becomes stale after a
 /// supervisor has already landed the parked factory branch. The worker still
-/// has to re-close, so status must name that real blocker instead of asking
+/// awaits the verdict, so status must name that owner instead of asking
 /// the supervisor to merge the same branch again.
 #[tokio::test]
-async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9fd4() {
+async fn test_worker_status_names_delivered_merge_awaiting_verdict_cas_9fd4() {
     use std::process::Command;
 
     let _guard = EnvGuard::set(&[]);
@@ -3614,7 +3778,7 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
 
     let task_store = env.task_store();
     let id = task_store.generate_id().expect("id");
-    let mut task = Task::new(id.clone(), "Delivered task awaiting re-close".to_string());
+    let mut task = Task::new(id.clone(), "Delivered task awaiting verdict".to_string());
     task.status = TaskStatus::AwaitingMerge;
     task.assignee = Some(worker.to_string());
     task.deliverables.parked_branch = Some(format!("factory/{worker}"));
@@ -3631,12 +3795,13 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
             .expect("status"),
     );
     assert!(
-        text.contains("delivered-and-merged, awaiting worker re-close"),
+        // pin: integrated deliveries await their verdict, not another close.
+        text.contains("delivered-and-merged, awaiting merge verdict"),
         "status must report the delivered state, not stale merge work: {text}"
     );
     assert!(
-        text.contains("WAITING ON WORKER") && text.contains("retry task close"),
-        "status must name the worker re-close as the blocker: {text}"
+        text.contains("WAITING ON VERDICT") && !text.contains("retry task close"),
+        "status must name the merge verdict as the completion owner: {text}"
     );
     assert!(
         !text.contains("merge its branch, then it can close"),
@@ -3909,7 +4074,7 @@ async fn test_worker_status_surfaces_unread_inbox_without_consuming_it() {
 
 #[tokio::test]
 async fn test_worker_status_scopes_agents_to_factory_session() {
-    let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
+    let mut guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
     let env = FactoryTestEnv::new();
 
     env.register_supervisor_in_session("sup-a", "session-a");
@@ -3922,7 +4087,8 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     let agent_store = env.agent_store();
     agent_store.register(&plain).expect("register plain worker");
 
-    unsafe { std::env::set_var("CAS_FACTORY_SESSION", "session-a") };
+    guard._guard.set("CAS_ROOT", &env.cas_root);
+    guard._guard.set("CAS_FACTORY_SESSION", "session-a");
     let req = factory_req("worker_status");
     let result = env
         .service
@@ -4203,7 +4369,7 @@ async fn test_worker_status_and_agent_list_agree_on_live_workers() {
     .expect("CoordinationRequest");
     let list_text = get_text(
         &env.service
-            .coordination(Parameters(list_req))
+            .factory(Parameters(list_req))
             .await
             .expect("agent_list"),
     );
@@ -4728,7 +4894,7 @@ async fn test_2e81_agent_cleanup_parks_orphan_and_emits_worker_died() {
     req.stale_threshold_secs = Some(30);
     let result = env
         .service
-        .coordination(Parameters(req))
+        .factory(Parameters(req))
         .await
         .expect("agent_cleanup");
     let text = get_text(&result);
@@ -4858,11 +5024,12 @@ async fn test_20ac_lifecycle_ack_actions_terminate_both_queue_lanes_without_repl
 
         let mut request = coord_req(action);
         request.notification_id = Some(durable_id);
-        let result = env
-            .service
-            .coordination(Parameters(request))
-            .await
-            .expect("public lifecycle acknowledgement");
+        let result = if action == "queue_ack" {
+            env.service.factory(Parameters(request)).await
+        } else {
+            env.service.coordination(Parameters(request)).await
+        }
+        .expect("public lifecycle acknowledgement");
         let text = get_text(&result);
         assert!(
             text.contains("across durable and prompt queues"),
@@ -4973,7 +5140,7 @@ async fn test_20ac_queue_ack_repairs_processed_durable_row_with_replay_pending()
     request.notification_id = Some(durable_id);
     let result = env
         .service
-        .coordination(Parameters(request))
+        .factory(Parameters(request))
         .await
         .expect("repeated queue_ack bridges processed durable row");
     assert!(
@@ -5399,6 +5566,28 @@ fn clear_context_fixture(
     )
 }
 
+/// A completed turn can leave the current registration Idle while an older
+/// same-name registration still says Active. Harness comes from the current
+/// row's metadata, not the UUID or the stale row's provider.
+fn register_idle_reset_worker(
+    env: &FactoryTestEnv,
+    fixture: &ClearContextFixture,
+    stale_cli: &str,
+) -> Agent {
+    let store = env.agent_store();
+    let mut stale = fixture.worker.clone();
+    stale.id = format!("old-{}", stale.name);
+    stale.registered_at -= chrono::Duration::seconds(1);
+    stale.last_heartbeat -= chrono::Duration::seconds(1);
+    stale.metadata.insert("worker_cli".into(), stale_cli.into());
+    store.register(&stale).expect("register stale active row");
+    let mut current = fixture.worker.clone();
+    current.id = "00000000-0000-4000-8000-000000001114".into();
+    current.status = AgentStatus::Idle;
+    store.register(&current).expect("register current idle row");
+    current
+}
+
 /// cas-dffe (GH #145), the regression this task exists for, pinned dead: the
 /// queued row must be a CONTROL command, never the literal text `/clear`.
 ///
@@ -5418,7 +5607,7 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
             "supervisor".to_string(),
         ))
         .expect("register supervisor");
-    store.register(&fixture.worker).expect("register worker");
+    register_idle_reset_worker(&env, &fixture, "codex");
 
     let mut req = factory_req("clear_context");
     req.target = Some("wolf".to_string());
@@ -5593,43 +5782,55 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
     assert!(briefs[0].prompt.contains(&format!("#{answer_id}")));
 }
 
-/// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
-/// through to the durable recycle path rather than queueing a fake reset.
+/// Current recorded harness wins over a same-name Active ghost: Codex
+/// recycles, while Grok/OpenCode retain their unsupported-reset refusal.
 #[tokio::test]
-async fn test_clear_context_recycles_harness_without_verified_reset() {
-    let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
-    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+async fn test_clear_context_uses_current_idle_harness_cas_1114() {
+    for cli in ["codex", "grok", "opencode"] {
+        let (guard, fixture) = clear_context_fixture("badger", cli, "0");
+        let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
-    let store = env.agent_store();
-    store
-        .register(&Agent::new(
-            "test-sup".to_string(),
-            "supervisor".to_string(),
-        ))
-        .expect("register supervisor");
-    let mut worker = fixture.worker.clone();
-    // The recycle fallback only needs the durable worker identity and recipe;
-    // this fixture's temp directory is intentionally not a Git checkout.
-    worker.metadata.remove("clone_path");
-    store.register(&worker).expect("register worker");
+        let store = env.agent_store();
+        store
+            .register(&Agent::new(
+                "test-sup".to_string(),
+                "supervisor".to_string(),
+            ))
+            .expect("register supervisor");
+        let mut worker = register_idle_reset_worker(&env, &fixture, "claude");
+        // The recycle fallback only needs the durable worker identity and recipe;
+        // this fixture's temp directory is intentionally not a Git checkout.
+        worker.metadata.remove("clone_path");
+        store.update(&worker).expect("update current worker");
+        std::fs::remove_dir_all(&fixture.projects).expect("no Claude transcripts for this harness");
 
-    let mut req = factory_req("clear_context");
-    req.target = Some("badger".to_string());
-    let result = env
-        .service
-        .factory_request(Parameters(req))
-        .await
-        .expect("Codex clear_context should recycle the worker");
-    let message = get_text(&result);
-    assert!(message.contains("recycle"), "{message}");
+        let mut req = factory_req("clear_context");
+        req.target = Some("badger".to_string());
+        let result = env
+            .service
+            .factory_request(Parameters(req))
+            .await;
+        if cli != "codex" {
+            let error = result.expect_err("an unverified reset must remain unsupported");
+            assert!(error.message.contains(&format!("harness '{cli}'")), "{error}");
+            assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+            assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
+            continue;
+        }
+        let result = result.expect("Idle Codex clear_context should recycle the current worker");
+        let message = get_text(&result);
+        assert!(message.contains("recycle"), "{message}");
 
-    let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
-    assert!(
-        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
-        "Codex recycle must not queue readable prompt text"
-    );
+        let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
+        let spec: cas_mux::WorkerSpec = serde_json::from_str(requests[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(spec.cli, SupervisorCli::Codex, "reset must preserve the current Codex recipe");
+        assert!(
+            env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+            "Codex recycle must not queue readable prompt text"
+        );
+    }
 }
 
 /// GH #751: clear_context is not a recovery action once Claude is repeatedly
@@ -5714,9 +5915,6 @@ fn clear_context_command_really_resets_a_live_claude() {
     let stripped: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key.starts_with("CLAUDE_CODE"))
         .collect();
-    for (key, _) in &stripped {
-        unsafe { std::env::remove_var(key) };
-    }
 
     let dirs = reset::transcript_dirs_for(&cwd.to_string_lossy());
     assert!(
@@ -5733,7 +5931,7 @@ fn clear_context_command_really_resets_a_live_claude() {
             args: vec![],
             cwd: Some(cwd.clone()),
             env: vec![("TERM".to_string(), "xterm-256color".to_string())],
-            env_remove: vec![],
+            env_remove: stripped.iter().map(|(key, _)| key.clone()).collect(),
             rows: 24,
             cols: 80,
         },
@@ -5774,9 +5972,6 @@ fn clear_context_command_really_resets_a_live_claude() {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    for (key, value) in stripped {
-        unsafe { std::env::set_var(key, value) };
-    }
 
     let evidence = evidence.expect(
         "typing the reset command into a live claude must start a NEW session whose transcript \
@@ -5859,27 +6054,19 @@ async fn test_my_context_shows_agent_info() {
 // gc_report tests
 // =============================================================================
 
-/// cas-8563b (D2): fleet actions moved to the `factory` tool. For one release
-/// `coordination` still runs them, with a deprecation note naming the new
-/// call; `factory` rejects the messaging actions that stay on `coordination`.
+/// Retired factory aliases fail before dispatch and name the live route.
 #[tokio::test]
-async fn coordination_runs_moved_factory_actions_as_deprecated_aliases() {
+async fn coordination_rejects_retired_factory_actions() {
     let env = FactoryTestEnv::new();
     let gc_report: CoordinationRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
 
-    let via_alias = env
+    let refused = env
         .service
         .coordination(Parameters(gc_report.clone()))
         .await
-        .expect("the alias still runs the action");
-    let alias_text = get_text(&via_alias);
-    assert!(alias_text.contains("Stale agents: 0"), "{alias_text}");
-    assert!(
-        alias_text.contains("Deprecated: `coordination action=gc_report` moved")
-            && alias_text.contains("factory action=gc_report`"),
-        "{alias_text}"
-    );
+        .expect_err("retired alias must not run the action");
+    assert!(refused.message.contains("factory action=gc_report"), "{}", refused.message);
 
     let direct = env
         .service
@@ -6288,6 +6475,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     // Named cache consent must never enter ordinary GC's evidence-retention
     // or process-reaping paths, even when the named path is refused.
     let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     named.force = Some(true);
     named.dry_run = Some(false);
     named.reclaim_unknown_target = Some(env.cas_root.join("unknown/target").display().to_string());
@@ -6311,6 +6499,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
                 .set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
         }
         let mut named = factory_req("gc_cleanup");
+    named.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
@@ -6333,6 +6522,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     }
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     preview.dry_run = Some(false);
     let preview = env
@@ -6412,6 +6602,7 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
         .unwrap();
 
     let mut request = factory_req("gc_cleanup");
+    request.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     request.force = Some(true);
     request.dry_run = Some(false);
     request.artifacts = Some(true);
@@ -6456,52 +6647,46 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     )
     .unwrap();
 
-    // Probe a separate, fresh, unregistered cache with no retained handles or
-    // fixture processes. A live result here establishes unavailable visibility,
-    // independently of genuine liveness in the actual MCP worker below. With
-    // readable visibility, an accidentally live MCP fixture must fail selection.
-    let baseline = TempDir::new().unwrap();
-    let baseline_root = baseline.path().join(".cas");
-    let baseline_worker = baseline_root.join("worktrees/capability-probe");
-    let baseline_cache = baseline_worker.join("target");
-    std::fs::create_dir_all(&baseline_cache).unwrap();
-    std::fs::write(baseline_cache.join("probe"), b"x").unwrap();
-    use cas::factory_target_cache::{CacheDisposition, TargetCachePolicy};
-    let native = cas::factory_target_cache::inspect(
-        &baseline_root,
-        TargetCachePolicy {
-            high_watermark_percent: 1,
-            low_watermark_percent: 0,
-            min_idle_secs: 0,
-            retention_count: 0,
-        },
-        &[],
-        &[],
-        true,
-    )
-    .unwrap();
-    assert_eq!(native.caches.len(), 1);
-    assert_eq!(native.candidate_bytes, 1);
-    assert_eq!(native.caches[0].bytes, 1);
-    assert_eq!(
-        native.caches[0].path,
-        baseline_cache.canonicalize().unwrap()
-    );
-    assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
-    let reclaim = match native.caches[0].disposition {
-        CacheDisposition::Selected => true,
-        CacheDisposition::Indeterminate => {
-            eprintln!(
-                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. Indeterminate is distinct from positive process evidence."
-            );
-            false
+    // Native visibility can change between requests. Validate the typed
+    // disposition and accounting of each actual MCP snapshot independently;
+    // another cache's earlier process probe cannot predict this one.
+    fn assert_accounting(machine: &serde_json::Value, dry_run: bool) -> bool {
+        use cas::factory_target_cache::CacheDisposition;
+        assert_eq!(machine["schema_version"], 1);
+        assert_eq!(machine["dry_run"], dry_run);
+        assert_eq!(machine["candidate_bytes"], 64);
+        let caches = machine["caches"].as_array().unwrap();
+        assert_eq!(caches.len(), 1);
+        assert_eq!(caches[0]["bytes"], 64);
+        let disposition: CacheDisposition = serde_json::from_value(caches[0]["disposition"].clone()).unwrap();
+        match (dry_run, disposition) {
+            (true, CacheDisposition::Selected) => {
+                assert_eq!(machine["selected_bytes"], 64);
+                assert_eq!(machine["reclaimed_bytes"], 0);
+                false
+            }
+            (false, CacheDisposition::Reclaimed) => {
+                assert_eq!(machine["selected_bytes"], 64);
+                assert_eq!(machine["reclaimed_bytes"], 64);
+                true
+            }
+            (_, CacheDisposition::Indeterminate | CacheDisposition::LiveProcess) => {
+                // Cleanup may select first, then obtain blocking evidence at
+                // its final recheck. Selection never authorizes deletion once
+                // native evidence is live or unavailable.
+                let selected = machine["selected_bytes"].as_u64().unwrap();
+                if dry_run {
+                    assert_eq!(selected, 0);
+                } else {
+                    assert!(selected == 0 || selected == 64);
+                }
+                assert_eq!(machine["reclaimed_bytes"], 0);
+                assert!(!caches[0]["reason"].as_str().unwrap().is_empty());
+                false
+            }
+            _ => panic!("unexpected actual MCP cache state: {machine}"),
         }
-        other => panic!("unexpected native GC fixture state: {other:?}"),
-    };
-    assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
-    assert_eq!(native.reclaimed_bytes, 0);
-    assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
-    let disposition = if reclaim { "selected" } else { "indeterminate" };
+    }
     let cache_path = worker.join("target").canonicalize().unwrap();
     let assert_preserved = || {
         assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
@@ -6530,18 +6715,12 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
     let full_text = get_text(&full);
     let machine = status(&full_text);
-    assert_eq!(machine["schema_version"], 1);
-    assert_eq!(machine["dry_run"], true);
-    assert_eq!(machine["candidate_bytes"], 64);
-    assert_eq!(machine["selected_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(machine["reclaimed_bytes"], 0);
-    assert_eq!(machine["caches"].as_array().unwrap().len(), 1);
+    assert!(!assert_accounting(&machine, true));
     assert_eq!(
         machine["caches"][0]["path"],
         serde_json::to_value(&cache_path).unwrap()
     );
     assert_eq!(machine["caches"][0]["bytes"], 64);
-    assert_eq!(machine["caches"][0]["disposition"], disposition);
     let cache_category = report_text
         .lines()
         .find(|line| line.starts_with("- Cargo target cache pressure: "))
@@ -6558,6 +6737,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
+    preview.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     preview.force = Some(true);
     let preview = env
         .service
@@ -6567,20 +6747,13 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
     let preview_status = status(&preview_text);
-    assert_eq!(preview_status["schema_version"], 1);
-    assert_eq!(preview_status["dry_run"], true);
-    assert_eq!(preview_status["candidate_bytes"], 64);
-    assert_eq!(
-        preview_status["selected_bytes"],
-        if reclaim { 64 } else { 0 }
-    );
-    assert_eq!(preview_status["reclaimed_bytes"], 0);
-    assert_eq!(preview_status["caches"][0]["disposition"], disposition);
+    assert!(!assert_accounting(&preview_status, true));
     assert!(preview_status["caches"][0]["scan_elapsed_ms"].is_u64());
     assert!(preview_text.contains("scan_ms="));
     assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env
@@ -6591,36 +6764,16 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let cleanup_text = get_text(&cleanup);
     assert!(cleanup_text.contains("mode=cleanup"), "{cleanup_text}");
     let cleaned = status(&cleanup_text);
-    assert_eq!(cleaned["schema_version"], 1);
-    assert_eq!(cleaned["dry_run"], false);
-    assert_eq!(cleaned["candidate_bytes"], 64);
-    assert_eq!(cleaned["selected_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(cleaned["reclaimed_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(cleaned["caches"].as_array().unwrap().len(), 1);
+    let reclaimed = assert_accounting(&cleaned, false);
     assert_eq!(
         cleaned["caches"][0]["path"],
         serde_json::to_value(&cache_path).unwrap()
     );
     assert_eq!(cleaned["caches"][0]["bytes"], 64);
-    assert_eq!(
-        cleaned["caches"][0]["disposition"],
-        if reclaim {
-            "reclaimed"
-        } else {
-            "indeterminate"
-        }
-    );
-    assert_eq!(worker.join("target").exists(), !reclaim);
-    if !reclaim {
+    assert_eq!(worker.join("target").exists(), !reclaimed);
+    if !reclaimed {
         assert_preserved();
-        assert!(
-            cleanup_text.contains("state=Indeterminate"),
-            "{cleanup_text}"
-        );
-        assert!(!cleaned["caches"][0]["reason"].as_str().unwrap().is_empty());
-        eprintln!(
-            "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
-        );
+        eprintln!("CACHE PRESERVED: actual MCP snapshot has blocking native evidence: {cleanup_text}");
     }
     assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
 }
@@ -6730,6 +6883,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     closed.status = TaskStatus::Closed;
     env.task_store().update(&closed).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
@@ -6795,9 +6949,9 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         .truncate(false).open(slots.join("review-trash.lock")).unwrap();
     collector.lock_exclusive().unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    cleanup.full = Some(true);
     let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
     assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
     let deferred_status: serde_json::Value = serde_json::from_str(deferred.lines()
@@ -6878,6 +7032,7 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
         failures.push(format!("stale owner temp must leave 11 reclaimable and 23 pending bytes: {review}"));
     }
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -6947,6 +7102,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
             assert_ne!(next.id, dispatch.id);
         }
         let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
         cleanup.force = Some(true);
         cleanup.dry_run = Some(false);
         let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
@@ -7034,6 +7190,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     std::fs::create_dir_all(checkout.join("target")).unwrap();
     std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7198,6 +7355,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7271,15 +7429,17 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         .unwrap();
         let filter =
             "factory_mcp_ops_test::test_gc_retains_file_written_after_dirty_probe_cas_75ae";
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", filter, "--nocapture"])
             .env(CHILD, "1")
             .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .env("REVIEW_GC_REAL_GIT_75AE", real_git)
             .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
-            .env("PATH", path)
-            .output()
-            .unwrap();
+            .env("PATH", path);
+        clear_account_selectors(&mut command);
+        let output = command.output().unwrap();
         assert!(
             output.status.success(),
             "isolated late-write GC failed: {}\n{}",
@@ -7289,6 +7449,7 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), filter);
         return;
     }
+    assert_no_account_selectors();
     let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "review-race-control");
     let project = env.cas_root.parent().unwrap();
@@ -7311,6 +7472,7 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
     let control = PathBuf::from(std::env::var_os("REVIEW_GC_RACE_CONTROL_75AE").unwrap());
     std::fs::write(&control, format!("{}\n", checkout.display())).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let output = env
@@ -7377,6 +7539,7 @@ async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
         "{text}"
     );
     let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     env.service
@@ -7397,8 +7560,12 @@ async fn test_gc_cleanup_without_force() {
     let pq = env.prompt_queue();
     pq.enqueue("src", "wolf", "test").expect("enqueue");
 
-    let req = factory_req("gc_cleanup");
-    let result = env.service.factory_request(Parameters(req)).await;
+    // Exercise the public action allowlist, including CLI's explicit false
+    // presentation flags, rather than bypassing dispatch via factory_request.
+    let mut req = coord_req("gc_cleanup");
+    req.json = Some(false);
+    req.full = Some(false);
+    let result = env.service.factory(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -7411,6 +7578,10 @@ async fn test_gc_cleanup_without_force() {
         "Should report process-group cleanup outcome: {text}"
     );
 
+    assert!(text.starts_with("[INFO] GC cleanup complete:"), "{text}");
+    assert!(text.lines().all(|line| line.len() <= 79), "{text}");
+    assert!(!text.contains("_STATUS_JSON="), "machine payload must be opt-in");
+    assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
     // Prompts should still be pending
     assert_eq!(pq.pending_count().expect("count"), 1);
 }
@@ -7475,6 +7646,7 @@ async fn test_gc_cleanup_with_force_prunes_by_retention_window() {
     }
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
 
     let result = env.service.factory_request(Parameters(req)).await;
@@ -7501,6 +7673,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
     let id = pq.enqueue("src", "dead-worker", "poison").expect("enqueue");
 
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();
@@ -7545,6 +7718,7 @@ async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
         }
     }
     let mut req = factory_req("gc_cleanup");
+    req.full = Some(true); // Inspect complete evidence for the cleanup safety assertions.
     req.force = Some(true);
     req.older_than_secs = Some(0);
     let result = env.service.factory_request(Parameters(req)).await.unwrap();
@@ -8198,6 +8372,7 @@ fn coord_msg(
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
+        task_ids: None,
         delivery_mode: None,
         merge_request: None,
         blocker: None,
@@ -8264,6 +8439,7 @@ fn coord_msg(
         cwd: None,
         port: None,
         shared: None,
+        revision: None,
         mine: None,
         theirs: None,
         decision: None,
@@ -8822,11 +8998,15 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
         "URGENT: stop and report your current status",
         Some(true),
     );
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(urgent))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error
             .message
@@ -8925,7 +9105,6 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -8954,11 +9133,15 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
     let worker_id = env.register_worker("swift-fox");
 
     let interrupt = coord_msg("interrupt", "swift-fox", "Stop and tell me where cas-12b5 stands", None);
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let error = env
         .service
         .coordination(Parameters(interrupt))
         .await
         .expect_err("the fixture has no live Claude pane to confirm");
+    tokio::time::resume();
     assert!(
         error.message.contains("Could not confirm Claude interrupt delivery"),
         "unexpected interrupt error: {}",
@@ -8991,7 +9174,6 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -9052,10 +9234,14 @@ async fn cas_4a8e1_reply_before_the_interrupt_reached_the_worker_keeps_the_halt(
     ]);
     let env = FactoryTestEnv::with_server_supervisor();
     let worker_id = env.register_worker("swift-fox");
+    // Paused Tokio time keeps the production 8 s confirmation contract without
+    // waiting it out; the rest of the test runs on real time.
+    tokio::time::pause();
     let _ = env
         .service
         .coordination(Parameters(coord_msg("interrupt", "swift-fox", "Stop now", None)))
         .await;
+    tokio::time::resume();
     assert!(env.worker_halted("swift-fox"), "the interrupt must arm the halt");
 
     let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
@@ -9507,6 +9693,15 @@ async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() 
             assert!(text.contains("held inbox:"), "{text}");
             assert!(text.contains("next tool call or turn start"), "{text}");
             assert!(!text.contains("retry budget"), "{text}");
+            queue
+                .record_recipient_surfaced(id, "swift-fox", cas_store::SurfacingSource::HookSurfaced)
+                .unwrap();
+            let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+            req.notification_id = Some(id);
+            let received = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+            assert!(received.contains("recipient: RECEIVED by swift-fox"), "{received}");
+            assert!(queue.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none(),
+                "recipient evidence must be visible without an explicit ack");
         } else {
             assert!(text.contains("delivery retry:"), "{text}");
             assert!(text.contains("900s retry budget"), "{text}");
@@ -9886,6 +10081,10 @@ async fn test_coordination_interrupt_action_is_urgent() {
 /// caught at test time, not at factory-start time.
 #[test]
 fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
+    // An inherited account need not exist: the child owns its account fixture.
+    let account = TempDir::new().expect("ambient account parent");
+    let missing = account.path().join("absent-account");
+    let _guard = EnvGuard::set(&[("CODEX_HOME", missing.to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
         IsolatedCodexState::Available,
@@ -9947,6 +10146,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
         "cas-efc4 AC2: worker_spec must encode the effort override: {spec_json}"
     );
 
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid Codex spec");
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert_eq!(spec.requester_config_dir.as_deref(), expected_account.to_str());
+
     // Second entry: omitted overrides now resolves to the safe Codex worker floor
     // instead of inheriting the supervisor/session defaults.
     let claude_entry = &entries[1];
@@ -9969,6 +10172,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
 /// break the other.
 #[test]
 fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
+    // A valid but incompatible inherited account must not select the child's models.
+    let account = TempDir::new().expect("incompatible ambient Codex account");
+    write_codex_account_fixture(account.path(), &["unrelated-model"]);
+    let _guard = EnvGuard::set(&[("CODEX_HOME", account.path().to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
         IsolatedCodexState::Available,
@@ -10041,6 +10248,24 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
         claude_spec.contains("medium"),
         "claude effort in spec: {claude_spec}"
     );
+
+    // The fixture exercises catalogue admission, rather than bypassing it via
+    // API-key auth or a missing/stale cache. Refusal must not enqueue work.
+    let unlisted = "fixture-unlisted-model";
+    let mut rejected = factory_req("spawn_workers");
+    rejected.count = Some(1);
+    rejected.cli = Some("codex".into());
+    rejected.model = Some(unlisted.into());
+    let error = env.service.factory_request(Parameters(rejected)).await
+        .expect_err("an unlisted model must still be refused");
+    assert!(
+        error.message.contains(unlisted) && error.message.contains("models_cache.json"),
+        "{error}"
+    );
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert!(error.message.contains(expected_account.to_str().unwrap()), "{error}");
+    assert_eq!(env.spawn_queue().peek(10).expect("peek after refusal").len(), 2);
+
 }
 
 /// cas-efc4 AC4: `worker_status` must surface worktree/git metadata
@@ -10326,7 +10551,6 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -10586,6 +10810,10 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                full: true,
+                ..Default::default()
+            },
             id: clean_id.clone(),
             with_deps: false,
         }))
@@ -10601,6 +10829,9 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                ..Default::default()
+            },
             id: conflict_id.clone(),
             with_deps: false,
         }))
@@ -10781,7 +11012,13 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "per-task-branch",
         "empty",
         "foreign",
+        "target-change",
+        "target-same-branch",
+        "target-dirty",
+        "target-invalid",
+        "target-foreign",
     ] {
+        let retargeted = shape.starts_with("target-");
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
         let env = FactoryTestEnv::with_server_supervisor();
         // cas-b403: a logged-in project, so the rebind writes through the
@@ -10800,13 +11037,28 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             "[project]\ncanonical_id = \"rebind-project\"\n",
         )
         .unwrap();
+        // This test exercises delivery recovery, not discovery's one-second
+        // filesystem probe. Bind the known fixture target so host contention
+        // cannot turn a rebind assertion into an unrelated scan timeout.
+        {
+            use cas::store::KnownRepoStore;
+            cas::store::known_repos::ensure_host_schema().unwrap();
+            cas::store::known_repos::open_host_known_repo_store()
+                .unwrap()
+                .bind(
+                    "project:rebind-project",
+                    &project.canonicalize().unwrap(),
+                    &project.join(".git").canonicalize().unwrap(),
+                )
+                .unwrap();
+        }
         let worker_id = register_codex_worker_at(&env, worker, "session-88c1", &path);
         let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
         supervisor.factory_session = Some("session-88c1".into());
         env.agent_store().update(&supervisor).unwrap();
         // Squashing can lose only the anchor; reset recovery also drops an
         // inherited local-only supervisor base. Both need an audited rebind.
-        if shape != "squashed-anchor" {
+        if !matches!(shape, "squashed-anchor" | "target-same-branch") {
             git(&[
                 "commit",
                 "--allow-empty",
@@ -10837,7 +11089,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             branch: old_branch.clone(),
             base_sha: old_base.clone(),
         });
-        task.deliverables.factory_branch_anchor = Some(old_anchor.clone());
+        task.deliverables.factory_branch_anchor = (!retargeted).then(|| old_anchor.clone());
         env.task_store().add(&task).unwrap();
         assert!(
             env.agent_store()
@@ -10845,9 +11097,17 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .unwrap()
                 .is_success()
         );
-        let previous = env.task_store().get(&task.id).unwrap();
-        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
-        let branch = if shape == "per-task-branch" {
+        let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(worker_id.clone());
+        let worker_service = CasService::new(core, None);
+        let start_request = || task_req(serde_json::json!({"action": "start", "id": task.id}));
+        if retargeted {
+            worker_service
+                .task(Parameters(start_request()))
+                .await
+                .unwrap();
+        }
+        let branch = if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
             let branch = format!("factory/{worker}-{}", task.id);
             git(&["switch", "-qc", &branch, "origin/main"]);
             branch
@@ -10860,7 +11120,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             git(&["add", "delivery.txt"]);
             // Unnamed work is valid on the assigned lane. A foreign task
             // subject overrides worker authorship and the task's time window.
-            let subject = if shape == "foreign" {
+            let subject = if matches!(shape, "foreign" | "target-foreign") {
                 "cas-dead: another task"
             } else if shape == "squashed-anchor" {
                 "cas-88c1: squashed replacement"
@@ -10872,19 +11132,66 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         git(&["push", "-q", "--force", "origin", &branch]);
         let tip = git(&["rev-parse", "HEAD"]);
         assert!(git(&["status", "--porcelain"]).is_empty());
+        if retargeted {
+            git(&["branch", "epic/recovery", "origin/main"]);
+            git(&["push", "-q", "origin", "epic/recovery"]);
+            let old_start = env
+                .task_store()
+                .get(&task.id)
+                .unwrap()
+                .deliverables
+                .factory_branch_start;
+            let updated = env
+                .service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "update", "id": task.id, "target_branch": "epic/recovery",
+                }))))
+                .await
+                .unwrap();
+            assert_ne!(updated.is_error, Some(true), "{}", get_text(&updated));
+            worker_service
+                .task(Parameters(start_request()))
+                .await
+                .unwrap();
+            assert_eq!(
+                env.task_store()
+                    .get(&task.id)
+                    .unwrap()
+                    .deliverables
+                    .factory_branch_start,
+                old_start,
+                "restarting cannot silently erase the prior boundary; explicit rebind approves recovery"
+            );
+        }
+        if shape == "target-dirty" {
+            std::fs::write(path.join("uncommitted.txt"), "keep this work\n").unwrap();
+        }
+        let previous = env.task_store().get(&task.id).unwrap();
+        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
+        let refs = git(&["show-ref"]);
+        let status = git(&["status", "--porcelain"]);
+        let requested_branch = if shape == "target-invalid" {
+            "factory/other-worker-cas-88c1"
+        } else {
+            &branch
+        };
         let request = || {
             task_req(serde_json::json!({
-                "action": "rebind_branch", "id": task.id, "branch": branch,
+                "action": "rebind_branch", "id": task.id, "branch": requested_branch,
                 "reason": "Supervisor approved recovery onto the corrected target base",
             }))
         };
         let result = env.service.task(Parameters(request())).await;
-        if matches!(shape, "empty" | "foreign") {
-            let error = result.expect_err("empty and foreign deliveries must refuse");
-            let reason = if shape == "empty" {
-                "no unmerged task delivery"
-            } else {
-                "foreign commit"
+        if matches!(
+            shape,
+            "empty" | "foreign" | "target-dirty" | "target-invalid" | "target-foreign"
+        ) {
+            let error = result.expect_err("invalid replacement must refuse");
+            let reason = match shape {
+                "empty" => "no unmerged task delivery",
+                "target-dirty" => "clean worktree",
+                "target-invalid" => "replacement must be this worker",
+                _ => "foreign commit",
             };
             if !error.message.contains(reason) {
                 failures.push(format!("{shape}: expected {reason}: {error}"));
@@ -10903,6 +11210,11 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
             assert_eq!(start.branch, branch, "{shape}");
             assert_eq!(
+                start.work_target.target_branch,
+                if retargeted { "epic/recovery" } else { "main" },
+                "{shape}: record the explicitly selected target"
+            );
+            assert_eq!(
                 start.base_sha, target_tip,
                 "{shape}: replace the obsolete start base"
             );
@@ -10911,13 +11223,19 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 rebound.deliverables.work_target,
                 previous.deliverables.work_target
             );
-            assert!(rebound.deliverables.factory_branch_anchor.is_none());
-            assert!(
-                rebound
-                    .deliverables
-                    .historical_factory_branch_anchors
-                    .contains(&old_anchor)
+            assert_eq!(
+                Some(&start.work_target),
+                rebound.deliverables.work_target.as_ref()
             );
+            assert!(rebound.deliverables.factory_branch_anchor.is_none());
+            if !retargeted {
+                assert!(
+                    rebound
+                        .deliverables
+                        .historical_factory_branch_anchors
+                        .contains(&old_anchor)
+                );
+            }
             let audit = rebound
                 .notes
                 .lines()
@@ -10925,7 +11243,14 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
                 .expect("persist the old-tip audit even when the branch name stays the same");
             assert_eq!(audit["previous_start"]["base_sha"], old_base);
-            assert_eq!(audit["previous_anchor"], old_anchor);
+            assert_eq!(
+                audit["previous_anchor"],
+                serde_json::to_value(&previous.deliverables.factory_branch_anchor).unwrap()
+            );
+            assert_eq!(
+                audit["previous_start"],
+                serde_json::to_value(&previous.deliverables.factory_branch_start).unwrap()
+            );
             assert_eq!(
                 audit["previous_tip"],
                 if branch == old_branch {
@@ -10947,6 +11272,16 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             "approval never moves Git refs"
         );
         assert_eq!(git_stdout(project, &["rev-parse", "main"]), target_tip);
+        assert_eq!(
+            git(&["show-ref"]),
+            refs,
+            "{shape}: rebind must not mutate Git refs"
+        );
+        assert_eq!(
+            git(&["status", "--porcelain"]),
+            status,
+            "{shape}: preserve checkout contents"
+        );
         assert_eq!(
             serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
             lease
@@ -11612,6 +11947,75 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         let recorded = store.get(&task_b).unwrap().deliverables.factory_branch_start;
         assert_eq!(recorded.map(|start| start.branch), Some(started_on));
     }
+}
+
+#[tokio::test]
+async fn test_start_rejects_commit_guard_factory_misbinding_cas_b153() {
+    let mut guard = EnvGuard::set(&[
+        ("CAS_FACTORY_MODE", "1"),
+        ("CAS_FACTORY_SESSION", "session-cas-b153"),
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-hawk-30"),
+        ("CAS_AGENT_ID", "test-agent-id"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "watchful-hawk-30";
+    let checkout = init_sync_repo(&env, worker);
+    guard._guard.set("CAS_CLONE_PATH", &checkout);
+    std::fs::write(env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-b153-fixture\"\n").unwrap();
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-cas-b153".into());
+    agent.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+    env.agent_store().register(&agent).unwrap();
+    let mut task = Task::new("cas-f1f5".into(), "start binding".into());
+    task.assignee = Some(worker.into());
+    let store = env.task_store();
+    store.add(&task).unwrap();
+    let start: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": task.id,
+    })).unwrap();
+    let commit_guard = || {
+        let input = serde_json::from_value(serde_json::json!({
+            "session_id": agent.id, "cwd": checkout, "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap();
+        serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&env.cas_root)).unwrap()).unwrap()
+    };
+    // Missing WorkTarget must not hide a factory identity mismatch either.
+    for (branch, declared) in [
+        ("factory/watchful-hawk-30-f1f5", false),
+        ("factory/retired-worker-cas-f1f5", true),
+    ] {
+        if declared {
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "project:cas-b153-fixture".into(),
+                target_branch: "epic/requested".into(),
+            });
+            store.update(&task).unwrap();
+        }
+        git_stdout(&checkout, &["switch", "-c", branch, "epic/requested"]);
+        let tip = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+        let before = serde_json::to_value(store.get(&task.id).unwrap()).unwrap();
+        let guard = commit_guard();
+        assert_eq!(guard.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{guard}");
+        let refused = env.service.task(Parameters(start.clone())).await
+            .expect_err("task start must reject a branch the commit guard denies");
+        assert!(refused.message.contains("factory/watchful-hawk-30-cas-f1f5"), "{refused}");
+        assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), before);
+        assert!(env.agent_store().list_agent_leases(&agent.id).unwrap().is_empty());
+        assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), branch);
+        assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tip);
+    }
+    let own = "factory/watchful-hawk-30-cas-f1f5";
+    git_stdout(&checkout, &["switch", "-c", own, "epic/requested"]);
+    env.service.task(Parameters(start)).await.expect("canonical task branch starts");
+    let saved = store.get(&task.id).unwrap();
+    assert_eq!(saved.status, TaskStatus::InProgress);
+    assert_eq!(saved.deliverables.factory_branch_start.unwrap().branch, own);
+    let allowed = commit_guard();
+    assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("allow"), "{allowed}");
 }
 
 #[tokio::test]
@@ -13600,15 +14004,34 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         .expect("register supervisor A");
     env.register_supervisor_in_session("noble-lynx-44", "cas-src-vivid-sparrow-8");
 
-    // (1) A messages B.
+    // Untyped peer FYIs stay readable without opening a model turn.
+    let fyi = env.service.coordination(Parameters(coord_msg(
+        "message", "noble-lynx-44", "FYI: the release notes are drafted.", None,
+    ))).await.expect("FYI is delivered to the peer inbox");
+    let fyi_id = queued_notification_id(&get_text(&fyi));
+    let fyi_row = env.prompt_queue().peek_all(10).unwrap().into_iter()
+        .find(|row| row.id == fyi_id).unwrap();
+    let agents = env.agent_store().list(None).unwrap();
+    let origin = fyi_row.origin.as_ref().unwrap();
+    let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
+        Some(origin), Some(&supervisor_a),
+    );
+    let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
+        "noble-lynx-44", "noble-lynx-44", &sender, &fyi_row.source, &fyi_row.prompt,
+        quiet_supervisor_pane(), chrono::Utc::now(),
+    );
+    assert!(!decision.allowed, "an untyped FYI must not wake: {}", decision.reason);
+
+    // (1) A sends an actionable status to B.
+    let mut request = coord_msg(
+        "message", "noble-lynx-44",
+        "Release gate: hold the merge queue until my epic lands.", None,
+    );
+    request.kind = Some("status".into());
     let send = get_text(
         &env.service
-            .coordination(Parameters(coord_msg(
-                "message",
-                "noble-lynx-44",
-                "Release gate: hold the merge queue until my epic lands.",
-                None,
-            )))
+            .coordination(Parameters(request))
             .await
             .expect("a supervisor must be able to message a supervisor in another session"),
     );
@@ -13963,12 +14386,13 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
     task.assignee = Some("cas-8725-close-worker".to_string());
     env.task_store().add(&task).expect("add task");
 
+    let reason = "envelopes shipped with complete proof. ".repeat(40);
     let close = get_text(
         &env.service
             .task(Parameters(task_req(serde_json::json!({
                 "action": "close",
                 "id": task.id,
-                "reason": "envelopes shipped",
+                "reason": reason,
             }))))
             .await
             .expect("close returns verification guidance rather than an error"),
@@ -14006,6 +14430,18 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         "CAS composed every byte of this row, so it is Daemon-stamped: {handoff:?}"
     );
 
+    eprintln!("DISPATCH_REPLAY reason_bytes={} queued_bytes={}", reason.len(), handoff.prompt.len());
+    assert!(!handoff.prompt.contains(&reason));
+    let artifacts = cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap()
+        .list_for_task(&task.id).unwrap();
+    let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))
+        .expect("verification dispatch must preserve complete evidence in a manifest");
+    assert!(handoff.prompt.contains(&manifest.id));
+    let config = cas::config::Config::load(&env.cas_root).unwrap_or_default();
+    let root = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = cas::artifacts::paths::PublishRoots::new(&env.cas_root, &root, &task.id);
+    assert!(std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap().contains(&reason));
+
     // The gate, driven for real: this row wakes an idle supervisor pane.
     let agents = env.agent_store().list(None).expect("roster");
     let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
@@ -14035,7 +14471,7 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": task.id,
-            "reason": "envelopes shipped",
+            "reason": reason,
         }))))
         .await;
     let handoffs = env
@@ -14286,9 +14722,8 @@ async fn gh_699_spawn_preflight_warns_when_a_second_supervisor_shares_the_clone(
 
 /// Switch the calling session for the rest of a test that already holds the
 /// fixture's EnvGuard (which restores the original value on drop).
-fn act_as_session(session: &str) {
-    // SAFETY: the caller holds the suite's process-state guard.
-    unsafe { std::env::set_var("CAS_FACTORY_SESSION", session) };
+fn act_as_session(guard: &mut EnvGuard, session: &str) {
+    guard._guard.set("CAS_FACTORY_SESSION", session);
 }
 
 fn standalone_task(env: &FactoryTestEnv, title: &str) -> String {
@@ -14316,7 +14751,7 @@ fn assigned_task(env: &FactoryTestEnv, title: &str, worker: &str) -> String {
 /// works; status stays readable.
 #[tokio::test]
 async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
-    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let mut guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
     let env = FactoryTestEnv::new();
     env.register_supervisor_in_session("sup-a", "session-a");
     env.register_supervisor_in_session("sup-b", "session-b");
@@ -14345,7 +14780,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             "sup-a",
         ),
     ] {
-        act_as_session(caller);
+        act_as_session(&mut guard, caller);
         let queued_before = env.spawn_queue().peek(50).expect("peek").len();
 
         // shutdown_workers: refused, naming the owning session.
@@ -14353,7 +14788,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         shutdown.worker_names = Some(foreign.to_string());
         let refused = env
             .service
-            .coordination(Parameters(shutdown))
+            .factory(Parameters(shutdown))
             .await
             .expect_err("another session's worker must not be shut down");
         assert!(
@@ -14427,7 +14862,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
         // The own worker holds an in-progress task, so shutdown needs force.
         own_shutdown.force = Some(true);
         env.service
-            .coordination(Parameters(own_shutdown))
+            .factory(Parameters(own_shutdown))
             .await
             .expect("own worker shutdown is queued");
         let mut own_spawn = factory_req("spawn_workers");
@@ -14438,6 +14873,20 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             .factory_request(Parameters(own_spawn))
             .await
             .expect("own spawn is queued");
+        // A forced stop and the replacement that follows are one pair, per caller.
+        let forced = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::ForceShutdown,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        let respawns = cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::Respawn,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        assert!(!forced.is_empty() && respawns.len() == forced.len(), "{forced:?} {respawns:?}");
         let own_merge = core
             .worktree_merge(
                 &format!("factory/{own}"),
@@ -14464,7 +14913,7 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
     }
 
     // The own-session reset (force) goes through.
-    act_as_session("session-a");
+    act_as_session(&mut guard, "session-a");
     core.cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
         task_id: task_a.clone(),
         force: Some(true),
@@ -14766,6 +15215,25 @@ async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
         .expect("report")
         .expect("row");
     assert_eq!(report.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(decision);
+    let result = env.service.coordination(Parameters(named)).await.expect("named answered read");
+    let text = get_text(&result);
+    assert!(!text.contains("Take option B."), "an actual reply makes even a named read terminal: {text}");
+    assert!(text.contains("answered"), "{text}");
+
+    let broadcast = env.prompt_queue().enqueue("supervisor", "all_workers", "Shared follow-up instruction").unwrap();
+    env.service.coordination(Parameters(reply("cosmic-bear-43", "Answered the shared instruction.", broadcast)))
+        .await.expect("reply to broadcast");
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(broadcast);
+    let result = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&result);
+    assert!(!text.contains("Shared follow-up instruction"), "{text}");
+    assert!(text.contains("answered"), "{text}");
+    assert_eq!(env.prompt_queue().poll_unseen_for_recipient("another-worker", None, 10).unwrap()[0].prompt,
+        "Shared follow-up instruction", "another recipient still gets the first body");
+
 }
 
 /// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are
@@ -14814,4 +15282,38 @@ async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
         .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
         .await;
     assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
+}
+
+
+#[tokio::test]
+async fn cas_afe0_authenticated_ack_is_recipient_scoped_and_does_not_surface_a_body() {
+    let _guard = EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor"), ("CAS_AGENT_NAME", "lead-pane")]);
+    let env = FactoryTestEnv::with_agent_id_and_env("lead-id", None);
+    let mut lead = Agent::new("lead-id".into(), "lead-pane".into());
+    lead.role = AgentRole::Supervisor;
+    env.agent_store().register(&lead).unwrap();
+    env.register_worker_with_id("other-id", "worker-b", None);
+    let queue = env.prompt_queue();
+    let id = queue.enqueue("director", "all_workers", "Shared body that must stay private after ACK").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(id);
+    env.service.coordination(Parameters(ack)).await.unwrap();
+    for alias in ["lead-pane", "supervisor"] {
+        assert_eq!(queue.recipient_receipt(id, alias).unwrap(), None);
+        assert!(queue.poll_unseen_for_recipient(alias, None, 10).unwrap().is_empty());
+    }
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(id);
+    let response = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&response);
+    assert!(!text.contains("Shared body that"), "{text}");
+    assert!(text.contains("acknowledged"), "{text}");
+    // Alias mirroring must not turn a terminal reference into body evidence.
+    assert_eq!(queue.recipient_receipt(id, "lead-pane").unwrap(), None);
+    assert_eq!(queue.poll_unseen_for_recipient("worker-b", None, 10).unwrap()[0].prompt,
+        "Shared body that must stay private after ACK");
+    let foreign = queue.enqueue("director", "worker-b", "Other worker's body").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(foreign);
+    assert!(env.service.coordination(Parameters(ack)).await.is_err());
 }

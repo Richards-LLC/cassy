@@ -21,6 +21,15 @@ function footerState(rows: PairedMachineRow[]): string {
 }
 
 describe('paired machine footer after authentication loss (cas-f698)', () => {
+  it('explains an unknown runtime before connecting without promising a reconnect can update a live unknown runtime', () => {
+    const container = document.createElement('div');
+    renderPairedMachines(container, [{ ...atlas, latestRelease: '3.88.0' }], async () => undefined);
+    // pin: the existing machine-register copy tells when its version can arrive.
+    expect(container.querySelector('.paired-machine-runtime')?.textContent).toBe('Version unknown until it connects');
+    renderPairedMachines(container, [{ ...atlas, connected: true, runtime: 'unknown', latestRelease: '3.88.0' }], async () => undefined);
+    expect(container.querySelector('.paired-machine-runtime')?.textContent).toBe('Version unknown');
+    expect(container.querySelector('.machine-version-update')).toBeNull();
+  });
   it.each([true, false])('requests pairing for the only revoked machine, previously live: %s', (everConnected) => {
     expect(footerState([{ ...atlas, everConnected }])).toBe('Needs pairing');
   });

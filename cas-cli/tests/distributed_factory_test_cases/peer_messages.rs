@@ -583,9 +583,20 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert!(replies[0].prompt.ends_with("yes"));
     // pin: pm_1 is the fixture's Cloud parent id and must survive as reply correlation.
     assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
-    // Ordinary/status mail wakes too. Only explicit receipt/quiet intent
-    // removes eligibility from an authenticated peer message.
+    assert!(parse_envelope(&replies[0].prompt).unwrap().wakes_idle(),
+        "an untyped answer must wake the supervisor that asked");
+    let answer_body = "I will take it";
+    coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"answer", "message":answer_body, "kind":"answer", "in_reply_to":rows[0].id})).await.unwrap();
+    let aa = a.clone();
+    let answers = tokio::task::spawn_blocking(move || { tick(&aa, "a"); inbox(&aa) }).await.unwrap();
+    let answer = answers.iter().find(|row| row.prompt.ends_with(answer_body)).unwrap();
+    assert!(parse_envelope(&answer.prompt).unwrap().wakes_idle());
+    let invalid = coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"invalid", "message":"unknown kind", "kind":"answr", "in_reply_to":rows[0].id})).await.unwrap_err();
+    // pin: an unsupported kind must return an actionable validation error.
+    assert!(invalid.contains("unknown peer message kind"), "{invalid}");
+    // New untyped FYIs remain quiet; replies to an ask and explicit actions wake.
     for (kind, blocker, wakes) in [
+        (None, false, false),
         (Some("blocker"), false, true), (None, true, true), (Some("status"), false, true),
         (Some("receipt"), false, false), (Some("quiet"), false, false),
     ] {
@@ -1409,14 +1420,14 @@ async fn ct2_p3_overcap_peer_body_readable() {
     let (sender, receiver) = (service_for(&a, "a"), service_for(&b, "b"));
     let body = format!("contract-v2 over-cap body\n{}\nend-of-body", "readable 体\n".repeat(400));
     assert!(body.chars().count() > cas::config::Config::default().factory().message_max_chars);
-    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body})).await.unwrap();
-    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(body.as_str()));
+    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body, "kind":"ask"})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(format!("<cas-peer-intent kind=\"ask\"/>\n{body}").as_str()));
     let rows = tokio::task::spawn_blocking(move || { tick(&b, "b"); inbox(&b) }).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].prompt.ends_with(&body));
     let reply = format!("reply\n{body}");
     coordinate(&receiver, json!({"action":"message", "target":"sup-a@machine-alpha", "summary":"long peer reply", "message":reply, "in_reply_to":rows[0].id})).await.unwrap();
-    assert_eq!(mailbox.lock().unwrap()[1]["body"].as_str(), Some(reply.as_str()));
+    assert_eq!(mailbox.lock().unwrap()[1]["body"].as_str(), Some(format!("<cas-peer-intent kind=\"answer\"/>\n{reply}").as_str()));
     let rows = tokio::task::spawn_blocking(move || { tick(&a, "a"); inbox(&a) }).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].prompt.ends_with(&reply));

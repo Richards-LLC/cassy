@@ -7,6 +7,8 @@ use std::collections::HashSet;
 pub(crate) enum MessageAttention {
     Needed,
     Satisfied,
+    /// A transcript correlated the durable id and full body; persist on Write.
+    Consumed,
 }
 
 fn close_instruction_tasks(prompt: &str) -> Vec<String> {
@@ -26,6 +28,7 @@ pub(crate) struct AttentionInputs {
     pub(crate) session_name: String,
     dead_workers: HashSet<String>,
     workers: Vec<String>,
+    replacement_workers: HashSet<String>,
 }
 impl AttentionInputs {
     pub(crate) fn from_daemon(daemon: &FactoryDaemon) -> Self {
@@ -34,6 +37,7 @@ impl AttentionInputs {
             session_name: daemon.session_name.clone(),
             dead_workers: daemon.dead_workers.clone(),
             workers: daemon.app.worker_names().to_vec(),
+            replacement_workers: daemon.pending_worker_replacements(),
         }
     }
     /// Snapshot stores once and resolve each recipient transcript once per scan.
@@ -64,8 +68,23 @@ impl AttentionInputs {
         let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
+        // Only shutdown evidence needs a durable replacement lookup. Cache by
+        // recipient, preserving pending intent when the store is unreadable.
+        let spawns = std::cell::OnceCell::new();
+        let mut replacement_cache = HashMap::new();
+        let mut replacement_pending = |target: &str| {
+            self.replacement_workers.contains(target)
+                || *replacement_cache.entry(target.to_owned()).or_insert_with(|| {
+                    spawns.get_or_init(|| open_spawn_queue_store(&self.cas_dir).ok())
+                        .as_ref().and_then(|store|
+                            store.has_pending_spawn(target, Some(&self.session_name)).ok())
+                        .unwrap_or(true)
+                })
+        };
         for row in rows {
-            if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents) {
+            if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents, &self.replacement_workers)
+                && !replacement_pending(&row.target)
+            {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
@@ -107,7 +126,10 @@ impl AttentionInputs {
             // cas-0cdaa: explicit work after the handoff retires the alarm
             // even when a Codex transcript cannot be bound. Keep this separate
             // from per-message read/ack evidence; transport alone is insufficient.
-            if queue.recipient_action_satisfies_alarm(row.id).unwrap_or(false) {
+            if queue
+                .recipient_action_satisfies_alarm(row.id)
+                .unwrap_or(false)
+            {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
@@ -126,7 +148,11 @@ impl AttentionInputs {
                 continue;
             };
             if recipient.status == cas_types::AgentStatus::Shutdown {
-                decisions.insert(row.id, MessageAttention::Satisfied);
+                decisions.insert(row.id, if replacement_pending(&row.target) {
+                    MessageAttention::Needed
+                } else {
+                    MessageAttention::Satisfied
+                });
                 continue;
             }
             let cited_note = notes.iter().any(|event| {
@@ -170,6 +196,13 @@ impl AttentionInputs {
                     cli,
                     cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex
                 ) {
+                    let consumed = crate::mcp::tools::service::harness_observation::observations_for_queued_message(
+                        path, *cli, row.created_at, row.id, &row.prompt,
+                    );
+                    if consumed.wake.is_some() {
+                        decisions.insert(row.id, MessageAttention::Consumed);
+                        continue;
+                    }
                     let observed = crate::mcp::tools::service::harness_observation::observations_after_delivery(
                         path, *cli, row.created_at, &row.prompt,
                     );
@@ -257,6 +290,7 @@ impl AttentionInputs {
 }
 
 impl FactoryDaemon {
+    #[cfg(test)]
     pub(super) fn message_attention_decisions(
         &self,
         queue: &dyn cas_store::PromptQueueStore,

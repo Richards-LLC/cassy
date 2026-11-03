@@ -724,7 +724,30 @@ impl std::ops::Deref for PooledImmediateTx<'_> {
 /// As with the unpooled form, nothing runs inside the transaction until it is
 /// open, so the caller's body executes exactly once.
 pub fn begin_immediate_pooled(shared: &Mutex<Connection>) -> crate::Result<PooledImmediateTx<'_>> {
-    begin_immediate_pooled_bounded(shared, POOLED_ATTEMPT_BUSY, POOLED_WRITE_BUDGET)
+    begin_immediate_pooled_bounded(shared, POOLED_ATTEMPT_BUSY, pooled_write_budget())
+}
+
+#[cfg(test)]
+thread_local! {
+    static POOLED_WRITE_BUDGET_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Shorten [`POOLED_WRITE_BUDGET`] for pooled writes made on the calling
+/// thread, so exhaustion tests need not wait out the production budget.
+#[cfg(test)]
+pub(crate) fn set_pooled_write_budget_for_tests(budget: Duration) {
+    // pin: shortening the budget in tests must not lower the production one.
+    assert_eq!(POOLED_WRITE_BUDGET, Duration::from_millis(31_500));
+    POOLED_WRITE_BUDGET_OVERRIDE.with(|cell| cell.set(Some(budget)));
+}
+
+fn pooled_write_budget() -> Duration {
+    #[cfg(test)]
+    if let Some(budget) = POOLED_WRITE_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return budget;
+    }
+    POOLED_WRITE_BUDGET
 }
 
 /// [`begin_immediate_pooled`] with an explicit per-attempt busy wait and total

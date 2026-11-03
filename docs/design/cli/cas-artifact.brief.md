@@ -5,7 +5,7 @@
 | **First two lines** | A committed `publish` opens with `[OK] published <name> - <size> - <artifact_id>`; a retained local record opens with `[WARN] local-only` and its id. The next line names the storage outcome, including remote failure status when available. Only a completed Cloud commit claims publication; a local record remains citable on this machine. A refusal states what is wrong and where publishing is allowed. |
 | **Scannable** | `list` prints one fixed-column row per artifact — name, size, status, id — sorted newest first, so the row just published is the first one. `show` is a labelled term/value block in a stable order (task, type, sha256, status, then any cloud and Slack references). Sizes use decimal units, matching the file dialog the operator read the size from. |
 | **Readable** | The storage line states Cloud availability or local-only retention. A failed upload preserves its HTTP status and complete cause without a success headline; the local artifact id remains available for inspection. MCP uses the same distinction: `Published` only after commit, otherwise `Local-only artifact`. |
-| **Machine output** | `--json` is one object per command: `publish` returns `artifact_id`, `task_id`, `name`, `mime`, `size_bytes`, `sha256`, `status`, `storage` (`committed` / `not_live` / `not_logged_in` / `upload_failed`), `storage_detail`, `cloud_url`, `source`; `show` returns the stored record; `list` returns an array of records. The human verdict line never appears on stdout in JSON mode. |
+| **Machine output** | `--json` is one object per command: `publish` returns `artifact_id`, `task_id`, `name`, `mime`, `size_bytes`, `sha256`, `status`, `storage` (`committed` / `not_live` / `not_logged_in` / `upload_failed`), `storage_detail`, `metadata_state` (`task_reference_recorded` / `metadata_unavailable` / `local_only`), `cloud_url`, `source`; `show` returns the local or synced record; `list` returns an array of local ledger records. The human verdict line never appears on stdout in JSON mode. |
 | **Omitted** | The pre-signed upload URL, in every mode — it is a credential, so it is never printed, never persisted, and never included in a failure report. `publish` prints the complete 64-character SHA-256 on a 76-column ASCII line; `show` and `--json` also retain the whole digest. Per-step upload timings are not reported. |
 
 ## Fetch
@@ -14,13 +14,28 @@
 | --- | --- |
 | **First two lines** | `[OK] verified <name> - <id>` proves the download matched the published bytes; the next line is the local file to read. |
 | **Scannable** | One verdict followed by one path; no table or transfer progress. |
-| **Readable** | A refusal names authentication, a missing reference, or the size/digest disagreement before a local copy is saved. |
+| **Readable** | A refusal names authentication, unavailable metadata, or the size/digest disagreement before a local copy is saved. Unavailable metadata does not claim that Cloud bytes are absent. |
 | **Machine output** | One object: `artifact_id`, `path`, `sha256`, `size_bytes`; no human banner. |
 | **Omitted** | Signed view URLs and credentials stay in memory; artifact metadata is available through `show`. |
 
 Like publish, fetch mutates disk and the local ledger. Its real CLI and MCP
 paths share the verified download implementation; the portable-proof handler
 regression covers both surfaces, including corruption refusal.
+
+## Peer metadata
+
+Every committed publication records a trusted task reference, including a plain
+publish without a prose proof note. Normal task sync carries that reference to
+the peer. `show` can inspect it before the first fetch; only a verified fetch
+imports the downloaded artifact into the peer's local ledger.
+
+Byte storage and metadata availability are separate outcomes. If the bytes
+commit but the task reference cannot be recorded, `storage` remains `committed`
+and `metadata_state` is `metadata_unavailable`, with the cause in
+`storage_detail`. Missing metadata in `show` or `fetch` returns a nonzero exit
+and one JSON error document with `state: metadata_unavailable`, `artifact_id`
+and the task ID when known. MCP carries the same state in its error data.
+Neither surface concludes that the Cloud object is missing without checking it.
 
 ## Why the refusals are this loud
 

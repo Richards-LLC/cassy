@@ -77,13 +77,13 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     vi.useFakeTimers();
     // 64 KiB/s of serialized request bytes (512 kbit/s), including base64 expansion.
     vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => new Promise<Response>(resolve => {
-      setTimeout(() => resolve(new Response(JSON.stringify({ path: "/host/photo.jpg", artifact_id: "art-photo" }))), Math.ceil(String(init.body).length / 65_536 * 1000));
+      setTimeout(() => resolve(new Response(JSON.stringify({ path: "/host/photo.jpg", artifact_id: "art-photo" }))), Math.ceil(String(init.body).length / 65_536 * 1000 * 1.25));
       transferring!();
     })));
     const result = connection.uploadFile("session", "id", file.name, data);
     const delivered = result.then(value => ({ value }), error => ({ error }));
     await started;
-    await vi.advanceTimersByTimeAsync(240_000);
+    await vi.advanceTimersByTimeAsync(300_000);
     expect(await delivered).toMatchObject({ value: { path: "/host/photo.jpg" } });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);

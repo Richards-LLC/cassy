@@ -1113,6 +1113,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.block_stale_assignment", "false", "false"),
         ("factory.stale_threshold_commits", "3", "3"),
         ("factory.stall_threshold_secs", "420", "420"),
+        ("factory.restart_worker_between_tasks", "true", "true"),
         ("factory.context_recycle_threshold_percent", "85", "85"),
         ("factory.stall_after_secs", "900", "900"),
         ("factory.delivery_stalled_priority_secs", "120", "120"),
@@ -1398,33 +1399,6 @@ fn worker_credential_env_round_trip_and_shared_policy_cas_82bc() {
         .unwrap().worker_credential_env.is_empty());
 }
 
-/// cas-4971: Jev was removed (cas-4971). A config file written by an older
-/// release with a `[jev]` section must still load, keep its other settings,
-/// and lose the retired section on the next save.
-#[test]
-fn retired_jev_section_loads_and_is_dropped_on_save_cas_4971() {
-    let temp = TempDir::new().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "[jev]\nenabled = true\nmodel = \"jev-1.13.0\"\nkey_file = \"/tmp/key\"\n\n\
-         [jev.gate]\nshadow = true\n\n[qa]\nuser_facing_labels = [\"mobile\"]\n",
-    )
-    .unwrap();
-
-    let loaded = Config::load(temp.path()).expect("a config with [jev] still loads");
-    assert!(loaded.retired_jev.is_some(), "the retired section is recognised");
-    assert_eq!(loaded.qa().user_facing_labels, vec!["mobile"]);
-    assert_eq!(loaded.get("jev.enabled"), None, "no jev.* key is readable");
-    assert!(loaded.list().iter().all(|(key, _)| !key.starts_with("jev.")));
-
-    loaded.save(temp.path()).unwrap();
-    let saved = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(!saved.contains("jev"), "the retired section is not written back: {saved}");
-    let reloaded = Config::load(temp.path()).unwrap();
-    assert!(reloaded.retired_jev.is_none());
-    assert_eq!(reloaded.qa().user_facing_labels, vec!["mobile"]);
-}
-
 /// cas-fd0a: an older config carrying the retired post-merge sweep keys
 /// still loads through `Config::load`, keeps its other settings, refuses the
 /// retired keys for get/set, and loses them on the next save.
@@ -1454,6 +1428,42 @@ fn retired_merge_sweep_keys_load_and_are_dropped_on_save_cas_fd0a() {
     assert!(!saved.contains("merge_sweep"), "the retired keys are not written back: {saved}");
     assert!(!saved.contains("release_gate_home_dir"), "{saved}");
     assert!(Config::load(temp.path()).unwrap().factory().retired_keys().is_empty());
+}
+
+/// cas-49de: the TUI pop-up notification keys were removed with their
+/// never-wired pipeline. An older config carrying them still loads with its
+/// live hook keys intact, cannot read them back, and loses them both on the
+/// next save and through the update-time retirement edit.
+#[test]
+fn retired_notification_keys_load_and_are_dropped_cas_49de() {
+    let raw = "[notifications]\nenabled = false\nsound_enabled = true\nmax_visible = 3\n\
+               on_idle_prompt = true # keep comment\n\n[notifications.tasks]\non_created = true\n\n\
+               [notifications.skills]\non_disabled = false\n";
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, raw).unwrap();
+
+    let loaded = Config::load(temp.path()).expect("an old config with pop-up keys still loads");
+    let notifications = loaded.notifications.clone().unwrap();
+    assert_eq!(notifications.retired_keys(), vec!["sound_enabled", "max_visible", "tasks", "skills"]);
+    assert!(!notifications.enabled && notifications.on_idle_prompt, "live hook keys are kept");
+    assert_eq!(loaded.get("notifications.sound_enabled"), None, "a retired key is not readable");
+    assert_eq!(loaded.get("notifications.tasks.on_created"), None);
+    assert!(loaded.list().iter().all(|(key, _)| !key.starts_with("notifications.tasks")));
+
+    let receipt = crate::config::retire_config(temp.path(), false);
+    assert_eq!(receipt.status, "repaired", "{receipt:?}");
+    let retired = std::fs::read_to_string(&path).unwrap();
+    assert!(retired.contains("# keep comment"), "{retired}");
+    for gone in ["sound_enabled", "max_visible", "on_created", "notifications.tasks", "notifications.skills"] {
+        assert!(!retired.contains(gone), "{gone} survived the retirement edit: {retired}");
+    }
+
+    std::fs::write(&path, raw).unwrap();
+    loaded.save(temp.path()).unwrap();
+    let reloaded = Config::load(temp.path()).unwrap();
+    assert!(reloaded.notifications.as_ref().unwrap().retired_keys().is_empty());
+    assert_eq!(reloaded.get("notifications.on_idle_prompt").as_deref(), Some("true"));
 }
 
 #[test]
@@ -1728,4 +1738,89 @@ fn qa_capture_intent_and_runtime_pointer_findings_cas_db23() {
     assert!(config.qa().capture.unwrap().is_configured().unwrap());
     config.set("qa.capture.serve", "").unwrap();
     assert!(!config.qa().capture.unwrap().is_configured().unwrap());
+}
+
+#[test]
+fn qa_batch_default_preserves_explicit_per_task_round_trip() {
+    let env = TestEnvGuard::temp_home();
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&project).unwrap();
+    assert_eq!(Config::default().qa().mode, QaMode::Batch);
+    let mut config = Config::load(&project).unwrap();
+    assert_eq!(config.get("qa.mode").as_deref(), Some("batch"));
+    config.set("qa.mode", "per_task").unwrap();
+    config.save(&project).unwrap();
+    assert_eq!(Config::load(&project).unwrap().get("qa.mode").as_deref(), Some("per_task"));
+}
+
+#[test]
+fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
+    let env = TestEnvGuard::temp_home();
+    let host = env.home().join(".cas");
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = false\nevidence_gate = false\n[hooks]\ncapture_enabled = false\n").unwrap();
+    let mut loaded = Config::load(&project).unwrap();
+    assert_eq!(loaded.get("qa.mode").as_deref(), Some("batch"));
+    assert!(!loaded.qa().independent_pass);
+    assert!(!loaded.qa().evidence_gate);
+    assert!(loaded.hooks.is_none(), "only qa defaults are inherited");
+    loaded.set("tasks.commit_nudge_on_close", "true").unwrap();
+    loaded.save(&project).unwrap();
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(project.join("config.toml")).unwrap()).unwrap();
+    assert!(saved.get("qa").is_none(), "saving another section must not pin inherited QA defaults");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"per_task\"\nindependent_pass = false\nevidence_gate = false\n").unwrap();
+    let inherited = Config::load(&project).unwrap();
+    assert_eq!(inherited.get("qa.mode").as_deref(), Some("per_task"));
+    assert!(inherited.list().contains(&("qa.mode".into(), "per_task".into())));
+    std::fs::write(project.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = true\n").unwrap();
+    let overridden = Config::load(&project).unwrap();
+    assert_eq!(overridden.get("qa.mode").as_deref(), Some("batch"));
+    assert!(overridden.qa().independent_pass);
+    assert!(!overridden.qa().evidence_gate, "a project key does not mask other user defaults");
+    let mut overridden = overridden;
+    overridden.save(&project).unwrap();
+    assert!(!Config::load(&project).unwrap().qa().evidence_gate);
+    overridden.set("qa.evidence_gate", "true").unwrap();
+    overridden.save(&project).unwrap();
+    assert!(Config::load(&project).unwrap().qa().evidence_gate,
+        "an explicit built-in value overrides a different user value");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode='per_task'\n[qa.capture]\nbase_url='http://localhost:3000'\n").unwrap();
+    let nested = env.home().join("nested/.cas");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("config.yaml"), "qa:\n  independent_pass: false\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.capture.ready_path", "/ready").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert_eq!(reloaded.qa().mode, QaMode::PerTask, "YAML migration must not pin the mode");
+    let capture = reloaded.qa().capture.unwrap();
+    assert_eq!(capture.base_url, "http://localhost:3000");
+    assert_eq!(capture.ready_path, "/ready");
+    assert!(!reloaded.qa().independent_pass);
+    std::fs::write(host.join("config.toml"), "[qa]\ntelemetry_sweep='scripts/sweep.sh'\npreflight_env_files=['USER_ENV']\n[qa.post_release]\ncommand='echo healthy'\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.telemetry_sweep", "").unwrap();
+    loaded.set("qa.preflight_env_files", "").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert!(reloaded.qa().telemetry_sweep.is_none());
+    assert!(reloaded.qa().preflight_env_files.is_empty());
+    assert_eq!(crate::qa_post_release::configured(&nested).unwrap().command, "echo healthy");
+    let fallback = env.home().join("bad-user-policy/.cas");
+    std::fs::create_dir_all(&fallback).unwrap();
+    for broken in ["[qa\nmode=", "[qa]\nmode='invalid'\nevidence_gate=false\n"] {
+        std::fs::write(host.join("config.toml"), broken).unwrap();
+        let loaded = Config::load(&fallback).expect("a broken user layer must not break project loading");
+        assert_eq!(loaded.qa().mode, QaMode::Batch);
+        assert!(loaded.qa().evidence_gate);
+        std::fs::write(fallback.join("config.toml"), "[qa]\nmode='per_task'\nmax_rounds=5\n").unwrap();
+        let loaded = Config::load(&fallback).unwrap();
+        assert_eq!(loaded.qa().mode, QaMode::PerTask);
+        assert_eq!(loaded.qa().max_rounds, 5);
+        std::fs::remove_file(fallback.join("config.toml")).unwrap();
+    }
+    std::fs::write(fallback.join("config.toml"), "[qa]\nmode='invalid-project'\n").unwrap();
+    assert!(Config::load(&fallback).is_err(), "invalid project policy must still be reported");
 }

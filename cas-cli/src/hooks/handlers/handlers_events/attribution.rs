@@ -561,6 +561,12 @@ fn persist_active_task_factory_anchor(
     let Some(branch) = branch.filter(|name| name.starts_with("factory/")) else {
         return false;
     };
+    // cas-3d70: a commit on a separate helper branch (for example a
+    // supervisor-requested main-ready copy) is not this task's delivery and
+    // must not replace the anchor of the branch that will be merged.
+    if !is_own_delivery_branch(&task, &agent.name, &branch) {
+        return false;
+    }
     task.deliverables.factory_branch_anchor = Some(commit_hash.to_string());
     // Keep the first recorded branch as the recovery pointer if this task is
     // later reassigned. The current assignee still identifies the live branch,
@@ -568,6 +574,21 @@ fn persist_active_task_factory_anchor(
     task.deliverables.parked_branch.get_or_insert(branch);
     task.updated_at = chrono::Utc::now();
     task_store.update(&task).is_ok()
+}
+
+/// The branches that carry `task`'s delivery for `worker`: its lane, its
+/// per-task branch, the branch recorded at start and the parked branch.
+fn is_own_delivery_branch(task: &cas_types::Task, worker: &str, branch: &str) -> bool {
+    let strip = |name: &str| name.strip_prefix("origin/").unwrap_or(name).to_string();
+    let branch = strip(branch);
+    let mut own = Vec::new();
+    for name in std::iter::once(worker).chain(task.assignee.as_deref()) {
+        own.push(format!("factory/{name}"));
+        own.push(crate::factory_isolation::worker_task_branch(name, &task.id));
+    }
+    own.extend(task.deliverables.factory_branch_start.as_ref().map(|start| strip(&start.branch)));
+    own.extend(task.deliverables.parked_branch.as_deref().map(strip));
+    own.contains(&branch)
 }
 
 /// Codex does not include a shell exit code in PostToolUse input. Require the
@@ -1544,21 +1565,24 @@ mod commit_anchor_tests {
     fn non_factory_branch_does_not_record_active_task_anchor() {
         let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
-        git(repo, &["checkout", "-q", "main"]);
         let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
-
-        assert!(!persist_active_task_factory_anchor(
-            &cas_root,
-            &HookInput {
-                session_id: agent.id,
-                cwd: repo.display().to_string(),
-                ..Default::default()
-            },
-            &commit_hash,
-            false,
-        ));
-        let unchanged = task_store.get(&task.id).expect("unchanged task");
-        assert!(unchanged.deliverables.factory_branch_anchor.is_none());
-        assert!(unchanged.deliverables.parked_branch.is_none());
+        // cas-3d70: a separate helper factory branch is not the task's delivery.
+        let helper = format!("factory/{}-{}-main", agent.name, task.id);
+        for branch in ["main", helper.as_str()] {
+            git(repo, &["checkout", "-q", "-B", branch]);
+            assert!(!persist_active_task_factory_anchor(
+                &cas_root,
+                &HookInput {
+                    session_id: agent.id.clone(),
+                    cwd: repo.display().to_string(),
+                    ..Default::default()
+                },
+                &commit_hash,
+                false,
+            ), "{branch}");
+            let unchanged = task_store.get(&task.id).expect("unchanged task");
+            assert!(unchanged.deliverables.factory_branch_anchor.is_none(), "{branch}");
+            assert!(unchanged.deliverables.parked_branch.is_none(), "{branch}");
+        }
     }
 }

@@ -230,7 +230,7 @@ impl CasService {
         let target_project = req.project.clone();
         let blocks_origin_task_id = req.blocks_origin_task_id.clone();
         let proposal_attempt_id = req.proposal_attempt_id.clone();
-        let supervisor_override = req.effective_supervisor_override();
+        let supervisor_override = req.supervisor_override;
         let task_type = req
             .task_type
             .as_deref()
@@ -264,6 +264,36 @@ impl CasService {
             &self.inner.load_config().qa().user_facing_labels,
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // cas-0ad8: the review spawn threshold, for every project and role.
+        let reviewer_origin = self.caller_review_origin();
+        let finding_origin = crate::mcp::tools::core::task::lifecycle::review_loop::spawn_gate(
+            &crate::mcp::tools::core::task::lifecycle::review_loop::SpawnRequest {
+                origin: req.finding_origin.as_deref(),
+                repro: req.repro.as_deref(),
+                affected: req.affected.as_deref(),
+                title: req.title.as_deref().unwrap_or_default(),
+                description: req.description.as_deref().unwrap_or_default(),
+                priority: req.priority.unwrap_or(2),
+                task_type,
+                reviewer_origin: reviewer_origin.as_deref(),
+                is_worker: std::env::var("CAS_AGENT_ROLE").is_ok_and(|role| role == "worker"),
+            },
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        let mut req = req;
+        if let Some(origin) = finding_origin.as_deref() {
+            use crate::mcp::tools::core::task::lifecycle::review_loop::{FINDING_LABEL, origin_note};
+            req.labels = Some(match req.labels.take().filter(|labels| !labels.trim().is_empty()) {
+                Some(labels) => format!("{labels},{FINDING_LABEL}"),
+                None => FINDING_LABEL.to_string(),
+            });
+            let note = origin_note(origin, req.repro.as_deref().unwrap_or_default(), req.affected.as_deref().unwrap_or_default());
+            req.notes = Some(match req.notes.take().filter(|notes| !notes.trim().is_empty()) {
+                Some(notes) => format!("{notes}\n{note}"),
+                None => note,
+            });
+        }
+        let finding_epic = finding_origin.as_ref().and(req.epic.clone());
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -307,7 +337,8 @@ impl CasService {
                 )
                 .await;
         }
-        self.inner
+        let created = self
+            .inner
             .cas_task_create_with_delivery_mode(
                 inner_req,
                 target_repo.as_deref(),
@@ -315,7 +346,33 @@ impl CasService {
                 req.confirm_warning.unwrap_or(false),
                 req.delivery_mode.as_deref(),
             )
-            .await
+            .await;
+        if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
+            && let Some(epic) = finding_epic.as_deref()
+        {
+            crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, epic);
+        }
+        created
+    }
+
+    /// The review this caller is performing, which makes anything it files a
+    /// follow-up from a finding: a verifier, or a worker holding a QA task.
+    fn caller_review_origin(&self) -> Option<String> {
+        let agent_id = self.inner.get_agent_id().ok()?;
+        let agent = crate::store::open_agent_store(&self.inner.cas_root).ok()?.get(&agent_id).ok()?;
+        if agent.name == "task-verifier" {
+            return Some("verifier".to_string());
+        }
+        crate::store::open_task_store(&self.inner.cas_root)
+            .ok()?
+            .list(Some(crate::types::TaskStatus::InProgress))
+            .ok()?
+            .into_iter()
+            .find(|task| {
+                task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL)
+                    && task.assignee.as_deref().is_some_and(|assignee| assignee == agent.id || assignee == agent.name)
+            })
+            .map(|task| format!("qa:{}", task.id))
     }
 
     pub(super) async fn task_proposal_inbox(
@@ -396,11 +453,31 @@ impl CasService {
         let inner_req = TaskShowRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "show"))?,
             with_deps: req.with_deps.unwrap_or(true),
+            read: crate::mcp::tools::TaskReadOptions {
+                full: req.full.unwrap_or(false),
+                offset: req.offset,
+                limit: req.limit,
+            },
         };
         self.inner.cas_task_show(Parameters(inner_req)).await
     }
 
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        if let Some(ids) = req.task_ids.as_ref() {
+            let fields = serde_json::to_value(&req).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            if fields.as_object().is_some_and(|fields| fields.iter().any(|(key, value)|
+                !value.is_null() && !["action", "id", "assignee", "task_ids", "expected_generation"].contains(&key.as_str()))) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Queue assignment accepts only assignee, task_ids, optional id and expected_generation; apply other task updates separately"));
+            }
+            let worker = req.assignee.as_deref().ok_or_else(|| Self::error(
+                ErrorCode::INVALID_PARAMS, "task update with task_ids requires assignee=<worker>"))?;
+            if req.id.as_ref().is_some_and(|id| ids.first() != Some(id)) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, "id must match the first task_ids entry; omit id to clear the queue"));
+            }
+            return self.inner.configure_worker_task_queue(worker, Some(ids.clone()), req.expected_generation)
+                .await.map(Self::success);
+        }
         use crate::mcp::tools::TaskUpdateRequest;
         if req.task_type.is_some() {
             return Err(Self::error(
@@ -454,7 +531,7 @@ impl CasService {
         use crate::mcp::tools::TaskStartRequest;
         let inner_req = TaskStartRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "start"))?,
-            brief: req.brief,
+            brief: req.brief.or(req.full.map(|full| !full)),
             force: req.force,
         };
         self.inner
@@ -470,7 +547,6 @@ impl CasService {
         // made the documented no-code escape discoverable only after exact
         // verification had locked the ordinary update path.
         let inline_execution_note = req.execution_note.clone();
-        let effective_supervisor_override = req.effective_supervisor_override();
         let evidence_only = req.evidence_only.unwrap_or(false).then(|| {
             crate::mcp::tools::EvidenceOnlyCloseRequest {
                 artifact_path: req.evidence_only_artifact_path,
@@ -490,8 +566,7 @@ impl CasService {
             stranded_branch_override: req.stranded_branch_override,
             id: req.id.ok_or_else(|| self.missing_id("task", "close"))?,
             reason: req.reason.or(req.notes),
-            supervisor_override: effective_supervisor_override,
-            legacy_bypass_code_review: req.legacy_bypass_code_review,
+            supervisor_override: req.supervisor_override,
             search_manifest: req.search_manifest,
             commit_receipt: req.commit_receipt,
         };
@@ -623,8 +698,8 @@ impl CasService {
     }
 
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::{IdRequest, TaskNotesRequest};
-        let supervisor_override = req.effective_supervisor_override();
+        use crate::mcp::tools::{TaskNotesReadRequest, TaskNotesRequest, TaskReadOptions};
+        let supervisor_override = req.supervisor_override;
         let id = req.id.ok_or_else(|| self.missing_id("task", "notes"))?;
 
         match req.notes {
@@ -640,7 +715,14 @@ impl CasService {
             }
             None => {
                 self.inner
-                    .cas_task_notes_read(Parameters(IdRequest { id }))
+                    .cas_task_notes_read(Parameters(TaskNotesReadRequest {
+                        id,
+                        read: TaskReadOptions {
+                            full: req.full.unwrap_or(false),
+                            offset: req.offset,
+                            limit: req.limit,
+                        },
+                    }))
                     .await
             }
         }
@@ -719,7 +801,6 @@ impl CasService {
 
     pub(super) async fn task_transfer(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskTransferRequest;
-        let effective_supervisor_override = req.effective_supervisor_override();
         let inner_req = TaskTransferRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "transfer"))?,
             to_agent: req.to_agent.ok_or_else(|| {
@@ -737,9 +818,7 @@ impl CasService {
             })?,
             adopt_branch: req.adopt_branch,
             note: req.notes,
-            // Keep the one-release close-gate alias usable for transfer while
-            // exposing the surviving name consistently at the unified boundary.
-            supervisor_override: effective_supervisor_override,
+            supervisor_override: req.supervisor_override,
         };
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }

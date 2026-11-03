@@ -1,0 +1,4 @@
+title: Generated statuslines must record native usage and account choices must retain unreset observations with their age
+tasks: [cas-7045, cas-d739]
+invariants: [HUB-J13-NATIVE-CLAUDE-CAPACITY]
+journeys: [HUB-J13]

@@ -133,6 +133,8 @@ fn sibling_presence_under_a_held_tantivy_writer_has_no_retirement_failures_cas_e
 
 #[test]
 fn held_tantivy_writer_defers_deleted_files_then_retries_cas_e4aa() {
+    // The held writer exhausts a shortened budget (production: 10 s).
+    super::indexing::set_writer_lock_budget_for_tests(std::time::Duration::from_millis(100));
     let fixture = Worktrees::new();
     assert!(fixture.scan(&fixture.main).errors.is_empty());
     std::fs::remove_file(fixture.main.join("new.rs")).unwrap();
@@ -319,6 +321,8 @@ fn retirement_ownership_and_receipts_follow_symlink_aliases_cas_e4aa() {
 
 #[test]
 fn daemon_retries_a_deferred_retirement_without_new_events_cas_e4aa() {
+    // The held writer exhausts a shortened budget (production: 10 s).
+    super::indexing::set_writer_lock_budget_for_tests(std::time::Duration::from_millis(100));
     use super::{CodeWatcher, WatcherConfig};
     let fixture = Worktrees::new();
     assert!(fixture.scan(&fixture.main).errors.is_empty());

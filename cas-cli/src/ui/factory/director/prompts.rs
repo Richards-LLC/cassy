@@ -432,7 +432,20 @@ pub fn revalidate_event_for_delivery_with_context(
                 .agents
                 .iter()
                 .find(|agent| agent.name == *worker)
-                .and_then(|agent| agent.active_lease.clone());
+                .and_then(|agent| agent.active_lease.clone())
+                .or_else(|| {
+                    unfiltered_data.ready_tasks.iter()
+                        .chain(unfiltered_data.in_progress_tasks.iter())
+                        .find(|task| task.status == TaskStatus::Blocked
+                            && task_assigned_to_worker(unfiltered_data, task, worker))
+                        .map(|task| cas_factory::ActiveLeaseSummary {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                            task_status: task.status,
+                            close_rejected_reason: None,
+                            pending_qa: None,
+                        })
+                });
 
             let supervisor_already_contacted = idle_since
                 .and_then(|idle_since| {
@@ -578,6 +591,8 @@ pub struct Prompt {
     /// Immutable delivery identity for CI-completed signals. Final release
     /// must not substitute a later tip from the reused worker lane.
     pub merge_alert: Option<MergeAlertEvidence>,
+    /// Green CI intent assigned by the readiness producer, independent of prose.
+    pub merge_ready: bool,
     /// Target agent name (worker name or "supervisor")
     pub target: String,
     /// Typed routing for a routine worker stall nudge; always uses the durable queue.
@@ -626,6 +641,13 @@ pub struct Prompt {
     /// which keep their historical one-shot delivery.
     pub durable_retry: bool,
 }
+
+impl Prompt {
+    pub(crate) fn is_merge_ready(&self) -> bool {
+        self.merge_ready && self.merge_alert.is_some()
+    }
+}
+
 
 /// Last-mile predicate for a prompt that has already survived event-level
 /// revalidation. The caller supplies a snapshot loaded immediately before
@@ -1131,6 +1153,9 @@ pub(crate) fn refresh_ci_merge_signal(
             return false;
         }
         if task.status != TaskStatus::AwaitingMerge {
+            if !super::events::delivery_marked_ready(task, &original.factory_tip) {
+                return false;
+            }
             // A pre-park signal must still name the current pushed lane, never
             // an earlier green tip after the worker has committed again.
             let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo_root, branch);
@@ -1140,6 +1165,9 @@ pub(crate) fn refresh_ci_merge_signal(
                 || crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
                     repo_root, task, &original.factory_branch, &original.factory_tip,
                 ).is_err()
+                || !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(
+                    repo_root, task, &original.factory_branch, &original.factory_tip,
+                )
             { return false; }
         }
     }
@@ -1210,7 +1238,7 @@ fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> Strin
 /// See `docs/requests/BUG-stale-merge-required-alerts-refire-after-merge.md`:
 /// the task-status snapshot backing this alert can be accurate (the task
 /// really is still `AwaitingMerge` in the DB) while stale in the sense that
-/// matters — the branch was already merged and nobody has re-closed the
+/// matters — the branch was already merged but verification has not closed the
 /// task yet. The check uses the close gate's success-bearing
 /// `known_unmerged_factory_commits` helper against immutable snapshots of
 /// both the local epic ref and `origin/<epic>`, after a bounded exact-ref
@@ -1428,9 +1456,8 @@ fn pending_qa_idle_prompt_text(
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
 ///
-/// `supervisor_prefix` is used for MCP commands the supervisor must run. The
-/// re-close instruction is explicitly handed to the worker, so it uses
-/// `worker_prefix`; the supervisor's escape hatch uses `supervisor_prefix`.
+/// `supervisor_prefix` is used for MCP commands the supervisor must run.
+/// The merge verdict owns completion; no second close command is relayed.
 ///
 /// Wording constraint: must not contain "assign" — the AwaitingMerge idle
 /// path is not "idle needing work" (cas-09d0 / cas-728b).
@@ -1446,7 +1473,6 @@ fn merge_required_idle_prompt_text(
     task: &ActiveLeaseSummary,
     data: &DirectorData,
     supervisor_prefix: &str,
-    worker_prefix: &str,
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = evidence.map(|e| e.factory_branch.clone()).unwrap_or_else(|| format!("factory/{worker}"));
@@ -1480,16 +1506,6 @@ fn merge_required_idle_prompt_text(
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
-    // This exact command is handed to the worker to execute in its own session.
-    let reclose = format!(
-        "`{worker_prefix}task action=close id={} commit_receipt=<merged sha> reason=\"merged task\"`",
-        task.task_id
-    );
-    // Keep the supervisor's emergency path separate and in their harness.
-    let supervisor_close = format!(
-        "`{supervisor_prefix}task action=close id={} supervisor_override=true commit_receipt=<merged sha> reason=\"worker unavailable\"`",
-        task.task_id
-    );
     let rejection = task
         .close_rejected_reason
         .as_deref()
@@ -1513,8 +1529,7 @@ fn merge_required_idle_prompt_text(
              2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
              Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
              then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
-             3. When the merge queue lands it, tell {worker} to run this in its own session: {reclose}\n\
-             Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
+             3. The merge verdict closes or reopens the task; wait for its result.\n\
              4. Then clear context / hand the worker their next task if more work is ready\n\
              Live task state: {show}\n\
              This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1535,8 +1550,7 @@ fn merge_required_idle_prompt_text(
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
          3. Push {target} if remote tracking applies\n\
-         4. Tell {worker} to run this in its own session: {reclose}\n\
-         Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
+         4. The merge verdict closes or reopens the task; wait for its result.\n\
          5. Then clear context / hand the worker their next task if more work is ready\n\
          Live task state: {show}\n\
          This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1657,7 +1671,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
@@ -1742,7 +1756,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1754,32 +1768,9 @@ pub fn generate_prompt_at(
             })
         }
 
-        DirectorEvent::TaskBlocked {
-            task_id,
-            task_title,
-            worker,
-        } => {
-            if !config.on_task_blocked {
-                return None;
-            }
-
-            let text = format!(
-                "Worker {worker} is blocked on task {task_id} ({task_title}).\n\
-                 They may need assistance or the blocker needs to be resolved."
-            );
-
-            Some(Prompt {
-                merge_alert: None,
-                target: supervisor_name.to_string(),
-                text: with_response_instructions(&text, worker, supervisor_cli),
-                retract_worker: None,
-                retract_task: None,
-                retract_epic: None,
-                drop_if_worker_assigned: None,
-                stall_nudge_task: None,
-                durable_retry: false,
-            })
-        }
+        // Blocked tasks belong to the durable task_blocked episode. The
+        // lifecycle outbox owns its first alert and bounded deadline escalation.
+        DirectorEvent::TaskBlocked { .. } => None,
 
         DirectorEvent::WorkerIdle {
             worker,
@@ -1857,35 +1848,15 @@ pub fn generate_prompt_at(
             }
 
             if let Some(task) = active_task {
-                // cas-728b/cas-627f: Blocked and AwaitingMerge are
-                // supervisor-parked states. This arm is NOT the
-                // worker-assistance "please assign this idle worker
-                // something" ping (that's the `ready_count` branch below,
-                // reached only when `active_task` is `None`). An earlier
-                // version of this fix unconditionally suppressed this arm
-                // for Blocked/AwaitingMerge — that re-hid the flagship
-                // close-rejected notification cas-627f spent real effort
-                // making reachable again (park releases the lease, so
-                // `active_lease` — and this `Some(task)` — was `None` for
-                // every parked task until that fix). Tick-by-tick repetition
-                // is already handled upstream: the event detector's
-                // `idle_already_emitted` gate (events.rs) fires `WorkerIdle`
-                // once per sustained idle streak, not every 2s tick, and
-                // `IDLE_RATE_LIMIT` floors any streak-reset repeat to once
-                // per 5 minutes. No additional suppression needed here.
-                //
-                // cas-c145: when the park is specifically MERGE REQUIRED /
-                // AwaitingMerge, upgrade from vague "resolve the rejection"
-                // to an actionable merge-queue prompt (task, factory branch,
-                // epic target, next steps). Other close-rejection reasons
-                // keep the informational wording.
+                if task.task_status == TaskStatus::Blocked {
+                    return None;
+                }
                 let text = if is_merge_required_idle(task) {
                     merge_required_idle_prompt_text(
                         worker,
                         task,
                         data,
                         supervisor_prefix,
-                        worker_prefix,
                         merge_alert_evidence,
                     )
                 } else {
@@ -1918,7 +1889,7 @@ pub fn generate_prompt_at(
                 };
 
                 return Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
@@ -1989,7 +1960,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
@@ -2036,7 +2007,7 @@ pub fn generate_prompt_at(
                 );
 
                 return Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2062,7 +2033,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
@@ -2109,7 +2080,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2178,7 +2149,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
                 retract_worker: Some(agent_name.clone()),
@@ -2317,7 +2288,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text,
                 retract_worker: None,
@@ -3727,7 +3698,7 @@ mod tests {
         };
         let mut data = make_data(0);
         data.in_progress_tasks = vec![summary("main")];
-        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             text.contains("protected: pull requests through the merge queue only"),
             "{text}"
@@ -3743,7 +3714,7 @@ mod tests {
         );
 
         data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
-        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             epic.contains("git merge --no-ff factory/wise-badger-5"),
             "{epic}"
@@ -3784,14 +3755,14 @@ mod tests {
         for target in ["epic/burn-down-v43-cas-3-58", "main"] {
             data.in_progress_tasks = vec![summary(target)];
             let text =
-                merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+                merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
             assert!(text.contains(&format!("Merge target: {target}")), "{text}");
             assert!(!text.contains("free-form"), "{text}");
             assert!(!text.to_lowercase().contains("chat"), "{text}");
         }
         let bundled = {
             data.in_progress_tasks = vec![summary("epic/burn-down-v43-cas-3-58")];
-            merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None)
+            merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None)
         };
         assert!(
             bundled.contains("git merge --no-ff factory/wise-badger-5")
@@ -4062,8 +4033,8 @@ mod tests {
         );
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("cas__task action=close id=cas-8eff"),
-            "homogeneous Grok: worker re-close must use cas__ prefix: {}",
+            !prompt.text.contains("task action=close"),
+            "merge verdict must own completion without another close command: {}",
             prompt.text
         );
         assert!(
@@ -4091,349 +4062,88 @@ mod tests {
         );
     }
 
-    /// cas-fa1c: worker re-close instructions target the worker's own session,
-    /// while the separately labelled supervisor escape hatch uses the
-    /// supervisor's harness.
     #[test]
-    fn test_c145_mixed_harness_awaiting_merge_separates_worker_and_supervisor_prefixes() {
-        let event = DirectorEvent::WorkerIdle {
-            worker: "codex-worker".to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: "cas-mix1".to_string(),
-                task_title: "Mixed factory merge park".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut data = make_data(0);
-        data.agents[0].name = "codex-worker".to_string();
-        data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "codex-worker".to_string());
-        data.in_progress_tasks = vec![TaskSummary {
-            id: "cas-mix1".to_string(),
-            title: "Mixed factory merge park".to_string(),
-            status: TaskStatus::AwaitingMerge,
-            priority: Priority::MEDIUM,
-            assignee: Some("codex-worker".to_string()),
-            task_type: TaskType::Task,
-            epic: Some("cas-epic1".to_string()),
-            branch: None,
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        data.epic_tasks = vec![TaskSummary {
-            id: "cas-epic1".to_string(),
-            title: "Epic".to_string(),
-            status: TaskStatus::InProgress,
-            priority: Priority::HIGH,
-            assignee: None,
-            task_type: TaskType::Epic,
-            epic: None,
-            branch: Some("epic/mixed-cas-epic1".to_string()),
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        let config = default_config();
-
-        // Claude supervisor, Codex worker
-        let prompt = generate_prompt(
-            &event,
-            &data,
-            &data,
-            "supervisor",
-            &config,
-            claude(),
-            codex(),
-            &HashSet::new(),
-            None,
-        )
-        .expect("mixed-harness AwaitingMerge must produce a supervisor prompt");
-
-        // Split body from with_response_instructions footer so a Claude
-        // footer `mcp__cas__coordination action=message` cannot false-pass
-        // supervisor body-command assertions (cas-c145 review follow-up).
-        let body = prompt.text.split("\n---\n").next().unwrap_or(&prompt.text);
-
-        // Supervisor-facing body tools: exact Claude alias (not footer-only).
-        assert!(
-            body.contains("mcp__cas__factory action=epic_status id=cas-epic1"),
-            "supervisor body epic_status must use exact Claude command: {}",
-            body
-        );
-        assert!(
-            body.contains("mcp__cas__task action=list status=awaiting_merge"),
-            "supervisor body list must use exact Claude command: {}",
-            body
-        );
-        assert!(
-            body.contains("mcp__cas__task action=show id=cas-mix1"),
-            "supervisor body show must use exact Claude command: {}",
-            body
-        );
-        // Worker prefix must not appear on supervisor body actions.
-        assert!(
-            !body.contains("mcp__cs__factory action=epic_status"),
-            "supervisor epic_status must not use worker (Codex) prefix: {}",
-            body
-        );
-        assert!(
-            !body.contains("mcp__cs__task action=list status=awaiting_merge"),
-            "supervisor list must not use worker (Codex) prefix: {}",
-            body
-        );
-        assert!(
-            !body.contains("mcp__cs__task action=show id=cas-mix1"),
-            "supervisor show must not use worker (Codex) prefix: {}",
-            body
-        );
-        // The re-close command is relayed to the Codex worker and must be
-        // explicit that it runs in the worker's own session.
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            body.contains("Tell codex-worker to run this in its own session: `mcp__cs__task action=close id=cas-mix1"),
-            "worker re-close command must use the worker's Codex prefix: {}",
-            body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            body.lines().any(|line| {
-                line.contains("Supervisor escape hatch")
-                    && line.contains("`mcp__cas__task action=close id=cas-mix1")
-                    && line.contains("supervisor_override=true")
-            }),
-            "supervisor escape hatch must be a separate Claude-prefixed line: {}",
-            body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            !body.contains("Tell codex-worker to run this in its own session: `mcp__cas__task"),
-            "worker instruction must not use the supervisor's Claude prefix: {}",
-            body
-        );
-
-        // Claude supervisor + Grok worker: re-close uses cas__
-        let grok_worker_event = DirectorEvent::WorkerIdle {
-            worker: "grok-worker".to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: "cas-mix2".to_string(),
-                task_title: "Grok worker merge park".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut grok_data = make_data(0);
-        grok_data.agents[0].name = "grok-worker".to_string();
-        grok_data
-            .agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "grok-worker".to_string());
-        let grok_prompt = generate_prompt(
-            &grok_worker_event,
-            &grok_data,
-            &grok_data,
-            "supervisor",
-            &config,
-            claude(),
-            SupervisorCli::Grok,
-            &HashSet::new(),
-            None,
-        )
-        .expect("Claude+Grok AwaitingMerge must produce a prompt");
-        let grok_body = grok_prompt
-            .text
-            .split("\n---\n")
-            .next()
-            .unwrap_or(&grok_prompt.text);
-
-        // Supervisor body commands: exact Claude prefix (not footer `mcp__cas__`).
-        assert!(
-            grok_body.contains("mcp__cas__factory action=epic_status id=<focused-epic>"),
-            "Claude+Grok supervisor body epic_status must be exact Claude command: {}",
-            grok_body
-        );
-        assert!(
-            grok_body.contains("mcp__cas__task action=list status=awaiting_merge"),
-            "Claude+Grok supervisor body list must be exact Claude command: {}",
-            grok_body
-        );
-        assert!(
-            grok_body.contains("mcp__cas__task action=show id=cas-mix2"),
-            "Claude+Grok supervisor body show must be exact Claude command: {}",
-            grok_body
-        );
-        // Negative: bare Grok `cas__` tool calls on supervisor actions.
-        // Match the leading backtick so Claude's `mcp__cas__` (which
-        // contains the substring `cas__`) does not false-fail the check.
-        assert!(
-            !grok_body.contains("`cas__factory action=epic_status"),
-            "supervisor epic_status must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        assert!(
-            !grok_body.contains("`cas__task action=list status=awaiting_merge"),
-            "supervisor list must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        assert!(
-            !grok_body.contains("`cas__task action=show id=cas-mix2"),
-            "supervisor show must not use bare worker (Grok) prefix: {}",
-            grok_body
-        );
-        // The worker instruction targets Grok, while the escape hatch stays
-        // with the Claude supervisor.
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            grok_body.contains("Tell grok-worker to run this in its own session: `cas__task action=close id=cas-mix2"),
-            "Grok worker re-close command must use its own prefix: {}",
-            grok_body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            grok_body.lines().any(|line| {
-                line.contains("Supervisor escape hatch")
-                    && line.contains("`mcp__cas__task action=close id=cas-mix2")
-                    && line.contains("supervisor_override=true")
-            }),
-            "Claude supervisor escape hatch must be a separate Claude-prefixed line: {}",
-            grok_body
-        );
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            !grok_body.contains("Tell grok-worker to run this in its own session: `mcp__cas__task"),
-            "Grok worker instruction must not use the supervisor's Claude prefix: {}",
-            grok_body
-        );
-    }
-
-    fn assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-        supervisor_cli: SupervisorCli,
-        worker_cli: SupervisorCli,
-    ) {
-        let worker = "worker";
-        let task_id = "cas-fa1c-prefix";
-        let event = DirectorEvent::WorkerIdle {
-            worker: worker.to_string(),
-            active_task: Some(ActiveLeaseSummary {
-                task_id: task_id.to_string(),
-                task_title: "Harness prefix relay".to_string(),
-                task_status: TaskStatus::AwaitingMerge,
-                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
-                pending_qa: None,
-            }),
-        };
-        let mut data = make_data(0);
-        data.agents[0].name = worker.to_string();
-        data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), worker.to_string());
-        data.in_progress_tasks = vec![TaskSummary {
-            id: task_id.to_string(),
-            title: "Harness prefix relay".to_string(),
-            status: TaskStatus::AwaitingMerge,
-            priority: Priority::MEDIUM,
-            assignee: Some(worker.to_string()),
-            task_type: TaskType::Task,
-            epic: Some("cas-fa1c-epic".to_string()),
-            branch: None,
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        data.epic_tasks = vec![TaskSummary {
-            id: "cas-fa1c-epic".to_string(),
-            title: "Harness prefix epic".to_string(),
-            status: TaskStatus::InProgress,
-            priority: Priority::HIGH,
-            assignee: None,
-            task_type: TaskType::Epic,
-            epic: None,
-            branch: Some("epic/harness-prefix".to_string()),
-            updated_at: None,
-            epic_verification_owner: None,
-        }];
-        let prompt = generate_prompt(
-            &event,
-            &data,
-            &data,
-            "supervisor",
-            &default_config(),
-            supervisor_cli,
-            worker_cli,
-            &HashSet::new(),
-            None,
-        )
-        .expect("AwaitingMerge idle must produce a supervisor prompt");
-        let body = prompt.text.split("\n---\n").next().unwrap_or(&prompt.text);
-        let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
-        let supervisor_prefix = supervisor_cli.backend().capabilities().tool_prefix;
-        // pin: rendered supervisor/worker prompt text is the contract under test.
-        let expected_worker = format!(
-            "Tell {worker} to run this in its own session: `{worker_prefix}task action=close id={task_id}"
-        );
-        assert!(
-            body.contains(&expected_worker),
-            "merge relay worker command must use {worker_prefix} and name its own session: {body}"
-        );
-        // pin: rendered supervisor/worker prompt text is the contract under test.
-        let expected_supervisor_line = format!(
-            "Supervisor escape hatch if {worker} is unresponsive: `{supervisor_prefix}task action=close id={task_id}"
-        );
-        assert!(
-            body.lines()
-                .any(|line| line.contains(&expected_supervisor_line)),
-            "supervisor escape hatch must be on its own line with {supervisor_prefix}: {body}"
-        );
-        let worker_on_escape = format!(
-            "Supervisor escape hatch if {worker} is unresponsive: `{worker_prefix}task action=close id={task_id}"
-        );
-        if worker_prefix != supervisor_prefix {
-            assert!(
-                !body.contains(&worker_on_escape),
-                "supervisor escape hatch must not use the worker prefix: {body}"
-            );
-        }
-    }
-
-    #[test]
-    fn cas_fa1c_claude_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Claude,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_codex_supervisor_claude_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Codex,
-            SupervisorCli::Claude,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_grok_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::Grok,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_opencode_supervisor_codex_worker_gets_mixed_prefixes() {
-        assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(
-            SupervisorCli::OpenCode,
-            SupervisorCli::Codex,
-        );
-    }
-
-    #[test]
-    fn cas_fa1c_same_harness_reclose_and_escape_hatch_use_one_prefix() {
-        for cli in [
+    fn merge_verdict_owns_completion_across_harnesses_and_targets() {
+        for supervisor_cli in [
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
             SupervisorCli::OpenCode,
         ] {
-            assert_merge_required_relay_close_uses_worker_and_supervisor_prefixes(cli, cli);
+            for worker_cli in [
+                SupervisorCli::Claude,
+                SupervisorCli::Codex,
+                SupervisorCli::Grok,
+                SupervisorCli::OpenCode,
+            ] {
+                for target in ["epic/harness-prefix", "main"] {
+                    let worker = "worker";
+                    let task_id = "cas-fa1c-prefix";
+                    let event = DirectorEvent::WorkerIdle {
+                        worker: worker.to_string(),
+                        active_task: Some(ActiveLeaseSummary {
+                            task_id: task_id.to_string(),
+                            task_title: "Harness prefix relay".to_string(),
+                            task_status: TaskStatus::AwaitingMerge,
+                            close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                            pending_qa: None,
+                        }),
+                    };
+                    let mut data = make_data(0);
+                    data.agents[0].name = worker.to_string();
+                    data.agent_id_to_name
+                        .insert("sess-id-abc123".to_string(), worker.to_string());
+                    data.in_progress_tasks = vec![TaskSummary {
+                        id: task_id.to_string(),
+                        title: "Harness prefix relay".to_string(),
+                        status: TaskStatus::AwaitingMerge,
+                        priority: Priority::MEDIUM,
+                        assignee: Some(worker.to_string()),
+                        task_type: TaskType::Task,
+                        epic: Some("cas-fa1c-epic".to_string()),
+                        branch: None,
+                        updated_at: None,
+                        epic_verification_owner: None,
+                    }];
+                    data.epic_tasks = vec![TaskSummary {
+                        id: "cas-fa1c-epic".to_string(),
+                        title: "Harness prefix epic".to_string(),
+                        status: TaskStatus::InProgress,
+                        priority: Priority::HIGH,
+                        assignee: None,
+                        task_type: TaskType::Epic,
+                        epic: None,
+                        branch: Some(target.to_string()),
+                        updated_at: None,
+                        epic_verification_owner: None,
+                    }];
+                    let prompt = generate_prompt(
+                        &event,
+                        &data,
+                        &data,
+                        "supervisor",
+                        &default_config(),
+                        supervisor_cli,
+                        worker_cli,
+                        &HashSet::new(),
+                        None,
+                    )
+                    .expect("parked delivery needs a merge relay");
+                    let body = prompt.text.split("\n---\n").next().unwrap();
+                    let prefix = supervisor_cli.backend().capabilities().tool_prefix;
+                    assert!(
+                        body.contains(&format!("{prefix}task action=show id={task_id}")),
+                        "{body}"
+                    );
+                    // pin: the merge verdict, not a second close command, owns completion.
+                    assert!(
+                        body.contains("The merge verdict closes or reopens the task"),
+                        "{body}"
+                    );
+                    assert!(!body.contains("task action=close"), "{body}");
+                    assert!(!body.contains("Supervisor escape hatch"), "{body}");
+                }
+            }
         }
     }
 
@@ -5415,13 +5125,10 @@ mod tests {
         );
     }
 
-    /// cas-dbbb P2: WorkerIdle must NOT be suppressed when the worker's only task
-    /// is Blocked. A Blocked task means the worker is genuinely stalled; the
-    /// supervisor still needs an idle nudge so they can resolve the blocker or
-    /// assign new work. Including Blocked tasks in the busy-guard would suppress
-    /// the nudge indefinitely.
+    /// Keep the event available for lifecycle reconciliation, without emitting
+    /// a second direct prompt alongside the durable blocked episode.
     #[test]
-    fn test_dbbb_idle_not_suppressed_when_worker_only_has_blocked_task() {
+    fn test_blocked_idle_uses_lifecycle_instead_of_a_second_prompt() {
         let blocked_task = TaskSummary {
             id: "task-blocked".to_string(),
             title: "Blocked Task".to_string(),
@@ -5469,9 +5176,16 @@ mod tests {
             worker: "swift-fox".to_string(),
             active_task: None,
         };
+        let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
+            .expect("blocked assignment remains an actionable WorkerIdle signal");
+        let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &rechecked else {
+            panic!("delivery must name the blocked task after its lease is released");
+        };
+        assert_eq!(active.task_id, "task-blocked");
+        assert_eq!(active.task_status, TaskStatus::Blocked);
         let config = default_config();
         let prompt = generate_prompt(
-            &event,
+            &rechecked,
             &data,
             &data,
             "supervisor",
@@ -5481,11 +5195,7 @@ mod tests {
             &HashSet::new(),
             None,
         );
-        assert!(
-            prompt.is_some(),
-            "cas-dbbb P2: WorkerIdle must NOT be suppressed when worker has only a Blocked task \
-             (blocked ≠ busy). Got: None"
-        );
+        assert!(prompt.is_none());
     }
 
     /// cas-dbbb P2: WorkerIdle must be suppressed when the worker has a session-ID
@@ -7191,7 +6901,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7215,7 +6925,7 @@ mod tests {
         }
 
         /// GH #74's third occurrence, at the same last mile: the task left
-        /// `AwaitingMerge` (re-closed after the supervisor merged) while the
+        /// `AwaitingMerge` (closed by the merge verdict) while the
         /// alert was queued behind other prompts in the injection loop.
         #[test]
         fn merge_alert_is_dropped_when_the_task_reopens_for_changes() {
@@ -7223,7 +6933,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7700,7 +7410,7 @@ mod tests {
 fn idle_relays_and_merge_relays_use_the_status_verdict() {
     use crate::mcp::tools::service::worker_liveness::{Liveness, Observation};
     let prompt = Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "Worker wolf is idle while task t is awaiting_merge".into(),
         retract_worker: Some("wolf".into()),

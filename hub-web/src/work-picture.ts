@@ -23,7 +23,7 @@ export interface WorkPictureDeps {
   repaintThread(machineId: string, session: string): void;
   /** Repaint the open worker timeline, if any. */
   repaintTimeline(): void;
-  storage?: Pick<Storage, "getItem" | "setItem">;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   setInterval?: (run: () => void, ms: number) => number;
   clearInterval?: (handle: number) => void;
 }
@@ -40,7 +40,9 @@ function streamKey(machineId: string, session: string, agent?: string): string {
 
 export class WorkPicture {
   private readonly streams = new Map<string, WorkEventStream>();
-  private readonly open = new Set<string>();
+  /** A live notice newer than the page currently being read. */
+  private readonly invalidated = new Set<WorkEventStream>();
+  private readonly open = new Map<string, boolean>();
   private show: boolean;
   private thread: Watch | undefined;
   private timeline: Watch | undefined;
@@ -128,14 +130,30 @@ export class WorkPicture {
   rows(machineId: string, session: string, agent?: string): WorkRowsContext {
     const stream = this.stream(machineId, session, agent);
     const prefix = streamKey(machineId, session, agent);
+    const savedKey = (key: string): string | undefined => key.startsWith("changes:") || key.startsWith("change:")
+      ? `commander.workDisclosure:${JSON.stringify([prefix, key])}` : undefined;
     return {
       detail: (eventId) => stream.detail(eventId),
       requestDetail: (eventId) => {
-        if (stream.detail(eventId)?.state === "loading") return;
+        const state = stream.detail(eventId)?.state;
+        if (state === "loading" || state === "offline") return;
         stream.requested(this.deps.transport(machineId)?.requestWorkEventDetail(session, eventId), { detail: eventId });
       },
-      isOpen: (key) => this.open.has(`${prefix}\u0000${key}`),
-      setOpen: (key, open) => { if (open) this.open.add(`${prefix}\u0000${key}`); else this.open.delete(`${prefix}\u0000${key}`); },
+      isOpen: (key) => {
+        const current = this.open.get(`${prefix}\u0000${key}`);
+        if (current !== undefined) return current;
+        const saved = savedKey(key);
+        try { if (saved && this.deps.storage?.getItem(saved) === "1") return true; } catch { /* storage unavailable */ }
+        return false;
+      },
+      setOpen: (key, open) => {
+        this.open.set(`${prefix}\u0000${key}`, open);
+        const saved = savedKey(key);
+        try { if (saved) {
+          if (open) this.deps.storage?.setItem(saved, "1");
+          else this.deps.storage?.removeItem(saved);
+        } } catch { /* this visit only */ }
+      },
     };
   }
 
@@ -145,7 +163,8 @@ export class WorkPicture {
     for (const stream of this.sessionStreams(machineId, session)) {
       if (!stream.owns(page.request_id)) continue;
       const gap = stream.accept(page);
-      if (gap !== undefined) stream.requested(this.deps.transport(machineId)?.requestWorkEvents(session, { before: gap, ...(stream.agent ? { agent: stream.agent } : {}) }), "gap");
+      if (gap !== undefined && this.visibleWatch(machineId, session, stream)) stream.requested(this.deps.transport(machineId)?.requestWorkEvents(session, { before: gap, ...(stream.agent ? { agent: stream.agent } : {}) }), "gap");
+      this.refreshInvalidated(machineId, session, stream);
       this.repaint(machineId, session, stream);
       return;
     }
@@ -159,24 +178,38 @@ export class WorkPicture {
 
   failed(machineId: string, session: string, requestId: string, reason: string): void {
     for (const stream of this.sessionStreams(machineId, session)) {
-      if (stream.failed(requestId, reason)) { this.repaint(machineId, session, stream); return; }
+      if (stream.failed(requestId, reason)) {
+        this.refreshInvalidated(machineId, session, stream);
+        this.repaint(machineId, session, stream);
+        return;
+      }
     }
   }
 
   /** The daemon's stream grew: re-read the newest page of what is on screen. */
   appended(machineId: string, session: string): void {
     for (const watch of this.watching()) {
-      if (watch.machineId === machineId && watch.session === session) this.readNewest(watch);
+      if (watch.machineId === machineId && watch.session === session) {
+        this.invalidated.add(this.stream(machineId, session, watch.agent));
+        this.readNewest(watch);
+      }
     }
   }
 
   /** The session's socket closed: answers in flight will never come. */
   disconnected(machineId: string, session: string): void {
-    for (const stream of this.sessionStreams(machineId, session)) stream.abandon();
+    for (const stream of this.sessionStreams(machineId, session)) {
+      stream.abandon();
+      this.invalidated.delete(stream);
+    }
   }
 
   /** A reattach: re-read the newest page of what is on screen. */
   reattached(machineId: string, session: string): void {
+    for (const stream of this.sessionStreams(machineId, session)) {
+      stream.reconnected();
+      this.repaint(machineId, session, stream);
+    }
     this.appended(machineId, session);
     this.syncPoll();
   }
@@ -199,7 +232,21 @@ export class WorkPicture {
     const stream = this.stream(watch.machineId, watch.session, watch.agent);
     if (stream.pending("newest")) return;
     if (watch.agent && !this.timelineSupported(watch.machineId, watch.session)) return;
-    stream.requested(this.deps.transport(watch.machineId)?.requestWorkEvents(watch.session, watch.agent ? { agent: watch.agent } : {}), "newest");
+    const request = this.deps.transport(watch.machineId)?.requestWorkEvents(watch.session, watch.agent ? { agent: watch.agent } : {});
+    stream.requested(request, "newest");
+    if (request !== undefined) this.invalidated.delete(stream);
+  }
+
+  /** Coalesce notices during a newest/gap read into one follow-up, only while visible. */
+  private refreshInvalidated(machineId: string, session: string, stream: WorkEventStream): void {
+    if (!this.invalidated.has(stream) || stream.pending("newest")) return;
+    const watch = this.visibleWatch(machineId, session, stream);
+    if (watch) this.readNewest(watch);
+    else this.invalidated.delete(stream);
+  }
+
+  private visibleWatch(machineId: string, session: string, stream: WorkEventStream): Watch | undefined {
+    return this.watching().find(watch => watch.machineId === machineId && watch.session === session && watch.agent === stream.agent);
   }
 
   private repaint(machineId: string, session: string, stream: WorkEventStream): void {

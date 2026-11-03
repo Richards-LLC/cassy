@@ -600,28 +600,18 @@ fn test_hook_status_command() {
         .args(["hook", "status"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("SessionStart").or(predicate::str::contains("configured")),
-        );
-}
+        .stdout(predicate::str::contains("PostModelSwitch: configured"));
 
-#[test]
-fn test_hook_configure_creates_settings() {
-    let temp = TempDir::new().unwrap();
-    init_cas(&temp);
-
-    // Configure hooks
-    cas_cmd(&temp)
-        .args(["hook", "configure"])
+    let output = cas_cmd(&temp)
+        .args(["hook", "status", "--json"])
         .assert()
-        .success();
-
-    // Verify settings file exists
-    let settings_path = temp.path().join(".claude/settings.json");
-    assert!(
-        settings_path.exists(),
-        "hook configure should create .claude/settings.json"
-    );
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(status["post_model_switch"], true);
+    assert_eq!(status.as_object().unwrap().len(), 12);
 }
 
 // =============================================================================

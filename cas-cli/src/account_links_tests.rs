@@ -116,10 +116,17 @@ fn recreated_retired_folders_are_named_and_never_linked() {
             )]
         );
 
-        // The same login as a named account: point at it.
+        // Claude's non-secret email can identify a duplicate. Codex keeps
+        // explicit aliases distinct rather than opening auth.json to infer it.
         let typo = h.join(format!("{}a@x.cmo", provider.prefix()));
         login(provider, &typo, "a@x.com");
         let ensured = ensure(provider, h, &typo).unwrap();
+        if provider == Provider::Codex {
+            assert!(ensured.status.retired.is_none());
+            assert_eq!(ensured.linked.len(), provider.shared().len());
+            assert_eq!(survey(h).unwrap().iter().filter(|(_, _, s)| s.retired.is_some()).count(), 1);
+            continue;
+        }
         assert_eq!(
             notices(provider, h, &typo, &ensured),
             [format!(

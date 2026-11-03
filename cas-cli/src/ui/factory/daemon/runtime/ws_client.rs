@@ -703,7 +703,9 @@ impl FactoryDaemon {
                         .await;
                 }
             }
-            ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
+            ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. }
+            | ClientMessage::SupervisorCommand { .. } | ClientMessage::SupervisorCommandStatus { .. }
+            | ClientMessage::SupervisorCommandStep { .. } => {
                 unreachable!("Commander controls return through the shared dispatcher")
             }
             ClientMessage::GetState => {

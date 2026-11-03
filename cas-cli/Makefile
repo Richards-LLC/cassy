@@ -212,6 +212,25 @@ test-scoped-selftest:
 # migration-snapshot suite went stale for five days (cas-66ee). Keep this list
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
+	cd .. && bash scripts/test-cas-image-generate.sh
+	cd .. && bash scripts/test-check-changelog-lint.sh
+	cd .. && python3 scripts/test-codex-cargo-admission.py -v
+	cd .. && python3 scripts/test-factory-client-terminal.py --if-available --out target/ci-factory-client-terminal
+	cd .. && python3 scripts/test-journey-bundles.py
+	cd .. && node --test scripts/test-opencode-slack-policy.mjs
+	cd .. && python3 scripts/test-release-budget-breach.py
+	cd .. && python3 scripts/test-release-precheck.py
+	cd .. && python3 scripts/test-release-report-post.py
+	cd .. && python3 scripts/test-release-report.py
+	cd .. && node scripts/test-verified-web-runners.mjs
+	cd .. && python3 scripts/test_factory_model_history.py
+	cd .. && node --test scripts/visual-qa.test.mjs
+	cd .. && node --test scripts/visual-qa-enter-transition.test.mjs
+	cd .. && node --test scripts/visual-qa-entrypoint.test.mjs
+	cd .. && node --test scripts/visual-qa-readiness.test.mjs
+	cd .. && node --test scripts/visual-qa-secrets.test.mjs
+	cd .. && python3 scripts/test-qa-candidate-build.py
+	cd .. && python3 scripts/test-ci-queue-flakes.py
 	cd .. && python3 scripts/test-sow-delivery-report.py
 	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py
@@ -240,11 +259,12 @@ test-ci-tiers:
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
 	cd .. && python3 scripts/test-release-learning.py
-	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && python3 scripts/test-release-binary-artifact.py
 	cd .. && ./scripts/test-check-operator-launch.sh
 	cd .. && ./scripts/test-release.sh
 	cd .. && ./scripts/test-release-publish.sh
+	cd .. && ./scripts/test-verify-hub-dist.sh
+	cd .. && python3 scripts/test-deploy-hub-release.py
 	cd .. && ./scripts/test-install-on-publish.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && python3 scripts/test-release-completion.py

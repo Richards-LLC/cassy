@@ -88,6 +88,18 @@ impl Fixture {
         )
     }
     fn decision(&mut self, body: &str) {
+        // Follow the public refusal command, including its delivery/finding scope.
+        let head = git(self.repo.path(), &["rev-parse", "HEAD"]);
+        let scoped = self.run(&head).err().and_then(|error| {
+            let (token, reason) = body.split_once(':')?;
+            if reason.trim().is_empty() {
+                return None;
+            }
+            let marker = format!("notes=\"{token}:");
+            let command = error.split_once(&marker)?.1.split_once('"')?.0;
+            Some(format!("{token}:{}", command.replace("<reason>", reason.trim())))
+        });
+        let body = scoped.as_deref().unwrap_or(body);
         append_close_decision_note(&self.store, &mut self.task, &format!("✅ DECISION {body}"));
     }
 }
@@ -107,6 +119,8 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
     write(f.repo.path(), "src/payments/start.ts", "new directory");
     let head = commit(f.repo.path());
     let error = f.run(&head).unwrap_err();
+    // pin: non-blocking upkeep advisories stay in notes/receipts even when a separate finding refuses close.
+    assert!(!error.contains("UPKEEP ADVISORY G5"), "{error}");
     assert!(
         error.contains("CODEMAP DRIFT") && error.contains("src/payments"),
         "{error}"

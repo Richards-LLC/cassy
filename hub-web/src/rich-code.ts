@@ -1,4 +1,5 @@
 import "./rich-content.css";
+import { setCodeFramePreview } from "./code-frame";
 
 /** Progressive enhancement: on failure the original, selectable code survives. */
 export async function enhanceCode(pre: HTMLPreElement, language: string): Promise<void> {
@@ -6,11 +7,11 @@ export async function enhanceCode(pre: HTMLPreElement, language: string): Promis
     if (language === "mermaid") {
       const { diagram } = await import("./rich-diagram");
       const figure = await diagram(pre.ownerDocument, pre.textContent ?? "");
-      pre.replaceWith(figure);
+      setCodeFramePreview(pre, figure);
     } else {
       const { unifiedDiff } = await import("./rich-diff");
       const diff = unifiedDiff(pre.ownerDocument, pre.textContent ?? "");
-      if (diff) pre.replaceWith(diff);
+      if (diff) setCodeFramePreview(pre, diff);
     }
   } catch {
     pre.dataset.richState = "fallback";

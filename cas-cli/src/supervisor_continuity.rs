@@ -6,6 +6,81 @@ use cas_store::{AgentStore, NotificationPriority, QueueOrigin, SqliteAgentStore}
 use cas_types::{Agent, AgentRole};
 
 const SOURCE: &str = "supervisor-handoff";
+const RECOVERY_SOURCE: &str = "integrated-delivery-recovery";
+
+/// Project facts, rather than a predecessor's session membership, determine
+/// recovery. This is an actionable list, not the bounded historical preview.
+/// Close remains the authority: startup never adopts, resolves or closes work.
+fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
+    use crate::mcp::tools::core::task::{lifecycle::review_tier, task_owned_by_project};
+    use cas_types::{TaskStatus, VerificationStatus};
+    let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(String::new()) };
+    let tasks = crate::store::open_task_store(root)?;
+    let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+    let verifications = crate::store::open_verification_store(root)?;
+    let mut parked = tasks.list(Some(TaskStatus::AwaitingMerge))?;
+    parked.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut rows = Vec::new();
+    let mut skipped = Vec::new();
+    for task in parked {
+        if !task_owned_by_project(&task, root, Some(&project))
+            || task.deliverables.merge_conflicted
+        {
+            continue;
+        }
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
+        let Ok((repo, target)) = crate::qa_batch::task_context(root, &task) else { continue };
+        if crate::qa_batch::integration_state(&repo, anchor, &target) != Some(true)
+            || core.guard_direct_update_close_merge_state(tasks.as_ref(), &task, None).is_err()
+        {
+            continue;
+        }
+        // An adverse or unanswered decision is substantive review work, not
+        // a missing receipt. A malformed row stays closed to recovery without
+        // hiding the other deliveries or the already-claimed session handoff.
+        let metadata = (|| -> anyhow::Result<_> {
+            Ok((verifications.get_latest_for_task(&task.id)?,
+                cas_store::get_latest_verification_dispatch(root, &task.id)?))
+        })();
+        let (latest, dispatch) = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped.push(format!("- {}: verification metadata unreadable; inspect/repair this row before retrying recovery ({error}).\n", task.id));
+                continue;
+            }
+        };
+        if latest.as_ref().is_some_and(|v| matches!(v.status, VerificationStatus::Rejected | VerificationStatus::SupervisorCall | VerificationStatus::Skipped)) {
+            continue;
+        }
+        if dispatch.as_ref().is_some_and(|d| {
+            matches!(d.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                && d.deadline_at > chrono::Utc::now()
+        }) {
+            continue;
+        }
+        let review = match review_tier::tier_for_delivery(&task, &repo).map(|decision| decision.tier) {
+            Some(review_tier::VerificationTier::Mechanical) => "mechanical close gates",
+            Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe",
+            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt",
+            _ => "dedicated verifier",
+        };
+        let hold = match dispatch.as_ref().map(|dispatch| dispatch.state) {
+            _ if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override => "CI override; independent QA must be rechecked",
+            Some(cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut) => "expired verification request",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Error) => "verification error",
+            _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
+            _ => "close gates pending",
+        };
+        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+    }
+    if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
+    Ok(format!(
+        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Adopt each row and run its close action to recheck the current hold. Supply the exact verdict/receipt or dedicated review requested by close; Tier 2 still needs its own verifier and adversarial probe.\n{}",
+        rows.len(), rows.concat() + &if skipped.is_empty() { String::new() } else {
+            format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat())
+        }
+    ))
+}
 
 fn preview(value: &serde_json::Value) -> serde_json::Value {
     let Some(fields) = value.as_object() else {
@@ -51,6 +126,45 @@ fn preview(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
+// Keep native Codex's visible handoff readable. The immutable JSON receipt
+// retains every field, including long notes, branches and earlier receipts.
+fn codex_handoff_row(row: &serde_json::Value) -> String {
+    fn text(value: &str, limit: usize) -> String {
+        let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut result: String = clean.chars().filter(|c| !c.is_control()).take(limit).collect();
+        if clean.chars().count() > limit {
+            result.push_str("...");
+        }
+        result
+    }
+    let field = |key: &str| row[key].as_str().unwrap_or_default();
+    if !field("title").is_empty() {
+        let mut line = format!("- {} ({})\n  {}", text(field("title"), 60), field("id"), field("status"));
+        if !field("assignee").is_empty() {
+            line.push_str(&format!("; assigned to {}", text(field("assignee"), 40)));
+        }
+        line.push('\n');
+        if let Some(branch) = row["deliverables"]["parked_branch"].as_str() {
+            line.push_str(&format!("  Parked: {}\n", text(branch, 68)));
+        }
+        if !field("external_ref").is_empty() {
+            line.push_str(&format!("  Review: {}\n", text(field("external_ref"), 68)));
+        }
+        line
+    } else if !field("name").is_empty() {
+        format!("- {}: {}\n", text(field("name"), 45), text(field("status"), 20))
+    } else {
+        let message = ["prompt", "message", "event_type"].into_iter()
+            .find_map(|key| row[key].as_str()).unwrap_or("Queued decision; see receipt");
+        let summary = if let Some(status) = message.lines().next().unwrap_or_default().strip_prefix("status:") {
+            format!("{}: delivery {}", field("source"), status.trim())
+        } else {
+            message.lines().next().unwrap_or(message).to_string()
+        };
+        format!("- {}\n", text(&summary, 72))
+    }
+}
+
 pub(crate) fn record_end(root: &Path, id: &str, reason: Option<&str>) -> anyhow::Result<()> {
     let store = SqliteAgentStore::open(root)?;
     store.init()?;
@@ -92,13 +206,21 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         temporary.persist(&path)?;
         #[cfg(unix)]
         std::fs::File::open(&dir)?.sync_all()?;
-        let mut detail = format!(
-            "Supervisor handoff from {} ({}), end reason: {}.\nReceipt: {}\n",
-            handoff.name,
-            handoff.agent_id,
-            handoff.reason,
-            path.display()
-        );
+        let codex = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .map(|h| h.eq_ignore_ascii_case("codex"))
+            .unwrap_or_else(|_| crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Codex);
+        let mut detail = if codex {
+            format!(
+                "Supervisor handoff from {}: {}.\n{} tasks, {} worker records, {} pending records.\nReceipt: {}\n",
+                handoff.name, handoff.reason, handoff.tasks.len(),
+                handoff.workers.len(), handoff.pending.len(), path.display()
+            )
+        } else {
+            format!(
+                "Supervisor handoff from {} ({}), end reason: {}.\nReceipt: {}\n",
+                handoff.name, handoff.agent_id, handoff.reason, path.display()
+            )
+        };
         // The complete immutable receipt remains readable when a large lane
         // exceeds startup's context budget. Each projection has an explicit count.
         for (label, rows) in [
@@ -109,19 +231,27 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
             detail.push_str(&format!("{label} ({}):\n", rows.len()));
             let mut used = 0;
             let mut ordered: Vec<_> = rows.iter().collect();
-            ordered.sort_by_key(|row| row["deliverables"]["parked_branch"].is_null());
+            ordered.sort_by_key(|row| {
+                if codex && row["name"].is_string() {
+                    !matches!(row["status"].as_str(), Some("active" | "idle"))
+                } else {
+                    row["deliverables"]["parked_branch"].is_null()
+                }
+            });
             for (index, row) in ordered.iter().enumerate() {
                 let line = if let Some(inherited) = row["inherited_handoff"].as_str() {
                     format!(
                         "- Earlier receipt: {}\n",
                         dir.join(format!("{inherited}.json")).display()
                     )
+                } else if codex {
+                    codex_handoff_row(row)
                 } else {
                     format!("- {}\n", serde_json::to_string(&preview(row))?)
                 };
                 // Reserve startup space for all three groups and the exact
                 // receipt path. Long timelines and large fleets stay in JSON.
-                if used + line.len() > 650 {
+                if used + line.len() > 650 || (codex && index >= 2) {
                     detail.push_str(&format!(
                         "- {} additional row(s): see receipt.\n",
                         rows.len() - index
@@ -135,7 +265,9 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         if let Some(moved) = rerouted.get(&handoff.id).filter(|ids| !ids.is_empty()) {
             let ids: Vec<String> = moved.iter().map(|id| format!("#{id}")).collect();
             detail.push_str(&format!(
-                "Unread operator messages re-routed to you: {}. Answer them with target=operator.\n",
+                "Unread operator messages re-routed to you: {}. Answer each once in your final pane reply; \
+                 use explicit routing only for disabled or unmirrored delivery \
+                 (cas-supervisor/references/reference.md#verified-commander-messages).\n",
                 ids.join(", ")
             ));
         }
@@ -164,13 +296,30 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(id)?;
     resume(root, &agent)?;
-    let messages = crate::store::open_prompt_queue_store(root)?
+    let queue = crate::store::open_prompt_queue_store(root)?;
+    if agent.role == AgentRole::Supervisor {
+        let recovery = integrated_recovery(root).unwrap_or_else(|error| format!(
+            "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
+        ));
+        if !recovery.is_empty() {
+            queue.enqueue_idempotent(
+                RECOVERY_SOURCE, &agent.name, &recovery, agent.factory_session.as_deref(),
+                Some(RECOVERY_SOURCE), Some(NotificationPriority::High),
+                &format!("{RECOVERY_SOURCE}:{}:{}", agent.id, agent.registered_at.to_rfc3339()),
+                Some(&QueueOrigin::Daemon),
+            )?;
+        }
+    }
+    let mut messages = queue
         .surface_unseen_from_sources_for_recipient(
             &agent.name,
             agent.factory_session.as_deref(),
             &[SOURCE],
             1,
         )?;
+    messages.extend(queue.surface_unseen_from_sources_for_recipient(
+        &agent.name, agent.factory_session.as_deref(), &[RECOVERY_SOURCE], 1,
+    )?);
     Ok(messages
         .into_iter()
         .map(|row| row.prompt)

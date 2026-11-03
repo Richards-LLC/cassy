@@ -1,0 +1,5 @@
+title: Team lanes retain live workers through heartbeat expiry and recycle; a new assignment replaces parked work within five seconds, and durable metadata matches both worker panes after replacement
+found: '2026-10-29'
+tasks: [cas-eec4]
+invariants: [HUB-J26-GOAL]
+journeys: [HUB-J26]

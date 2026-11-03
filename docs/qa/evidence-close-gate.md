@@ -6,6 +6,9 @@ Status: draft for supervisor approval, 2026-09-23.
 
 ## Problem
 
+Historical source snapshot below. Current lifecycle: the merge verdict closes
+or reopens a parked task; workers do not close it again after the merge.
+
 Customers keep receiving deliveries whose bugs anyone would spot by opening
 the product. The `cas-qa-craft` skill asks the implementer to run the
 product and keep evidence, but nothing enforces it. Code facts:
@@ -32,12 +35,36 @@ user-facing change they never ran.
 | --- | --- |
 | What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<project-key>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
 | Who must produce it | The implementer, for a delivery that is **web user-facing** (see Eligibility). |
-| Where it is enforced | **Before the merge gate** in `cas_task_close_with_completion`, after repo and branch resolution (`~4745`). It runs on every close attempt until the task closes, so the first close cannot park and the re-close cannot finish without a valid bundle for the delivered head. |
+| Where it is enforced | **Before the merge gate** in `cas_task_close_with_completion`, after repo and branch resolution (`~4745`). It runs on every close attempt until the task closes, so the first close cannot park and Cassy's post-merge completion cannot finish without a valid bundle for the delivered head. |
 | Staleness | Every listed file's mtime and `created_at` must be later than the delivered head's committer time, or the execution revision's time for a verified documentation-only rebind. `head_sha` must equal the delivered head, be a descendant of it, or precede it through that rebind. The existing product/QA-input classifier must prove the rebind. When the configured journey registry changes, `qa_impact::analyze` must select the same journey IDs, statuses and invariants (IDs, statements and checks) for the delivery's attributed files at both revisions. Coverage-neutral bug metadata or unrelated journey edits may reuse proof; changed coverage refuses and names the affected journeys/invariants. Close preserves the manifest and records both full SHAs and changed paths in task notes. Product, legacy catalog or QA-tool input changes still refuse reuse; unreadable post-check diffs report a read failure. |
 | Trace proof | Parsed natively from `trace.zip`'s `test.trace`. It needs ≥1 passing `Expect "` step and no failed `Expect "` step. `trace-actions.txt` must list at least one `Expect "` line. No `npx` runs in the close path. |
 | Skip markers | Any delivery that **adds** `test.fixme`, `test.skip` or `.only` markers to a JS/TS test file is rejected, whether or not it is user-facing. A marker is allowed when its line or the line above carries `cas-allow-skip: <reason>`. This is the healer finding from cas-d7b7. |
 | Bypass | `supervisor_override=true` with a non-empty reason from a live supervisor (the existing mechanism). It is logged as a `✅ DECISION` note that names the gate. |
 | Config | `qa.evidence_gate` (bool, default `true`) in cas-619f's `[qa]` section. |
+
+Independent reviewer bundles use the separate `qa-review-bundle:` citation on
+the delivery task. Producer close resolves only `qa-bundle:` evidence; the
+reviewer's QA record retains its own ledger and bundle regardless of which
+task artifacts root holds them. Historical independent-round notes using the
+older marker remain reviewer evidence and cannot shadow a producer citation.
+
+## Portable published bundles
+
+`artifact action=publish task_id=<task> path=<...>/bundle.json` preserves the
+manifest artifact and publishes a companion archive containing the files it
+references, including comparison captures. A reserved `QA_EVIDENCE_PROOF:`
+receipt binds the original citation, manifest digest and closure artifact.
+When the cited host path is missing, close fetches the closure by artifact id
+into the receiving host's task directory. No manual fetch is required.
+
+Restoration checks the published size/digest, rejects escaping paths, links,
+special files and duplicate entries, caps expanded bytes and file count, and
+preserves original file mtimes. The existing task/head, producer, freshness,
+trace, visual and journey checks then run against the restored files.
+A pre-existing manifest-only publication needs republishing while its source
+files are available to create the closure; a manifest alone cannot recover
+unpublished evidence. The closure has the same 25 MiB expanded-byte ceiling as
+an individual artifact, and at most 2048 files.
 
 ## Loaded-proof receipt grammar (risk=concurrency)
 
@@ -125,7 +152,7 @@ terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.
 
 A supervisor `qa_waive` bound to the exact delivered SHA satisfies the bundle,
-ledger and terminal receipt requirements on worker park and re-close. The close
+ledger and terminal receipt requirements on worker park and Cassy's post-merge completion. The close
 records the waiver, delivered SHA, supervisor and reason. It does not waive
 unexplained test skip/focus markers; a waiver for another tip does not apply.
 
@@ -293,7 +320,7 @@ healer-only delivery is test-only, so eligibility alone would never see it.
 | | cas-0cd5 (this) | cas-619f |
 | --- | --- | --- |
 | Question | Did the implementer run it? | Did someone else confirm it? |
-| Moment | Every close, before the merge gate | Dispatch at park, gates at merge and re-close |
+| Moment | Every close, before the merge gate | Dispatch at park, gates at merge and Cassy's post-merge completion |
 | Evidence dir | `<task>/qa/` (or `<task>/journeys/<id>/`) | `<task>/independent-qa/round-<n>/` |
 | Eligibility | The shared `user_facing_reasons` | The shared `user_facing_reasons` |
 | Waiver | `supervisor_override` on close, logged | `qa_waive`, logged |
@@ -302,7 +329,7 @@ healer-only delivery is test-only, so eligibility alone would never see it.
   reject the same missing thing twice. A failing evidence gate prevents the
   park, so no independent reviewer is spawned for a delivery the implementer
   never ran. That saves a taste-lane worker.
-- On re-close, a bundle already validated at park still validates, because
+- On Cassy's post-merge completion, a bundle already validated at park still validates, because
   the delivered head is unchanged. The evidence gate adds no new
   requirement after the merge unless the implementer committed again.
 - A `qa-pass` work item is never eligible for either gate.

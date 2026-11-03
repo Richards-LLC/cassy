@@ -1,0 +1,4 @@
+title: Sharing controls made the pairing-code dialog overflow its clipping edge on a sideways phone
+tasks: [cas-f300]
+invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
+journeys: [HUB-J1]

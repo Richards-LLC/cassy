@@ -226,13 +226,31 @@ impl CasCore {
         // Parse all caller-selected verdict state before a missing-dispatch
         // recovery can persist a new proof boundary. An invalid status must
         // remain failure-atomic rather than leaving a fresh pending dispatch.
-        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(
-                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
-            ),
-            data: None,
-        })?;
+        if !matches!(
+            req.status.to_ascii_lowercase().as_str(),
+            "approved" | "rejected" | "supervisor_call" | "pending" | "error" | "skipped"
+        ) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Invalid verification status. Expected: approved, rejected, supervisor_call, error, or skipped.",
+            ));
+        }
+        let status = VerificationStatus::from_storage(&req.status, None);
+
+        if status == VerificationStatus::Pending {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Invalid verification status: pending is reserved for system dispatch markers.",
+            ));
+        }
+        if status == VerificationStatus::SupervisorCall
+            && authored_content.summary.trim().is_empty()
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "A supervisor_call requires the question in summary.",
+            ));
+        }
 
         // Resolve authority only from the server's registered caller identity.
         // Caller-supplied names, models, verifier types, task ownership, harness
@@ -449,18 +467,27 @@ impl CasCore {
             // sealed, and expired/terminal cycles require explicit recovery.
             let live = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| matches!(dispatch.state,
-                    cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
-                    && dispatch.deadline_at > chrono::Utc::now());
+                .filter(|dispatch| {
+                    matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Pending
+                            | cas_types::VerificationDispatchState::Claimed
+                    ) && dispatch.deadline_at > chrono::Utc::now()
+                });
             match live {
                 Some(dispatch) => dispatch.id,
                 // A restart can leave an immutable parked delivery without an
                 // active review cycle; recover the boundary without a close attempt.
                 None if task.status == TaskStatus::AwaitingMerge => {
-                    self.recover_parked_verification_dispatch(&task, &caller)?.id
+                    self.recover_parked_verification_dispatch(&task, &caller)?
+                        .id
                 }
-                None => return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.")),
+                None => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.",
+                    ));
+                }
             }
         } else {
             return Err(McpError {
@@ -478,17 +505,18 @@ impl CasCore {
         // child-handoff authority, but let a direct supervisor verdict follow
         // an unchanged proof boundary to the current pending dispatch.
         if supervisor_direct {
-            requested_dispatch_id =
-                cas_store::resolve_verification_dispatch_for_add(
-                    &self.cas_root,
-                    &requested_dispatch_id,
-                )
-                .map_err(|_| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from("Supervisor-direct verification rejected: named dispatch is unavailable."),
-                    data: None,
-                })?
-                .id;
+            requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
+                &self.cas_root,
+                &requested_dispatch_id,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Supervisor-direct verification rejected: named dispatch is unavailable.",
+                ),
+                data: None,
+            })?
+            .id;
         }
 
         // cas-b269: urgent stop halt blocks verification MCP.
@@ -657,10 +685,6 @@ impl CasCore {
         if let Some(confidence) = req.confidence {
             verification.set_confidence(confidence);
         }
-        if let Some(duration_ms) = req.duration_ms {
-            verification.set_duration(duration_ms);
-        }
-
         // Set verification type if specified (default is Task)
         if let Some(vtype) = &req.verification_type {
             if vtype.trim().eq_ignore_ascii_case("epic") {
@@ -670,8 +694,9 @@ impl CasCore {
 
         // Supervisor-direct calls can be retried after a lost response or a
         // process restart. The exact dispatch remains the authorization
-        // boundary: only an identical verdict from the same registered
-        // supervisor is idempotent. A conflicting retry fails closed.
+        // boundary: an identical verdict from the same registered supervisor
+        // is idempotent. Only a supervisor-call question allows a new answer;
+        // a conflicting terminal retry fails closed.
         if supervisor_direct {
             verification.set_agent(caller_id.clone());
             verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
@@ -687,7 +712,8 @@ impl CasCore {
                         data: None,
                     })?
             {
-                if supervisor_verification_retry_matches(&existing, &verification) {
+                if supervisor_verification_retry_matches(&existing, &verification, req.duration_ms)
+                {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
@@ -700,8 +726,8 @@ impl CasCore {
                             &task,
                             &requested_dispatch_id,
                         ) {
-                            Ok(Some(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
-                            Ok(None) => "; no live assigned worker to retry close".to_string(),
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("; no close retry queued: {reason}"),
                             Err(error) => format!("; close retry wake failed: {error}"),
                         }
                     } else {
@@ -717,20 +743,24 @@ impl CasCore {
                         retry_note
                     )));
                 }
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(concat!(
-                        "Supervisor-direct verification rejected: the exact dispatch was ",
-                        "already resolved with a different verdict."
-                    )),
-                    data: None,
-                });
+                // A question is retained as history, not a final verdict. The
+                // supervisor answers it using this exact proof boundary.
+                if existing.status != VerificationStatus::SupervisorCall {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(concat!(
+                            "Supervisor-direct verification rejected: the exact dispatch was ",
+                            "already resolved with a different verdict."
+                        )),
+                        data: None,
+                    });
+                }
             }
         }
 
-        // Atomically persist the verdict, resolve any active exact-task
-        // dispatch, and clear that task's pending transition. If any step
-        // fails, all authority and lifecycle writes roll back.
+        // Atomically persist the review record and authority. A terminal
+        // verdict also resolves the exact dispatch and pending task transition.
+        // If any step fails, all authority and lifecycle writes roll back.
         {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
@@ -739,12 +769,11 @@ impl CasCore {
                 data: None,
             })?;
             // GH #1165: the pool's budget-aware busy handler.
-            cas_store::shared_db::install_busy_handler(&conn)
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to set busy timeout: {e}")),
-                    data: None,
-                })?;
+            cas_store::shared_db::install_busy_handler(&conn).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to set busy timeout: {e}")),
+                data: None,
+            })?;
 
             // BEGIN IMMEDIATE, not the DEFERRED default. The block below reads
             // (the dispatch, the capability) before it writes, so a deferred
@@ -765,6 +794,8 @@ impl CasCore {
                     data: None,
                 })?;
 
+            let mut review_bound_at = None;
+            let mut review_consumed_at = None;
             let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(
                     &tx,
@@ -793,6 +824,8 @@ impl CasCore {
                 }
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                review_bound_at = capability.bound_at;
+                review_consumed_at = capability.consumed_at;
                 verification.capability_id = Some(capability.id);
                 verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(capability.issuer_agent_id);
@@ -834,6 +867,8 @@ impl CasCore {
                 }
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                review_bound_at = capability.bound_at;
+                review_consumed_at = capability.consumed_at;
                 verification.capability_id = Some(capability.id);
                 verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(capability.issuer_agent_id);
@@ -867,86 +902,114 @@ impl CasCore {
                 });
             }
 
+            // A child has durable runtime boundaries. Direct verdicts (and
+            // legacy capabilities missing a bind time) can only measure the
+            // dispatch window, including queue/review wait; label that fallback.
+            verification.created_at = review_consumed_at.unwrap_or_else(chrono::Utc::now);
+            let (started_at, source) = match (review_bound_at, review_consumed_at) {
+                (Some(bound), Some(_)) => (bound, "capability_bound_to_consumed"),
+                _ => (dispatch.requested_at, "dispatch_elapsed_fallback"),
+            };
+            let elapsed_ms =
+                u64::try_from((verification.created_at - started_at).num_milliseconds())
+                    .unwrap_or(0);
+            verification.set_duration(req.duration_ms.unwrap_or(elapsed_ms));
+            verification.duration_source = Some(
+                if req.duration_ms.is_some() {
+                    "explicit"
+                } else {
+                    source
+                }
+                .into(),
+            );
+
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to add verification: {e}")),
                 data: None,
             })?;
 
-            cas_store::resolve_verification_dispatch_with_conn(
-                &tx,
-                &dispatch.id,
-                &caller_id,
-                verification.capability_id.as_deref(),
-                supervisor_direct,
-            )
-            .map_err(|_| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
-                ),
-                data: None,
-            })?;
-
-            let approved_delivery = matches!(
-                verification.status,
-                VerificationStatus::Approved | VerificationStatus::Skipped
-            );
-            let delivery_transitioned = if let Some(delivery_transaction_id) =
-                dispatch.delivery_transaction_id.as_deref()
-                && cas_store::transition_worker_delivery_verification_with_conn(
+            // A question transfers the decision to the supervisor. The child
+            // authority is spent, but the dispatch, delivery and pending task
+            // remain unchanged until the supervisor records the answer/verdict.
+            if verification.status != VerificationStatus::SupervisorCall {
+                cas_store::resolve_verification_dispatch_with_conn(
                     &tx,
-                    delivery_transaction_id,
-                    &verification.id,
-                    approved_delivery,
+                    &dispatch.id,
                     &caller_id,
+                    verification.capability_id.as_deref(),
+                    supervisor_direct,
                 )
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to advance transactional worker delivery: {e}"
-                    )),
-                    data: None,
-                })?
-                .is_some()
-            {
-                true
-            } else {
-                false
-            };
-
-            if delivery_transitioned {
-                tx.execute(
-                    "UPDATE tasks
-                     SET status = ?2, pending_verification = 0, updated_at = ?3
-                     WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
-                    rusqlite::params![
-                        req.task_id,
-                        if approved_delivery {
-                            "awaiting_merge"
-                        } else {
-                            "blocked"
-                        },
-                        chrono::Utc::now().to_rfc3339(),
-                    ],
-                )
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to project delivery verification state: {e}"
-                    )),
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
+                    ),
                     data: None,
                 })?;
-            }
 
-            if task.pending_verification {
-                cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
-                    |e| McpError {
+                let approved_delivery = matches!(
+                    verification.status,
+                    VerificationStatus::Approved | VerificationStatus::Skipped
+                );
+                let delivery_transitioned = if let Some(delivery_transaction_id) =
+                    dispatch.delivery_transaction_id.as_deref()
+                    && cas_store::transition_worker_delivery_verification_with_conn(
+                        &tx,
+                        delivery_transaction_id,
+                        &verification.id,
+                        approved_delivery,
+                        &caller_id,
+                    )
+                    .map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to clear pending_verification: {e}")),
+                        message: Cow::from(format!(
+                            "Failed to advance transactional worker delivery: {e}"
+                        )),
                         data: None,
-                    },
-                )?;
+                    })?
+                    .is_some()
+                {
+                    true
+                } else {
+                    false
+                };
+
+                if delivery_transitioned {
+                    tx.execute(
+                        "UPDATE tasks
+                         SET status = ?2, pending_verification = 0, updated_at = ?3
+                         WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
+                        rusqlite::params![
+                            req.task_id,
+                            if approved_delivery {
+                                "awaiting_merge"
+                            } else {
+                                "blocked"
+                            },
+                            chrono::Utc::now().to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to project delivery verification state: {e}"
+                        )),
+                        data: None,
+                    })?;
+                }
+
+                if task.pending_verification {
+                    cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
+                        |e| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to clear pending_verification: {e}"
+                            )),
+                            data: None,
+                        },
+                    )?;
+                }
             }
 
             tx.commit().map_err(|e| McpError {
@@ -956,7 +1019,9 @@ impl CasCore {
             })?;
         }
 
-        crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+        if verification.status != VerificationStatus::SupervisorCall {
+            crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+        }
 
         // Emit VerificationAdded event for task lifecycle tracking
         if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
@@ -965,6 +1030,8 @@ impl CasCore {
             let status_str = match verification.status {
                 VerificationStatus::Approved => "approved",
                 VerificationStatus::Rejected => "rejected",
+                VerificationStatus::SupervisorCall => "supervisor_call",
+                VerificationStatus::Pending => "pending",
                 VerificationStatus::Error => "error",
                 VerificationStatus::Skipped => "skipped",
             };
@@ -1005,7 +1072,14 @@ impl CasCore {
         let cassy_merged = task.deliverables.green_merge_commit.is_some()
             && task.deliverables.effective_merge_ci_admission()
                 != cas_types::MergeCiAdmission::Override;
-        let close_retry = if verification.status == VerificationStatus::Approved
+        let close_retry = if verification.status == VerificationStatus::SupervisorCall {
+            format!(
+                "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",
+                crate::mcp::tools::core::guidance::caller_prefix(),
+                req.task_id,
+                requested_dispatch_id,
+            )
+        } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
@@ -1031,8 +1105,10 @@ impl CasCore {
                         &current,
                         &requested_dispatch_id,
                     ) {
-                        Ok(Some(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
-                        Ok(None) => "\nNo live assigned worker was available for a close retry; a supervisor can retry task close.".to_string(),
+                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
+                        // cas-7fc3 (GH #1388): name the actual reason instead
+                        // of claiming no live worker exists.
+                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("\nNo close retry was queued: {reason}. A supervisor can retry task close."),
                         Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
                     },
                     Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),
@@ -1049,9 +1125,31 @@ impl CasCore {
             String::new()
         };
 
+        if let Some(outcome) = crate::quality_ledger::verifier_outcome(verification.status) {
+            crate::quality_ledger::check_run(
+                &self.cas_root,
+                crate::quality_ledger::Check {
+                    natural_key: format!("verifier|{id}"),
+                    check_id: "task_verifier",
+                    stage: cas_store::CheckStage::Verifier,
+                    outcome,
+                    task_id: Some(&req.task_id),
+                    sha: None,
+                    minutes: verification.duration_ms.map(|ms| ms as f64 / 60_000.0),
+                    link: None,
+                    actor: Some(&caller_id),
+                },
+            );
+        }
+
         Ok(Self::success(format!(
             "{} Verification {} for task {} - {}: {}{}",
-            status_emoji, id, req.task_id, task.title, verification.summary, close_retry
+            status_emoji,
+            id,
+            req.task_id,
+            truncate_str(&task.title, 120),
+            verification_receipt_summary(&verification),
+            close_retry
         )))
     }
 
@@ -1086,12 +1184,18 @@ impl CasCore {
             output.push_str(&format!("Verified by: {agent_id}\n"));
         }
         output.push_str(&format!("Provenance: {}\n", verification.provenance));
+        if let Some(dispatch_id) = &verification.dispatch_id {
+            output.push_str(&format!("Dispatch: {dispatch_id}\n"));
+        }
         if let Some(capability_id) = &verification.capability_id {
             output.push_str(&format!("Verifier capability: {capability_id}\n"));
         }
 
         if let Some(duration) = verification.duration_ms {
             output.push_str(&format!("Duration: {duration}ms\n"));
+        }
+        if let Some(source) = &verification.duration_source {
+            output.push_str(&format!("Duration source: {source}\n"));
         }
 
         if !verification.files_reviewed.is_empty() {
@@ -1177,12 +1281,7 @@ impl CasCore {
         );
 
         for v in verifications.iter().take(limit) {
-            let status_icon = match v.status {
-                VerificationStatus::Approved => "✅",
-                VerificationStatus::Rejected => "❌",
-                VerificationStatus::Error => "⚠️",
-                VerificationStatus::Skipped => "⏭️",
-            };
+            let status_icon = verification_status_emoji(v.status);
             let issues_info = if v.issues.is_empty() {
                 String::new()
             } else {
@@ -1221,12 +1320,7 @@ impl CasCore {
             })? {
             Some(mut v) => {
                 v.sanitize_verifier_authored_content();
-                let status_icon = match v.status {
-                    VerificationStatus::Approved => "✅",
-                    VerificationStatus::Rejected => "❌",
-                    VerificationStatus::Error => "⚠️",
-                    VerificationStatus::Skipped => "⏭️",
-                };
+                let status_icon = verification_status_emoji(v.status);
                 let issues_info = if v.issues.is_empty() {
                     String::new()
                 } else {
@@ -1238,7 +1332,12 @@ impl CasCore {
                 };
                 Ok(Self::success(format!(
                     "{} Latest verification for {}:\n\nID: {}\nStatus: {}\nSummary: {}{}",
-                    status_icon, req.task_id, v.id, v.status, v.summary, issues_info
+                    status_icon,
+                    req.task_id,
+                    v.id,
+                    v.status,
+                    verification_receipt_summary(&v),
+                    issues_info
                 )))
             }
             None => Ok(Self::success(format!(
@@ -1316,10 +1415,25 @@ impl CasCore {
     // ========================================================================
 }
 
+/// Successful receipts link to the full stored record; findings stay complete.
+fn verification_receipt_summary(verification: &Verification) -> String {
+    if verification.status == VerificationStatus::Approved && verification.issues.is_empty() {
+        format!(
+            "{}\nFull evidence: verification action=show id={}",
+            truncate_str(&verification.summary, 240),
+            verification.id
+        )
+    } else {
+        verification.summary.clone()
+    }
+}
+
 fn verification_status_emoji(status: VerificationStatus) -> &'static str {
     match status {
         VerificationStatus::Approved => "✅",
         VerificationStatus::Rejected => "❌",
+        VerificationStatus::SupervisorCall => "❓",
+        VerificationStatus::Pending => "⏳",
         VerificationStatus::Error => "⚠️",
         VerificationStatus::Skipped => "⏭️",
     }
@@ -1328,6 +1442,7 @@ fn verification_status_emoji(status: VerificationStatus) -> &'static str {
 fn supervisor_verification_retry_matches(
     existing: &Verification,
     candidate: &Verification,
+    requested_duration_ms: Option<u64>,
 ) -> bool {
     existing.task_id == candidate.task_id
         && existing.agent_id == candidate.agent_id
@@ -1340,7 +1455,9 @@ fn supervisor_verification_retry_matches(
         && existing.confidence == candidate.confidence
         && existing.summary == candidate.summary
         && existing.files_reviewed == candidate.files_reviewed
-        && existing.duration_ms == candidate.duration_ms
+        // Server-derived elapsed time changes on retry. Only an explicit
+        // caller override is part of the request's idempotency comparison.
+        && requested_duration_ms.is_none_or(|duration| existing.duration_ms == Some(duration))
         && serde_json::to_value(&existing.issues).ok()
             == serde_json::to_value(&candidate.issues).ok()
 }
@@ -1398,10 +1515,11 @@ mod lifecycle_friction_tests {
     async fn cas_5dc0_first_add_binds_the_unique_active_dispatch_without_retry() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);
+        let summary = "Independent review completed. ".repeat(100);
         let result = core
             .cas_verification_add(Parameters(
                 serde_json::from_value(serde_json::json!({
-                    "task_id":task.id,"status":"approved","summary":"Independent review completed"
+                    "task_id":task.id,"status":"approved","summary":summary
                 }))
                 .unwrap(),
             ))
@@ -1412,6 +1530,54 @@ mod lifecycle_friction_tests {
             .unwrap()
             .unwrap();
         assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let text = |result: CallToolResult| {
+            result
+                .content
+                .into_iter()
+                .filter_map(|content| {
+                    if let rmcp::model::RawContent::Text(text) = content.raw {
+                        Some(text.text)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>()
+        };
+        let receipt = text(result);
+        let latest = text(
+            core.cas_verification_latest(Parameters(VerificationListRequest {
+                task_id: task.id.clone(),
+                limit: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        let full = text(
+            core.cas_verification_show(Parameters(VerificationShowRequest {
+                id: recorded.id.clone(),
+            }))
+            .await
+            .unwrap(),
+        );
+        eprintln!(
+            "VERIFICATION_REPLAY summary_bytes={} receipt_bytes={} latest_bytes={} full_bytes={}",
+            summary.len(),
+            receipt.len(),
+            latest.len(),
+            full.len()
+        );
+        for compact in [&receipt, &latest] {
+            assert!(
+                compact.len() <= 2000,
+                "successful verification repeats proof: {compact}"
+            );
+            assert!(compact.contains(&recorded.id));
+            assert!(
+                compact.contains("action=show"),
+                "full proof needs a retrieval command"
+            );
+        }
+        assert!(full.contains(&summary), "full proof must remain lossless");
         // A terminal or missing dispatch is never silently inferred as new authority.
         assert!(
             core.cas_verification_add(Parameters(
@@ -1429,9 +1595,14 @@ mod lifecycle_friction_tests {
     async fn cas_5dc0_request_changes_recovers_a_blocked_parked_verifier_failure() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);
-        core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-            "task_id":task.id,"dispatch_id":dispatch.id,"status":"rejected","summary":"Correction required"
+        let findings = "Correction required with detailed findings. ".repeat(75);
+        let failure = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+            "task_id":task.id,"dispatch_id":dispatch.id,"status":"rejected","summary":findings
         })).unwrap())).await.unwrap();
+        assert!(
+            format!("{failure:?}").contains(&findings),
+            "failure findings must stay complete"
+        );
         let tasks = core.open_task_store().unwrap();
         let mut blocked = tasks.get(&task.id).unwrap();
         blocked.status = TaskStatus::Blocked;

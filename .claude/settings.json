@@ -49,6 +49,17 @@
         ]
       }
     ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "command": "cas hook PostModelSwitch",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
@@ -197,7 +208,7 @@
     ]
   },
   "statusLine": {
-    "command": "cas statusline",
+    "command": "cas statusline --with-session",
     "type": "command"
   }
 }

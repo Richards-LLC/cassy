@@ -13,7 +13,7 @@ import {
 
 describe("Commander connection lifecycle contract", () => {
   it("pins the guide's per-stage deadlines and heartbeat thresholds", () => {
-    expect(STAGE_TIMEOUT_MS).toEqual({ resolving: 3_000, dialing: 5_000, auth: 3_000, attaching: 3_000 });
+    expect(STAGE_TIMEOUT_MS).toEqual({ resolving: 3_000, dialing: 5_000, auth: 5_000, attaching: 3_000 });
     expect(DEGRADED_AFTER_MISSED_HEARTBEATS).toBe(2);
     expect(RECONNECT_AFTER_MISSED_HEARTBEATS).toBe(4);
   });

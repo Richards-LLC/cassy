@@ -147,6 +147,11 @@ pub fn impact_for_changes(
     impact_for_selected_changes(registry, qa, changes, codemap, None)
 }
 
+fn journey_input(path: &str) -> bool {
+    // Test-side suites and shared inputs still carry explicit journey coverage.
+    !crate::qa_pass::fixture_directory(&path.to_ascii_lowercase())
+}
+
 /// Selection never grants ownership. Some(empty) authoritatively selects none.
 fn impact_for_selected_changes(
     registry: Option<&crate::qa_registry::Registry>,
@@ -187,7 +192,9 @@ fn impact_for_selected_changes(
         .collect();
     let mut remaining = Vec::new();
     for file in files {
-        if registry.is_some_and(|r| matches_path(r.ignore.iter().map(String::as_str), file)) {
+        if registry.is_some_and(|r| {
+            !journey_input(file) || matches_path(r.ignore.iter().map(String::as_str), file)
+        }) {
             report.ignored.push(file.to_owned());
         } else {
             remaining.push(file);
@@ -196,6 +203,11 @@ fn impact_for_selected_changes(
     let mut owned = BTreeSet::new();
     if let Some(registry) = registry {
         for journey in &registry.journeys {
+            // Only an emitted journey can account for a file in the manifest.
+            // Semantic selection may exclude every registry owner (cas-3b77).
+            if selected.is_some_and(|ids| !ids.contains(&journey.id)) {
+                continue;
+            }
             let mut patterns: Vec<(&str, String)> = journey
                 .owners
                 .globs()
@@ -228,7 +240,7 @@ fn impact_for_selected_changes(
                     }
                 }
             }
-            if selected.map_or(matches.is_empty(), |ids| !ids.contains(&journey.id)) {
+            if selected.is_none() && matches.is_empty() {
                 continue;
             }
             let invariants = journey
@@ -315,7 +327,8 @@ fn impact_for_selected_changes(
         }
         report.unowned.push(Unowned {
             file: file.into(),
-            surface: matches_path(surfaces.iter().copied(), file),
+            surface: !crate::qa_pass::is_non_surface_path(file)
+                && matches_path(surfaces.iter().copied(), file),
             codemap: label,
         });
     }
@@ -436,6 +449,41 @@ pub fn codemap_labels(text: &str) -> Vec<CodemapLabel> {
         .into_iter()
         .map(|(prefix, summary)| CodemapLabel { prefix, summary })
         .collect()
+}
+
+/// Predict journeys from paths named in the task, shared by task start and ledger init.
+pub fn predicted(repo: &Path, qa: &QaConfig, task: &cas_types::Task) -> Result<Impact> {
+    let tracked = io::git(&repo, &["ls-files", "-z", "--cached", "--full-name"])?;
+    let content = format!(
+        "{}\n{}\n{}\n{}",
+        task.title,
+        task.description,
+        task.design,
+        task.proof_targets.join("\n")
+    );
+    let mut paths = std::collections::BTreeSet::new();
+    for word in content.split_whitespace() {
+        let path =
+            word.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | ')' | ',' | ';'));
+        let path = path
+            .split(':')
+            .next()
+            .unwrap_or(path)
+            .trim_start_matches("./");
+        if !path.contains('/') && !path.contains('.') {
+            continue;
+        }
+        for file in tracked.split('\0').filter(|file| !file.is_empty()) {
+            if file == path
+                || file.starts_with(&format!("{}/", path.trim_end_matches('/')))
+                || crate::qa_registry::matches_path([path], file)
+            {
+                paths.insert(file.to_string());
+            }
+        }
+    }
+    let changes: Vec<_> = paths.into_iter().map(Change::modified).collect();
+    analyze(repo, qa, &changes, None, None)
 }
 
 #[cfg(test)]

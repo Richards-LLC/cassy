@@ -1,7 +1,7 @@
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommanderJournal, type CredentialFence, type DeliveryScope } from "./commander-journal";
-import { HeldSendFlushes } from "./held-send-flush";
+import { drainHeld, HeldSendFlushes } from "./held-send-flush";
 import type { PendingSend } from "./conversation-store";
 
 afterEach(() => vi.restoreAllMocks());
@@ -11,6 +11,21 @@ const fence: CredentialFence = { credentialId: "credential-a", generation: 1 };
 const item: PendingSend = { id: "recovery-gap", target: "supervisor", text: "Send after recovery", state: "held", at: 1_000, heldAt: 1_000 };
 
 describe("held-send recovery flush", () => {
+  it("sends the next held message when a peer's journal sync removes the one in flight (cas-638c)", async () => {
+    const inFlight = "Second tab keeps that", next = "First tab keeps this";
+    const queue = [inFlight, next];
+    const dispatched: string[] = [];
+    await drainHeld(queue, async (entry) => {
+      dispatched.push(entry);
+      // The peer's claim reaches this tab's journal sync while the dispatch
+      // awaits IndexedDB; the sync drops the now-sending entry from the queue.
+      if (entry === inFlight) queue.splice(queue.indexOf(entry), 1);
+      return () => {};
+    });
+    expect(dispatched).toEqual([inFlight, next]);
+    expect(queue).toEqual([]);
+  });
+
   it("keeps the last live callback while a definite no-write is settling in IndexedDB", async () => {
     const journal = new CommanderJournal(new IDBFactory(), async () => fence, () => 1_000, false);
     await journal.reconcile(scope, [], [item], fence);

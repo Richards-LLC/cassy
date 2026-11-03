@@ -3,7 +3,7 @@
 The matrix tests the demo and the nearby risks, rather than replaying a report.
 Write the expected result in the user's words before running any cell.
 The project-agnostic matrix and quota guidance are adapted from
-https://github.com/Richards-LLC/cassy/issues/759; PostHog and mobile-device
+<https://github.com/Richards-LLC/cassy/issues/759>; PostHog and mobile-device
 details from that issue are intentionally outside this skill.
 
 1. Name the build (binary version or commit SHA), the one-line scope, and the
@@ -22,4 +22,4 @@ details from that issue are intentionally outside this skill.
    Record unchosen risks in the ledger honesty section when they matter.
 5. Run cells in order against the real build. Capture after the state settles;
    time-box the complete pass at 30 minutes and mark every remaining cell
-   `NOT EXERCISED` when the box expires.
+   `NOT EXERCISED: <reason>` when the box expires.

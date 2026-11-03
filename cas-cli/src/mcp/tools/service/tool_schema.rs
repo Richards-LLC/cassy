@@ -41,9 +41,8 @@ const STANDARD_FORMATS: &[&str] = &[
 const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "$defs", "definitions"];
 
 /// Parameters the agent-facing `coordination` tool publishes (D2 split,
-/// cas-8563b). The tool shares `CoordinationRequest` with `factory`, so it
-/// still deserializes the rest during the one-release alias window; it just
-/// stops loading the supervisor parameters into every worker's context.
+/// cas-8563b). The shared request union is projected to the fields this tool
+/// accepts so supervisor parameters do not load into every worker's context.
 pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "action",
     "id",
@@ -90,7 +89,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("blocker", "Blocker escalation; wakes idle supervisor."),
     ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
-    ("kind", "answer|status|receipt|ask|blocker; receipts never wake a supervisor."),
+    ("kind", "answer|status|receipt|ask|blocker|secret (summary=NAME); peer FYIs default receipt (quiet)."),
     ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
     ("options", "Operator ask choices; tap returns the label with in_reply_to."),
     ("attachment", "Published artifact id for Commander."),
@@ -99,14 +98,14 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked polled rows reappear once."),
+    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked unnamed batch reads reappear once."),
     ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary|sub_agent|worker|ci."),
     ("parent_id", "register/session_start: parent id."),
     ("session_id", "register/session_start/session_end: harness id."),
-    ("remind_message", "Required reminder text; message kind=ask: default at deadline."),
-    ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
+    ("remind_message", "Reminder text; ask: default at deadline."),
+    ("remind_delay_secs", "Seconds: deadlines/retries; polls use remind_event. ask: deadline."),
     ("remind_event", "task_completed|task_blocked|worker_idle|epic_completed|epic_split_decided; external: cross_session=true."),
     ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); task {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
@@ -252,6 +251,9 @@ mod tests {
         }
         assert!(message.contains("operator") && message.contains("refused"), "{message}");
         assert!(description("remind_event").contains("cross_session=true"));
+        // cas-1996: a secret request is discoverable, so agents never ask for a key in chat.
+        let kind = description("kind");
+        assert!(kind.contains("secret") && kind.contains("summary=NAME"), "{kind}");
         let filters = description("remind_filter");
         for example in [r#"{"commit":"<ref>","target_branch":"main"}"#,
             r#"{"tag":"v1.0.0"}"#, r#"{"sha":"<40-hex>","workflow":"CI"}"#,
@@ -305,31 +307,23 @@ mod tests {
         assert_eq!(tool.description.as_deref(), Some("fixture tool"));
     }
 
-    /// cas-269ab (cas-c6ef review): `interrupt` once dispatched while the
-    /// coordination description omitted it. Each tool's description names
-    /// every action of its registry list, aliases included.
+    /// The coordination description documents its actions; factory's schema
+    /// enum separately publishes the factory action naming contract.
     #[test]
-    fn coordination_and_factory_descriptions_name_every_registry_action() {
+    fn coordination_description_names_every_registry_action() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
-        for (name, actions) in [
-            ("coordination", cas_mcp::actions::COORDINATION_ACTIONS),
-            ("factory", cas_mcp::actions::FACTORY_ACTIONS),
-        ] {
-            let description = tools
-                .iter()
-                .find(|tool| tool.name == name)
-                .unwrap_or_else(|| panic!("{name} tool is not registered"))
-                .description
-                .as_deref()
-                .unwrap_or_default()
-                .to_string();
-            let words: std::collections::HashSet<&str> = description
-                .split(|c: char| !c.is_ascii_lowercase() && c != '_')
-                .collect();
-            for action in actions {
-                assert!(words.contains(action), "{name} description omits `{action}`: {description}");
-            }
+        let coordination = tools
+            .iter()
+            .find(|tool| tool.name == "coordination")
+            .expect("coordination tool is registered");
+        let description = coordination.description.as_deref().unwrap_or_default();
+        let words: std::collections::HashSet<&str> = description
+            .split(|c: char| !c.is_ascii_lowercase() && c != '_')
+            .collect();
+        for action in cas_mcp::actions::COORDINATION_ACTIONS {
+            assert!(words.contains(action), "coordination description omits `{action}`: {description}");
         }
+
     }
 
     /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish

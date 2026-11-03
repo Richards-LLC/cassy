@@ -14,9 +14,19 @@ import { fleetControlGate, type FleetControlGate, type FleetOperation } from "./
 import type { Scope } from "./types";
 
 export interface FleetAgent {
+  readonly id?: string;
   readonly name: string;
   readonly status?: string;
+  /** Execution evidence shared with factory worker_status. */
+  readonly liveness?: string;
+  readonly latest_activity?: { readonly summary: string; readonly created_at_rfc3339: string };
+  readonly last_heartbeat_rfc3339?: string;
   readonly current_task?: string | null;
+  readonly harness?: string | null;
+  readonly model?: string | null;
+  /** Task lifecycle timestamp, never worker registration or heartbeat. */
+  readonly task_started_at?: string | null;
+  readonly recent_trail?: readonly { readonly step: "started" | "pushed" | "ci_green" | "merged" | "verified"; readonly at?: string | null; readonly reference: string }[];
   /** The worker's spawn generation (cas-9b08), compared by the hub as-is. */
   readonly generation?: string | number | null;
   readonly started_at?: string | null;
@@ -32,6 +42,15 @@ export interface FleetTask {
   /** The delivered tip of an awaiting-merge task. */
   readonly tip?: string | null;
   readonly branch?: string | null;
+  readonly epic_id?: string | null;
+  readonly delivery_state?: "merged";
+  readonly merge_check_pending?: boolean;
+  readonly progress?: {
+    readonly total: number;
+    readonly merged: number;
+    readonly last_merged_at: string | null;
+    readonly merges_per_hour: number;
+  };
 }
 
 export type OperationKind =
@@ -94,7 +113,7 @@ function generation(agent: FleetAgent): string | number | null {
 }
 
 export function awaitingMerge(task: FleetTask): boolean {
-  return ["awaiting_merge", "awaitingmerge"].includes(String(task.status ?? "").toLowerCase());
+  return task.delivery_state !== "merged" && !task.merge_check_pending && ["awaiting_merge", "awaitingmerge"].includes(String(task.status ?? "").toLowerCase());
 }
 
 export function readyTask(task: FleetTask): boolean {

@@ -1,0 +1,4 @@
+title: Generic request deadlines and generic refusals prevent large phone attachments from reaching the supervisor
+tasks: [cas-fed8]
+invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
+journeys: [HUB-J24]

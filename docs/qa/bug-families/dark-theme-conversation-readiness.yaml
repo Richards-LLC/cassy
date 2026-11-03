@@ -1,0 +1,4 @@
+title: Desktop dark-theme and phone find, ask and dark-theme stages await the conversation socket before publishing seeded supervisor messages; composer visibility alone is not transport readiness
+tasks: [cas-f811, cas-9f5a, cas-44e8]
+invariants: [HUB-J3-GOAL, HUB-J7-GOAL, HUB-J10-GOAL]
+journeys: [HUB-J3, HUB-J7, HUB-J10]

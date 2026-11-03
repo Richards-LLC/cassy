@@ -38,6 +38,72 @@ fn isolated_home() -> TempDir {
 }
 
 #[test]
+fn configure_migrates_bare_statuslines_in_every_profile_once() {
+    let home = isolated_home();
+    let project = TempDir::new().unwrap();
+    let original = serde_json::json!({
+        "statusLine": {"type": "command", "command": "cas statusline", "padding": 2},
+        "theme": "dark", "permissions": {"deny": ["Read(secret)"]}
+    });
+    let project_path = project.path().join(".claude/settings.json");
+    std::fs::create_dir(project_path.parent().unwrap()).unwrap();
+    std::fs::write(&project_path, original.to_string()).unwrap();
+    let mut paths = Vec::new();
+    for name in [".claude", ".claude-alt", ".claude-work"] {
+        let dir = home.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, original.to_string()).unwrap();
+        paths.push(path);
+    }
+    let custom = home.path().join(".claude-custom");
+    std::fs::create_dir(&custom).unwrap();
+    let custom_path = custom.join("settings.json");
+    let custom_bytes = r#"{"statusLine":{"type":"command","command":"my-statusline"},"theme":"light"}"#;
+    std::fs::write(&custom_path, custom_bytes).unwrap();
+    configure_claude_hooks_with_home(project.path(), false, Some(home.path())).unwrap();
+    let project_settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&project_path).unwrap()).unwrap();
+    assert_eq!(project_settings["statusLine"]["command"], "cas statusline --with-session");
+    assert_eq!(project_settings["theme"], original["theme"]);
+    assert_eq!(project_settings["permissions"]["deny"], original["permissions"]["deny"]);
+    let mut expected = original;
+    expected["statusLine"]["command"] = "cas statusline --with-session".into();
+    let before: Vec<_> = paths.iter().map(|path| {
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), expected);
+        (bytes, std::fs::metadata(path).unwrap().modified().unwrap())
+    }).collect();
+    configure_claude_hooks_with_home(project.path(), false, Some(home.path())).unwrap();
+    for (path, (bytes, modified)) in paths.iter().zip(before) {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+    }
+    assert_eq!(std::fs::read_to_string(custom_path).unwrap(), custom_bytes);
+
+    let bad = home.path().join(".claude-broken");
+    std::fs::create_dir(&bad).unwrap();
+    let bad_settings = bad.join("settings.json");
+    std::fs::write(&bad_settings, "{ malformed").unwrap();
+    let mut bare = expected.clone();
+    bare["statusLine"]["command"] = "cas statusline".into();
+    for path in [&paths[0], &paths[2]] { std::fs::write(path, bare.to_string()).unwrap(); }
+    let dirs = vec![paths[0].parent().unwrap().to_owned(), bad, paths[2].parent().unwrap().to_owned()];
+    let mut warnings = Vec::new();
+    configure_claude_hooks_with_warnings(project.path(), false, &dirs, |warning| warnings.push(warning))
+        .expect("one malformed profile must not abort project hook setup");
+    for path in [&paths[0], &paths[2]] {
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(settings["statusLine"]["command"], "cas statusline --with-session");
+    }
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&project_path).unwrap()).unwrap();
+    assert_eq!(first_hook_command(&settings, "SessionStart"), Some("cas hook SessionStart"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(bad_settings.to_str().unwrap()) && warnings[0].contains("Invalid JSON")
+        && warnings[0].contains("cas hook configure"), "{warnings:?}");
+    assert_eq!(std::fs::read_to_string(bad_settings).unwrap(), "{ malformed");
+}
+
+#[test]
 fn test_configure_creates_settings() {
     // Use an isolated fake home so global_has_cas_hooks_in always returns false
     // regardless of the developer's real ~/.claude/settings.json (cas-1888).
@@ -825,6 +891,7 @@ fn hook_entries_emit_shell_form_command() {
 
     for (event, expected_command) in &[
         ("SessionStart", "cas hook SessionStart"),
+        ("PostModelSwitch", "cas hook PostModelSwitch"),
         ("SessionEnd", "cas hook SessionEnd"),
         ("Stop", "cas hook Stop"),
         ("SubagentStart", "cas hook SubagentStart"),
@@ -914,11 +981,11 @@ fn every_emitted_hook_object_has_command_and_no_args() {
         }
     }
 
-    // 14 events x 1 hook object (including sealed-handoff terminal cleanup),
-    // plus the extra SessionStart staleness entry = 15.
+    // 15 events x 1 hook object (including native model observations),
+    // plus the extra SessionStart staleness entry = 16.
     assert_eq!(
-        hook_objects, 15,
-        "expected exactly 15 hook objects (14 events + factory check-staleness)"
+        hook_objects, 16,
+        "expected exactly 16 hook objects (15 events + factory check-staleness)"
     );
 }
 
@@ -1333,21 +1400,17 @@ fn coverage_requires_every_config_dir() {
     let dirs = vec![default_dir.clone(), alt_dir.clone()];
 
     // Neither populated → not covered.
-    assert!(!all_config_dirs_have_cas_hooks(&dirs));
 
     // Default dir only → the alt-dir sessions are still uncovered.
     write_global_hooks(&default_dir);
     assert!(config_dir_has_cas_hooks(&default_dir));
-    assert!(!all_config_dirs_have_cas_hooks(&dirs));
     assert_eq!(config_dirs_missing_cas_hooks(&dirs), vec![alt_dir.clone()]);
 
     // Both populated → covered, and nothing is missing.
     write_global_hooks(&alt_dir);
-    assert!(all_config_dirs_have_cas_hooks(&dirs));
     assert!(config_dirs_missing_cas_hooks(&dirs).is_empty());
 
     // An empty dir list can never prove coverage.
-    assert!(!all_config_dirs_have_cas_hooks(&[]));
 }
 
 /// AC1: hooks only in ~/.claude while sessions run under CLAUDE_CONFIG_DIR=alt

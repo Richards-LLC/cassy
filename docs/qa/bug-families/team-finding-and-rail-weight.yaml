@@ -1,0 +1,5 @@
+title: Team leads with a computed finding, each lane's delivery track implies nothing unreported, and the rail's worker rows keep their controls while lighter than the lanes
+found: '2026-10-30'
+tasks: [cas-2d83, cas-64ef]
+invariants: [HUB-J26-GOAL]
+journeys: [HUB-J26]

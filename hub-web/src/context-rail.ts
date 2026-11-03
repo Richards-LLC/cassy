@@ -1,3 +1,5 @@
+import { appendEmojiText } from "./emoji-text";
+import { syncContextResize } from "./context-resize";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { artifactHref, attachmentSize, attachmentTypeMark } from "./attachment-sheet";
 import type { ConversationHistory } from "./conversation-history";
@@ -64,10 +66,12 @@ export const BLOCKER_HINT = "Reply to unblock";
 /**
  * Open asks and blockers the rail lists (cas-97d58 F09): every one that is
  * waiting, from the same set the bookmark reads, so the two never disagree
- * about what is open. The one the bookmark points at is marked, not dropped.
+ * about what is open. The question the bookmark pins is left out (operator,
+ * 2026-10-29): it shows in its bubble and the banner only, never a third time.
  */
 export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
-  return history?.waiting() ?? [];
+  const pinned = history?.pinnedAsk()?.notification_id;
+  return (history?.waiting() ?? []).filter((reply) => reply.notification_id !== pinned);
 }
 
 /** The open question the bookmark above the composer points at. */
@@ -130,8 +134,8 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
     jump.dataset.kind = reply.kind ?? "ask";
     jump.dataset.replyTo = String(reply.notification_id);
-    const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : "Question";
-    const text = document.createElement("span"); text.className = "context-text"; text.textContent = entryText(reply.message);
+    const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : reply.kind === "secret" ? "Secret" : "Question";
+    const text = document.createElement("span"); text.className = "context-text"; appendEmojiText(document, text, entryText(reply.message));
     jump.append(kind, text);
     // A blocker says how it clears (journey F12); the jump alone did not.
     if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
@@ -195,6 +199,8 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   rail.dataset.open = String(open);
   // A folded rail is an empty 48px track: nothing for assistive tech to land on.
   if (open) rail.removeAttribute("aria-hidden"); else rail.setAttribute("aria-hidden", "true");
-  rail.closest(".conversation-shell")?.classList.toggle("context-open", open);
+  const shell = rail.closest<HTMLElement>(".conversation-shell");
+  shell?.classList.toggle("context-open", open);
+  if (shell) syncContextResize(shell);
   return open;
 }

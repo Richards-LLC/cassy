@@ -392,6 +392,7 @@ impl BuildGuardSnapshot {
 
 /// Evaluate a supplied snapshot. Keeping this pure makes the refusal/force
 /// contract testable without mutating `/proc` or relying on host load.
+#[cfg(test)]
 pub(crate) fn evaluate(
     cpu_count: usize,
     load_1m: Option<f64>,

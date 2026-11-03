@@ -3,8 +3,8 @@
 #
 # Cassy installs a pre-push hook in worker worktrees that delegates here. A
 # push of refs/heads/factory/* must carry a `release-gate.sh --fast-rows` PASS
-# for the pushed tip, the same receipt the park requires, so a second-scale
-# mistake never costs a CI round. An existing same-tip receipt makes a repeat
+# for the pushed tip as early local feedback; CI owns the authoritative
+# proof and park ignores this receipt. An existing same-tip receipt makes a repeat
 # push free. Other refs (epic branches, main) pass through.
 #
 # Override, logged to <git-common-dir>/cas/fast-rows/overrides.log:

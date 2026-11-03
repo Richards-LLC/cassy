@@ -6,6 +6,9 @@ Status: draft for supervisor approval, 2026-09-23.
 
 ## Problem
 
+Historical source snapshot below. Current lifecycle: the merge verdict closes
+or reopens a parked task; workers do not close it again after the merge.
+
 Customers receive deliveries with bugs that anyone would spot by opening the
 product, and deliveries that work but look unfinished. Today the implementer
 is the only agent that runs a user-facing change before it merges. The
@@ -39,9 +42,23 @@ merge. The pass has to live there.
 | Trigger | A Cassy **QA dispatch** created when a user-facing task parks for merge. It is not a supervisor habit and not a task-verifier step. |
 | Who runs it | A separate factory worker on the **taste** lane (`claude-opus-5-5`/high). It is never the implementer, and the rule is enforced in the store. |
 | What it produces | A typed QA verdict (`qa_passes` row: passed/failed/waived) bound to the reviewed branch tip, plus a ledger with evidence. |
-| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and the re-close (backstop). |
+| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and Cassy's post-merge completion (backstop). |
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
+
+## Cross-machine review receipts
+
+QA lifecycle writes carry reserved `QA_PASS_PROOF:` snapshots in the delivery's
+synced task notes. Authenticated owner rows restore them into `qa_passes` on a
+peer, retaining the round, reviewer, implementer and exact reviewed head. QA
+records remain separate from task-verifier approvals. Caller notes cannot mint
+these receipts; stale open snapshots cannot revive a completed round. A verdict
+recorded before its deadline also survives a peer's local timeout.
+
+Publishing the implementer's `bundle.json` also publishes its bounded evidence
+closure. On another host, close restores a missing cited bundle through the
+published artifact records, validates its bytes and reruns the evidence gate.
+The reviewer citation remains separate from the implementer's citation.
 
 ## 1. Which deliveries are user-facing
 
@@ -76,7 +93,27 @@ non-empty reason. The waiver is:
 
 - appended as a `✅ DECISION` task note;
 - recorded on the pass as `state=waived` with the supervisor as issuer;
-- listed with its reason in `coordination action=epic_status`.
+- listed with its reason in `factory action=epic_status`.
+
+### Historical obsolete QA work items
+
+A waiver or superseding round retires its obsolete QA work item. Older stored
+rounds can still have Open children after their delivery closed. Inspect one
+closed delivery with `verification action=qa_status task_id=<delivery>`, then
+use a live registered supervisor to run:
+
+```text
+verification action=qa_reconcile task_id=<closed-delivery> limit=25
+```
+
+This explicit repair cancels at most `limit` obsolete QA children of that
+closed delivery (default 25, range 1–100). Repeat for the same delivery until
+zero are retired. It preserves a work item referenced by a pending, claimed,
+passed, failed or timed-out round, including an active replacement that reused
+an older work-item id. It retains review notes, findings, artifacts and pass
+records; it creates no waiver or replacement verdict. Each cancellation records
+its obsolete pass and delivery in the close reason. `qa_status` and `task ready`
+do not trigger this repair, and the command never scans other deliveries.
 
 The opposite request exists too (cas-74284). A supervisor can ask for a pass
 on a parked delivery that the park did not judge user-facing, for example
@@ -413,7 +450,7 @@ spawn and is retired after its QA task closes.
   with its assignee kept and the ledger cited. An approved verdict writes a
   typed verdict on the pass. Head drift supersedes the pass.
 - **Gates.** `worktree_merge` refuses without a QA pass and accepts with
-  one. The pre-tool guard denies `git merge factory/<w>`. The re-close
+  one. The pre-tool guard denies `git merge factory/<w>`. Cassy's completion
   backstop rejects and then accepts.
 - **Rounds and timeout.** The fourth rejection escalates instead of opening
   a round. An expired deadline times out the pass.

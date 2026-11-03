@@ -42,6 +42,8 @@ export function bindSwipeDismiss(element: HTMLElement, options: SwipeDismissOpti
   let start: { id: number; x: number; y: number } | undefined;
   let engaged = false;
   let dx = 0;
+  let suppressedClick: ((event: Event) => void) | undefined;
+  let clickDeadline: ReturnType<typeof setTimeout> | undefined;
   const reduced = () => options.reducedMotion?.() ?? prefersReducedMotion(element.ownerDocument.defaultView);
   const reset = (animate: boolean) => {
     element.style.transition = animate && !reduced() ? `transform ${EXIT_MS}ms ease-out, opacity ${EXIT_MS}ms ease-out` : "";
@@ -49,13 +51,25 @@ export function bindSwipeDismiss(element: HTMLElement, options: SwipeDismissOpti
     element.style.opacity = "";
     delete element.dataset.swiping;
   };
+  const clearClickSuppression = () => {
+    if (suppressedClick) element.removeEventListener("click", suppressedClick, { capture: true });
+    if (clickDeadline !== undefined) clearTimeout(clickDeadline);
+    suppressedClick = undefined; clickDeadline = undefined;
+  };
   const swallowClick = () => {
-    const stop = (event: Event) => { event.preventDefault(); event.stopPropagation(); };
-    element.addEventListener("click", stop, { capture: true, once: true });
+    clearClickSuppression();
+    suppressedClick = (event: Event) => {
+      clearClickSuppression();
+      event.preventDefault(); event.stopPropagation();
+    };
+    element.addEventListener("click", suppressedClick, { capture: true });
     // Nothing clicked after all: stop swallowing once this gesture's click would have landed.
-    setTimeout(() => element.removeEventListener("click", stop, { capture: true }), 400);
+    clickDeadline = setTimeout(clearClickSuppression, 400);
   };
   const down = (event: PointerEvent) => {
+    // A fresh press is a different gesture, even when a swiped card has just
+    // been restored. Only the swipe's own compatibility click is suppressed.
+    clearClickSuppression();
     if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
     if (!event.isPrimary || start) return;
     start = { id: event.pointerId, x: event.clientX, y: event.clientY };
@@ -103,10 +117,13 @@ export function bindSwipeDismiss(element: HTMLElement, options: SwipeDismissOpti
   element.addEventListener("pointermove", move);
   element.addEventListener("pointerup", up);
   element.addEventListener("pointercancel", cancel);
+  element.addEventListener("keydown", clearClickSuppression);
   return () => {
+    clearClickSuppression();
     element.removeEventListener("pointerdown", down);
     element.removeEventListener("pointermove", move);
     element.removeEventListener("pointerup", up);
     element.removeEventListener("pointercancel", cancel);
+    element.removeEventListener("keydown", clearClickSuppression);
   };
 }

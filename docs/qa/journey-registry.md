@@ -65,6 +65,31 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `safety` | Optional `{mode, forbidden_hosts?, protected_credentials?}` QA policy every journey inherits. `mode` is `fixture-only`, `staging` or `production-read-back`; any other value is a validation problem and renders as fixture-only. `forbidden_hosts` takes hosts, `*.domain` or URLs; `protected_credentials` names environment variables. The QA preflight refuses a round whose environment sets a protected credential or whose `qa.deployed_origins` names a forbidden host. |
 | `journeys` | Required non-empty list. |
 
+### Bug family files
+
+Add each new bug family in `bug-families/<slug>.yaml` beside the registry
+(by default `docs/qa/bug-families/`). Parallel fixes then add different files
+and merge without editing a shared map. The filename stem is the family key;
+the file contains the family itself:
+
+```yaml
+# docs/qa/bug-families/workspace-claim.yaml
+title: Arriving workspace was unclaimed
+tasks: [cas-1234]
+invariants: [INV-CLAIM]
+journeys: [B2-home]
+```
+
+The loader combines immediate `.yaml` and `.yml` files with the optional legacy
+inline `bug_families` map before validation. Keys must be unique across both
+sources; duplicate keys and malformed files fail loading. Journey and invariant
+references resolve against the combined registry. Commit the family file with
+the fix: impact and close-time checks read the files from the same Git snapshot
+as the registry, including when the working tree differs. An unchanged old case
+does not satisfy the close gate for a new bug delivery. The registry header's
+`updated` date describes curation of the main file; adding a family file does
+not require editing that header.
+
 ## Journeys
 
 | Field | Contract |
@@ -385,6 +410,12 @@ G1–G3 run before the merge request, using the committed delivery head and the 
 attributed diff (including deletions and rename sources). They read Git snapshots;
 uncommitted changes do not repair a delivery. Missing registries disable these gates.
 
+After publication, upkeep reads the parked delivery's actual integration merge
+against its first parent. An automatic dist regeneration commit after that merge
+does not replace the source delta or hide its changed bug case. Incoming target
+work and later registry repairs are outside that integration delta; a missing
+or unchanged case still refuses the close.
+
 Header `enforce` accepts `off`, `observe`, `enforce`, or `strict`, and takes precedence
 over local `qa.registry.enforce`. At each revision the local setting is fallback
 only when the header has no policy; its default is `enforce`. A delivery uses the
@@ -406,12 +437,15 @@ projects get the one-release observe window described in
 
 Own a new file in the same delivery to resolve G2. For G3, add or extend the case
 with the invariant that would have caught the incident; an unchanged historical
-case does not cover a new fix. Pre-existing validation debt and an untouched
-malformed registry warn without refusing unrelated delivery.
+case does not cover a new fix. Pre-existing validation debt warns without refusing
+unrelated deliveries. An untouched malformed registry still refuses a bug under
+G3 when its regression-case coverage cannot be evaluated.
 
-An escape requires `task action=notes id=<task> note_type=decision notes="<token> <reason>"`.
-The token starts the decision body and the reason must be non-empty; quoting it in
-progress or warning text does not waive a gate. Retry close after recording it.
+For an escape, copy the refusal's complete `task action=notes` command, retaining
+`<token> delivery=<sha> finding=<id>` and replacing `<reason>` with a non-empty
+reason. Record it after the delivery commit, then retry close. The decision
+applies only to that delivery and finding; an older decision or a token quoted in
+progress or warning text does not waive a gate.
 Authenticated `supervisor_override=true` with a non-empty close reason also waives
 these gates and records the refusal waived.
 

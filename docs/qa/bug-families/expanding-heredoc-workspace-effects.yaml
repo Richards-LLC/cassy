@@ -1,0 +1,4 @@
+title: Heredoc substitutions obey workspace boundaries and ambiguous body pairing, all quoted or unquoted byte boundaries, dollar-quote fragments and continued declarations fail closed while ordinary quoted bodies and escaped markers stay inert
+tasks: [cas-b8ae]
+invariants: []
+journeys: []

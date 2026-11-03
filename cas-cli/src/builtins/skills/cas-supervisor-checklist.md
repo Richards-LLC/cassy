@@ -11,7 +11,7 @@ metadata:
 
 0. **Preflight.** From a connected CAS MCP session, call `system action=preflight`; otherwise run `cas --json factory preflight`. Follow [preflight.md](../cas-supervisor/references/preflight.md), using `factory_blocked` and the finding codes rather than `binary.state` alone. A healthy MCP connection with `factory_blocked=false` and `binary.source_evidence_missing` can continue startup while gathering source comparison evidence; it does not require a rebuild or reconnect.
 
-   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control (or open a fresh supervisor session). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
+   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control, which keeps every worker running. A plain supervisor exit stops every worker in this factory; use `factory action=restart_supervisor` for a new harness or fresh context ([supervisor restart](../cas-supervisor/references/worker-recovery.md#supervisor-restart)). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:
@@ -87,8 +87,8 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 - Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error. `EPIC CLOSE CHECK INCOMPLETE` is resumable: retry the same close until it completes.
 - Confirm task deliverables exist on the epic branch
-- Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
-- Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
+- Run the closeout once, in order: freeze scope; one full review and the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck) together; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
+- Require the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
 ## Session End
 

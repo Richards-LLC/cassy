@@ -21,22 +21,53 @@ impl CasService {
         if config.qa().mode != crate::config::QaMode::Batch {
             return Err(reject("requires qa.mode=batch".into()));
         }
+        // cas-ce5e: `verification_type=release` records the one code-review verdict
+        // for the assembled tip, in the shape of a QA receipt but never as one.
+        let (schema, check_id, stage, label) = match req.verification_type.as_deref() {
+            None | Some("task") => (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa_batch", cas_store::CheckStage::Qa, "Batch QA receipt"),
+            Some("release") => (cas_store::RELEASE_VERDICT_SCHEMA, "release_verdict", cas_store::CheckStage::Verifier, "Release verdict"),
+            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'task' or 'release'"))),
+        };
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
+            required(req.ledger_author.as_deref(), "ledger_author")?,
             req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
             required(req.staging_sha.as_deref(), "staging_sha")?,
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
-            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?))
+            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?),
+            schema)
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={}",
-            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id);
+        // cas-6048: the peer machine's close gate learns it through task sync.
+        crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
+        for (task_id, head) in &receipt.task_heads {
+            crate::quality_ledger::check_run(&self.inner.cas_root, crate::quality_ledger::Check {
+                natural_key: format!("{check_id}|{}|{task_id}", receipt.id),
+                check_id,
+                stage,
+                outcome: cas_store::CheckOutcome::Pass,
+                task_id: Some(task_id),
+                sha: Some(head),
+                minutes: None,
+                link: None,
+                actor: None,
+            });
+        }
+        let note = format!("[{}] {label} {}: staging={} ledger={} recorder={} author={} ({})",
+            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
+            receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
         for task_id in receipt.task_heads.keys() {
+            let note = match receipt.author_overrides.get(task_id) {
+                Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
+                None => note.clone(),
+            };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
         }
-        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+        let closes = self.inner.close_release_covered_deliveries(&receipt).await;
+        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path)))
     }
@@ -123,11 +154,14 @@ impl CasService {
             now,
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
+        crate::qa_pass::sync::record(&cas_root, task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("QA sync receipt failed: {error}")))?;
+        crate::quality_ledger::qa_recorded(&cas_root, &pass, verdict, &ledger_text, &reviewer_id);
         // cas-2ee2: the verdict turns the GitHub required check green or red.
         crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 
-        // Cite the round's bundle on the delivery the same way an
-        // implementer cites its own (`note_type=platform_proof`).
+        // Keep the round's evidence on the delivery with its own citation
+        // role; it must never replace the implementer's producer bundle.
         if let Ok(store) = self.inner.open_task_store() {
             let note = format!(
                 "[{}] 🧪 PLATFORM_PROOF {citation} {} (independent QA round {}, {})",
@@ -335,15 +369,13 @@ impl CasService {
                 ),
             ));
         };
-        let pass = cas_store::waive_qa_pass(
-            &self.inner.cas_root,
+        let (pass, retired) = self.inner.waive_qa_round(
             task_id,
             &supervisor,
             &implementer,
             &branch,
             &chosen.head,
             reason,
-            chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
         // What the receipt adds: why a newer tip was chosen, or that the
@@ -382,7 +414,7 @@ impl CasService {
             ));
         }
         Ok(Self::success(format!(
-            "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.",
+            "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.{retired}",
             pass.head8(),
             pass.id
         )))
@@ -405,6 +437,8 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        crate::qa_pass::sync::record(&self.inner.cas_root, task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let closed = withdrawn
             .as_ref()
             .map(|pass| self.close_withdrawn_qa_task(pass, reason))
@@ -436,6 +470,32 @@ impl CasService {
         self.inner.cancel_withdrawn_qa_task(pass, reason)
     }
 
+    /// Repair one closed delivery's historical orphans without changing QA evidence.
+    pub(super) async fn verification_qa_reconcile(
+        &self, req: VerificationRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let supervisor = self.inner.resolve_live_supervisor_authority()
+            .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                "qa_reconcile requires a live registered supervisor"))?;
+        let task_id = required(req.task_id.as_deref(), "task_id (one closed delivery)")?;
+        let limit = req.limit.unwrap_or(25);
+        if !(1..=100).contains(&limit) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "qa_reconcile limit must be 1..100"));
+        }
+        let task = self.inner.open_task_store()?.get(task_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        if task.status != TaskStatus::Closed {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "qa_reconcile requires a closed delivery; active deliveries use normal QA lifecycle retirement"));
+        }
+        let retired = self.inner.reconcile_obsolete_qa_tasks(task_id, limit, &supervisor.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        Ok(Self::success(format!(
+            "QA reconciliation for {task_id}: {} obsolete QA child(ren) cancelled (limit {limit}). Pass records, findings and current rounds retained.{}",
+            retired.len(), retired.iter().map(|id| format!("\n- {id}")).collect::<String>(),
+        )))
+    }
+
     pub(super) async fn verification_qa_status(
         &self,
         req: VerificationRequest,
@@ -447,8 +507,8 @@ impl CasService {
                 .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
             let (repo, target) = crate::qa_batch::task_context(&self.inner.cas_root, &task)
                 .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
-            let receipt = match task.deliverables.factory_branch_anchor.as_deref() {
-                Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, &task, &repo, &target, head)
+            let receipt = match crate::qa_batch::delivery_anchor(&repo, &task) {
+                Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, &task, &repo, &target, &head)
                     .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?,
                 None => None,
             };
@@ -525,6 +585,7 @@ impl CasService {
             }
         };
         let mut tracked = Vec::new();
+        let mut below_threshold = Vec::new();
         for issue in issues {
             // cas-2849: a finding that names its existing follow-up is linked,
             // not filed again.
@@ -536,6 +597,11 @@ impl CasService {
                 let _ = store.add_dependency(&related);
                 let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
                 tracked.push(format!("{label} by {existing}"));
+                continue;
+            }
+            if !issue.clears_spawn_threshold() {
+                let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
+                below_threshold.push(label.to_string());
                 continue;
             }
             let id = match store.generate_id() {
@@ -564,6 +630,9 @@ impl CasService {
         }
         let mut out = String::new();
         if !filed.is_empty() {
+            if let Some(epic) = epic.as_ref() {
+                crate::mcp::tools::core::task::lifecycle::review_loop::notify_when_tripped(&self.inner.cas_root, &epic.id);
+            }
             let note = format!(
                 "[{}] Independent QA round {} recorded {} pre-existing issue(s) as follow-ups: {} (not counted against this delivery; ledger {ledger_path})",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -577,6 +646,12 @@ impl CasService {
             out.push_str(&format!(
                 "\nPre-existing follow-ups filed (related to {delivery_id}): {}.",
                 filed.join(", ")
+            ));
+        }
+        if !below_threshold.is_empty() {
+            out.push_str(&format!(
+                "\nLeft in the verdict, below the spawn threshold (no repro or affected): {}.",
+                below_threshold.join("; ")
             ));
         }
         if !tracked.is_empty() {

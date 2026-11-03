@@ -7,6 +7,10 @@ keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd
 one transcript per changed status/error code, including refusal cases. The only
 required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
 (captured comparison against vendored contract fixtures, empty when they agree).
+Start with `cas qa ledger init --task <id>` and keep its matrix header/counts.
+The transcript may follow the rows in the same file; an inline transcript row
+uses `LEDGER.md` as its readable evidence path. Run
+`cas qa ledger check <path> --task <id>` before submitting it.
 Record `head_sha: <delivered SHA>` and `origin: <HTTP origin>` in the transcript,
 a PASS/real-build ledger row for approval, then `request: <METHOD> <absolute URL>`,
 `status: <numeric code>` and `body: <captured response>` for each cell.
@@ -20,8 +24,11 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use this bundle with `@playwright/test` `^1.63`.
-Older Playwright means `NOT EXERCISED`. CLI cells use terminal captures.
+Rendered web/hub cells use this bundle with `@playwright/test` **^1.63**.
+Playwright below 1.63 means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
+The 1.64 recording and agent features are optional: use them only when the
+project's installed version supports them. Valid 1.63 captures remain acceptable;
+missing optional 1.64 features do not make a cell NOT EXERCISED.
 
 ## Layout
 
@@ -258,11 +265,59 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
+The example keeps 1.63-compatible recording options. On 1.64, optionally use
+10 fps to reduce encoder backlog: it encodes VP9 automatically and exposes `fps`
+on `use.video`, `recordVideo` and `screencast.start`. Omit `fps` on 1.63.
+Firefox/WebKit capture at most 25 fps. Optional 1.64 action styling uses
+`showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
+`fontSize`; `style.point` and `style.highlight` also accept CSS declarations.
+Use the project's type tokens when styling; see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
+The worked example below is self-contained for other projects. Its chapter
+helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
+styles to the target project's DESIGN.md.
+
+Commander-only, in the Cassy source checkout: replace the inline helper with
+this import (adjust the relative path for the spec). Other projects do not ship
+this repository file:
+
+```ts
+// Commander-only; not a dependency of the generic example below.
+import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
+```
 
 ```ts
 // tests/qa-evidence.spec.ts
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
+
+async function showRecordingChapter(page: Page, title: string, { duration = 1000 } = {}) {
+  const id = `qa-chapter-${randomUUID()}`;
+  await page.evaluate(({ id, title }) => {
+    const host = document.createElement('div');
+    host.id = id;
+    host.setAttribute('aria-hidden', 'true');
+    const root = host.attachShadow({ mode: 'open' });
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(`
+      :host { position: fixed; inset: 0; display: grid; place-items: center;
+        z-index: 2147483647; pointer-events: none; }
+      span { max-width: calc(100vw - 2em); padding: 1em; overflow-wrap: anywhere;
+        background: Canvas; color: CanvasText; font: inherit; }
+    `);
+    root.adoptedStyleSheets = [sheet];
+    const caption = document.createElement('span');
+    caption.textContent = title;
+    root.append(caption);
+    document.body.append(host);
+  }, { id, title });
+  try {
+    // Node time also works when the page clock is paused.
+    await new Promise(resolve => setTimeout(resolve, duration));
+  } finally {
+    if (!page.isClosed()) await page.evaluate(id => document.getElementById(id)?.remove(), id);
+  }
+}
 
 const QA = process.env.QA_ARTIFACTS!;
 const visualChange = true; // match bundle.json visual_change for this delivery
@@ -275,8 +330,8 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await page.goto('/');
 
   if (visualChange) {
-    await page.screencast.showChapter('M01 submit a task filter', {
-      description: 'expect: matching rows update', duration: 1000,
+    await showRecordingChapter(page, 'M01 submit a task filter — expect matching rows update', {
+      duration: 1000,
     });
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('fix');
@@ -285,8 +340,8 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await page.screenshot({ path: `${QA}/M01.png` });
 
   if (visualChange) {
-    await page.screencast.showChapter('M02 query with no matches', {
-      description: 'expect: clear no-results copy', duration: 1000,
+    await showRecordingChapter(page, 'M02 query with no matches — expect clear no-results copy', {
+      duration: 1000,
     });
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('zzz');
@@ -379,8 +434,10 @@ and repeat that path in the close reason.
   filmstrip, so it reports “No screenshot found”.
 - `page.screencast.start()` without `size` records 800×450. Pass
   `page.viewportSize()`.
-- `showChapter` blocks for its `duration` (default 2000 ms). `showActions`
-  returns a disposable; the annotations stop when it is disposed.
+- `showRecordingChapter(page, title, { duration })` blocks for its `duration`
+  (default 1000 ms). Call it only while recording; put the expected result in
+  the title. `showActions` returns a disposable; the annotations stop when it
+  is disposed.
 - `emulateMedia` keeps every feature you omit, so reset all three modes each
   time. A matching `matchMedia` query is the proof that the mode took effect;
   a screenshot identical to the default is not.

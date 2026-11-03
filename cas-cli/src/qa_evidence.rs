@@ -18,8 +18,10 @@ use serde::Deserialize;
 #[path = "qa_journeys.rs"]
 pub mod journeys;
 
-/// Note token that cites a bundle manifest: `qa-bundle: <abs>/bundle.json`.
+/// Note token that cites the implementer's bundle manifest.
 pub const BUNDLE_CITATION: &str = "qa-bundle:";
+/// Independent-review evidence, never a producer close-gate citation.
+pub const REVIEW_BUNDLE_CITATION: &str = "qa-review-bundle:";
 /// Same-line (or preceding-line) escape for a deliberate skip marker.
 pub const ALLOW_SKIP: &str = "cas-allow-skip:";
 /// Where the contract's worked example and producing commands live.
@@ -437,16 +439,26 @@ pub(crate) fn validate_cited_pair_coverage(
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the
-/// implementer's own. cas-619f cites each independent round's bundle on the
-/// same delivery task (`<task>/independent-qa/round-<n>/bundle.json`); those
-/// are the reviewer's evidence and never stand in for, or shadow, the
-/// implementer's bundle.
+/// implementer's own. New independent rounds use `qa-review-bundle:`.
+/// Older rounds used this marker too, with a same-line independent-round
+/// suffix or an `/independent-qa/` path; neither shadows producer evidence,
+/// including when the reviewer kept its bundle under a separate task root.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {
     notes
         .match_indices(BUNDLE_CITATION)
         .filter_map(|(index, token)| {
-            notes[index + token.len()..]
-                .split_whitespace()
+            // Proof records carry quoted audit fields, not producer citations.
+            // A review summary mentioning qa-bundle must not shadow the note.
+            let line_start = notes[..index].rfind('\n').map_or(0, |offset| offset + 1);
+            if cas_store::task_note_markers::is_reserved_line(&notes[line_start..]) {
+                return None;
+            }
+            let rest = &notes[index + token.len()..];
+            let line = rest.lines().next()?;
+            if line.contains("(independent QA round ") {
+                return None;
+            }
+            rest.split_whitespace()
                 .next()
                 .map(|raw| {
                     // Sentence punctuation may sit outside or inside quoting:
@@ -617,15 +629,21 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     }
     // Use the same visual classification as the media-mode captures below.
     // Optional recordings still undergo containment, content and freshness checks.
-    match files.receipt.as_deref().filter(|value| !value.trim().is_empty()) {
+    match files
+        .receipt
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         Some(relative) => listed.push((
             "receipt".to_string(),
             resolve_bundle_file(&bundle_dir, "receipt", relative)?,
         )),
-        None if manifest.visual_change => return Err(EvidenceRefusal::new(
-            "incomplete: bundle.json lists no files.receipt for a visual change (visual_change is true)",
-            producing_command("receipt", &bundle_dir),
-        )),
+        None if manifest.visual_change => {
+            return Err(EvidenceRefusal::new(
+                "incomplete: bundle.json lists no files.receipt for a visual change (visual_change is true)",
+                producing_command("receipt", &bundle_dir),
+            ));
+        }
         None => {}
     }
     if files.cells.is_empty() {
@@ -638,12 +656,26 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         ));
     }
     let advisories = pair_declaration(
-        ctx, manifest.visual_change, files.pairs.is_some(),
-        &manifest.pairs_status, &manifest.pairs_reason,
+        ctx,
+        manifest.visual_change,
+        files.pairs.is_some(),
+        &manifest.pairs_status,
+        &manifest.pairs_reason,
     )?;
-    let pair_files = files.pairs.as_deref()
-        .map(|relative| validate_pairs(ctx, &bundle_dir, relative, &manifest.head_sha, &manifest.pairs_status))
-        .transpose()?.unwrap_or_default();
+    let pair_files = files
+        .pairs
+        .as_deref()
+        .map(|relative| {
+            validate_pairs(
+                ctx,
+                &bundle_dir,
+                relative,
+                &manifest.head_sha,
+                &manifest.pairs_status,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
     listed.extend(pair_files.current);
     for suffix in POLISH_RENDERS {
         if !files
@@ -752,7 +784,12 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     let rebound_paths = if !head_covers_delivery
         && journeys::doc_only_rebind(ctx.repo, &manifest.head_sha, ctx.delivered_head)
     {
-        Some(checked_rebind_paths(ctx, &manifest.head_sha, ctx.delivered_head, &rerun)?)
+        Some(checked_rebind_paths(
+            ctx,
+            &manifest.head_sha,
+            ctx.delivered_head,
+            &rerun,
+        )?)
     } else {
         None
     };
@@ -770,20 +807,29 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     // already carry an explicit documentation-only rebind.
     let delivered_time = if !manifest.executed_head_sha.is_empty() {
         if !journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
-            return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
+            return Err(EvidenceRefusal::new(
+                "QA evidence rebind changed product or journey inputs",
+                rerun,
+            ));
         }
         checked_rebind_paths(ctx, &manifest.executed_head_sha, &manifest.head_sha, &rerun)?;
-        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
-            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
+        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(|| {
+            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone())
+        })?
     } else if rebound_paths.is_some() {
-        committer_time(ctx.repo, &manifest.head_sha).ok_or_else(||
-            EvidenceRefusal::new("recorded QA revision is unreadable", rerun.clone()))?
+        committer_time(ctx.repo, &manifest.head_sha).ok_or_else(|| {
+            EvidenceRefusal::new("recorded QA revision is unreadable", rerun.clone())
+        })?
     } else {
         delivered_time
     };
     if let Some(deployed) = manifest.deployed.as_ref() {
         let deployed_ctx = EvidenceContext {
-            delivered_head: if rebound_paths.is_some() { &manifest.head_sha } else { ctx.delivered_head },
+            delivered_head: if rebound_paths.is_some() {
+                &manifest.head_sha
+            } else {
+                ctx.delivered_head
+            },
             ..*ctx
         };
         check_deployed_binding(&deployed_ctx, deployed, &listed, &rerun)?;
@@ -894,8 +940,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             else {
                 return Err(missing_key("visual_qa_baseline_json"));
             };
-            let baseline =
-                resolve_bundle_file(&bundle_dir, "visual_qa_baseline_json", relative)?;
+            let baseline = resolve_bundle_file(&bundle_dir, "visual_qa_baseline_json", relative)?;
             check_visual_qa_scoped_at(
                 &visual_qa_json,
                 &baseline,
@@ -903,12 +948,12 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
                 &delivered_label,
                 deployed_origin.as_deref(),
             )
-                .map_err(|problem| {
-                    EvidenceRefusal::new(
-                        problem,
-                        producing_command("visual_qa_baseline_json", &bundle_dir),
-                    )
-                })?;
+            .map_err(|problem| {
+                EvidenceRefusal::new(
+                    problem,
+                    producing_command("visual_qa_baseline_json", &bundle_dir),
+                )
+            })?;
         }
         other => {
             return Err(EvidenceRefusal::new(
@@ -976,39 +1021,50 @@ fn checked_rebind_paths(
     rerun: &str,
 ) -> Result<Vec<String>, EvidenceRefusal> {
     use std::collections::{BTreeMap, BTreeSet};
-    let unreadable = |error| EvidenceRefusal::new(
-        format!("uncheckable QA evidence rebind: {error}"), rerun,
-    );
+    let unreadable =
+        |error| EvidenceRefusal::new(format!("uncheckable QA evidence rebind: {error}"), rerun);
     // This follows the path proof. A failed Git read is not a stale-build verdict.
     let diff = crate::qa_impact::io::git(ctx.repo, &["diff", "--name-only", from, to, "--"])
         .map_err(|error| unreadable(error.to_string()))?;
     let paths: Vec<String> = diff.lines().map(str::to_owned).collect();
-    let registry = ctx.rebind_scope.map(|(qa, _)| qa.registry.path.as_str())
+    let registry = ctx
+        .rebind_scope
+        .map(|(qa, _)| qa.registry.path.as_str())
         .unwrap_or(crate::qa_registry::DEFAULT_PATH);
     if !paths.iter().any(|path| path == registry) {
         return Ok(paths);
     }
-    let (qa, files) = ctx.rebind_scope.ok_or_else(||
-        unreadable("registry changed but the delivery's QA scope is unavailable".into()))?;
-    let changes: Vec<_> = files.iter().map(crate::qa_impact::Change::modified).collect();
+    let (qa, files) = ctx.rebind_scope.ok_or_else(|| {
+        unreadable("registry changed but the delivery's QA scope is unavailable".into())
+    })?;
+    let changes: Vec<_> = files
+        .iter()
+        .map(crate::qa_impact::Change::modified)
+        .collect();
     let selected = |head| {
         crate::qa_impact::analyze(ctx.repo, qa, &changes, None, Some(head))
             .map(|impact| {
                 let safety = impact.safety;
-                let journeys = impact.journeys.into_iter().map(|journey| {
-                    let invariants = journey.invariants.into_iter()
-                        .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
-                        .collect::<BTreeMap<_, _>>();
-                    (
-                        journey.id,
+                let journeys = impact
+                    .journeys
+                    .into_iter()
+                    .map(|journey| {
+                        let invariants = journey
+                            .invariants
+                            .into_iter()
+                            .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
+                            .collect::<BTreeMap<_, _>>();
                         (
-                            journey.status,
-                            journey.kind,
-                            journey.evidence_required,
-                            invariants,
-                        ),
-                    )
-                }).collect::<BTreeMap<_, _>>();
+                            journey.id,
+                            (
+                                journey.status,
+                                journey.kind,
+                                journey.evidence_required,
+                                invariants,
+                            ),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
                 (journeys, safety)
             })
             .map_err(|error| unreadable(error.to_string()))
@@ -1016,8 +1072,11 @@ fn checked_rebind_paths(
     let (before, before_safety) = selected(from)?;
     let (after, after_safety) = selected(to)?;
     let safety_changed = before_safety != after_safety;
-    let changed: BTreeSet<_> = before.keys().chain(after.keys())
-        .filter(|id| before.get(*id) != after.get(*id)).collect();
+    let changed: BTreeSet<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|id| before.get(*id) != after.get(*id))
+        .collect();
     let mut affected = changed.clone();
     if safety_changed {
         affected.extend(before.keys());
@@ -1028,7 +1087,9 @@ fn checked_rebind_paths(
         for id in &affected {
             let old = before.get(*id).map(|(_, _, _, invariants)| invariants);
             let new = after.get(*id).map(|(_, _, _, invariants)| invariants);
-            for key in old.into_iter().flat_map(|m| m.keys())
+            for key in old
+                .into_iter()
+                .flat_map(|m| m.keys())
                 .chain(new.into_iter().flat_map(|m| m.keys()))
             {
                 if old.and_then(|m| m.get(key)) != new.and_then(|m| m.get(key)) {
@@ -1036,12 +1097,23 @@ fn checked_rebind_paths(
                 }
             }
         }
-        return Err(EvidenceRefusal::new(format!(
-            "registry coverage changed: journeys [{}]; invariants [{}]; safety policy {}",
-            affected.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", "),
-            invariants.into_iter().collect::<Vec<_>>().join(", "),
-            if safety_changed { "changed" } else { "unchanged" },
-        ), rerun));
+        return Err(EvidenceRefusal::new(
+            format!(
+                "registry coverage changed: journeys [{}]; invariants [{}]; safety policy {}",
+                affected
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                invariants.into_iter().collect::<Vec<_>>().join(", "),
+                if safety_changed {
+                    "changed"
+                } else {
+                    "unchanged"
+                },
+            ),
+            rerun,
+        ));
     }
     Ok(paths)
 }
@@ -1108,7 +1180,10 @@ impl VisualQaRun {
                     let mut issue = issue.clone();
                     if let Some(object) = issue.as_object_mut()
                         && !page.is_empty()
-                        && object.get("url").and_then(serde_json::Value::as_str).is_none_or(str::is_empty)
+                        && object
+                            .get("url")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(str::is_empty)
                     {
                         object.insert("url".into(), serde_json::Value::String(page.to_string()));
                     }
@@ -1181,7 +1256,11 @@ pub fn check_visual_qa_run_at(
         {
             return Err(format!(
                 "{claim} {} records totalIssues={:?}, validRenders={:?}/{}, strict={:?}; a single-source pass needs zero issues and every render valid under --strict",
-                report.display(), run.total_issues, run.valid_renders, run.renders.len(), run.strict
+                report.display(),
+                run.total_issues,
+                run.valid_renders,
+                run.renders.len(),
+                run.strict
             ));
         }
     } else if run.status != "PASS" || run.total_issues.is_some_and(|issues| issues > 0) {
@@ -1368,8 +1447,12 @@ fn visual_qa_finding_context(finding: &serde_json::Value) -> String {
 
 fn visual_qa_finding_path(finding: &serde_json::Value, field: &str) -> String {
     // Whitespace inside quoted CSS attribute values is significant.
-    normalize_random_ids(finding.get(field).and_then(serde_json::Value::as_str)
-        .unwrap_or_default())
+    normalize_random_ids(
+        finding
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 fn visual_qa_selector(finding: &serde_json::Value) -> String {
@@ -1428,8 +1511,13 @@ fn visual_qa_bounds_pair(
 
 /// Measured defect details the producer records. A translated finding must
 /// carry identical values, so a moved element whose defect changed is new.
-const VISUAL_QA_TRANSLATION_METRICS: [&str; 5] =
-    ["ratio", "threshold", "foreground", "background", "largeText"];
+const VISUAL_QA_TRANSLATION_METRICS: [&str; 5] = [
+    "ratio",
+    "threshold",
+    "foreground",
+    "background",
+    "largeText",
+];
 
 /// GH #1321: an element's identity across builds. An inserted sibling shifts
 /// every later `:nth-of-type(n)`, so prefer the element's own `#id` or
@@ -1628,9 +1716,10 @@ pub fn check_visual_qa_scoped_at(
     )?;
     let base_run = read_visual_qa_run(baseline, claim)?;
     let base_targets = check_run_provenance(&base_run, baseline, claim, None, None)?;
-    let (Some(tip_findings), Some(base_findings)) =
-        (tip_run.comparable_findings(), base_run.comparable_findings())
-    else {
+    let (Some(tip_findings), Some(base_findings)) = (
+        tip_run.comparable_findings(),
+        base_run.comparable_findings(),
+    ) else {
         return Err(format!(
             "{claim} {} and {} must both record their findings, as a top-level `findings` list (the builtin visual-qa.mjs) or per render as `renders[].issues` (a per-source project visual-qa.mjs), so the two runs can be compared",
             tip.display(),
@@ -1638,8 +1727,10 @@ pub fn check_visual_qa_scoped_at(
         ));
     };
     let (tip_findings, base_findings) = (&tip_findings, &base_findings);
-    let base_pages: std::collections::BTreeSet<String> =
-        base_targets.iter().map(|target| visual_qa_page(target)).collect();
+    let base_pages: std::collections::BTreeSet<String> = base_targets
+        .iter()
+        .map(|target| visual_qa_page(target))
+        .collect();
     let missing: Vec<String> = tip_targets
         .iter()
         .map(|target| visual_qa_page(target))
@@ -1663,7 +1754,11 @@ pub fn check_visual_qa_scoped_at(
             introduced.len(),
             tip.display(),
             shown.join("; "),
-            if introduced.len() > shown.len() { "; …" } else { "" }
+            if introduced.len() > shown.len() {
+                "; …"
+            } else {
+                ""
+            }
         ));
     }
     Ok(ScopedVisualQa {
@@ -1700,7 +1795,9 @@ fn check_deployed_declaration(
     };
     if is_local_origin(&origin) {
         return Err(EvidenceRefusal::new(
-            format!("a deployed-origin run that names a local origin ({origin}); a local build needs no deployed declaration"),
+            format!(
+                "a deployed-origin run that names a local origin ({origin}); a local build needs no deployed declaration"
+            ),
             "remove `deployed` from bundle.json".to_string(),
         ));
     }
@@ -1815,7 +1912,7 @@ fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
 /// Largest single text or trace entry the secret scan reads.
 const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-fn first_secret(text: &str) -> Option<&'static str> {
+pub(crate) fn first_secret(text: &str) -> Option<&'static str> {
     secret_patterns()
         .iter()
         .find(|(_, pattern)| {
@@ -1861,7 +1958,10 @@ fn json_value_has_secret(quoted_value: &str) -> bool {
 /// trace (Playwright records request headers there), naming the file and
 /// the kind of secret, never its value. A saved storage-state file anywhere
 /// in the bundle is refused by name.
-fn check_no_secrets(bundle_dir: &Path, listed: &[(String, PathBuf)]) -> Result<(), EvidenceRefusal> {
+fn check_no_secrets(
+    bundle_dir: &Path,
+    listed: &[(String, PathBuf)],
+) -> Result<(), EvidenceRefusal> {
     let fix = "re-record without credentials: saved storage-state files and real cookie/authorization values of 8 or more characters are refused; redact each entire value to exactly REDACTED, [REDACTED], <redacted>, ***, or empty before listing the trace; JWT, bearer and API tokens remain refused".to_string();
     if let Ok(entries) = std::fs::read_dir(bundle_dir) {
         for entry in entries.flatten() {
@@ -2013,7 +2113,7 @@ fn resolve_inside_task_dir(
     Ok(resolved)
 }
 
-fn resolve_bundle_file(
+pub(crate) fn resolve_bundle_file(
     bundle_dir: &Path,
     key: &str,
     relative: &str,
@@ -2109,8 +2209,10 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         match kind {
-            "after" if steps.get(call).is_some_and(|(_, expect)| *expect)
-                && !expect_has_expect_ancestor(call, &steps) => {
+            "after"
+                if steps.get(call).is_some_and(|(_, expect)| *expect)
+                    && !expect_has_expect_ancestor(call, &steps) =>
+            {
                 if event.get("error").is_some_and(|error| !error.is_null()) {
                     summary.failed += 1;
                 } else {
@@ -2157,7 +2259,10 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
 pub(crate) fn validate_api_evidence(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
     let fix = "capture request:, status: and body: per changed status/refusal in LEDGER.md against the named real build; record head_sha: and origin:, plus contracts.diff against vendored fixtures (cas-qa-craft references/evidence-bundle.md)";
     let refuse = |problem: &str| EvidenceRefusal::new(problem, fix);
-    let root = ctx.task_artifacts_dir.canonicalize().map_err(|_| refuse("missing API evidence directory"))?;
+    let root = ctx
+        .task_artifacts_dir
+        .canonicalize()
+        .map_err(|_| refuse("missing API evidence directory"))?;
     let mut files = Vec::new();
     for name in ["LEDGER.md", "contracts.diff"] {
         let path = resolve_bundle_file(&root, name, name)?;
@@ -2167,42 +2272,83 @@ pub(crate) fn validate_api_evidence(ctx: &EvidenceContext<'_>) -> Result<PathBuf
         if committer_time(ctx.repo, ctx.delivered_head)
             .is_some_and(|at| mtime_secs(&path).is_none_or(|mtime| mtime < at))
         {
-            return Err(refuse(&format!("stale API evidence: {name} predates the delivered commit")));
+            return Err(refuse(&format!(
+                "stale API evidence: {name} predates the delivered commit"
+            )));
         }
         files.push((name.to_string(), path));
     }
     check_no_secrets(&root, &files)?;
     let ledger = &files[0].1;
     let body = std::fs::read_to_string(ledger).map_err(|_| refuse("unreadable HTTP transcript"))?;
-    let field = |name: &str| body.lines().find_map(|line| line.strip_prefix(name)).map(str::trim);
+    let field = |name: &str| {
+        body.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim)
+    };
     if field("head_sha:") != Some(ctx.delivered_head) {
-        return Err(refuse("API transcript head_sha does not match the delivered commit"));
+        return Err(refuse(
+            "API transcript head_sha does not match the delivered commit",
+        ));
     }
-    let origin = field("origin:").and_then(url_origin).ok_or_else(|| refuse("API transcript has no HTTP origin"))?;
+    let origin = field("origin:")
+        .and_then(url_origin)
+        .ok_or_else(|| refuse("API transcript has no HTTP origin"))?;
     if !is_local_origin(&origin) {
-        if !ctx.deployed_origins.iter().any(|allowed| url_origin(allowed).as_deref() == Some(origin.as_str())) {
+        if !ctx
+            .deployed_origins
+            .iter()
+            .any(|allowed| url_origin(allowed).as_deref() == Some(origin.as_str()))
+        {
             return Err(refuse("API origin is not in qa.deployed_origins"));
         }
         let sha = field("deployed_sha:").unwrap_or_default();
         if !is_full_sha(sha)
-            || (sha != ctx.delivered_head && git(ctx.repo, &["merge-base", "--is-ancestor", ctx.delivered_head, sha]).is_none())
+            || (sha != ctx.delivered_head
+                && git(
+                    ctx.repo,
+                    &["merge-base", "--is-ancestor", ctx.delivered_head, sha],
+                )
+                .is_none())
             || !field("deployment_proof:").is_some_and(|proof| proof.contains(sha))
         {
-            return Err(refuse("API deployment needs deployed_sha covering this commit and deployment_proof from its version endpoint, inline in LEDGER.md"));
+            return Err(refuse(
+                "API deployment needs deployed_sha covering this commit and deployment_proof from its version endpoint, inline in LEDGER.md",
+            ));
         }
     }
-    let requests: Vec<_> = body.lines().filter_map(|line| line.strip_prefix("request:")).collect();
-    let statuses: Vec<_> = body.lines().filter_map(|line| line.strip_prefix("status:")).collect();
-    let bodies = body.lines().filter(|line| line.starts_with("body:")).count();
-    if requests.is_empty() || statuses.len() != requests.len() || bodies != requests.len()
+    let requests: Vec<_> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("request:"))
+        .collect();
+    let statuses: Vec<_> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("status:"))
+        .collect();
+    let bodies = body
+        .lines()
+        .filter(|line| line.starts_with("body:"))
+        .count();
+    if requests.is_empty()
+        || statuses.len() != requests.len()
+        || bodies != requests.len()
         || requests.iter().any(|request| {
             let mut parts = request.split_whitespace();
-            !matches!(parts.next(), Some("GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"))
-                || parts.next().and_then(url_origin).as_deref() != Some(origin.as_str())
+            !matches!(
+                parts.next(),
+                Some("GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS")
+            ) || parts.next().and_then(url_origin).as_deref() != Some(origin.as_str())
         })
-        || statuses.iter().any(|status| !status.trim().parse::<u16>().is_ok_and(|code| (100..=599).contains(&code)))
+        || statuses.iter().any(|status| {
+            !status
+                .trim()
+                .parse::<u16>()
+                .is_ok_and(|code| (100..=599).contains(&code))
+        })
     {
-        return Err(refuse("API transcript needs matching HTTP request, numeric status and body captures"));
+        return Err(refuse(
+            "API transcript needs matching HTTP request, numeric status and body captures",
+        ));
     }
     Ok(ledger.clone())
 }
@@ -2247,44 +2393,29 @@ fn validate_ledger_receipt(
             command,
         ));
     }
-    let mut has_pass = false;
-    let mut deferred = Vec::new();
-    for line in body.lines() {
-        let cells: Vec<&str> = line
-            .trim()
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
-        has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
-        if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {
-            continue;
-        }
-        let owner = cells
-            .get(6)
-            .and_then(|cell| cell.strip_prefix("deferred: deployed-verification owner="));
-        let Some(owner) = owner.filter(|owner| {
-            !owner.is_empty() && !owner.chars().any(|c| c.is_whitespace() || c.is_control())
-        }) else {
-            return Err(EvidenceRefusal::new(
-                "invalid deployed-verification deferral: expected `deferred: deployed-verification owner=<registered supervisor>`",
-                command,
-            ));
-        };
-        let row_id = cells[0];
-        if row_id.is_empty() {
-            return Err(EvidenceRefusal::new(
-                "invalid deployed-verification deferral: row id is empty",
-                command,
-            ));
-        }
-        deferred.push(DeferredDeployedVerification {
-            row_id: row_id.into(),
-            owner: owner.into(),
-            ledger: ledger.clone(),
-        });
+    let report = crate::qa_ledger::check(&ledger, 1);
+    if !report.ok {
+        return Err(EvidenceRefusal::new(
+            report.refusal(),
+            format!("cas qa ledger check {}", ledger.display()),
+        ));
     }
+    let has_pass = report
+        .rows
+        .iter()
+        .any(|row| row.verdict == crate::qa_ledger::Verdict::Pass && row.label == "real-build");
+    let deferred: Vec<_> = report
+        .rows
+        .iter()
+        .filter_map(|row| {
+            row.deferred_owner()
+                .map(|owner| DeferredDeployedVerification {
+                    row_id: row.id.clone(),
+                    owner: owner.into(),
+                    ledger: ledger.clone(),
+                })
+        })
+        .collect();
     if !has_pass && deferred.is_empty() {
         return Err(EvidenceRefusal::new(
             format!(
@@ -2578,8 +2709,14 @@ pub fn delivery_range(
 /// the target to its root. Unlike --boundary, this cannot mistake a merged
 /// second parent for a first-parent receipt. Roots have no delivery boundary.
 pub(crate) fn receipt_on_first_parent(repo: &Path, head: &str, target: &str) -> Option<bool> {
-    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
-    let commits = git(repo, &["rev-list", "--first-parent", &format!("{head}^1..{target}")])?;
+    let full_head = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
+    )?;
+    let commits = git(
+        repo,
+        &["rev-list", "--first-parent", &format!("{head}^1..{target}")],
+    )?;
     Some(commits.lines().any(|commit| commit == full_head))
 }
 
@@ -2590,13 +2727,24 @@ pub(crate) fn receipt_delivery_base(
     head: &str,
     recorded_base: Option<&str>,
 ) -> Option<String> {
-    let base = recorded_base.map(str::to_owned).unwrap_or_else(|| format!("{head}^1"));
-    let full_base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?;
-    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    let base = recorded_base
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{head}^1"));
+    let full_base = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )?;
+    let full_head = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
+    )?;
     if full_base == full_head {
         return None;
     }
-    git(repo, &["merge-base", "--is-ancestor", &full_base, &full_head])?;
+    git(
+        repo,
+        &["merge-base", "--is-ancestor", &full_base, &full_head],
+    )?;
     Some(base)
 }
 
@@ -2624,7 +2772,16 @@ pub fn range_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
 /// listed path is confirmed with it.
 pub(crate) fn content_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
     let listing = Command::new("git")
-        .args(["diff", "-w", "--diff-filter=ACMRT", "--name-only", "-z", from, to, "--"])
+        .args([
+            "diff",
+            "-w",
+            "--diff-filter=ACMRT",
+            "--name-only",
+            "-z",
+            from,
+            to,
+            "--",
+        ])
         .current_dir(repo)
         .output()
         .map_err(|error| format!("git diff failed to start: {error}"))?;
@@ -2640,7 +2797,15 @@ pub(crate) fn content_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<Str
         .filter(|path| !path.is_empty())
     {
         let probe = Command::new("git")
-            .args(["diff", "-w", "--quiet", "--diff-filter=ACMRT", from, to, "--"])
+            .args([
+                "diff",
+                "-w",
+                "--quiet",
+                "--diff-filter=ACMRT",
+                from,
+                to,
+                "--",
+            ])
             // `--name-only` paths are top-relative; so is this pathspec (cas-833c).
             .arg(format!(":(top,literal){path}"))
             .current_dir(repo)
@@ -2649,7 +2814,11 @@ pub(crate) fn content_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<Str
         match probe.code() {
             Some(0) => {}
             Some(1) => paths.push(path.to_string()),
-            _ => return Err(format!("git diff -w --quiet {from} {to} -- {path} failed: {probe}")),
+            _ => {
+                return Err(format!(
+                    "git diff -w --quiet {from} {to} -- {path} failed: {probe}"
+                ));
+            }
         }
     }
     Ok(paths)
@@ -2746,7 +2915,10 @@ pub fn run_close_gate_with_write_dir(
         if ctx.task_artifacts_dir != write_dir
             && !command.contains(write_dir.to_string_lossy().as_ref())
         {
-            let write_ctx = EvidenceContext { task_artifacts_dir: write_dir, ..*ctx };
+            let write_ctx = EvidenceContext {
+                task_artifacts_dir: write_dir,
+                ..*ctx
+            };
             command.push_str(&format!("; {}", cite_command(&write_ctx)));
         }
         format!(
@@ -2758,8 +2930,12 @@ pub fn run_close_gate_with_write_dir(
         )
     };
     if tier != EvidenceTier::None && reasons.iter().any(|reason| reason.starts_with("api:")) {
-        let transcript = validate_api_evidence(ctx).map_err(|refusal| reject(refusal, "API evidence"))?;
-        pass.notes.push(format!("API HTTP transcript and contract diff accepted: {}.", transcript.display()));
+        let transcript =
+            validate_api_evidence(ctx).map_err(|refusal| reject(refusal, "API evidence"))?;
+        pass.notes.push(format!(
+            "API HTTP transcript and contract diff accepted: {}.",
+            transcript.display()
+        ));
     }
     match tier {
         EvidenceTier::None => {}

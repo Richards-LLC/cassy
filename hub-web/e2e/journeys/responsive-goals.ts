@@ -26,7 +26,7 @@ export async function showConversationList(page: Page): Promise<void> {
 }
 export async function openConversation(page: Page, project: string): Promise<void> {
   await showConversationList(page);
-  await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) }));
+  await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) }).and(page.locator(".conversation-row")));
   await expect(page.getByRole("button", { name: `Send to the ${project} supervisor`, exact: true })).toBeVisible();
 }
 export async function declaredChoice(page: Page, name: string): Promise<Locator> {
@@ -50,18 +50,19 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
     await expect(list).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations");
     await search.fill("atlas");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
     await openConversation(page, "cas-src");
     await expect(list).toBeHidden();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
   });
   await journey.stage("A question arrives while reading another machine", async () => {
     await openConversation(page, "gabber-studio");
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone find-conversation socket never opened before the supervisor question" }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Which lane should go first?", { kind: "ask", options: ["Linux first", "Mac first"] });
     await showConversationList(page);
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
     await search.fill("cas-src");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
     await openConversation(page, "cas-src");
     await expect(page.getByRole("log")).toContainText("Which lane should go first?");
   });
@@ -70,9 +71,9 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
     await activate(page, await declaredChoice(page, "Linux first"));
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Linux first", in_reply_to: ask });
     await showConversationList(page);
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByRole("img", { name: "Waiting for you", exact: true })).toHaveCount(0);
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toHaveCount(0);
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.locator(".conversation-row")).toHaveCount(2);
   });
 }
 
@@ -151,6 +152,7 @@ export async function phoneAsk(page: Page, journey: Journey): Promise<void> {
   await journey.stage("Read the actual question on the phone, opening its folded form when needed", async () => {
     await journey.open(); await openConversation(page, "cas-src");
     await page.getByRole("textbox", { name: "Your message" }).focus();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone answer-question socket never opened before the supervisor question" }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Fix the gate in this patch or send it back for review?", { kind: "ask", options: ["Fix the gate", "Send for review"] });
     await declaredChoice(page, "Fix the gate");
     await expect(page.getByRole("log")).toContainText("Fix the gate in this patch");
@@ -179,6 +181,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.stage("Read a supervisor message, then use Back to reach Appearance on the phone", async () => {
     await journey.open(); await openConversation(page, "cas-src");
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
     hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
     await expect(page.getByRole("log")).toContainText("Linux lane is green");
     await showConversationList(page);
@@ -198,7 +201,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
     await page.emulateMedia({ forcedColors: "active" });
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     await showConversationList(page);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
     await openConversation(page, "cas-src");
     const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
     const style = await send.evaluate(element => { const css = getComputedStyle(element); return { border: css.borderTopStyle, color: css.color, background: css.backgroundColor }; });

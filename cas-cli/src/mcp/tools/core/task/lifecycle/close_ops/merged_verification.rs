@@ -35,6 +35,15 @@ impl CasCore {
         }) {
             return Ok(());
         }
+        // cas-5207: a Tier 0 delivery gets no dispatch here either. The close that
+        // follows records the tier. cas-ce5e: nor does one the release verdict owns.
+        if latest_dispatch.is_none()
+            && (super::super::review_tier::tier_for_delivery(task, repo).is_some_and(|decision| {
+                decision.tier == super::super::review_tier::VerificationTier::Mechanical
+            }) || super::super::review_tier::release_verdict_owns(&self.cas_root, task, repo))
+        {
+            return Ok(());
+        }
         // A task with no typed dispatch keeps the close gate's legacy
         // authority: an undispatched approval still authorizes close, so a
         // fresh dispatch here would only void it.
@@ -53,6 +62,8 @@ impl CasCore {
         {
             return Ok(());
         }
+        super::super::qa_evidence_gate::ledger_preflight(&self.cas_root, task, true)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let anchors = super::super::repository_proof::delivered_anchor_commits(
             repo,
             Some(target),
@@ -91,10 +102,16 @@ impl CasCore {
                 format!("Cannot prepare merged-delivery verification dispatch: {error}"),
             )
         })?;
+        // cas-6a8b: a merge may already have answered COMMITTED while this
+        // close continues in the background. Its response cannot carry a
+        // dispatch created later, even when requester and owner are the same
+        // supervisor. Always queue the typed wake; the emitter deduplicates
+        // by dispatch id, independently of the response and outcome note.
         // This creates a review destination, not an approval or an exemption
         // from ancestry, content, QA, or any later close gate.
         if let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_root)
             && let Err(error) = super::super::supervisor_push::emit_verification_dispatch_handoff(
+                &self.cas_root,
                 queue.as_ref(),
                 &dispatch.id,
                 &task.id,

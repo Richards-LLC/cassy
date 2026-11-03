@@ -137,6 +137,49 @@ impl Fixture {
         store.register(&worker).unwrap();
     }
 
+    fn supervisor_turn(&self, cli: &str, text: &str) {
+        let account = self.root.path().join(cli);
+        let session_id = "019f84af-3121-7950-ba14-b01db2da1154";
+        let now = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let (path, records) = if cli == "codex" {
+            (
+                account.join(format!("sessions/2026/10/15/rollout-{session_id}.jsonl")),
+                vec![
+                    serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"cwd":self.root.path(),"originator":"codex-tui","source":"cli"}}),
+                    serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"consumed"}}),
+                    serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}],"internal_chat_message_metadata_passthrough":{"turn_id":"consumed"}}}),
+                ],
+            )
+        } else {
+            let slug = self.root.path().to_string_lossy().replace(['/', '.'], "-");
+            (
+                account.join(format!("projects/{slug}/{session_id}.jsonl")),
+                vec![
+                    serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","message":{"role":"user","content":text}}),
+                ],
+            )
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let store = open_agent_store(&self.cas_dir).unwrap();
+        let mut agent = store.get(&format!("{SUPERVISOR}-id")).unwrap();
+        agent.cc_session_id = Some(session_id.into());
+        agent.metadata.insert("supervisor_cli".into(), cli.into());
+        agent.metadata.insert(
+            "worker_account_dir".into(),
+            account.to_string_lossy().into(),
+        );
+        agent.metadata.insert(
+            "clone_path".into(),
+            self.root.path().to_string_lossy().into(),
+        );
+        store.register(&agent).unwrap();
+    }
+
     fn scan(&mut self) -> Vec<cas_store::QueuedPrompt> {
         self.daemon
             .pane_silent_since
@@ -613,15 +656,65 @@ fn cas_07ee_unreadable_recipient_registry_still_needs_attention() {
 }
 
 #[test]
+fn registered_recycle_retries_lost_state_before_later_shutdown_cas_f501() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let spawns = open_spawn_queue_store(&f.cas_dir).unwrap();
+    let request = spawns.enqueue_recycle("worker", None, Some(SESSION)).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir.join("cas.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER lose_registered_state BEFORE UPDATE OF spawn_state ON spawn_queue
+        WHEN NEW.spawn_state = 'registered'
+        BEGIN SELECT RAISE(ABORT, 'injected registration write failure'); END;").unwrap();
+    super::append_spawn_audit(
+        &f.cas_dir, SESSION, Some(request), Some("worker"), "register", "confirmed", "registered successfully",
+    );
+    conn.execute_batch("DROP TRIGGER lose_registered_state").unwrap();
+    let (done, receive) = std::sync::mpsc::channel();
+    super::super::store_worker::global().submit("registration retry sentinel", move || { done.send(()).unwrap(); });
+    receive.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+    // Registration completed, then the replacement really shut down. A lost
+    // audit write must not keep its reusable name pending for the whole session.
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    agents.graceful_shutdown("worker-id").unwrap();
+    f.daemon.dead_workers.insert("worker".into());
+    let id = f.aged("supervisor", "worker", "Please handle this after shutdown");
+    assert!(f.scan().is_empty(), "completed recycle must not leave a shutdown recipient alarming");
+    let selection = super::run_queue_select(&super::super::prompt_queue_jobs::QueueSelectRequest {
+        cas_dir: f.cas_dir.clone(), session_name: SESSION.into(), supervisor_name: SUPERVISOR.into(),
+        worker_names: Vec::new(), dead_workers: f.daemon.dead_workers.clone(), replacement_workers: Default::default(),
+        limit: 10, operator_replies: false, deferred_operator_replies: Default::default(), adopt_operator_notices: false,
+    }, 1).unwrap();
+    assert!(selection.shut_down_recipients.iter().any(|name| name == "worker"));
+    let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::ShutdownCancelled));
+    assert!(!spawns.has_pending_spawn("worker", Some(SESSION)).unwrap());
+}
+
+#[test]
 fn cas_07ee_respawned_worker_name_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
-    f.aged(
+    let id = f.aged(
         "supervisor",
         "worker",
         "Please handle this course correction",
     );
     f.daemon.dead_workers.insert("worker".into());
+    // cas-c71e: the name still has work before its replacement registers.
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    let mut old = agents.get("worker-id").unwrap();
+    old.mark_shutdown();
+    agents.register(&old).unwrap();
+    let snapshot = message_attention::AttentionInputs::from_daemon(&f.daemon);
+    open_spawn_queue_store(&f.cas_dir).unwrap()
+        .enqueue_recycle("worker", None, Some(SESSION)).unwrap();
+    let row = f.queue.queued_prompt(id).unwrap().unwrap();
+    assert_eq!(snapshot.decisions(f.queue.as_ref(), &[row]).get(&id),
+        Some(&MessageAttention::Needed));
+    let mut replacement = Agent::new("replacement-id".into(), "worker".into());
+    replacement.factory_session = Some(SESSION.into());
+    agents.register(&replacement).unwrap();
     let pty = cas_mux::Pty::spawn(
         "worker",
         cas_mux::PtyConfig {
@@ -1318,5 +1411,143 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
     );
     for id in [lifecycle, peer] {
         assert!(f.queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none(), "row {id}");
+    }
+}
+
+#[test]
+fn cas_afe0_reference_wire_never_becomes_a_body_receipt() {
+    let _env = env();
+    for cli in ["codex", "claude"] {
+        for terminal in [false, true] {
+            let mut f = Fixture::new();
+            let id = f.aged("worker", "supervisor", "Review the queued delivery details");
+            f.queue.record_recipient_transport_delivered(id, SUPERVISOR).unwrap();
+            f.queue.mark_transport_delivered(id).unwrap();
+            if terminal {
+                f.queue.acknowledge_for_recipients(id, &[SUPERVISOR.into()], None).unwrap();
+            } else {
+                // The attention fixture deliberately ages rows beyond the
+                // automatic inbox TTL; this is an explicit body recovery.
+                f.queue.poll_named_for_recipient(SUPERVISOR, Some(SESSION), &[id]).unwrap();
+            }
+            let receipt = f.queue.recipient_receipt(id, SUPERVISOR).unwrap();
+            let projected = f.queue.recipient_delivery(id, SUPERVISOR).unwrap().unwrap();
+            assert!(!projected.is_full());
+            let projected = projected.into_prompt();
+            let wire = super::teams_body_fallback_text(&projected);
+            // References carry no body provenance or reply hint.
+            assert_eq!(wire, projected.prompt);
+            let wire = if cli == "codex" {
+                super::super::delivery::frame_pty_payload(cas_mux::SupervisorCli::Codex, "worker", &wire)
+            } else {
+                format!("<teammate-message teammate_id=\"worker\">\n{wire}\n</teammate-message>")
+            };
+            f.supervisor_turn(cli, &wire);
+            f.scan();
+            assert_eq!(f.queue.recipient_receipt(id, SUPERVISOR).unwrap(), receipt,
+                "{cli}/terminal={terminal}: consuming a notice is not consuming the body");
+        }
+    }
+}
+
+#[test]
+fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
+    let _env = env();
+    for (cli, claimed, pasted) in [
+        ("codex", false, false),
+        ("codex", true, false),
+        ("claude", false, false),
+        ("claude", true, false),
+        ("codex", false, true),
+        ("codex", true, true),
+        ("claude", false, true),
+        ("claude", true, true),
+    ] {
+        let mut f = Fixture::new();
+        let id = f.aged(
+            "worker",
+            "supervisor",
+            "Please review the completed delivery",
+        );
+        // The same body with another id must stay unread: body equality or a
+        // later turn alone cannot correlate the delivery.
+        let unread = f.aged(
+            "worker",
+            "supervisor",
+            "Please review the completed delivery",
+        );
+        for row in [id, unread] {
+            if claimed {
+                f.queue
+                    .record_recipient_transport_delivered(row, SUPERVISOR)
+                    .unwrap();
+            }
+            f.queue.mark_transport_delivered(row).unwrap();
+        }
+        if claimed {
+            // Exercise the existing weak probe and its actual stamps. Pane
+            // growth without this message's body must never grant a read.
+            assert_eq!(
+                super::classify_urgent_wake(10, Some(11), Duration::ZERO, Duration::from_secs(1)),
+                super::UrgentWakeOutcome::Observed
+            );
+            FactoryDaemon::consume_urgent_wake_row(f.queue.as_ref(), unread, SUPERVISOR).unwrap();
+            assert_eq!(
+                f.queue.recipient_receipt(unread, SUPERVISOR).unwrap(),
+                Some(cas_store::SurfacingSource::TransportClaimed)
+            );
+        }
+        let row = f.queue.queued_prompt(id).unwrap().unwrap();
+        let wire = super::teams_body_fallback_text(&row);
+        let wire = if cli == "codex" {
+            super::super::delivery::frame_pty_payload(
+                cas_mux::SupervisorCli::Codex,
+                "worker",
+                &wire,
+            )
+        } else {
+            format!("<teammate-message teammate_id=\"worker\">\n{wire}\n</teammate-message>")
+        };
+        // Captured native paste wrapper, including its attributed closing tag:
+        // tests/data/ambient-supervisor-replay.json (UserPromptSubmit).
+        let wire = if pasted {
+            format!("\n\n<pasted_content id=\"d36a\">\n{wire}\n</pasted_content id=\"d36a\">\n")
+        } else {
+            wire
+        };
+        f.supervisor_turn(cli, &wire);
+        let alarms = f.scan();
+        let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(
+            report.recipient_receipt,
+            Some(cas_store::SurfacingSource::ObservedWake),
+            "{cli}/claimed={claimed}/pasted={pasted}: consumed wire must get a durable receipt"
+        );
+        assert!(
+            report.confirmed_at.is_none(),
+            "consumption is not explicit acknowledgement"
+        );
+        assert!(
+            alarms
+                .iter()
+                // pin: supervisor_unread names the oldest unread notification here.
+                .any(|r| r.prompt.contains(&format!("message {unread},"))),
+            "{cli}: the other transport-only message must still alarm"
+        );
+        assert_eq!(
+            f.queue
+                .message_delivery_report(unread)
+                .unwrap()
+                .unwrap()
+                .recipient_receipt,
+            claimed.then_some(cas_store::SurfacingSource::TransportClaimed)
+        );
+        assert!(
+            f.queue
+                .poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 10)
+                .unwrap()
+                .iter()
+                .all(|r| r.id != id)
+        );
     }
 }

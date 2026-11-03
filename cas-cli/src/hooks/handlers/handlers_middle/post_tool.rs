@@ -56,11 +56,6 @@ fn handle_post_tool_use_with_guardrail(
     // returns so Bash/Read review activity resets actionable-idle detection.
     crate::ui::factory::record_supervisor_mcp_call();
 
-    // Outcome capture is independent of observation filtering: read-like tool
-    // calls are often the strongest evidence that an injected card was used.
-    // The helper is bounded and fail-open, so it cannot alter hook behavior.
-    crate::ambient_recall::record_ambient_tool_usage(input, cas_root);
-
     // If Agent/Task returned without a successful SubagentStart bind, remove
     // only its exact still-unbound sealed handoff. Bound/consumed audit rows
     // are immutable and this is therefore a no-op after a legitimate spawn.

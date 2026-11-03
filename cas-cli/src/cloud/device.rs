@@ -109,7 +109,6 @@ impl DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_machine_hash_is_stable() {
@@ -121,22 +120,22 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("device.json");
-
-        let config = DeviceConfig {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        assert!(DeviceConfig::load().unwrap().is_none());
+        let mut config = DeviceConfig {
             device_id: "test-device-123".to_string(),
             name: Some("My Laptop".to_string()),
             registered_at: "2026-02-19T00:00:00Z".to_string(),
         };
-
-        let content = serde_json::to_string_pretty(&config).unwrap();
-        std::fs::write(&path, content).unwrap();
-
-        let loaded_content = std::fs::read_to_string(&path).unwrap();
-        let loaded: DeviceConfig = serde_json::from_str(&loaded_content).unwrap();
+        config.save().unwrap();
+        let loaded = DeviceConfig::load().unwrap().unwrap();
         assert_eq!(loaded.device_id, "test-device-123");
-        assert_eq!(loaded.name, Some("My Laptop".to_string()));
+        assert_eq!(loaded.name.as_deref(), Some("My Laptop"));
+        assert_eq!(loaded.registered_at, "2026-02-19T00:00:00Z");
+        config.name = None;
+        config.save().unwrap();
+        assert!(DeviceConfig::load().unwrap().unwrap().name.is_none());
     }
 
     #[test]

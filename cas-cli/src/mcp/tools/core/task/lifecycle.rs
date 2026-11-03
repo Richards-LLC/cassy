@@ -51,6 +51,7 @@ impl TaskLifecycleGateError {
 pub(crate) mod close_ops;
 pub(crate) mod epic_lane;
 mod epic_overlap;
+mod recall_terms;
 pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
@@ -59,6 +60,8 @@ mod qa_dispatch;
 pub(crate) mod qa_impact;
 pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
+pub(crate) mod review_loop;
+pub(crate) mod review_tier;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;
 
@@ -203,6 +206,7 @@ fn checkout_task_beside_parked_delivery(
     worker: &str,
     task_id: &str,
     target: &str,
+    require_fresh_base: bool,
 ) -> Result<String, String> {
     let git = GitOperations::new(checkout.to_path_buf());
     let status = std::process::Command::new("git")
@@ -214,6 +218,17 @@ fn checkout_task_beside_parked_delivery(
         return Err("Cannot start task beside a parked delivery: commit or stash tracked changes before switching branches.".into());
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
+    if require_fresh_base {
+        let base = git.resolve_fresh_base(target)
+            .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
+        let expected = git.resolve_commit(&base.branch_ref);
+        for reference in [format!("refs/heads/{branch}"), format!("origin/{branch}")] {
+            if let Some(existing) = git.resolve_commit(&reference)
+                && Some(existing) != expected {
+                return Err(format!("Queued branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"));
+            }
+        }
+    }
     if git.resolve_commit(&format!("refs/heads/{branch}")).is_none() {
         let remote = format!("origin/{branch}");
         let base = if git.resolve_commit(&remote).is_some() {
@@ -1057,7 +1072,7 @@ fn recent_other_epic_planner(
 }
 
 /// cas-3e41 (GH #993): the recall query for a task: the content terms of its
-/// title, labels and description, filtered by the ambient-recall stopword
+/// title, labels and description, filtered by a shared stopword
 /// floor so filler and harness words cannot carry a match. Labels come first
 /// so a domain label such as `qa` is never cut by the term cap.
 pub(crate) fn task_recall_query(title: &str, labels: &[String], description: &str) -> String {
@@ -1068,7 +1083,7 @@ pub(crate) fn task_recall_query(title: &str, labels: &[String], description: &st
             terms.push(label);
         }
     }
-    for term in crate::ambient_recall::content_terms(&format!("{title}\n{description}")) {
+    for term in recall_terms::content_terms(&format!("{title}\n{description}")) {
         if !terms.contains(&term) {
             terms.push(term);
         }
@@ -1091,6 +1106,12 @@ impl CasCore {
         query: &str,
         exclude_id: Option<&str>,
     ) -> Option<String> {
+        self.related_recall_context(query, exclude_id, true)
+    }
+
+    /// Durable start instructions retain matching context even if this session
+    /// has already seen it. Only the response path claims session markers.
+    fn related_recall_context(&self, query: &str, exclude_id: Option<&str>, dedupe: bool) -> Option<String> {
         use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
@@ -1112,6 +1133,17 @@ impl CasCore {
         let rules = self.open_rule_store().ok();
         let tasks = self.open_task_store().ok();
         let mut lines = Vec::new();
+        let query_terms = recall_terms::content_terms(query);
+        let session = self.get_registered_agent_id_read_only().ok().and_then(|id| {
+            self.open_agent_store().ok()?.get(&id).ok().map(|agent| agent.cc_session_id.unwrap_or(id))
+        }).or_else(|| std::env::var("CAS_SESSION_ID").ok())
+            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok()).unwrap_or_default();
+        let relevant = |text: &str| {
+            let terms = recall_terms::content_terms(text);
+            // BM25 ranks even incidental single-word matches. Require two
+            // content terms (or the complete query when it has one term).
+            query_terms.iter().filter(|term| terms.contains(term)).count() >= query_terms.len().min(2).max(1)
+        };
 
         for hit in results {
             if lines.len() == RELATED_RECALL_LIMIT {
@@ -1122,7 +1154,7 @@ impl CasCore {
             }
             let line = match hit.doc_type {
                 DocType::Entry => store.as_ref().and_then(|store| {
-                    store.get(&hit.id).ok().map(|entry| {
+                    store.get(&hit.id).ok().filter(|entry| !entry.archived && relevant(&format!("{} {}", entry.title.as_deref().unwrap_or_default(), entry.content))).map(|entry| {
                         let title = entry.title.as_deref().unwrap_or("untitled memory");
                         format!(
                             "- Memory [{}]: {} — {}",
@@ -1134,7 +1166,7 @@ impl CasCore {
                 }),
                 DocType::Rule => rules.as_ref().and_then(|rules| {
                     rules.get(&hit.id).ok().and_then(|rule| {
-                        (!matches!(
+                        (relevant(&rule.content) && !matches!(
                             rule.status,
                             cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
                         ))
@@ -1146,7 +1178,7 @@ impl CasCore {
                 }),
                 DocType::Task => tasks.as_ref().and_then(|tasks| {
                     tasks.get(&hit.id).ok().and_then(|task| {
-                        (task.task_type == crate::types::TaskType::Epic).then(|| {
+                        (task.task_type == crate::types::TaskType::Epic && relevant(&format!("{} {}", task.title, task.description))).then(|| {
                             let detail = task.description.lines().next().unwrap_or_default();
                             format!(
                                 "- Past epic [{}]: {} — {}",
@@ -1162,6 +1194,7 @@ impl CasCore {
             if let Some(line) = line
                 && lines.iter().map(String::len).sum::<usize>() + line.len()
                     <= RELATED_RECALL_CHAR_CAP
+                && (!dedupe || crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id))
             {
                 lines.push(line);
             }
@@ -1725,8 +1758,7 @@ impl CasCore {
         task.notes.push_str(&predicted);
 
         // Associate the creation event and dependency metadata with the
-        // current session. This is used by ambient recall to avoid feeding a
-        // task back to the agent that just authored it.
+        // current session for the durable task audit trail.
         task_store
             .create_atomic(
                 &task,
@@ -2061,6 +2093,14 @@ impl CasCore {
                 receipt
             })
             .unwrap_or_default();
+        crate::quality_ledger::bug_labelled(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            &task.labels,
+            None,
+        );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",
             id,
@@ -2202,13 +2242,101 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskStartRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.start_task_with_principal(req, None).await
+    }
+
+    pub(crate) async fn task_start_for_queue(
+        &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
+    ) -> Result<CallToolResult, McpError> {
+        self.start_task_with_principal(req, Some(principal)).await
+    }
+
+    async fn start_task_with_principal(
+        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut queued_start = principal.is_some();
+        let agent_id = match principal.as_ref() {
+            Some(principal) => principal.agent().id.clone(),
+            None => self.get_agent_id()?,
+        };
+        let agents = self.open_agent_store()?;
+        let worker = agents.get(&agent_id).ok().filter(|a| a.role == cas_types::AgentRole::Worker);
+        let load_worker_queue = || worker.as_ref().filter(|a| a.factory_session.is_some())
+            .map(|worker| cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.cas_root)
+                .and_then(|queues| queues.get(worker.factory_session.as_deref().unwrap_or_default(), &worker.name)))
+            .transpose().map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()));
+        let mut worker_queue = load_worker_queue()?;
+        let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
+            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        let _start_lock = if queued_start { None } else {
+            match worker.as_ref().filter(|a| a.factory_session.is_some()) {
+                Some(worker) if queue_enabled => Some(crate::worker_task_queue::worker_lock(
+                    &self.cas_root, worker, "start")?),
+                Some(worker) => Some(crate::worker_task_queue::wait_for_worker_start(
+                    &self.cas_root, worker).await?),
+                None => None,
+            }
+        };
+        // Even a plain start fences first queue configuration/refill. Re-read
+        // after waiting so any queue configured before us is observed.
+        if _start_lock.is_some() {
+            worker_queue = load_worker_queue()?;
+        }
+        let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
+            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        if let (Some(queue), Some(worker)) = (worker_queue.as_ref(), worker.as_ref())
+            && queue.current_task.as_deref() == Some(req.id.as_str())
+            && queue.context_reset_from.as_deref() == Some(crate::worker_task_queue::conversation_generation(worker).as_str())
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task"));
+        }
+        if !queued_start && let Some(queue) = worker_queue.as_ref() {
+            if queue.starting && queue.current_task.as_deref() == Some(req.id.as_str()) {
+                queued_start = true;
+            } else if queue.starting && !queue.current_started {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "The worker has a reserved queue task; resolve or start that task before starting another"));
+            }
+        }
+        if queued_start {
+            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued start requires its registered worker"))?;
+            crate::worker_task_queue::ensure_owned_queue_checkout(worker)?;
+        }
         let task_store = self.open_task_store()?;
+
+        if queue_enabled && let Some(worker) = worker.as_ref() {
+            let mut active = task_store.list(Some(TaskStatus::InProgress))
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|task| task.id != req.id
+                    && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+                    && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
+                .map(|task| task.id).collect::<Vec<_>>();
+            active.extend(agents.list_active_leases()
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
+                .map(|lease| lease.task_id));
+            active.sort();
+            active.dedup();
+            if !active.is_empty() {
+                let prefix = self.guidance_prefix();
+                let holds = active.iter().map(|id|
+                    format!("{prefix}task action=update id={id} status=blocked"))
+                    .collect::<Vec<_>>().join("\n");
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "Cannot start task {} while {} has active work: {}. Finish active work before starting unrelated work. For returned-delivery recovery, checkpoint the unfinished branch and put its task on hold:\n{holds}\nThen switch to the returned task's recorded branch (see `{prefix}task action=show id={} full=true`) and retry `{prefix}task action=start id={}`. The held successor keeps its queue slot. After the returned delivery is parked, switch back, set the held task open and start it again.",
+                    req.id, worker.name, active.join(", "), req.id, req.id)));
+            }
+        }
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let mut queued_start_snapshot = queued_start.then(|| task.clone());
 
         // cas-a0d2: an unattributed row is adopted into this project here. The
         // in-progress write below persists it, so the repair survives and every
@@ -2244,9 +2372,46 @@ impl CasCore {
             ));
         }
 
+        let declared_repo_context = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
+            .transpose()
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
+
+        // Use the commit guard's identity predicate before claiming QA or
+        // mutating the task, lease or checkout. A foreign factory ref must not
+        // silently fall back to the reusable worker lane (cas-b153).
+        if let Some(worker) = worker.as_ref()
+            && let Some(checkout) = worker.metadata.get("clone_path")
+                .map(std::path::Path::new)
+                .or_else(|| declared_repo_context.as_ref().map(|context| context.repo_root.as_path()))
+            && let Some(branch) = crate::factory_isolation::branch_at(checkout)
+            && matches!(
+                crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
+                crate::factory_isolation::WorkerBinding::Sibling { .. }
+            )
+        {
+            let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
+            let base = declared_repo_context.as_ref().map(|context| context.target_branch.clone())
+                .unwrap_or_else(|| crate::factory_isolation::expected_worker_branch(&worker.name));
+            let [switch] = GitOperations::git_remedies([&["switch", "-c", &own, &base]])
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                "Cannot start task {}: '{branch}' is not worker '{}'s factory branch.\n\
+                 Use your own per-task branch '{own}' before starting:\n{switch}",
+                task.id, worker.name,
+            )));
+        }
+
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
-        let qa_claim_note = self.claim_qa_round_on_start(&task)?.unwrap_or_default();
+        let qa_claim_note = self.claim_qa_round_on_start(&task, principal.as_ref().map(|p| p.agent().id.as_str()))?.unwrap_or_default();
         // cas-31a3: the QA preflight (cas-d5c1) appends its report to this
         // task's notes in the store. The start writes `task` back below, so
         // take the notes as they are now; the copy read above would overwrite
@@ -2254,6 +2419,16 @@ impl CasCore {
         if !qa_claim_note.is_empty()
             && let Ok(fresh) = task_store.get(&req.id)
         {
+            if let Some(expected) = queued_start_snapshot.as_mut() {
+                let mut comparable = fresh.clone();
+                comparable.notes = expected.notes.clone();
+                comparable.updated_at = expected.updated_at;
+                if serde_json::to_value(&comparable).ok() != serde_json::to_value(&*expected).ok() {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "Queued task changed during QA preflight; retry before preparing Git"));
+                }
+                *expected = fresh.clone();
+            }
             task.notes = fresh.notes;
         }
 
@@ -2269,17 +2444,19 @@ impl CasCore {
             )
         };
 
-        let declared_repo_context = task
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
-            .transpose()
-            .map_err(|message| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
-                data: None,
-            })?;
+        if let Some(snapshot) = queued_start_snapshot.as_ref() {
+            let fresh = task_store.get(&req.id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if snapshot.status != TaskStatus::Open || snapshot.assignee.as_deref()
+                != worker.as_ref().map(|a| a.name.as_str())
+                || serde_json::to_value(snapshot).ok() != serde_json::to_value(&fresh).ok() {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
+            }
+        }
+
+        if queued_start && declared_repo_context.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Queued task needs a declared work target before its branch can be allocated"));
+        }
 
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
         // work, so its assigned worker may resume it. A clean AwaitingMerge
@@ -2318,9 +2495,7 @@ impl CasCore {
             };
         }
 
-        // Auto-claim the task with a lease
-        let agent_id = self.get_agent_id()?;
-
+        // The caller or validated queue principal owns this execution lease.
         let agent_store = self.open_agent_store()?;
 
         // A supervisor may grant exactly this registration one start. Check
@@ -2377,6 +2552,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
@@ -2420,7 +2596,14 @@ impl CasCore {
                         });
                     // GH #1353: both the reusable and per-task parked refs
                     // must remain stable while the next task starts.
-                    let parked_branch_note = if task.status == TaskStatus::Open {
+                    let parked_branch_note = if queued_start && task.status == TaskStatus::Open {
+                        let previous = worker_branch.clone();
+                        worker_branch = checkout_task_beside_parked_delivery(
+                            worker_checkout, &worker.name, &task.id, target_branch,
+                            task.deliverables.factory_branch_start.is_none(),
+                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        Some(format!("\nTask queue preserved {previous}; starting on {worker_branch}."))
+                    } else if task.status == TaskStatus::Open {
                         crate::mcp::tools::worktree_head(worker_checkout)
                             .and_then(|tip| crate::mcp::tools::parked_delivery_at_tip(
                                 task_store.as_ref(), &worker.name, &tip,
@@ -2431,7 +2614,7 @@ impl CasCore {
                             .map(|parked| {
                                 let preserved = worker_branch.clone();
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch,
+                                    worker_checkout, &worker.name, &task.id, target_branch, false,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Ok::<_, McpError>(format!(
                                     "\n\n🔀 PARKED BRANCH PRESERVED: {} stays on {preserved} at {}. This task uses {worker_branch}.",
@@ -2530,6 +2713,10 @@ impl CasCore {
                     };
                     // Persist only with the successful InProgress transition
                     // below. Repeated starts must never advance this boundary.
+                    current_checkout_branch = Some(
+                        crate::factory_isolation::branch_at(worker_checkout)
+                            .unwrap_or_else(|| "(detached HEAD)".into()),
+                    );
                     if task.deliverables.factory_branch_start.is_none()
                         && crate::factory_isolation::branch_at(worker_checkout).as_deref()
                             == Some(worker_branch.as_str())
@@ -2886,6 +3073,8 @@ impl CasCore {
             }
         }
 
+        #[cfg(test)]
+        close_ops::lifecycle_race_hook::fire_before_start_lease(&req.id);
         let local_claim =
             agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started"));
         let won = match &local_claim {
@@ -2962,7 +3151,7 @@ impl CasCore {
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
-        let brief = req.brief.unwrap_or(false);
+        let brief = req.brief.unwrap_or(true);
         let mut parent_worktree_info: Option<String> = None;
         let mut epic_ownership_info: Option<String> = None;
         let mut sibling_notes_info: Option<String> = None;
@@ -3064,7 +3253,7 @@ impl CasCore {
                             }
 
                             // Look up the parent epic's worktree
-                            if !brief && let Some(ref worktree_id) = parent.worktree_id {
+                            if let Some(ref worktree_id) = parent.worktree_id {
                                 if let Ok(wt_store) = self.open_worktree_store() {
                                     if let Ok(worktree) = wt_store.get(worktree_id) {
                                         if worktree.path.exists() {
@@ -3169,7 +3358,7 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        let start_update = match split_start_snapshot.as_ref() {
+        let start_update = match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
             Some(expected) => task_store.update_if_current(&task, expected),
             None => task_store.update(&task),
         };
@@ -3272,12 +3461,6 @@ impl CasCore {
                 }
             }
         }
-        let claim_info = if peer_notes.is_empty() {
-            claim_info
-        } else {
-            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
-        };
-
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store
             .get(&agent_id)
@@ -3346,6 +3529,7 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
+        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -3353,11 +3537,29 @@ impl CasCore {
             )
             .unwrap_or_default();
 
+        // Diagnostics only: report the persisted boundary after a successful
+        // start, including when an idempotent start observed another branch.
+        let source_readback = super::query::recorded_source_readback(&task);
+        let mut source_readback = if source_readback.is_empty() {
+            source_readback
+        } else {
+            format!("\n{source_readback}")
+        };
+        if let (Some(start), Some(current)) = (
+            task.deliverables.factory_branch_start.as_ref(),
+            current_checkout_branch.as_deref(),
+        ) && current != start.branch {
+            source_readback.push_str(&format!(
+                "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
+                 Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
+                start.branch, task.id,
+                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+            ));
+        }
+
         if brief {
-            // Bound the complete variable portion of the brief response. The
-            // fixed header/claim/warning/push text remains small, while own
-            // notes are capped to 4 KiB and sibling/epic/workflow payloads are
-            // omitted entirely.
+            // Keep scope, resume state and recent evidence within 2000 bytes.
+            // Complete fields remain available through show/notes full or pages.
             let execution_state = task_store
                 .get_execution_state(&task.id)
                 .map_err(|error| {
@@ -3382,43 +3584,132 @@ impl CasCore {
                     Ok::<String, McpError>(format!("\n\nStructured execution state:\n{encoded}"))
                 })
                 .transpose()?;
-            let own_notes = if task.notes.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\n📋 TASK NOTES:\n{}",
-                    crate::mcp::tools::truncate_str(&task.notes, 4_093)
+            use super::query::{ReadClipping, read_hint, task_scope, task_show_notes};
+            let mut clipping = ReadClipping::default();
+            // Save start-only instructions before budgeting; full show cannot
+            // otherwise recover warnings computed only during this start.
+            let advisory = format!(
+                "{}{}{}{}{}{}",
+                peer_notes,
+                blocker_warning,
+                reused_factory_branch_reset.as_deref().unwrap_or_default(),
+                unanchored_warning.unwrap_or_default(),
+                wt_info,
+                start_guidance,
+            );
+            let durable_recall = self.related_recall_context(
+                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
+            ).unwrap_or_default();
+            let context = format!("{advisory}{durable_recall}{cited_issues}");
+            let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
+            let read_saved = || task_store.get(&task.id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Task {} started, but reading saved start instructions failed: {error}",
+                        task.id
+                    ),
                 )
-            };
-            let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
-                req.id,
-                crate::mcp::tools::truncate_str(&task.title, 509),
+            });
+            let mut saved = read_saved()?;
+            // Only compare the most recent context, ignoring its timestamp and
+            // any later progress notes. Lease display is intentionally transient.
+            let previous = std::iter::once(0)
+                .chain(saved.notes.match_indices("\n\n[").map(|(i, _)| i + 2))
+                .filter_map(|offset| {
+                    let entry = &saved.notes[offset..];
+                    chrono::NaiveDateTime::parse_from_str(
+                        entry.get(..18)?,
+                        "[%Y-%m-%d %H:%M]",
+                    )
+                    .ok()?;
+                    Some((offset, entry.get(18..)?.strip_prefix(" START CONTEXT")?))
+                })
+                .last();
+            let existing = previous
+                .filter(|(_, body)| {
+                    body.strip_prefix(context.as_ref())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
+                })
+                .map(|(offset, _)| offset);
+            if existing.is_none() {
+                let note = format!(
+                    "[{}] START CONTEXT{context}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                );
+                task_store.append_note(&task.id, &note).map_err(|error| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
+                ))?;
+                saved = read_saved()?;
+                saved.notes.find(&note).ok_or_else(|| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
+                ))?;
+            }
+            // Cloud reconciliation can reorder timestamped notes ahead of
+            // undated history between start and notes. A tail offset from this
+            // snapshot may then split UTF-8 or skip the instructions entirely.
+            // Begin recovery at the stable document boundary instead.
+            let navigation = format!(
+                "\nStart advisories: task notes id={} offset=0 limit=1600 (follow next= to end; read latest START CONTEXT)\nAll start advisories: task notes id={} full=true",
+                task.id, task.id
+            );
+            let cited_pointer =
+                crate::github_issue_attach::cited_issue_lines(&self.cas_root, &task)
+                    .into_iter()
+                    .next()
+                    .map(|line| format!("Cited issue: {line}"))
+                    .unwrap_or_default();
+            let optional = format!(
+                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                clipping.excerpt(&related_context, 120),
+                task_scope(&task, &mut clipping),
+                task_show_notes(&task.notes, &task.id, &mut clipping),
+                clipping.excerpt(&execution_state.unwrap_or_default(), 120),
+                clipping.excerpt(&cited_pointer, 220),
+            );
+            let prefix = format!(
+                "Started task: {} - {}\nDelivery mode: {}{}{}",
+                task.id,
+                clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
-                reused_factory_branch_reset.as_deref().unwrap_or_default(),
-                blocker_warning,
-                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
-                crate::mcp::tools::truncate_str(&cited_issues, 1_021),
-                related_context,
-                execution_state.unwrap_or_default(),
-                start_guidance(&task),
-                own_notes,
-                push_note,
+                source_readback,
             );
-            // `truncate_str` appends three bytes when it truncates, hence the
-            // 6_141 payload bound for a hard 6 KiB response ceiling.
-            return Ok(Self::success(crate::mcp::tools::truncate_str(
-                &response, 6_141,
+            let hint = read_hint(&task.id, "show", true);
+            let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());
+            // A warning is either complete or explicitly deferred to its saved
+            // note, never silently clipped to a misleading prefix.
+            let (advisory, available) = if advisory.len() <= available {
+                let remaining = available - advisory.len();
+                (advisory, remaining)
+            } else {
+                let overflow = "\nStart advisories exceed the response budget. Read the saved start advisories below BEFORE acting.".to_string();
+                let remaining = available.saturating_sub(overflow.len());
+                (overflow, remaining)
+            };
+            let clipped = clipping.clipped || optional.len() > available;
+            let hint = read_hint(&task.id, "show", clipped);
+            return Ok(Self::success(format!(
+                "{prefix}{advisory}{navigation}{}{hint}",
+                clipping.excerpt(&optional, available)
             )));
         }
 
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
+
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
             claim_info.unwrap_or_default(),
+            source_readback,
             reused_factory_branch_reset.as_deref().unwrap_or_default(),
             blocker_warning,
             // cas-156b: placed directly after the claim line so the nativity
@@ -3431,7 +3722,7 @@ impl CasCore {
             wt_info,
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
-            start_guidance(&task),
+            start_guidance,
             push_note,
         )))
     }
@@ -5129,6 +5420,10 @@ mod related_recall_response_tests {
             .expect("create epic"),
         );
 
+        let repeated = text(core.cas_task_create_with_target(epic_request(
+            "Timeline import follow-up again", "Plan timeline import work for the next release."
+        ), None, None, true).await.expect("repeat create"));
+        assert!(!repeated.contains("m-recall-memory"), "repeated memory: {repeated}");
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
         assert!(
@@ -5138,8 +5433,8 @@ mod related_recall_response_tests {
     }
 
     /// cas-3e41 (GH #993): a qa-labelled task's create receipt and its
-    /// worker's first context (the start response) both carry the standing
-    /// golden-set memory, not only an epic's create receipt.
+    /// worker's durable start notes carry the standing golden-set memory.
+    /// A response in the same session does not repeat the create receipt.
     #[tokio::test]
     async fn qa_task_create_and_start_carry_the_golden_set_memory_cas_3e41() {
         let _env = TestEnvGuard::with_optional_vars(&[
@@ -5176,12 +5471,13 @@ mod related_recall_response_tests {
             .expect("created task")
             .id;
         let started = text(
-            core.cas_task_start(Parameters(IdRequest { id: task_id }))
+            core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
                 .await
                 .expect("start qa task"),
         );
-        assert!(started.contains("m-golden-set"), "{started}");
-        assert!(started.contains("QA golden test data"), "{started}");
+        assert!(!started.contains("m-golden-set"), "the same session already saw this memory: {started}");
+        let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
+        assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }
 
     #[test]
@@ -5542,6 +5838,7 @@ mod related_recall_response_tests {
 
     #[test]
     fn related_recall_is_bounded_by_result_count_and_character_cap() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_SESSION_ID", "bounded-recall")]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         for index in 0..6 {
@@ -5553,6 +5850,8 @@ mod related_recall_response_tests {
             );
         }
 
+        add_memory(&core, "m-weak-match", "Incidental keyword", "Keyword belongs to an unrelated outage.");
+        assert!(core.related_recall("unrelated bounded").is_none(), "single incidental matches stay quiet");
         let response = core
             .related_recall("bounded recall shared keyword")
             .expect("matching recall");

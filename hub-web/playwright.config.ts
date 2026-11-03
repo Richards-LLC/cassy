@@ -1,4 +1,4 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices, type PlaywrightTestConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { checkoutPorts } from "./e2e/checkout-ports.mjs";
 import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
@@ -7,19 +7,57 @@ import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
 // - fixtures (cas-d7b7 Test Agents spike): specs under e2e/ against the Vite
 //   fixture site, real src/ renderers with fixture data and no hub daemon.
 // - journeys (cas-9be7): one test per user journey in docs/qa/journeys.md,
-//   driving the committed production bundle (dist/) at /commander/ through a
+//   driving a source-bound scratch production build at /commander/ through a
 //   hub protocol double. Receipts: e2e/.results/journeys/<ID>/ or
 //   $JOURNEY_RECEIPTS (scripts/journey-eval.sh).
 //
 // Ports (cas-00ad): HUB_E2E_PORT / HUB_JOURNEY_PORT when set (use a pair in
 // 20000–32767 per concurrent run), else this checkout's own pair from its
 // path. Servers are never reused, so a run always serves this checkout's
-// fixtures and dist; a port someone else holds fails the run loudly.
+// fixtures and scratch build; a port someone else holds fails the run loudly.
+//
+// Readiness is the launched server's own "listening" line, never a probe of the
+// URL: a URL probe cannot tell this run's server from a concurrent caller's on
+// the same port, so a run whose own server lost the bind could attach to the
+// winner's before its server's exit was seen (cas-9e97).
 const defaults = checkoutPorts(fileURLToPath(new URL(".", import.meta.url)));
 const port = Number(process.env.HUB_E2E_PORT ?? defaults.fixtures);
 const origin = `http://127.0.0.1:${port}`;
 const journeyPort = Number(process.env.HUB_JOURNEY_PORT ?? defaults.journeys);
 const journeyOrigin = `http://127.0.0.1:${journeyPort}`;
+const listeningOn = (url: string) => new RegExp(url.replaceAll(".", "\\."));
+
+export const fixtureWebServer = {
+  name: "Commander fixtures",
+  command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
+  wait: { stdout: listeningOn(`Local:\\s+${origin}/`) },
+  reuseExistingServer: false,
+  stdout: "pipe",
+} satisfies NonNullable<PlaywrightTestConfig["webServer"]>;
+
+export const journeyWebServer = {
+  name: "Commander journeys",
+  command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
+  wait: { stdout: listeningOn(`at ${journeyOrigin}/commander/`) },
+  reuseExistingServer: false,
+  stdout: "pipe",
+} satisfies NonNullable<PlaywrightTestConfig["webServer"]>;
+
+// Playwright owns webServer at config level, even when --project filters tests.
+// Match its case-insensitive project globs and variadic/repeated CLI option so
+// a selected project starts only its own server. An unfiltered run needs both.
+const projectFilters: string[] = [];
+let projectOption = false;
+for (const arg of process.argv.slice(2)) {
+  if (arg === "--project") projectOption = true;
+  else if (arg.startsWith("--project=")) {
+    projectFilters.push(arg.slice("--project=".length));
+    projectOption = false;
+  } else if (arg.startsWith("-")) projectOption = false;
+  else if (projectOption) projectFilters.push(arg);
+}
+const usesProject = (name: string) => projectFilters.length === 0 || projectFilters.some(pattern =>
+  new RegExp(`^${pattern.split("*").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(name));
 
 export default defineConfig({
   testDir: "./e2e",
@@ -67,15 +105,7 @@ export default defineConfig({
     },
   ],
   webServer: [
-    {
-      command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
-      url: `${origin}/`,
-      reuseExistingServer: false,
-    },
-    {
-      command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
-      url: `${journeyOrigin}/commander/`,
-      reuseExistingServer: false,
-    },
+    ...(usesProject("chromium") ? [fixtureWebServer] : []),
+    ...(usesProject("journeys") ? [journeyWebServer] : []),
   ],
 });

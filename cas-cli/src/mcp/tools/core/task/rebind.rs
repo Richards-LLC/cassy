@@ -103,14 +103,19 @@ impl CasCore {
             .work_target
             .as_ref()
             .ok_or_else(|| refused("the task has no declared work target"))?;
-        if previous.work_target != *target
-            || expected.assignee.as_deref() != Some(previous.assignee.as_str())
-        {
+        // Reassignment preserves the old start as evidence. Explicit approval
+        // binds the current assignee's lane; the prior owner stays in the audit.
+        // Retargeting still cannot move the delivery to another repository.
+        if previous.work_target.repo_selector != target.repo_selector {
             return Err(refused(
-                "assignment or work target differs from the recorded start; resolve that recovery first",
+                "repository differs from the recorded start; restore the original repository before rebinding",
             ));
         }
-        let worker = resolve_agent_identity(agents.as_ref(), &previous.assignee)
+        let assignee = expected
+            .assignee
+            .as_deref()
+            .ok_or_else(|| refused("assign the task to a live registered worker before rebinding"))?;
+        let worker = resolve_agent_identity(agents.as_ref(), assignee)
             .filter(|worker| worker.role == AgentRole::Worker && worker.is_alive())
             .ok_or_else(|| refused("the assignee must be a live registered worker"))?;
         if supervisor.factory_session != worker.factory_session {
@@ -220,7 +225,7 @@ impl CasCore {
         rebound.deliverables.parked_branch = None;
         rebound.deliverables.factory_branch_start = Some(FactoryBranchStart {
             work_target: target.clone(),
-            assignee: previous.assignee.clone(),
+            assignee: assignee.to_string(),
             branch: branch.to_string(),
             base_sha: base.clone(),
         });
@@ -240,7 +245,12 @@ impl CasCore {
                 .success(),
             None => true,
         };
-        if same_branch && previous.base_sha == base && anchor_still_reachable {
+        if same_branch
+            && previous.assignee == assignee
+            && previous.work_target == *target
+            && previous.base_sha == base
+            && anchor_still_reachable
+        {
             return Ok(Self::success(format!(
                 "Task {id} already records delivery branch {branch}; its base and audit are unchanged."
             )));
@@ -282,6 +292,14 @@ impl CasCore {
         tasks
             .update_if_current(&rebound, &expected)
             .map_err(|error| refused(error.to_string()))?;
+        crate::quality_ledger::intervention(
+            &self.cas_root,
+            cas_store::InterventionKind::Rebind,
+            format!("rebind|{id}|{branch}|{tip}"),
+            Some(id),
+            Some(&supervisor.id),
+            Some(reason),
+        );
         Ok(Self::success(format!(
             "Task {id} delivery branch rebound to {branch} at {tip}.\nPrevious branch {} at {} is retained in the audit.\nAssignment, target, leases and normal close gates are unchanged.",
             previous.branch,

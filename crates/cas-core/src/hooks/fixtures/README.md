@@ -10,6 +10,12 @@ already sanitized to `/fixture/...`; ids, keys, prompt and session title remain.
 capture described in docs/analysis/2026-08-07-hook-wire-shape-audit.md.
 The cas-5e46 files are the later interactive captures described by that audit.
 
+`grok-1.0.70-session-start.json` was captured from the official Linux Grok
+1.0.70 (`f50904eaee6c`) binary's native `SessionStart` with a command hook
+teeing stdin. No prompt, model turn or tool call was submitted. Only session ids
+and paths were sanitized. It preserves the differing snake_case/camelCase event
+values; the snake_case value is authoritative when both spellings occur.
+
 For a changed HookInput alias or rename, retain an independently captured raw
 payload here and add its wire-key/consumed-field pair to `wire_contract.rs`.
 The contract parses the same bytes through serde and checks the decoded value

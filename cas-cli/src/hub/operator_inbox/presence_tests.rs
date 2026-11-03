@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test(start_paused = true)]
 async fn presence_rate_limit_waits_from_response_without_changing_unanswered_body() {
     let mut r = activated();
-    let body = r.prepare(vec![], None).unwrap().body.clone();
+    let body = r.prepare(vec![]).unwrap().body.clone();
     let response = super::super::machine::HttpResponse {
         status: 429,
         body: br#"{"error":"rate_limited"}"#.to_vec(),
@@ -14,10 +14,10 @@ async fn presence_rate_limit_waits_from_response_without_changing_unanswered_bod
     r.receive(response.status, &response.body);
     tokio::time::advance(Duration::from_secs(599)).await;
     assert!(tokio::time::Instant::now() < not_before);
-    assert_eq!(r.prepare(vec![], None).unwrap().body, body);
+    assert_eq!(r.prepare(vec![]).unwrap().body, body);
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(tokio::time::Instant::now(), not_before);
-    let retry: Value = serde_json::from_slice(&r.prepare(vec![], None).unwrap().body).unwrap();
+    let retry: Value = serde_json::from_slice(&r.prepare(vec![]).unwrap().body).unwrap();
     assert_eq!(retry["seq"], "1");
 }
 
@@ -73,7 +73,7 @@ fn activation(epoch: &str, generation: &str) -> Vec<u8> {
 
 fn activated() -> Reporter {
     let mut r = reporter();
-    r.prepare(vec![], None).unwrap();
+    r.prepare(vec![]).unwrap();
     assert_eq!(r.receive(200, &activation("1", "1")), Some("1".into()));
     r
 }
@@ -85,28 +85,21 @@ fn response(r: &mut Reporter, error: &str) {
 #[test]
 fn presence_unanswered_report_reuses_identical_body_and_sequence() {
     let mut r = activated();
-    let original = r
-        .prepare(vec![], Silence::new(SilenceKind::Sleep, 600))
-        .unwrap()
-        .body
-        .clone();
+    let original = r.prepare(vec![]).unwrap().body.clone();
     r.receive(503, b"not JSON");
     let retry = r
-        .prepare(
-            vec![Component {
-                component: ComponentName::Hub,
-                state: ComponentState::Down,
-                age_s: 0,
-            }],
-            None,
-        )
+        .prepare(vec![Component {
+            component: ComponentName::Hub,
+            state: ComponentState::Down,
+            age_s: 0,
+        }])
         .unwrap();
     assert_eq!(retry.body, original);
     r.receive(
         200,
         br#"{"wire_version":1,"receipt":{"reporter_epoch":"1","seq":"1","outcome":"duplicate"}}"#,
     );
-    let fresh: Value = serde_json::from_slice(&r.prepare(vec![], None).unwrap().body).unwrap();
+    let fresh: Value = serde_json::from_slice(&r.prepare(vec![]).unwrap().body).unwrap();
     assert_eq!(fresh["seq"], "2");
     assert!(fresh.get("silence").is_none());
 }
@@ -114,34 +107,34 @@ fn presence_unanswered_report_reuses_identical_body_and_sequence() {
 #[test]
 fn presence_activation_conflict_retries_once_but_fenced_heartbeat_never_activates() {
     let mut r = reporter();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     r.receive(
         409,
         br#"{"error":"reporter_epoch_conflict","current_reporter_epoch":"7"}"#,
     );
-    let next: Value = serde_json::from_slice(&r.prepare(vec![], None).unwrap().body).unwrap();
+    let next: Value = serde_json::from_slice(&r.prepare(vec![]).unwrap().body).unwrap();
     assert_eq!(next["previous_reporter_epoch"], "7");
     r.receive(
         409,
         br#"{"error":"reporter_epoch_conflict","current_reporter_epoch":"8"}"#,
     );
-    assert!(r.prepare(vec![], None).is_none());
+    assert!(r.prepare(vec![]).is_none());
 
     let mut r = activated();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     response(&mut r, "reporter_epoch_conflict");
-    assert!(r.prepare(vec![], None).is_none());
+    assert!(r.prepare(vec![]).is_none());
     assert!(matches!(r.phase, Phase::Stopped("reporter_fenced")));
 }
 
 #[test]
 fn presence_generation_change_activates_but_preserves_seq_for_existing_epoch() {
     let mut r = activated();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     response(&mut r, "monitoring_generation_conflict");
-    assert_eq!(r.prepare(vec![], None).unwrap().path, ACTIVATE);
+    assert_eq!(r.prepare(vec![]).unwrap().path, ACTIVATE);
     assert_eq!(r.receive(200, &activation("1", "3")), Some("1".into()));
-    let next: Value = serde_json::from_slice(&r.prepare(vec![], None).unwrap().body).unwrap();
+    let next: Value = serde_json::from_slice(&r.prepare(vec![]).unwrap().body).unwrap();
     assert_eq!(next["seq"], "2");
     assert_eq!(next["monitoring_generation"], "3");
 }
@@ -153,12 +146,12 @@ fn presence_generation_refresh_cannot_steal_epoch_from_newer_process() {
     // The cloud checks generation before epoch, so the stale heartbeat first
     // receives a generation conflict instead of the fencing conflict.
     let mut r = activated();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     r.receive(
         409,
         br#"{"error":"monitoring_generation_conflict","current_monitoring_generation":"3","monitoring_state":"enabled"}"#,
     );
-    let activation = r.prepare(vec![], None).unwrap();
+    let activation = r.prepare(vec![]).unwrap();
     assert_eq!(activation.path, ACTIVATE);
     let request: Value = serde_json::from_slice(&activation.body).unwrap();
     assert_eq!(request["previous_reporter_epoch"], "1");
@@ -166,24 +159,21 @@ fn presence_generation_refresh_cannot_steal_epoch_from_newer_process() {
         409,
         br#"{"error":"reporter_epoch_conflict","current_reporter_epoch":"2"}"#,
     );
-    assert!(r.prepare(vec![], None).is_none());
+    assert!(r.prepare(vec![]).is_none());
     assert!(matches!(r.phase, Phase::Stopped("reporter_fenced")));
 }
 
 #[test]
 fn presence_stale_report_advances_seq_with_fresh_observations() {
     let mut r = activated();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     response(&mut r, "presence_report_stale");
     let next: Value = serde_json::from_slice(
-        &r.prepare(
-            vec![Component {
-                component: ComponentName::Serve,
-                state: ComponentState::Degraded,
-                age_s: 1,
-            }],
-            None,
-        )
+        &r.prepare(vec![Component {
+            component: ComponentName::Serve,
+            state: ComponentState::Degraded,
+            age_s: 1,
+        }])
         .unwrap()
         .body,
     )
@@ -204,34 +194,31 @@ fn presence_disable_revoke_and_unknown_refusal_stop_this_process() {
         (409, br#"{"error":"presence_sequence_conflict"}"#.as_slice()),
     ] {
         let mut r = activated();
-        r.prepare(vec![], None);
+        r.prepare(vec![]);
         r.receive(status, body);
-        assert!(r.prepare(vec![], None).is_none());
+        assert!(r.prepare(vec![]).is_none());
     }
 }
 
 #[test]
 fn presence_receipt_must_bind_epoch_seq_version_and_policy() {
     let mut r = activated();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     r.receive(
         200,
         br#"{"wire_version":1,"receipt":{"reporter_epoch":"2","seq":"1","outcome":"accepted"}}"#,
     );
-    assert!(r.prepare(vec![], None).is_none());
+    assert!(r.prepare(vec![]).is_none());
     let mut r = reporter();
-    r.prepare(vec![], None);
+    r.prepare(vec![]);
     let mut invalid: Value = serde_json::from_slice(&activation("1", "1")).unwrap();
     invalid["lease_s"] = json!(0);
     assert_eq!(r.receive(200, &serde_json::to_vec(&invalid).unwrap()), None);
-    assert!(r.prepare(vec![], None).is_none());
+    assert!(r.prepare(vec![]).is_none());
 }
 
 #[test]
-fn presence_silence_and_positions_are_bounded_closed_values() {
-    assert!(Silence::new(SilenceKind::Maintenance, 86_400).is_some());
-    assert!(Silence::new(SilenceKind::Reboot, 0).is_none());
-    assert!(Silence::new(SilenceKind::Sleep, 86_401).is_none());
+fn presence_positions_are_bounded_closed_values() {
     for value in [
         json!("01"),
         json!("-1"),
@@ -245,7 +232,7 @@ fn presence_silence_and_positions_are_bounded_closed_values() {
 
 #[test]
 fn presence_epoch_is_atomic_and_bound_to_cloud_account_and_machine() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_hub_tempdir();
     let mut principal: MachinePrincipal = serde_json::from_value(json!({
         "wire_version":1, "cloud_origin":"https://cloud.example", "account_id":"account", "machine_id":"machine",
         "hub_id":"hub", "grant_id":"grant", "grant_generation":"1", "feed_generation":"1", "active_epoch":"1",

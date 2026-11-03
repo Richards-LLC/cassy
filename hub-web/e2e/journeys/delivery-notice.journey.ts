@@ -45,12 +45,12 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("Open the session: only its conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(log).toContainText("Looking at the ledger import now.");
     await expect(log).not.toContainText("never reached it");
     // Yesterday's turn shows its date, not a bare clock time.
-    await expect(log.locator(".turn time").first()).toContainText("Sep 29, 17:20");
+    await expect(log.locator(".turn time").first()).toContainText("Sep 29, 5:20 PM");
   });
 
   await journey.stage("A blocker I never answered does not say I replied", async () => {
@@ -76,7 +76,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
     // cas-5c22: the item carries the notice's own time, not when this page heard of it.
-    await expect(attentionItems.locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(attentionItems.locator("time")).toHaveText("Sep 29, 5:49 PM");
     await expect(attentionItems.locator(".attention-title")).toHaveText(NOTICE_HEADLINE);
     await expect(attentionItems.locator(".attention-detail")).toHaveText("Worker daring-robin-43 stopped. The update did not reach the supervisor.");
     await expect(page.locator(".attention-group-label")).toHaveText("Accounting · happy-cheetah-1");
@@ -89,6 +89,21 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("1");
+    // cas-a929: a visible warning must not push any header control off-screen.
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      for (const selector of ["#conversation-back", "#conversation-attention", ".conversation-identity", ".conversation-header-actions button"]) {
+        for (const element of await page.locator(selector).all()) {
+          await expect(element).toBeVisible();
+          const bounds = (await element.boundingBox())!;
+          expect(bounds.x, `${colorScheme} ${selector} left edge`).toBeGreaterThanOrEqual(0);
+          expect(bounds.x + bounds.width, `${colorScheme} ${selector} right edge`).toBeLessThanOrEqual(390);
+        }
+      }
+      await expect(page.getByRole("button", { name: "Raw output", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
+    }
+    await page.emulateMedia({ colorScheme: "light" });
     // cas-97d58 F07: with the attention chip, Raw output and Interrupt on the
     // row, the identity takes its own line; title and machine read whole.
     const identity = page.locator(".conversation-identity");
@@ -104,7 +119,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
     await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE })).toBeVisible();
-    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toHaveText("Sep 29, 17:49");
+    await expect(sheet.locator("article", { hasText: NOTICE_HEADLINE }).locator("time")).toHaveText("Sep 29, 5:49 PM");
   });
 
   await journey.stage("Keyboard stays in the sheet", async () => {
@@ -180,7 +195,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const sameControl = (label: string) => label.replace(/#\d+$/, "");
     await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
     await expect(sheet.locator("article.attention-item").first().locator("details")).toHaveAttribute("open", "");
-    atlas.pop();
+    atlas[atlas.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
     await sheet.locator(".attention-dismiss").focus();
@@ -217,7 +232,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
     await hub.announceCatalog("atlas");
     await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
-    sessions.pop();
+    sessions[sessions.length - 1]!.liveness = "stale_metadata";
     await expect(badge).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
@@ -252,7 +267,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     expect(await staleCopy!.boundingBox(), "the replaced Copy has no geometry").toBeNull();
     await expect(attentionItems.locator("details")).toHaveAttribute("open", "");
     await expectDetailsCopyRow(attentionItems, "Copy has its own row at1280px too after a catalog redraw");
-    sessions.pop();
+    sessions[sessions.length - 1]!.liveness = "stale_metadata";
     await hub.announceCatalog("atlas");
     await expectDetailsCopyRow(attentionItems, "Copy keeps its row after the catalog settles");
     await expect(attentionItems.locator("pre"), "Details is the message as text at 1280px").toHaveText(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
@@ -273,13 +288,13 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
     await page.reload();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
     expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
     // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
     // this browser stored it is not a machine stamp to measure a clock by.
-    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 17:20");
+    await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 5:20 PM");
     // cas-b113: resolved watchdog notices must not return from the device
     // journal as conversation blockers, nor make the rail wait on me.
     await expect(log.locator(".bub", { hasText: NOTICE_TEXT })).toHaveCount(0);
@@ -325,7 +340,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     open.onerror = () => reject(open.error);
   }));
   const choose = async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
   };
   await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
     await journey.open(); await choose();

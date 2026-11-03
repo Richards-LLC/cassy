@@ -40,7 +40,7 @@ fn fixture(env: &mut TestEnvGuard) -> (tempfile::TempDir, CasCore, CasCore, Stri
     let repo = temp.path();
     std::fs::write(
         repo.join(".cas/config.toml"),
-        "[verification]\nenabled=false\n[qa]\nindependent_pass=false\n",
+        "[verification]\nenabled=false\n[qa]\nmode='per_task'\nindependent_pass=false\n",
     )
     .unwrap();
     git(repo, &["init", "-q", "-b", "main"]);
@@ -333,7 +333,7 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
     git(repo, &["checkout", "-q", "factory/test-agent"]);
     env.remove("GIT_COMMITTER_DATE");
     std::fs::write(cas_dir.join("config.toml"),
-        "[verification]\nenabled=true\n[code_review]\nowner=\"worker\"\n[qa]\nindependent_pass=false\n").unwrap();
+        "[verification]\nenabled=true\n[code_review]\nowner=\"worker\"\n[qa]\nmode='per_task'\nindependent_pass=false\n").unwrap();
     let first = close(worker.clone(), Some(&receipt)).await;
     assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)

@@ -1,0 +1,4 @@
+title: A read-only pairing told the person holding the phone to run a CLI command, and its composer looked writable
+tasks: [cas-b7c0]
+invariants: [HUB-J2-GOAL]
+journeys: [HUB-J2]

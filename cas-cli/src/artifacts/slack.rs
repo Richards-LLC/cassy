@@ -127,7 +127,7 @@ fn resolve_error(error: ViewError) -> PostError {
         ),
         ViewError::NotLoggedIn => PostError::new(
             "cloud_auth_missing",
-            "this installation is not logged in to Cassy Cloud, so the artifact cannot be resolved; run `cas cloud login`",
+            "this installation is not logged in to Cassy Cloud, so the artifact cannot be resolved; run `cas login`",
         ),
         ViewError::NotInCloud { status } => PostError::new(
             "artifact_not_in_cloud",

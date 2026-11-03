@@ -38,6 +38,8 @@ pub const QA_PASS_SCHEMA_STATEMENTS: &[&str] = &[
         deadline_at TEXT NOT NULL,
         resolved_at TEXT
     )",
+    "CREATE TABLE IF NOT EXISTS qa_pass_sync_versions (
+        id TEXT PRIMARY KEY, changed_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS idx_qa_passes_task ON qa_passes(task_id, requested_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_qa_passes_qa_task ON qa_passes(qa_task_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_passes_active_task
@@ -528,6 +530,22 @@ pub fn waive_qa_pass(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<QaPass> {
+    waive_qa_pass_reporting_superseded(cas_dir, task_id, supervisor_agent_id,
+        implementer_agent_id, branch, bound_head, reason, now).map(|(pass, _)| pass)
+}
+
+/// Record the waiver and report the retired round so lifecycle callers can
+/// cancel its work item, just as they do after a head-advance supersession.
+pub fn waive_qa_pass_reporting_superseded(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    implementer_agent_id: &str,
+    branch: &str,
+    bound_head: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(QaPass, Option<QaPass>)> {
     if reason.trim().is_empty() {
         return Err(StoreError::Parse("a QA waiver needs a reason".to_string()));
     }
@@ -539,8 +557,10 @@ pub fn waive_qa_pass(
     let conn = open_conn(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
+    let mut retired = None;
     if let Some(active) = active_with_conn(&tx, task_id)? {
         set_state(&tx, &active.id, QaPassState::Superseded, Some(now))?;
+        retired = Some(by_id_with_conn(&tx, &active.id)?);
     }
     let round = failed_rounds_with_conn(&tx, task_id)? + 1;
     let id = new_pass_id();
@@ -562,7 +582,43 @@ pub fn waive_qa_pass(
     )?;
     let pass = by_id_with_conn(&tx, &id)?;
     tx.commit()?;
-    Ok(pass)
+    Ok((pass, retired))
+}
+
+/// Keep a shared work item if any round still needs it or records a verdict.
+/// Deadline expiry is deliberately not applied by this read-only predicate.
+pub fn qa_task_has_current_round(cas_dir: &Path, qa_task_id: &str) -> Result<bool> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM qa_passes WHERE qa_task_id = ?1
+         AND state NOT IN ('superseded', 'waived'))",
+        params![qa_task_id], |row| row.get(0),
+    )?)
+}
+
+/// Read a bounded page of obsolete work items for exactly one delivery. Each
+/// child appears once; references from any non-obsolete round protect it.
+pub fn obsolete_qa_task_passes(cas_dir: &Path, task_id: &str, limit: usize) -> Result<Vec<QaPass>> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let columns = COLUMNS.split(',').map(|column| format!("p.{}", column.trim()))
+        .collect::<Vec<_>>().join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {columns} FROM qa_passes p JOIN tasks t ON t.id = p.qa_task_id
+         WHERE p.task_id = ?1 AND p.state IN ('superseded', 'waived')
+           AND t.status NOT IN ('closed', 'cancelled')
+           AND EXISTS(SELECT 1 FROM json_each(t.labels) WHERE value = 'qa-pass')
+           AND NOT EXISTS(SELECT 1 FROM qa_passes current
+             WHERE current.qa_task_id = p.qa_task_id
+               AND current.state NOT IN ('superseded', 'waived'))
+           AND p.rowid = (SELECT newest.rowid FROM qa_passes newest
+             WHERE newest.qa_task_id = p.qa_task_id
+             ORDER BY newest.requested_at DESC, newest.rowid DESC LIMIT 1)
+         ORDER BY p.requested_at, p.rowid LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![task_id, limit.clamp(1, 100) as i64], parse_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(StoreError::Database)
 }
 
 /// cas-0c988: carry a recorded verdict to a rebased tip of the same delivery.
@@ -826,6 +882,99 @@ fn list_filtered(cas_dir: &Path, task_id: &str, satisfying_only: bool) -> Result
     Ok(rows)
 }
 
+/// Import a trusted owner-scoped QA snapshot. This is deliberately separate
+/// from task verifications and from the ordinary task-note write interface.
+/// Immutable delivery identity and no-self-review also apply on a peer host.
+pub fn import_qa_pass(cas_dir: &Path, pass: &QaPass, changed_at: DateTime<Utc>) -> Result<()> {
+    if pass.id.is_empty() || pass.task_id.is_empty() || pass.bound_head.is_empty()
+        || pass.implementer_agent_id.is_empty() || pass.branch.is_empty() || pass.round == 0
+        || pass.reviewer_agent_id.as_deref() == Some(pass.implementer_agent_id.as_str())
+        || (matches!(pass.state, QaPassState::Passed | QaPassState::Failed)
+            && (pass.reviewer_agent_id.as_deref().is_none_or(str::is_empty)
+                || pass.ledger_path.as_deref().is_none_or(str::is_empty)
+                || pass.resolved_at.is_none()))
+        || (pass.state == QaPassState::Waived
+            && (pass.issuer_agent_id.as_deref().is_none_or(str::is_empty) || pass.resolved_at.is_none()))
+    {
+        return Err(StoreError::Parse("invalid independent QA snapshot".into()));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let previous = match by_id_with_conn(&tx, &pass.id) {
+        Ok(previous) => Some(previous),
+        Err(StoreError::NotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(previous) = &previous {
+        if previous.task_id != pass.task_id || previous.bound_head != pass.bound_head
+            || previous.branch != pass.branch || previous.implementer_agent_id != pass.implementer_agent_id
+            || previous.requested_at != pass.requested_at || previous.round != pass.round
+            || previous.deadline_at != pass.deadline_at
+            || (previous.qa_task_id.is_some() && pass.qa_task_id.is_some() && previous.qa_task_id != pass.qa_task_id)
+        {
+            return Err(StoreError::Parse("QA snapshot changes immutable delivery identity".into()));
+        }
+        let version: Option<String> = tx.query_row(
+            "SELECT changed_at FROM qa_pass_sync_versions WHERE id = ?1", [&pass.id],
+            |row| row.get(0)).optional()?;
+        let old_time = version.map(parse_time).transpose()?.unwrap_or(
+            previous.resolved_at.unwrap_or(previous.requested_at));
+        // An authenticated verdict made before the deadline beats a peer's
+        // lazy timeout. Later delivery invalidation still wins by resolution.
+        let late_verdict = previous.state == QaPassState::TimedOut
+            && matches!(pass.state, QaPassState::Passed | QaPassState::Failed)
+            && pass.resolved_at.is_some_and(|at| at <= pass.deadline_at);
+        if matches!(previous.state, QaPassState::Passed | QaPassState::Failed)
+            && pass.state == QaPassState::TimedOut {
+            return Ok(());
+        }
+        // Terminal decisions never regress to an open round, including a
+        // stale source snapshot delivered after a local deadline transition.
+        if (!previous.state.is_active() && pass.state.is_active())
+            || !late_verdict && (changed_at < old_time
+                || previous.resolved_at > pass.resolved_at && !previous.state.is_active())
+        {
+            return Ok(());
+        }
+        if !late_verdict && changed_at == old_time && previous != pass {
+            return Err(StoreError::Parse("conflicting independent QA snapshots".into()));
+        }
+    }
+    if let Some(active) = active_with_conn(&tx, &pass.task_id)?
+        && active.id != pass.id
+    {
+        // A source verdict replaces a duplicate peer dispatch for the same
+        // delivery. A stale active round cannot displace a newer dispatch.
+        if pass.state.is_active() && active.requested_at >= pass.requested_at {
+            return Ok(());
+        }
+        if pass.state.is_active() || active.bound_head == pass.bound_head {
+            set_state(&tx, &active.id, QaPassState::Superseded, Some(changed_at))?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO qa_passes (id, task_id, round, implementer_agent_id, branch, bound_head,
+         qa_task_id, reviewer_agent_id, state, summary, issues_json, ledger_path, issuer_agent_id,
+         requested_at, deadline_at, resolved_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         ON CONFLICT(id) DO UPDATE SET qa_task_id=COALESCE(excluded.qa_task_id, qa_passes.qa_task_id),
+         reviewer_agent_id=excluded.reviewer_agent_id, state=excluded.state,
+         summary=excluded.summary, issues_json=excluded.issues_json, ledger_path=excluded.ledger_path,
+         issuer_agent_id=excluded.issuer_agent_id, resolved_at=excluded.resolved_at",
+        params![pass.id, pass.task_id, pass.round, pass.implementer_agent_id, pass.branch,
+            pass.bound_head, pass.qa_task_id, pass.reviewer_agent_id, pass.state.as_str(),
+            pass.summary, pass.issues_json, pass.ledger_path, pass.issuer_agent_id,
+            pass.requested_at.to_rfc3339(), pass.deadline_at.to_rfc3339(),
+            pass.resolved_at.map(|time| time.to_rfc3339())],
+    )?;
+    tx.execute("INSERT INTO qa_pass_sync_versions VALUES (?1,?2)
+        ON CONFLICT(id) DO UPDATE SET changed_at=excluded.changed_at",
+        params![pass.id, changed_at.to_rfc3339()])?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,6 +997,41 @@ mod tests {
             QaPassOpen::Dispatched(pass) => pass,
             other => panic!("expected a dispatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peer_snapshots_preserve_verdict_identity_and_do_not_revive_open_rounds() {
+        let source = TempDir::new().unwrap();
+        let peer = TempDir::new().unwrap();
+        let now = Utc::now();
+        let pending = dispatched(open_qa_pass(source.path(), &new("aaaa1111", now), now).unwrap());
+        set_qa_task(source.path(), &pending.id, "cas-review").unwrap();
+        let claimed = claim_qa_pass(source.path(), "cas-ui1", "reviewer", now).unwrap();
+        let passed = resolve_qa_pass(source.path(), "cas-ui1", "reviewer", QaVerdict::Approved,
+            "PASS", None, "/other/LEDGER.md", now + Duration::seconds(1)).unwrap();
+        for (index, pass) in [&pending, &claimed, &passed].into_iter().enumerate() {
+            import_qa_pass(peer.path(), pass, now + Duration::milliseconds(index as i64 * 500)).unwrap();
+        }
+        import_qa_pass(peer.path(), &pending, now).unwrap();
+        import_qa_pass(peer.path(), &claimed, now + Duration::hours(1)).unwrap();
+        assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
+        let expired_peer = TempDir::new().unwrap();
+        import_qa_pass(expired_peer.path(), &claimed, now).unwrap();
+        latest_qa_pass(expired_peer.path(), "cas-ui1", now + Duration::hours(2)).unwrap();
+        import_qa_pass(expired_peer.path(), &passed, now + Duration::seconds(1)).unwrap();
+        assert_eq!(list_qa_passes(expired_peer.path(), "cas-ui1").unwrap(), vec![passed.clone()]);
+        for kind in ["self-review", "head", "implementer", "task", "deadline"] {
+            let mut forged = passed.clone();
+            match kind {
+                "self-review" => forged.reviewer_agent_id = Some(forged.implementer_agent_id.clone()),
+                "head" => forged.bound_head = "other".into(),
+                "implementer" => forged.implementer_agent_id = "other".into(),
+                "task" => forged.task_id = "cas-other".into(),
+                _ => forged.deadline_at += Duration::hours(1),
+            }
+            assert!(import_qa_pass(peer.path(), &forged, now + Duration::hours(2)).is_err(), "{kind}");
+        }
+        assert_eq!(list_qa_passes(peer.path(), "cas-ui1").unwrap(), vec![passed]);
     }
 
     #[test]

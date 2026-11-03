@@ -291,7 +291,7 @@ async fn missing_cloud_auth_is_named() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "cloud_auth_missing", "{error}");
-    assert!(error.message.contains("cas cloud login"), "{error}");
+    assert!(error.message.contains("cas login"), "{error}");
 }
 
 #[tokio::test]

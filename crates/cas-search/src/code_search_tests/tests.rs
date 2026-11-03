@@ -412,13 +412,6 @@ fn test_create_snippet_truncates_multibyte_text_on_char_boundary() {
     }
 }
 
-#[test]
-fn test_code_search_stats_default() {
-    let stats = CodeSearchStats::default();
-    assert_eq!(stats.file_count, 0);
-    assert_eq!(stats.symbol_count, 0);
-}
-
 /// Test that search uses batch fetching, not N+1 individual queries
 #[test]
 fn test_no_n_plus_1_with_1000_symbols() {

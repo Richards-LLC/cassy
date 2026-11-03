@@ -34,6 +34,15 @@ pub(super) fn at_park(
         Ok(snapshot) => snapshot,
         Err(message) => return warning(notes, task, message),
     };
+    let Some(delivery_head) =
+        super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+    else {
+        return warning(
+            notes,
+            task,
+            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
+        );
+    };
     let qa = config.qa();
     let result = (|| -> anyhow::Result<_> {
         let mut changes = crate::qa_impact::io::changes_for_diff(repo, &base, Some(&head))?;
@@ -64,11 +73,7 @@ pub(super) fn at_park(
             warnings.push(format!("UPKEEP WARNING G6: {warning}"));
         }
         let mut registry = |revision: &str, files: &[String]| -> anyhow::Result<_> {
-            let text = read(repo, revision, &qa.registry.path, files)?;
-            match text
-                .map(|text| crate::qa_registry::parse(&text))
-                .transpose()
-            {
+            match registry_upkeep::read_registry(repo, revision, &qa.registry.path, files) {
                 Ok(registry) => Ok(registry),
                 Err(error) => {
                     warnings.push(format!("UPKEEP WARNING: {} at {revision} malformed; registry overview signal unavailable (not blocking): {error}", qa.registry.path));
@@ -170,6 +175,8 @@ pub(super) fn at_park(
         match finish(
             notes,
             task,
+            repo,
+            &delivery_head,
             stage,
             path,
             findings,

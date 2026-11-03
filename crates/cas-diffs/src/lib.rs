@@ -215,18 +215,19 @@ mod tests {
 
     #[test]
     fn change_type_variants() {
-        let variants = [
-            ChangeType::Change,
-            ChangeType::RenamePure,
-            ChangeType::RenameChanged,
-            ChangeType::New,
-            ChangeType::Deleted,
-        ];
-        for v in &variants {
-            // Round-trip through serde
-            let json = serde_json::to_string(v).unwrap();
-            let back: ChangeType = serde_json::from_str(&json).unwrap();
-            assert_eq!(*v, back);
+        for (variant, spelling) in [
+            (ChangeType::Change, "change"),
+            (ChangeType::RenamePure, "rename-pure"),
+            (ChangeType::RenameChanged, "rename-changed"),
+            (ChangeType::New, "new"),
+            (ChangeType::Deleted, "deleted"),
+        ] {
+            let fixture = serde_json::Value::String(spelling.into());
+            assert_eq!(serde_json::to_value(variant).unwrap(), fixture);
+            assert_eq!(
+                serde_json::from_value::<ChangeType>(fixture).unwrap(),
+                variant
+            );
         }
     }
 
@@ -255,28 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn context_content_construction() {
-        let ctx = ContextContent {
-            lines: 3,
-            addition_line_index: 0,
-            deletion_line_index: 0,
-        };
-        assert_eq!(ctx.lines, 3);
-    }
-
-    #[test]
-    fn change_content_construction() {
-        let change = ChangeContent {
-            deletions: 2,
-            deletion_line_index: 5,
-            additions: 3,
-            addition_line_index: 5,
-        };
-        assert_eq!(change.deletions, 2);
-        assert_eq!(change.additions, 3);
-    }
-
-    #[test]
     fn hunk_content_tagged_serde() {
         let ctx = HunkContent::Context(ContextContent {
             lines: 1,
@@ -296,152 +275,5 @@ mod tests {
         assert!(json.contains("\"type\":\"change\""));
     }
 
-    #[test]
-    fn hunk_construction() {
-        let hunk = Hunk {
-            collapsed_before: 5,
-            addition_start: 1,
-            addition_count: 7,
-            addition_lines: 2,
-            addition_line_index: 0,
-            deletion_start: 1,
-            deletion_count: 5,
-            deletion_lines: 0,
-            deletion_line_index: 0,
-            hunk_content: vec![
-                HunkContent::Context(ContextContent {
-                    lines: 3,
-                    addition_line_index: 0,
-                    deletion_line_index: 0,
-                }),
-                HunkContent::Change(ChangeContent {
-                    deletions: 0,
-                    deletion_line_index: 3,
-                    additions: 2,
-                    addition_line_index: 3,
-                }),
-                HunkContent::Context(ContextContent {
-                    lines: 2,
-                    addition_line_index: 5,
-                    deletion_line_index: 3,
-                }),
-            ],
-            hunk_context: Some("fn main()".into()),
-            hunk_specs: Some("@@ -1,5 +1,7 @@".into()),
-            split_line_start: 0,
-            split_line_count: 7,
-            unified_line_start: 0,
-            unified_line_count: 7,
-            no_eof_cr_deletions: false,
-            no_eof_cr_additions: false,
-        };
-        assert_eq!(hunk.addition_count, 7);
-        assert_eq!(hunk.hunk_content.len(), 3);
-    }
 
-    #[test]
-    fn file_diff_metadata_construction() {
-        let file = FileDiffMetadata {
-            name: "src/main.rs".into(),
-            prev_name: None,
-            change_type: ChangeType::Change,
-            hunks: vec![],
-            split_line_count: 10,
-            unified_line_count: 10,
-            is_partial: true,
-            deletion_lines: vec!["old line".into()],
-            addition_lines: vec!["new line".into()],
-        };
-        assert_eq!(file.name, "src/main.rs");
-        assert!(file.prev_name.is_none());
-        assert_eq!(file.change_type, ChangeType::Change);
-    }
-
-    #[test]
-    fn file_diff_metadata_rename() {
-        let file = FileDiffMetadata {
-            name: "src/new_name.rs".into(),
-            prev_name: Some("src/old_name.rs".into()),
-            change_type: ChangeType::RenameChanged,
-            hunks: vec![],
-            split_line_count: 0,
-            unified_line_count: 0,
-            is_partial: false,
-            deletion_lines: vec![],
-            addition_lines: vec![],
-        };
-        assert_eq!(file.prev_name.as_deref(), Some("src/old_name.rs"));
-        assert_eq!(file.change_type, ChangeType::RenameChanged);
-    }
-
-    #[test]
-    fn parsed_patch_construction() {
-        let patch = ParsedPatch {
-            patch_metadata: Some("commit abc123\nAuthor: Test".into()),
-            files: vec![FileDiffMetadata {
-                name: "README.md".into(),
-                prev_name: None,
-                change_type: ChangeType::Change,
-                hunks: vec![],
-                split_line_count: 5,
-                unified_line_count: 5,
-                is_partial: true,
-                deletion_lines: vec![],
-                addition_lines: vec![],
-            }],
-        };
-        assert!(patch.patch_metadata.is_some());
-        assert_eq!(patch.files.len(), 1);
-        assert_eq!(patch.files[0].name, "README.md");
-    }
-
-    #[test]
-    fn parsed_patch_serde_roundtrip() {
-        let patch = ParsedPatch {
-            patch_metadata: None,
-            files: vec![FileDiffMetadata {
-                name: "test.rs".into(),
-                prev_name: None,
-                change_type: ChangeType::New,
-                hunks: vec![Hunk {
-                    collapsed_before: 0,
-                    addition_start: 1,
-                    addition_count: 3,
-                    addition_lines: 3,
-                    addition_line_index: 0,
-                    deletion_start: 0,
-                    deletion_count: 0,
-                    deletion_lines: 0,
-                    deletion_line_index: 0,
-                    hunk_content: vec![HunkContent::Change(ChangeContent {
-                        deletions: 0,
-                        deletion_line_index: 0,
-                        additions: 3,
-                        addition_line_index: 0,
-                    })],
-                    hunk_context: None,
-                    hunk_specs: Some("@@ -0,0 +1,3 @@".into()),
-                    split_line_start: 0,
-                    split_line_count: 3,
-                    unified_line_start: 0,
-                    unified_line_count: 3,
-                    no_eof_cr_deletions: false,
-                    no_eof_cr_additions: false,
-                }],
-                split_line_count: 3,
-                unified_line_count: 3,
-                is_partial: false,
-                deletion_lines: vec![],
-                addition_lines: vec![
-                    "fn main() {".into(),
-                    "    println!(\"hello\");".into(),
-                    "}".into(),
-                ],
-            }],
-        };
-
-        let json = serde_json::to_string_pretty(&patch).unwrap();
-        let back: ParsedPatch = serde_json::from_str(&json).unwrap();
-        assert_eq!(patch, back);
-    }
 }

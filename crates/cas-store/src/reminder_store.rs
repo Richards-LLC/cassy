@@ -406,6 +406,34 @@ pub struct SqliteReminderStore {
 }
 
 impl SqliteReminderStore {
+    /// Read ended-reminder history using one captured clock, so mixed SQLite
+    /// and RFC3339 timestamps have the same window at either side of midnight.
+    pub fn list_recently_ended_at(
+        &self,
+        agent_id: &str,
+        within_secs: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let cutoff = (now - chrono::Duration::seconds(within_secs)).to_rfc3339();
+        let sql = format!(
+            "SELECT {} FROM reminders
+             WHERE status IN ('expired', 'cancelled')
+               AND (supervisor_id = ?1 OR target_id = ?1)
+               AND MAX(julianday(created_at), COALESCE(julianday(cancelled_at), 0),
+                       COALESCE(julianday(trigger_at), 0)) >= julianday(?2)
+             ORDER BY id DESC",
+            Self::SELECT_COLUMNS
+        );
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let reminders = stmt
+            .query_map(params![agent_id, cutoff], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(reminders)
+    }
+
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.
@@ -781,23 +809,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn list_recently_ended(&self, agent_id: &str, within_secs: i64) -> Result<Vec<Reminder>> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let cutoff = (Utc::now() - chrono::Duration::seconds(within_secs)).to_rfc3339();
-        let sql = format!(
-            "SELECT {} FROM reminders
-             WHERE status IN ('expired', 'cancelled')
-               AND (supervisor_id = ?1 OR target_id = ?1)
-               AND MAX(created_at, COALESCE(cancelled_at, ''), COALESCE(trigger_at, '')) >= ?2
-             ORDER BY id DESC",
-            Self::SELECT_COLUMNS
-        );
-
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let reminders = stmt
-            .query_map(params![agent_id, cutoff], Self::reminder_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(reminders)
+        self.list_recently_ended_at(agent_id, within_secs, Utc::now())
     }
 
     fn get_due_time_reminders(&self) -> Result<Vec<Reminder>> {

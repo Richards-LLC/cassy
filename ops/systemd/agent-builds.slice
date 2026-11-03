@@ -1,0 +1,8 @@
+[Unit]
+Description=Agent builds and dev servers
+
+[Slice]
+# The dash makes this a child of agent.slice. Keep builds below agent control.
+CPUWeight=25
+# Soft aggregate ceiling: reclaim and throttle, never a hard memory kill.
+MemoryHigh=24G

@@ -8,6 +8,9 @@ export function installMediaPreviews(document: Document): void {
   if (!view) return;
   const tag = "commander-media-preview";
   if (!view.customElements.get(tag)) view.customElements.define(tag, class extends view.HTMLElement {
+    static get observedAttributes(): string[] { return ["data-preview-state"]; }
+    declare previewStateChanged?: (state: string) => void;
+    attributeChangedCallback(_name: string, _old: string | null, state: string): void { this.previewStateChanged?.(state); }
     declare loadPreview?: () => Promise<void>;
     declare machineId?: string;
     declare available?: () => boolean;
@@ -24,7 +27,12 @@ export function installMediaPreviews(document: Document): void {
     connectedCallback(): void {
       this.observer?.disconnect(); this.observer = undefined;
       if (this.complete || this.loading) return;
-      if (this.dataset.previewState === "waiting" && this.available?.() === false) return;
+      if (this.dataset.previewState === "waiting") {
+        if (this.available?.() === false) return;
+        // A cached failed preview is hidden. Restore its reserved box before
+        // observing, so re-entry after an offscreen reconnect can intersect.
+        this.dataset.previewState = "pending";
+      }
       const load = async () => {
         this.observer?.disconnect(); this.observer = undefined;
         if (this.complete || this.loading || !this.isConnected) return;
@@ -52,7 +60,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
   let resume: { time: number; playing: boolean } | undefined;
   const fallback = (waiting = false) => {
     viewport.dataset.previewState = waiting ? "waiting" : "failed";
-    const text = document.createElement("p"); text.textContent = "Preview unavailable. Open the file below."; viewport.replaceChildren(text);
+    const text = document.createElement("p"); text.textContent = "Preview unavailable"; viewport.replaceChildren(text);
   };
   const attempt = async (): Promise<void> => {
     try {
@@ -97,7 +105,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
         return;
       }
       if (mime.startsWith("image/")) {
-        const image = document.createElement("img"); image.alt = file.name; image.width = 640; image.height = 360; image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer"; media = image;
+        const image = document.createElement("img"); image.alt = file.name; image.width = viewport.classList.contains("rich-thumbnail") ? 48 : 640; image.height = viewport.classList.contains("rich-thumbnail") ? 48 : 360; image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer"; media = image;
       } else {
         const player = document.createElement(mime.startsWith("video/") ? "video" : "audio"); player.controls = true; player.preload = "none";
         player.addEventListener("play", () => { wantedPlayback = true; });

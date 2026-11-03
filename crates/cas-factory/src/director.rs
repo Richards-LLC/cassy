@@ -447,17 +447,11 @@ impl DirectorData {
                 assignee: t.assignee.clone(),
                 task_type: t.task_type,
                 epic: child_to_epic.get(&t.id).cloned(),
-                // An epic has two distinct branch authorities when it was
-                // created with an explicit integration target: `branch` is
-                // the live coordination branch workers must build on, while
-                // `WorkTarget.target_branch` is its parent delivery branch.
-                // Keep the former in the director snapshot so focus-based
-                // worker spawns retain the epic tip (GH #746).
+                // The shared resolver keeps renamed lanes current without
+                // confusing an epic's integration base with its live lane.
                 branch: if t.task_type == TaskType::Epic {
-                    t.branch.clone().or_else(|| {
-                        t.deliverables
-                            .work_target
-                            .as_ref()
+                    t.effective_epic_branch().map(str::to_string).or_else(|| {
+                        t.deliverables.work_target.as_ref()
                             .map(|target| target.target_branch.clone())
                     })
                 } else {
@@ -1612,13 +1606,33 @@ mod tests {
         });
         stores.task_store.add(&task).unwrap();
 
-        let data =
-            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        let data = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
         assert_eq!(
             data.in_progress_tasks[0].branch.as_deref(),
             Some("main"),
             "the director relay must receive the WorkTarget branch rather than infer a focus"
         );
+
+        let mut epic = Task::new("cas-lane".into(), "Current lane".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/previous-cas-lane".into());
+        for (target, expected) in [
+            ("main", "epic/previous-cas-lane"),
+            ("epic/current-cas-lane", "epic/current-cas-lane"),
+        ] {
+            epic.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "remote:example.invalid/acme/cas".into(),
+                target_branch: target.into(),
+            });
+            if stores.task_store.get(&epic.id).is_ok() {
+                stores.task_store.update(&epic).unwrap();
+            } else {
+                stores.task_store.add(&epic).unwrap();
+            }
+            let data =
+                DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+            assert_eq!(data.epic_tasks[0].branch.as_deref(), Some(expected));
+        }
     }
 
     #[test]

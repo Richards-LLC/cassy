@@ -30,6 +30,15 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "scripts/journey-eval.sh /artifacts/cas-fixture --full",
             "bash scripts/journey-eval.sh /artifacts/cas-fixture --full --workers=4",
             "npx playwright test",
+            "npx playwright test qa/real-walk.spec.js --full",
+            // A later --help can be an option's value, and these still run the suite.
+            "npx playwright test --grep-invert --help",
+            "npx playwright test --reporter --help",
+            "npx playwright test -- --help",
+            "npx playwright test --help --full",
+            "npx playwright test --help; npx playwright test",
+            "node scripts/run-verified-tests.mjs playwright --help",
+            "npm run journeys -- qa/real-walk.spec.js --full=true",
             "npx playwright test .journey.ts",
             "npx playwright test .spec.mjs",
             "npx playwright test .spec.ts",
@@ -74,6 +83,7 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             let reason = denial(command, role).expect(command);
             assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
             assert!(reason.contains("affected"), "{reason}");
+            assert!(reason.contains("named spec"), "{reason}");
         }
     }
 }
@@ -87,6 +97,7 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "CAS_CLONE_PATH",
         directory.path().to_str().unwrap(),
     )]);
+    assert!(!directory.path().join("scripts/journey-eval.sh").exists());
     for command in [
         "scripts/journey-eval.sh /artifacts/cas-fixture",
         "scripts/journey-eval.sh /artifacts/cas-fixture --affected abc --workers=4",
@@ -100,10 +111,18 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/x.spec.ts:42 --debug=cli > pw-debug.log 2>&1 &",
         "npx playwright test qa/real-walk.spec.mjs --retries 0 -j 1 --trace on --repeat-each 2 --max-failures 1 --browser chromium --global-timeout 30000 --tsconfig tsconfig.json",
         "npx playwright test qa/real-walk.spec.js --workers=1",
+        "npx playwright test tests/e2e/explorer-login.spec.cjs --workers=1",
+        "NODE_PATH=/cached/node_modules npx --prefix /cached playwright test scripts/tests/decision-workbook.spec.js --config scripts/tests/decision-workbook.playwright.config.cjs",
+        "npx --prefix=/cached playwright test scripts/tests/decision-workbook.spec.cjs --config=scripts/tests/decision-workbook.playwright.config.cjs",
+        "npx playwright test /task-artifacts/independent-qa/round-1/independent.spec.cjs --config /task-artifacts/independent-qa/round-1/independent.config.cjs --workers=1 > target/independent-browser.log 2>&1",
         "npx playwright test qa/real-walk.spec.tsx --workers=1",
         "npm run journeys -- --grep=HUB-J7 --workers=4",
         "npx playwright test --grep 'HUB-J7|HUB-J12'",
         "npx playwright --version",
+        "npx playwright test --help",
+        "npx playwright test -h",
+        "node node_modules/@playwright/test/cli.js test --help",
+        "npx playwright test --help 2>&1 | head -40",
         "npx vitest run",
         "npx tsc --noEmit",
         "cat > README.md <<'EOF'\nnpx playwright test\nEOF",
@@ -114,8 +133,10 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "# npx playwright test",
         "printf '%s\\n' scripts/journey-eval.sh --full",
     ] {
-        let reason = denial(command, "worker");
-        assert!(reason.is_none(), "{command}: {reason:?}");
+        for role in ["worker", "qa"] {
+            let reason = denial(command, role);
+            assert!(reason.is_none(), "{role}: {command}: {reason:?}");
+        }
     }
     for command in [
         "scripts/journey-eval.sh /artifacts/cas-fixture --full",

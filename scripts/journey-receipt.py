@@ -18,10 +18,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from journey_dist import CAPTURE_INSTRUMENTATION, GUARDED_INPUTS, comparison, git, verify_build
 
-def git(repo: Path, *args: str) -> str:
-    return subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True,
-                          text=True).stdout.strip()
 
 
 def cas_root(repo: Path) -> Path:
@@ -109,37 +107,6 @@ def selection(repo: Path, base: str, head: str, full: bool) -> list[dict]:
     return sorted(rows, key=lambda r: r['id'])
 
 
-# Only the opt-in comparison may overlay these producer-owned helpers from
-# its reviewed head onto the base checkout. Product, bundle and test inputs
-# remain the evaluated revision; record the helper revision explicitly.
-CAPTURE_INSTRUMENTATION = (
-    'scripts/journey-eval.sh', 'scripts/journey-receipt.py',
-    'hub-web/e2e/journeys/journey.ts',
-    'hub-web/e2e/journeys/receipt-directory.mjs',
-    'hub-web/e2e/journeys/receipt-directory.d.mts',
-)
-GUARDED_INPUTS = ('hub-web', 'docs/qa/journeys.md', 'scripts/journey-eval.sh',
-                  'scripts/journey-receipt.py', 'scripts/journey-bundles.py',
-                  'scripts/journeys-for-diff.py')
-
-
-def comparison(repo: Path, refs: list[str], evaluated: str) -> dict:
-    base, head = [git(repo, 'rev-parse', '--verify', f'{ref}^{{commit}}') for ref in refs]
-    if evaluated not in (base, head):
-        raise ValueError('comparison must evaluate exactly its base or head checkout')
-    dirty = set(git(repo, 'diff', '--name-only', 'HEAD', '--', *GUARDED_INPUTS).splitlines())
-    dirty.update(git(repo, 'ls-files', '--others', '--exclude-standard', '--', *GUARDED_INPUTS).splitlines())
-    if dirty - set(CAPTURE_INSTRUMENTATION):
-        raise ValueError('comparison product/catalog/test inputs must be committed')
-    for path in CAPTURE_INSTRUMENTATION:
-        source = subprocess.run(['git', 'show', f'{head}:{path}'], cwd=repo, capture_output=True)
-        if source.returncode == 0:
-            if not (repo / path).is_file() or (repo / path).read_bytes() != source.stdout:
-                raise ValueError(f'comparison instrumentation must match head: {path}')
-        elif path in dirty:
-            raise ValueError(f'comparison instrumentation absent from head: {path}')
-    return {'base_sha': base, 'head_sha': head, 'instrumentation_sha': head}
-
 
 def plan(args: argparse.Namespace) -> int:
     repo = args.repo.resolve()
@@ -220,6 +187,8 @@ def fold(plan: dict, report: dict | None, suite_exit: int, version: str) -> tupl
                'native_report': 'playwright/report.json' if ids else None, 'errors': errors}
     if 'comparison' in plan:
         receipt['comparison'] = plan['comparison']
+    if 'build' in plan:
+        receipt['build'] = plan['build']
     if ci:
         receipt['ci_run_url'] = ci_url
     okay = suite_exit == 0 and not errors and all(r['status'] == 'PASS' for r in rows.values())
@@ -237,6 +206,11 @@ def write(args: argparse.Namespace) -> int:
     actual = [r['id'] for r in selection(repo, run['base_sha'], compared['head_sha'] if compared else run['head_sha'], run['scope'] == 'full')]
     if actual != run['selection_ids']:
         raise ValueError('plan selection differs from journeys-for-diff; caller IDs cannot substitute for affected proof')
+    if run['selection_ids']:
+        build = json.loads((args.plan.parent / 'journey-build.json').read_text())
+        if build.get('comparison') != run.get('comparison'):
+            raise ValueError('snapshot comparison does not match journey selection')
+        run['build'] = verify_build(repo, build, run['head_sha'])
     report = json.loads(args.report.read_text()) if args.report.is_file() else None
     receipt, status = fold(run, report, args.suite_exit, args.tool_version)
     args.output.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -273,6 +247,11 @@ def verify_full(args: argparse.Namespace) -> int:
     head = receipt.get('head_sha', '')
     if not re.fullmatch(r'[0-9a-f]{40}', head):
         raise ValueError('receipt head is not a full commit id')
+    if 'build' in receipt:
+        built = receipt['build']
+        if (not isinstance(built, dict) or built.get('source_sha') != head
+                or not re.fullmatch(r'[0-9a-f]{64}', built.get('dist_sha256', ''))):
+            raise ValueError('receipt snapshot source/hash does not match its evaluated head')
     sha = git(repo, 'rev-parse', '--verify', f'{args.sha}^{{commit}}')
     tree = git(repo, 'rev-parse', f'{sha}^{{tree}}')
     try:

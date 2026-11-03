@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -56,6 +56,20 @@ pub(crate) fn run_command_with_stdin(
     per_command_cap: Duration,
     stdin: Stdio,
 ) -> Result<Output, BoundedCommandError> {
+    run_command_cancellable(command, deadline, per_command_cap, stdin, None)
+}
+
+/// Cancellation reaps this probe's owned process group before returning, so
+/// background publication cannot install a route after the hub has stopped.
+pub(crate) fn run_command_cancellable(
+    command: &mut Command,
+    deadline: Deadline,
+    per_command_cap: Duration,
+    stdin: Stdio,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Output, BoundedCommandError> {
+    let is_cancelled = || cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
+    if is_cancelled() { return Err(BoundedCommandError::TimedOut); }
     let remaining = deadline.remaining();
     if remaining.is_zero() {
         return Err(BoundedCommandError::TimedOut);
@@ -79,6 +93,10 @@ pub(crate) fn run_command_with_stdin(
     // epic close proof; back off from 100 µs instead.
     let mut poll = POLL_START;
     let status = loop {
+        if is_cancelled() {
+            terminate_process_group(&mut child);
+            return Err(BoundedCommandError::TimedOut);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < probe_deadline => {

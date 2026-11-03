@@ -1,0 +1,4 @@
+title: An authenticated pairing refusal clears working before the next animation frame
+tasks: [cas-ef7a]
+invariants: [HUB-J12-TRUTHFUL-WORKING]
+journeys: [HUB-J12]

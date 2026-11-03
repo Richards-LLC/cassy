@@ -163,10 +163,7 @@ pub fn doc_only_rebind(repo: &Path, executed: &str, head: &str) -> bool {
         return false;
     };
     let changed_paths: Vec<_> = changed.lines().collect();
-    if changed_paths.is_empty()
-        || !changed_paths
-            .iter()
-            .all(|path| crate::qa_pass::is_non_surface_path(path))
+    if !changed_paths.iter().all(|path| crate::qa_pass::is_non_surface_path(path))
         || changed_paths
             .iter()
             .any(|path| path.starts_with("hub-web/") && !is_hub_web_documentation_path(path))

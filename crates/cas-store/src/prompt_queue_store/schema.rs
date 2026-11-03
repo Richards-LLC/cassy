@@ -209,6 +209,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
         ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
         ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
         ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
+        ("holding_detail", PROMPT_QUEUE_HOLDING_DETAIL_MIGRATION),
         (
             "transport_delivered_at",
             PROMPT_QUEUE_TRANSPORT_DELIVERED_AT_MIGRATION,
@@ -298,6 +299,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
     conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
     conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
+    conn.execute_batch(PROMPT_QUEUE_MAINTENANCE_INDEXES)?;
     for statement in OPERATOR_DELIVERY_SCHEMA_STATEMENTS {
         conn.execute_batch(statement)?;
     }

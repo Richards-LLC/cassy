@@ -1,16 +1,41 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
 import { ConversationList, ROW_TAP_CLICK_WAIT_MS, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { applePlatform, appearanceButtonMarkup, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
+import { applePlatform, appearanceButtonMarkup, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
-import { projectName, projectBadge } from "./cloud-brand";
+import { projectName } from "./cloud-brand";
 
 import { pendingSessionLabel, visibleCatalog } from "./worker-visibility";
+
+it("shows the live supervisor's own Cassy version and flags an installed upgrade (cas-8125)", () => {
+  const base: ConversationRow = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", projectDir: "/projects/cas-src", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true };
+  const view = document.createElement("div");
+  for (const state of [
+    { mcp_version: "3.90.0", installed_version: "3.91.1", shown: "3.90.0", update: true },
+    { mcp_version: "3.91.1", installed_version: "3.91.1", shown: "3.91.1", update: false },
+    { mcp_version: "3.92.0", installed_version: "3.91.1", shown: "3.92.0", update: false },
+    { mcp_version: "3.91.1", installed_version: undefined, shown: "3.91.1", update: false },
+    { mcp_version: undefined, installed_version: "3.91.1", shown: undefined, update: false },
+    { mcp_version: "unknown", installed_version: "3.91.1", shown: undefined, update: false },
+    { mcp_version: "3.90.0", installed_version: "3.91.1", machine_online: false, shown: undefined, update: false },
+  ]) {
+    const row = { ...base, ...state };
+    view.innerHTML = conversationRowMarkup(row);
+    const badge = view.querySelector<HTMLElement>(".supervisor-version");
+    if (!state.shown) { expect(badge).toBeNull(); continue; }
+    expect(badge?.textContent).toContain(state.shown);
+    expect(badge?.classList.contains("update-available")).toBe(state.update);
+    expect(conversationRowSpokenName(row)).toContain(`Cassy ${state.shown}`);
+    if (state.update) {
+      expect(badge?.title).toContain("3.91.1");
+      expect(badge?.title).toContain("Reconnect MCP");
+      expect(badge?.textContent).toContain("↑");
+      expect(conversationRowSpokenName(row)).toContain("Update available");
+    }
+  }
+});
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
 it('another tab settles adjacent held sends without manufacturing unsent chips', () => {
@@ -43,14 +68,23 @@ describe('conversation evidence', () => {
     });
     history.hydrateSend(row(1, 'Phone message', 'phone', 'Pixel 10'));
     history.hydrateSend(row(2, 'Computer message', 'computer', 'Desktop'));
-    history.hydrateSend(row(3, 'Terminal message', 'terminal', 'Terminal', false));
+    // Transcript capture can arrive after a later Commander send has a row
+    // ID. Its original input time still places it before that send.
+    history.hydrateSend({ ...row(4, 'Terminal message', 'terminal', 'Terminal', false), target: 'terminal-history', at: '2026-09-29T15:00:01.500Z' });
     const view = new ConversationView(document, history, 'supervisor');
     document.body.replaceChildren(view.element);
     view.update();
     expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent))
-      .toEqual(['from Pixel 10', 'from Desktop', 'from Terminal']);
+      .toEqual(['from Pixel 10', 'from Terminal', 'from Desktop']);
     expect(history.events.map(event => event.kind === 'send' && event.value.text))
-      .toEqual(['Phone message', 'Computer message', 'Terminal message']);
+      .toEqual(['Phone message', 'Terminal message', 'Computer message']);
+    const terminal = { ...row(4, 'Terminal message', 'terminal', 'Terminal', false), target: 'terminal-history', at: '2026-09-29T15:00:01.500Z' };
+    const reloaded = new ConversationHistory();
+    for (const message of [terminal, row(2, 'Computer message', 'computer', 'Desktop'), row(1, 'Phone message', 'phone', 'Pixel 10')]) reloaded.hydrateSend(message);
+    reloaded.hydrateSend(terminal);
+    reloaded.hydrateSend(row(3, 'Later computer message', 'computer', 'Desktop'));
+    expect(reloaded.events.map(event => event.kind === 'send' && event.value.text))
+      .toEqual(['Phone message', 'Terminal message', 'Computer message', 'Later computer message']);
   });
   it('threads the supervisor answer under a terminal-typed question, once (cas-5c89)', () => {
     const history = new ConversationHistory();
@@ -271,7 +305,6 @@ describe('conversation evidence', () => {
     expect(projectName('/home/Projects/cas-src/')).toBe('cas-src');
     expect(projectName('C:\\Projects\\Studio One\\')).toBe('Studio One');
     expect(projectName(undefined)).toBe('Project unavailable');
-    expect(projectBadge('/home/<img>')).toContain('&lt;img&gt;');
   });
   it('preserves a focused row across catalog updates and isolates identical session names', () => {
     const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
@@ -391,7 +424,7 @@ describe('conversation evidence', () => {
     // Journey F7: the title is the project, then the machine; the codename is tertiary text beneath.
     expect(waiting.querySelector('.conversation-who > .conversation-title > strong.conversation-project')?.textContent).toBe('cas-src');
     expect(waiting.querySelector('.conversation-title > .conversation-project + .conversation-machine')).not.toBeNull();
-    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor')?.textContent).toBe('patient-pelican-9');
+    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor > .conversation-supervisor-name')?.textContent).toBe('patient-pelican-9');
     expect(waiting.querySelector('.conversation-who')?.textContent).toBe('cas-srcAtlaspatient-pelican-9');
     expect(waiting.querySelector('.project-badge')).toBeNull();
     // P13: the title leads with the project, never a stray dot; the only separator rides with the machine.
@@ -551,18 +584,12 @@ describe('conversation evidence', () => {
     expect(preview.endsWith('…')).toBe(true);
     expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: longReply, selected: false })).toContain(`>${preview}</span>`);
   });
-  it('names an unreachable session with a pending instruction on its row, over the last turn (cas-7294)', () => {
-    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Unreachable · message pending', attention: 0, preview: 'You: Keep this instruction visible.', selected: false };
-    expect(conversationRowMarkup({ ...row, unreachable: true })).toContain('<span class="conversation-preview unreachable">Unreachable · message pending</span>');
-    const dormant = visibleCatalog([{ name: 's', supervisor: 'sup', workers: [], liveness: 'live', dormant: true }], () => true)[0];
-    const connection = pendingSessionLabel(dormant, true)!;
-    // pin: a Connected machine must not be called unreachable when its supervisor has not taken the message.
-    expect(connection).toBe('Waiting for supervisor');
-    expect(conversationRowMarkup({ ...row, unreachable: dormant.unreachable, connection })).toContain('<span class="conversation-preview unreachable">Waiting for supervisor</span>');
-    expect(pendingSessionLabel(dormant, false)).toBe(row.connection);
-    // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
-    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
-    expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
+  it('does not repeat a machine outage or retain a stopped supervisor for a pending instruction (cas-f8ab)', () => {
+    const dormant = { name: 's', supervisor: 'sup', workers: [], liveness: 'stale_metadata' as const, dormant: true, unreachable: true };
+    expect(visibleCatalog([dormant])).toEqual([]);
+    expect(pendingSessionLabel(dormant, false)).toBeUndefined();
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', attention: 0, preview: 'Keep this instruction visible.', selected: false };
+    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Keep this instruction visible.</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };
@@ -652,8 +679,6 @@ describe('conversation evidence', () => {
     expect(app.querySelector<HTMLElement>('#conversation-attention-slot > #attention-panel')?.hidden).toBe(false);
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
-    // The existing clip becomes a working keyboard-reachable file picker.
-    expect(ATTACH_SUPPORTED).toBe(true);
     expect(composer.querySelector<HTMLButtonElement>('.composer-clip')?.disabled).toBe(false);
     expect(composer.querySelector('.composer-clip')?.getAttribute('aria-label')).toBe('Attach files');
     const mic = composer.querySelector<HTMLButtonElement>('#message-mic')!;
@@ -748,17 +773,6 @@ describe("hostMarkup (journey F14)", () => {
     expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
     expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
   });
-  it("keeps the machine ahead of the codename at every width (cas-766c)", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
-    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
-    // The OS word goes whenever the line is short of room, not only on a phone.
-    // cas-8526: hidden from sight only, so the OS word is still heard; since
-    // cas-0546 fitMachineLine marks it .sr-only (the house accessibility helper).
-    expect(css).toMatch(/\n\.sr-only \{/);
-    expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
-  });
 });
 
 describe("fitMachineLine (cas-766c)", () => {
@@ -816,15 +830,6 @@ describe("fitMachineLine (cas-766c)", () => {
     const fits = line({ machine: 160, machineNoOs: 120, codename: 50 });
     fitMachineLine(fits, 200, true);
     expect(state(fits)).toEqual(["os-dropped", "machine-long"]);
-  });
-  it("hides the codename, not the machine, in the stylesheet, header and empty card alike", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    // cas-8526: the codename steps aside from sight only; it is still heard.
-    expect(css).toContain(".conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
-    expect(css).toContain(".thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }");
-    expect(css).not.toMatch(/(host-where|proj2)\.(os-dropped|codename-squeezed)[^{]*\{ display: none; \}/);
-    expect(css).not.toContain(".conversation-identity .conversation-host { display: none; }");
-    expect(css).not.toContain("machine-squeezed > :is(");
   });
 });
 

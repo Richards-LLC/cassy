@@ -84,7 +84,7 @@ if [[ -n "$pr_json" ]]; then
     pr_created="$(jq -r '.created_at // empty' <<<"$pr_json" 2>/dev/null || true)"
 fi
 if [[ -n "$pr_number" && -n "$pr_created" ]]; then
-    opened="$(date -u -d "$pr_created" +%s 2>/dev/null || true)"
+    opened="$(date -u -d "$pr_created" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$pr_created" +%s 2>/dev/null || true)"
 fi
 {
     printf '\n---\n\n'

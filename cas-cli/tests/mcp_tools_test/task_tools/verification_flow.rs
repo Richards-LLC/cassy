@@ -16,6 +16,25 @@ use tempfile::TempDir;
 #[path = "../../fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
+fn compact_close_detail(response: &str, task_id: &str, target: &str) -> String {
+    let (summary, reference) = response
+        .split_once("\nDetails: ")
+        .expect("successful close must reference its durable detail receipt");
+    assert_eq!(
+        summary.lines().next().unwrap(),
+        format!("Closed task: {task_id}; delivery none; target {target}; next: none.")
+    );
+    let (path, _) = reference
+        .rsplit_once(" (SHA-256 ")
+        .expect("detail reference must include its content digest");
+    let detail = std::fs::read_to_string(path).expect("close detail receipt must be readable");
+    assert!(
+        detail.contains(&format!("Closed task: {task_id}")),
+        "detail must describe the closed task: {detail}"
+    );
+    detail
+}
+
 fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -118,7 +137,6 @@ async fn legacy_repository_proof_rejects_drift(test_env: &mut TestEnvGuard, isol
         id: task_id.clone(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -335,7 +353,6 @@ fn close_request(task_id: &str, reason: &str) -> TaskCloseRequest {
         id: task_id.to_string(),
         reason: Some(reason.to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     }
@@ -1010,6 +1027,228 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
     assert!(closed.contains("Closed task:"), "{closed}");
 }
 
+/// Commit one file on the worker's lane, merge it to main and record the
+/// delivery's start and anchor on the task. Returns the delivered tip.
+fn merge_delivery_of(
+    root: &std::path::Path,
+    lane: &std::path::Path,
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    path: &str,
+    branch: &str,
+) -> String {
+    let start = head_of(lane);
+    let file = lane.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "delivered\n").unwrap();
+    proof_boundary_git(lane, &["add", path]);
+    proof_boundary_git(lane, &["commit", "-q", "-m", "deliver one path"]);
+    let tip = head_of(lane);
+    proof_boundary_git(root, &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+
+    let tasks = open_task_store(cas_dir).unwrap();
+    let mut task = tasks.get(task_id).unwrap();
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+        assignee: "worker".into(),
+        branch: branch.into(),
+        base_sha: start,
+    });
+    tasks.update(&task).unwrap();
+    tip
+}
+
+/// Deliver one file, merged to main, and close through the real close path with
+/// the delivery's start and anchor recorded. Returns the close's text and notes.
+async fn close_delivery_of(path: &str, branch: &str) -> (String, String, bool) {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, branch).await;
+    // QA mode decides who reviews a Tier 1 delivery; cas-ce5e covers batch mode.
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"per_task\"\n",
+    )
+    .unwrap();
+    let tip = merge_delivery_of(temp.path(), worker_dir.path(), &cas_dir, &task_id, path, branch);
+
+    let mut request = close_request(&task_id, "delivered");
+    request.commit_receipt = Some(tip);
+    let text = extract_text(service.cas_task_close(Parameters(request)).await.expect("close"));
+    let notes = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap().notes;
+    let dispatched = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().is_some();
+    (text, notes, dispatched)
+}
+
+/// cas-5207: docs close with no independent verifier and say so on the task;
+/// anything that can change behavior still gets one.
+#[tokio::test]
+async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
+    let (text, notes, dispatched) = close_delivery_of("docs/guide.md", "factory/tier-zero").await;
+    assert!(text.contains("Closed task:"), "{text}");
+    assert!(!dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 0"), "{notes}");
+
+    let (text, notes, dispatched) = close_delivery_of("src/lib.rs", "factory/tier-one").await;
+    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
+    assert!(dispatched, "{text}");
+    assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
+}
+
+/// cas-ce5e: in release QA mode Tier 1 merged deliveries open no verifier and
+/// close on one verdict naming them, with no close call after it: one merged by
+/// `worktree_merge`, one merged outside it whose assignee was later cleared. A
+/// Tier 2 delivery named in that same verdict still owes its adversarial probe
+/// and its own verifier.
+#[tokio::test]
+async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_ce5e() {
+    let mut env = TestEnvGuard::temp_home();
+    let branch = "factory/release-batch";
+    let (temp, worker, cas_dir, first, lane) = delivered_worktree_fixture(&mut env, branch).await;
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"batch\"\n",
+    )
+    .unwrap();
+    let mut deliveries = vec![(first, "src/one.rs")];
+    for path in ["src/two.rs", "src/live.rs", "src/rejected.rs", "src/approved.rs", ".github/workflows/guard.yml"] {
+        let created = worker
+            .cas_task_create(Parameters(simple_task_req(path)))
+            .await
+            .unwrap();
+        deliveries.push((extract_task_id(&extract_text(created)).unwrap().to_string(), path));
+    }
+    let close = async |id: &str, tip: &str| {
+        let mut request = close_request(id, "delivered");
+        request.commit_receipt = Some(tip.to_string());
+        extract_text(worker.cas_task_close(Parameters(request)).await.expect("close"))
+    };
+    let dispatched = |id: &str| cas_store::get_latest_verification_dispatch(&cas_dir, id).unwrap().is_some();
+    let mut tips = Vec::new();
+    for (index, (id, path)) in deliveries.iter().enumerate() {
+        if index > 0 {
+            worker
+                .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+                .await
+                .expect("start delivery");
+        }
+        let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, id, path, branch);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut parked = tasks.get(id).unwrap();
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.update(&parked).unwrap();
+        if index == 0 {
+            assert!(tasks.record_merge_admission(id, &tip, cas_types::MergeCiAdmission::Green).unwrap());
+        }
+        let waiting = close(id, &tip).await;
+        tips.push(tip);
+        if path.starts_with("src/") {
+            assert!(waiting.contains("WAITING FOR RELEASE VERDICT"), "{waiting}");
+            assert!(!dispatched(id), "{waiting}");
+        } else {
+            assert!(waiting.contains("no adversarial probe"), "{waiting}");
+        }
+    }
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut unassigned = tasks.get(&deliveries[1].0).unwrap();
+    unassigned.assignee = None;
+    tasks.update(&unassigned).unwrap();
+
+    // cas-d8b2 / cas-5249: old dispatches and deferred batch evidence must
+    // not strand merged Tier 1 work after a later, exact release verdict.
+    for (index, (id, _)) in deliveries.iter().take(5).enumerate() {
+        cas_store::defer_qa_batch_evidence(&cas_dir, id, &tips[index]).unwrap();
+        if index == 3 || index == 4 {
+            let mut prior = Verification::new(format!("ver-prior-{index}"), id.clone());
+            prior.status = if index == 3 { cas::types::VerificationStatus::Rejected } else { cas::types::VerificationStatus::Approved };
+            add_exact_supervisor_fixture_verdict(&cas_dir, prior, None);
+        }
+        cas_store::create_verification_dispatch(
+            &cas_dir, id, "ended-supervisor", "ended-supervisor",
+            chrono::Utc::now() + chrono::Duration::minutes(if index == 2 { 10 } else { -1 }),
+        ).unwrap();
+        if index == 0 || index == 3 || index == 4 {
+            cas_store::timeout_verification_dispatch(&cas_dir, id, chrono::Utc::now()).unwrap();
+        }
+    }
+
+    let report = temp.path().join("RELEASE-REVIEW.md");
+    let named: Vec<&str> = deliveries.iter().map(|(id, _)| id.as_str()).collect();
+    std::fs::write(&report, format!("# Release review\n{}\n", named.join(" PASS\n"))).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let artifact = cas::artifacts::publish(
+        &cas::artifacts::PublishContext {
+            store: &artifacts,
+            roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &temp.path().join("artifacts"), named[0]),
+            task_id: named[0].into(),
+            cloud: None,
+        },
+        &report,
+    )
+    .unwrap()
+    .artifact
+    .id;
+    let supervisor = CasService::new(registered_supervisor(&cas_dir, "release-supervisor").await, None);
+    let verdict: cas_mcp::types::VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "batch_receipt", "verification_type": "release", "task_ids": named,
+        "staging_sha": head_of(temp.path()), "ledger_artifact_id": artifact,
+        "ledger_path": report, "ledger_author": "release-reviewer",
+    }))
+    .unwrap();
+    let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
+    assert!(recorded.contains("Release verdict"), "{recorded}");
+    assert!(recorded.contains("Closed 3: "), "{recorded}");
+    assert!(recorded.contains(&format!("Keeps its own review: {}", named[5])), "{recorded}");
+    assert!(recorded.contains("Still held (2):"), "{recorded}");
+
+    for (index, (id, path)) in deliveries.iter().enumerate() {
+        if path.starts_with("src/") {
+            let expected = if index < 2 || index == 4 { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, expected, "{recorded}");
+            if index < 2 || index == 4 {
+                let notes = open_task_store(&cas_dir).unwrap().get(id).unwrap().notes;
+                assert!(notes.contains("QA batch debt satisfied by release verdict"), "release review pays debt without claiming a QA walk: {notes}");
+            }
+            // The superseded dispatch remains immutable audit history.
+            assert!(dispatched(id), "{recorded}");
+            continue;
+        }
+        assert!(!dispatched(id), "the verdict opens no verifier for Tier 2: {recorded}");
+        let closed = close(id, &tips[index]).await;
+        // Named in the verdict, the Tier 2 delivery still owes its probe...
+        assert!(closed.contains("no adversarial probe"), "{closed}");
+        let ledger = closed.split(" if ").nth(1).and_then(|rest| rest.split(" is missing").next()).unwrap();
+        std::fs::create_dir_all(std::path::Path::new(ledger).parent().unwrap()).unwrap();
+        std::fs::write(
+            ledger,
+            format!(
+                "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n{}\n| P1 | Adversarial probe: bypass the guard | refused | refused | PASS | real-build | LEDGER.md | - |\n",
+                cas::qa_ledger::HEADER
+            ),
+        )
+        .unwrap();
+        // ...and then its own verifier, whose dispatch the verdict cannot satisfy.
+        let probed = close(id, &tips[index]).await;
+        assert!(probed.contains("VERIFICATION REQUIRED"), "{probed}");
+        assert!(dispatched(id), "{probed}");
+        assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
+    }
+
+    // A fresh cycle started after this release receipt keeps its authority,
+    // even if that new cycle subsequently expires.
+    let current = &deliveries[2].0;
+    cas_store::timeout_verification_dispatch(&cas_dir, current, chrono::Utc::now() + chrono::Duration::hours(1)).unwrap();
+    cas_store::create_verification_dispatch_bound(
+        &cas_dir, current, "new-supervisor", "new-supervisor",
+        &cas::types::VerificationProofBoundary::task(),
+        chrono::Utc::now() - chrono::Duration::minutes(1), true,
+    ).unwrap();
+    let held = close(current, &tips[2]).await;
+    assert!(held.contains("VERIFICATION TIMED OUT"), "a later cycle cannot reuse the old release verdict: {held}");
+}
+
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's
 /// worktree binding (no target-branch proof), and rewriting the bound
 /// worktree head still voids the verdict rather than passing silently.
@@ -1183,6 +1422,10 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
     let shown = extract_text(
         supervisor
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id: task_id.clone(),
                 with_deps: false,
             }))
@@ -2988,7 +3231,6 @@ async fn test_task_close_blocked_without_verification() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3015,9 +3257,9 @@ async fn test_task_close_blocked_without_verification() {
         .unwrap()
         .expect("dispatch-request verification row should exist after close");
     assert_eq!(
-        latest.status,
-        cas::types::VerificationStatus::Error,
-        "Dispatch-request row should have Error status until the subagent writes a verdict"
+        latest.status.to_string(),
+        "pending",
+        "Dispatch markers are pending work, not failed checks"
     );
     assert!(
         latest.summary.contains("Dispatch requested"),
@@ -3097,7 +3339,6 @@ require_merge_on_epic_close = true
         id: task.id.clone(),
         reason: Some("Done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3275,7 +3516,6 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
                 id: id.clone(),
                 reason: Some("implementation complete".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3391,7 +3631,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: Some("worker tries to discard its own delivery".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3423,7 +3662,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                 id: task_id.to_string(),
                 reason: Some("measurement complete".to_string()),
                 supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3447,7 +3685,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: None,
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3489,7 +3726,6 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     id: task_id.to_string(),
                     reason: Some("experiment regressed the dominant path; do not ship".to_string()),
                     supervisor_override: None,
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -3505,8 +3741,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
             .await
             .unwrap(),
     );
-    assert!(closed.contains("Closed task:"), "{closed}");
-    assert!(closed.contains("measured negative result"), "{closed}");
+    let detail = compact_close_detail(&closed, task_id, "main");
+    assert!(detail.contains("measured negative result"), "{detail}");
 
     let closed_task = task_store.get(task_id).unwrap();
     assert_eq!(closed_task.status, TaskStatus::Closed);
@@ -3639,7 +3875,6 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3754,7 +3989,6 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3897,7 +4131,6 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4070,7 +4303,6 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4212,7 +4444,6 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
         id: id_a.clone(),
         reason: Some("ready for merge".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4477,7 +4708,6 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
                 id: task_id.clone(),
                 reason: Some("work was merged before first close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4624,7 +4854,6 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4696,7 +4925,6 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4882,7 +5110,6 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 id: id_a.clone(),
                 reason: Some("merged and pushed to origin".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5029,7 +5256,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5068,7 +5294,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("merged, closing".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5133,7 +5358,6 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 id: id_a.clone(),
                 reason: Some("reworked, claiming done".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5249,7 +5473,6 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         id: id.clone(),
         reason: Some("done, merged onto main".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5360,7 +5583,6 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5473,7 +5695,6 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5557,7 +5778,6 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         id: id.clone(),
         reason: Some("resolved via notes, no code needed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5697,7 +5917,6 @@ enabled = false
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5732,7 +5951,6 @@ enabled = false
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5760,7 +5978,6 @@ enabled = false
         id: id.clone(),
         reason: Some("Committed and ready".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5895,7 +6112,6 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         id: id.clone(),
         reason: Some("done".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5931,7 +6147,6 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         id: id.clone(),
         reason: Some("actually done now".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6045,7 +6260,6 @@ async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() 
                 id: id.clone(),
                 reason: Some("staging work is committed".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6215,7 +6429,6 @@ enabled = false
                 id: id_a.clone(),
                 reason: Some("committed and additive".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6263,7 +6476,6 @@ enabled = false
                 id: id_b.clone(),
                 reason: Some("claims to be additive".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6322,7 +6534,6 @@ enabled = false
                 id: id_c.clone(),
                 reason: Some("localized existing value".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6472,7 +6683,6 @@ enabled = false
         id: id.clone(),
         reason: Some("non-isolated direct CLI flow".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6547,7 +6757,6 @@ enabled = false
         id: additive_id.clone(),
         reason: Some("additive-only non-isolated".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6633,7 +6842,6 @@ enabled = false
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6742,7 +6950,6 @@ enabled = false
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6832,7 +7039,6 @@ async fn test_a699_halted_approved_delivery_recloses() {
                 id: id.clone(),
                 reason: Some("approved review re-close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -6985,7 +7191,6 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
                 id: task_id.clone(),
                 reason: Some("finished and merged".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: Some(receipt),
             }))
@@ -7044,7 +7249,6 @@ enabled = false
         id: id.clone(),
         reason: Some("trying to close someone else's task".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7114,7 +7318,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7145,7 +7348,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7178,7 +7380,6 @@ async fn test_epic_close_requires_epic_verification_type() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7219,7 +7420,6 @@ async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6(
         reason: Some("Planning complete".into()),
         stranded_branch_override: None,
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7314,7 +7514,6 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
                 id: epic.id.clone(),
                 reason: Some("merged epic branch is ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -7426,7 +7625,6 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
                 id: epic.id.clone(),
                 reason: Some("target merge receipt proves the epic delivery".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: Some(merge_tip.clone()),
             }))
@@ -7502,7 +7700,7 @@ async fn test_task_lifecycle_with_verification() {
         id.to_string(),
         "All checks passed".to_string(),
     );
-    add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
+    let dispatch = add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
 
     // Close task - should succeed now with verification
     let close_req = TaskCloseRequest {
@@ -7511,7 +7709,6 @@ async fn test_task_lifecycle_with_verification() {
         id: id.to_string(),
         reason: Some("Completed successfully".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7521,14 +7718,20 @@ async fn test_task_lifecycle_with_verification() {
         .expect("task_close should succeed");
 
     let text = extract_text(result);
-    assert!(
-        text.contains("Closed") || text.contains("closed"),
-        "Task should close with verification: {text}"
-    );
-    assert!(
-        text.contains("verified"),
-        "Should indicate verification: {text}"
-    );
+    let detail = compact_close_detail(&text, &id, "");
+    assert!(detail.contains("(verified)"), "{detail}");
+
+    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed);
+    assert!(!task.pending_verification);
+    let verification = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&id)
+        .unwrap()
+        .expect("approved verification must remain auditable after close");
+    assert_eq!(verification.id, "ver-test");
+    assert_eq!(verification.status, cas::types::VerificationStatus::Approved);
+    assert_eq!(verification.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
 }
 
 #[tokio::test]
@@ -7600,7 +7803,6 @@ async fn test_task_close_reopens_after_rejected_verification() {
         id: id.to_string(),
         reason: Some("Completed".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7689,7 +7891,6 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         id: id.clone(),
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7787,7 +7988,6 @@ async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
             id,
             reason: Some("historical record".into()),
             supervisor_override: Some(true),
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -7832,7 +8032,6 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
                     id: id.clone(),
                     reason: Some("all child tasks complete".into()),
                     supervisor_override: explicit_override.then_some(true),
-                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }))
@@ -7866,10 +8065,9 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
 }
 
 /// Positive: supervisor closes an orphaned task (no assignee) → bypass fires.
-/// Task goes to Closed without running the verifier and without writing a
-/// verification row. The close_reason passed by the supervisor is preserved
-/// on the task and the response carries the
-/// "(verification skipped — assignee inactive)" marker.
+/// Task goes to Closed without running the verifier, recording a Skipped
+/// verification row. The supervisor's close_reason is preserved on the task,
+/// and the durable detail receipt explains the orphaned-task bypass.
 #[tokio::test]
 async fn test_close_supervisor_bypass_orphaned_task() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -7930,7 +8128,6 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -7940,17 +8137,15 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         .expect("task_close should succeed via supervisor bypass");
     let response_text = extract_text(result);
 
-    assert!(
-        response_text.contains("Closed"),
-        "bypass close should report success: {response_text}"
-    );
+    let detail = compact_close_detail(&response_text, &id, "");
     // cas-3bd4: orphaned (no-assignee) closes now cite the accurate
     // reason — "orphaned task, no assignee" — instead of the catch-all
     // "assignee inactive" phrase that was always emitted regardless of
     // actual assignee state.
     assert!(
-        response_text.contains("verification skipped — orphaned task, no assignee"),
-        "response must carry the orphaned-task bypass marker: {response_text}"
+        detail.contains("verification skipped — orphaned task, no assignee")
+            && response_text.contains("verification skipped — orphaned task, no assignee"),
+        "summary and detail must carry the orphaned-task bypass marker: {response_text}"
     );
     assert!(
         !response_text.contains("VERIFICATION REQUIRED"),
@@ -7992,6 +8187,7 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         "bypass row must be Skipped, got {:?}",
         verification_row.status
     );
+    assert!(verification_row.summary.contains("no assignee (orphaned)"));
 }
 
 /// Positive: supervisor closes a task whose assignee points at an agent that
@@ -8049,7 +8245,6 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8066,10 +8261,11 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     // because `agent_store.get(name)` unwrap_or(true) collapsed every
     // lookup failure into the same bucket. The new path keeps the
     // supervisor bypass behavior but cites the real reason.
+    let detail = compact_close_detail(&response_text, &id, "");
     assert!(
-        response_text.contains("Closed")
+        detail.contains("verification skipped — assignee unknown")
             && response_text.contains("verification skipped — assignee unknown"),
-        "ghost-assignee bypass should close and mark skipped: {response_text}"
+        "ghost-assignee summary and detail should mark skipped: {response_text}"
     );
 
     let task_after = task_store.get(&id).expect("task should exist");
@@ -8081,6 +8277,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         .expect("verification lookup should not error")
         .expect("ghost-assignee bypass must write a Skipped verification row");
     assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
+    assert!(row.summary.contains("assignee row not found in agent store"));
 }
 
 /// cas-3bd4 regression: a factory worker's `task.assignee` stores the agent's
@@ -8092,7 +8289,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
 ///
 /// Post-fix, the close path resolves liveness from the task's active lease
 /// (`TaskLease.agent_id` is the real session id), which survives the name/id
-/// mismatch. A supervisor closing such a task without `bypass_code_review=true`
+/// mismatch. A supervisor closing such a task without `supervisor_override=true`
 /// must now drop into the normal verification path; with the flag set, the
 /// close proceeds but the audit message cites "supervisor bypass", never
 /// "assignee inactive".
@@ -8175,7 +8372,6 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         id: id.clone(),
         reason: Some("worker finished, asking supervisor to close".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8211,7 +8407,6 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         id: id.clone(),
         reason: Some("supervisor forced close after alignment".to_string()),
         supervisor_override: Some(true),
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8310,7 +8505,6 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         // with this phrase, an alive assignee must keep the jail engaged.
         reason: Some("verification skipped — assignee inactive".to_string()),
         supervisor_override: None,
-        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -8345,9 +8539,9 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         .expect("verification lookup should not error")
         .expect("alive-assignee close should persist a dispatch-request row");
     assert_eq!(
-        verification_row.status,
-        cas::types::VerificationStatus::Error,
-        "dispatch-request row should have Error status until a verdict lands"
+        verification_row.status.to_string(),
+        "pending",
+        "Dispatch markers are pending work, not failed checks"
     );
 }
 // =============================================================================
@@ -9806,7 +10000,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9825,7 +10018,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         .expect("dispatch row exists");
     assert_eq!(
         legacy_dispatch.status,
-        cas::types::VerificationStatus::Error
+        cas::types::VerificationStatus::Pending
     );
     assert!(legacy_dispatch.summary.starts_with("Dispatch requested"));
 
@@ -9863,7 +10056,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -10622,7 +10814,6 @@ async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() 
                 id: id.clone(),
                 reason: Some("Ready for supervisor verification".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -10970,7 +11161,6 @@ async fn supervisor_self_assignee_close_guidance(
                 id: id.clone(),
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11072,7 +11262,6 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             id: id.clone(),
             reason: Some("Completed".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -11101,7 +11290,6 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
                 id: id.clone(),
                 reason: Some("Completed".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11196,7 +11384,6 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 id: id.clone(),
                 reason: Some("062d close proof".to_string()),
                 supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11350,7 +11537,6 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11406,7 +11592,6 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11551,7 +11736,6 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11583,7 +11767,6 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 id: id_a.clone(),
                 reason: Some("retry before merge".to_string()),
                 supervisor_override: None,
-                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -11692,7 +11875,6 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
             id: id_b.clone(),
             reason: Some("done".to_string()),
             supervisor_override: None,
-            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -12194,4 +12376,155 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         assert!(reopened.terminal_outcome.is_none());
         assert!(reopened.has_delivery_to_integrate());
     }
+}
+
+/// cas-7fc3 (GH #1388), real path: a no-code worker closes, receives an exact
+/// supervisor-owned dispatch and waits Blocked on it. The supervisor's
+/// approval through `cas_verification_add` must queue the worker's close
+/// retry (not report "no live assigned worker"), and that unchanged retry
+/// closes the task with no source commit.
+#[tokio::test]
+async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
+    let repo = temp.path();
+    let cas_dir = repo.join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = 'cas-7fc3-fixture'\n[verification]\nenabled = true\n[worktrees]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n",
+    )
+    .unwrap();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+    proof_boundary_git(repo, &["add", ".gitignore", "README.md"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed main"]);
+    let head = || {
+        let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let starting_head = head();
+
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut supervisor = cas::types::Agent::new("sup-7fc3".into(), "sup-7fc3".into());
+    supervisor.role = AgentRole::Supervisor;
+    supervisor.factory_session = Some("sess-7fc3".into());
+    agents.register(&supervisor).unwrap();
+    let mut worker = cas::types::Agent::new("worker-7fc3".into(), "worker-7fc3".into());
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("sess-7fc3".into());
+    agents.register(&worker).unwrap();
+    let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    worker_core.set_agent_id_for_testing("worker-7fc3".to_string());
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing("sup-7fc3".to_string());
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-7fc3-wait".into(), "Publish the artifact".into());
+    task.status = TaskStatus::InProgress;
+    task.task_type = TaskType::Chore;
+    task.assignee = Some("worker-7fc3".into());
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some("artifact:cas-7fc3/report".into());
+    task.risk = vec![cas::types::TaskRisk::None];
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-7fc3-fixture".into(),
+        target_branch: "main".into(),
+    });
+    tasks.add(&task).unwrap();
+
+    let reason = "Published the artifact; no source change";
+    let first = extract_text(
+        worker_core
+            .cas_task_close(Parameters(close_request(&task.id, reason)))
+            .await
+            .unwrap(),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+        .unwrap()
+        .expect("exact dispatch");
+    assert_eq!(dispatch.owner_agent_id, "sup-7fc3");
+
+    // The worker records the documented verification wait.
+    let mut waiting = tasks.get(&task.id).unwrap();
+    waiting.status = TaskStatus::Blocked;
+    waiting.notes.push_str(&format!(
+        "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+        dispatch.requested_at.format("%Y-%m-%d %H:%M"),
+        dispatch.id
+    ));
+    tasks.update(&waiting).unwrap();
+
+    let approved = extract_text(
+        supervisor_core
+            .cas_verification_add(Parameters(VerificationAddRequest {
+                task_id: task.id.clone(),
+                status: "approved".into(),
+                summary: "Artifact reviewed; no-code delivery approved".into(),
+                confidence: Some(0.9),
+                issues: None,
+                files_reviewed: None,
+                duration_ms: None,
+                verification_type: None,
+                verifier_capability: None,
+                dispatch_id: Some(dispatch.id.clone()),
+            }))
+            .await
+            .expect("supervisor approves the exact dispatch"),
+    );
+    assert!(approved.contains("Close retry queued for the assigned worker"), "{approved}");
+    assert!(!approved.contains("No close retry was queued"), "{approved}");
+    let rows = cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap();
+    let retry = rows
+        .iter()
+        .find(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id))
+        .unwrap_or_else(|| panic!("close retry row for the worker: {rows:?}"));
+    // pin: the retry prompt is the instruction the worker acts on.
+    assert!(retry.prompt.contains("Retry task close id=cas-7fc3-wait now"), "{}", retry.prompt);
+
+    let closed = extract_text(
+        worker_core
+            .cas_task_close(Parameters(close_request(&task.id, reason)))
+            .await
+            .unwrap(),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+    assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
+}
+
+/// Existing no-code ledgers bypass the runtime QA gate, but malformed evidence
+/// must fail before a dispatch, pending flag or lease can be created.
+#[tokio::test]
+async fn malformed_ledger_refuses_close_before_verification_dispatch() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut env);
+    let cas_dir = temp.path().join(".cas");
+    let artifacts = temp.path().join("artifacts");
+    std::fs::write(cas_dir.join("config.toml"), format!(
+        "[verification]\nenabled=true\n[factory]\nartifacts_root={:?}\n", artifacts.display().to_string()
+    )).unwrap();
+    let created = service.cas_task_create(Parameters(simple_task_req("Review external evidence"))).await.unwrap();
+    let id = extract_task_id(&extract_text(created)).unwrap().to_owned();
+    service.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.unwrap();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&id).unwrap();
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some("artifact:cas-ledger/report".into());
+    store.update(&task).unwrap();
+    let base = cas::config::project_factory_artifacts_root(&cas_dir, &artifacts).join(&id);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("LEDGER.md"), concat!(
+        "cells=1; PASS=0; FAIL=1; NOT EXERCISED=0\nlabels: real-build=1\n",
+        "| id | cell | expected | observed | verdict | label | evidence path | defect task |\n",
+        "| M01 | help | usage | broken | FAIL | real-build | - | - |\n"
+    )).unwrap();
+    let before = store.get(&id).unwrap();
+    let leases = cas::store::open_agent_store(&cas_dir).unwrap().get_lease_history(&id, None).unwrap();
+    let refused = extract_text(service.cas_task_close(Parameters(serde_json::from_value(serde_json::json!({ "id": id, "reason": "external review complete" })).unwrap())).await.unwrap());
+    assert!(refused.contains("QA LEDGER REJECTED") && refused.contains("line 4 row M01 [defect task]"), "{refused}");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap().is_none());
+    assert_eq!(store.get(&id).unwrap().pending_verification, before.pending_verification);
+    assert_eq!(cas::store::open_agent_store(&cas_dir).unwrap().get_lease_history(&id, None).unwrap().len(), leases.len());
 }

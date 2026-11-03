@@ -1,11 +1,19 @@
+import type { SessionEndOutcome } from "./types";
 import { appSwitcherMarkup, projectExplorerLinkMarkup } from "./app-switcher";
 import { cloudBrand, cloudBrandSwitcher, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
+import { modelLabel, providerAvatarMarkup } from "./provider-mark";
 
 export interface ConversationShellModel {
+  ended?: SessionEndOutcome;
   supervisor?: string;
   projectDir?: string;
   host?: string;
+  /** The supervisor's harness (hub catalog): its provider mark leads the heading. */
+  harness?: string;
+  /** The supervisor's model and effort (cas-2dcc), when the hub reports them. */
+  model?: string;
+  effort?: string;
   /** Selected machine; its accent class goes on the shell root so the thread inherits it. */
   machineId?: string;
   selected: boolean;
@@ -149,7 +157,7 @@ export function interruptLabel(project: string | undefined): string {
  * description beside it (applyActionAvailability), instead of disappearing.
  */
 export function conversationActionsMarkup(project: string | undefined): string {
-  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false" aria-label="Show work">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
+  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><button id="conversation-commands" class="conversation-action" type="button" aria-label="Supervisor commands" aria-controls="supervisor-command-palette"><span aria-hidden="true">/</span><span class="action-label">Commands</span></button><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false" aria-label="Show work">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
 }
 
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
@@ -158,7 +166,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity">${providerAvatarMarkup({ harness: model.harness, fallback: machineMonogram(host || model.supervisor || "?"), className: "conversation-avatar" })}<div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host">${modelLabel(model.harness, model.model, model.effort) ? `<span class="conversation-model">${escapeHtml(modelLabel(model.harness, model.model, model.effort)!)}</span>` : ""}<span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status">${model.ended ? " · Ended" : ""}</span></span></div></div></header>`;
 }
 
 /** Attachments use the authenticated hub upload API before the durable message send. */
@@ -287,7 +295,7 @@ const UNPAIRED_LEAD = "Pair a machine to start your first conversation.";
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
 export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
-  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? `${UNPAIRED_LEAD} Got a pairing link from whoever runs it? Open it on this device.` : "No live supervisors listed. Start one with New session, or show sessions that stopped from Appearance & commands.";
+  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? `${UNPAIRED_LEAD} Got a pairing link from whoever runs it? Open it on this device.` : "No live supervisors listed. Start one with New session.";
 }
 
 /** What the list knows about one paired machine's session catalog. */
@@ -370,15 +378,15 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${model.explorerHref === undefined ? cloudBrand() : cloudBrandSwitcher()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div>${model.explorerHref === undefined ? "" : appSwitcherMarkup(model.explorerHref)}<div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}${model.selected ? SKIP_TO_CONVERSATION : ""}</header>
-      <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${model.explorerHref === undefined ? cloudBrand() : cloudBrandSwitcher()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button><button id="accounts-toggle" type="button" class="icon-button" aria-label="Accounts" title="Accounts" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true" focusable="false"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v3"/></svg></button>${appearanceButtonMarkup()}</span></div>${model.explorerHref === undefined ? "" : appSwitcherMarkup(model.explorerHref)}<div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}${model.selected ? SKIP_TO_CONVERSATION : ""}</header>
+      ${model.paired ? '<div id="conversation-filters" class="conversation-filters"></div>' : ""}<nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${!model.selected ? networkHelp : ""}
       ${model.paired ? composeFabMarkup : ""}
       <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
     </aside>
     <main class="conversation-main">
-      ${model.selected ? `${conversationHeaderMarkup(model)}${networkHelp}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button><p class="conversation-welcome-inbox">Machine off? <button id="empty-inbox" class="link-button" type="button" aria-haspopup="dialog">Read your inbox</button> without pairing.</p>' : ""}</div>`}
+      ${model.selected ? `${conversationHeaderMarkup(model)}${networkHelp}<nav class="conversation-tabs" role="tablist" aria-label="Conversation views"><button id="conversation-tab" type="button" role="tab" aria-selected="true" aria-controls="conversation-pane-slot">Conversation</button><button id="team-tab" type="button" role="tab" aria-selected="false" aria-controls="team-panel" tabindex="-1">Team</button></nav><section id="team-panel" class="team-panel" role="tabpanel" aria-labelledby="team-tab" tabindex="0" hidden></section><section id="conversation-pane-slot" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button><p class="conversation-welcome-inbox">Machine off? <button id="empty-inbox" class="link-button" type="button" aria-haspopup="dialog">Read your inbox</button> without pairing.</p>' : ""}</div>`}
     </main>
     ${contextRailMarkup(model.selected, model.explorerHref?.includes("project_id=") ? model.explorerHref : null)}
   </div>`;
@@ -444,10 +452,12 @@ export function fitConversationHost(root: ParentNode): void {
   const connection = host.querySelector<HTMLElement>("#conversation-connection");
   // cas-d043 G02: the device in control, when another one is, keeps its place too.
   const control = host.querySelector<HTMLElement>("#conversation-control");
+  // The harness name leads the host line (DESIGN.md Conversation header).
+  const harness = host.querySelector<HTMLElement>(":scope > .conversation-model");
   // cas-d043 QA round 1: on a phone the header's codename shows whole or
   // steps aside, never as a cut slot beside the machine.
   const phoneHeader = identity.ownerDocument.defaultView?.matchMedia?.("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)").matches === true;
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0), phoneHeader);
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
 }
 
 /**
@@ -515,6 +525,7 @@ export function arrangeConversationShell(document: Document, model: Conversation
     if (regions.grid) shell.querySelector("#conversation-pane-slot")!.append(regions.grid);
     if (regions.composer) {
       dressComposer(regions.composer, model.supervisor, projectTitle(model.projectDir));
+      syncEndedComposer(regions.composer, model.ended);
       shell.querySelector("#conversation-composer-slot")!.append(regions.composer);
     }
     if (regions.status) shell.querySelector("#conversation-status-slot")!.append(regions.status);
@@ -584,4 +595,34 @@ export function bindKeyboardViewport(window: KeyboardViewportWindow): () => void
   visual.addEventListener("scroll", sync);
   sync();
   return () => { visual.removeEventListener("resize", sync); visual.removeEventListener("scroll", sync); applyKeyboardViewport(window.document, undefined); };
+}
+
+/** One factual terminal turn, using the browser's local clock and time zone. */
+export function sessionEndSummary(ended: SessionEndOutcome): string {
+  const at = new Date(ended.at);
+  const time = Number.isFinite(at.getTime())
+    ? at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })
+    : "an unknown time";
+  const reason = ended.reason === "prompt_input_exit" || ended.reason === "exit" ? "/exit"
+    : ended.reason === "unknown" ? "reason unknown" : ended.reason;
+  const count = ended.workers_stopped.length;
+  return `Supervisor and ${count} worker${count === 1 ? "" : "s"} stopped at ${time} · ${reason}`;
+}
+
+export const SESSION_ENDED_GUIDANCE = "This session ended. Choose New session to start or resume a supervisor.";
+
+/** Preserve the draft while making a terminal destination impossible to send to. */
+export function syncEndedComposer(root: ParentNode, ended: SessionEndOutcome | undefined): void {
+  const send = root.querySelector<HTMLButtonElement>("#message-send");
+  const status = root.querySelector<HTMLElement>("#message-status");
+  if (send) send.disabled = Boolean(ended);
+  if (status && ended) {
+    status.hidden = false;
+    status.dataset.sessionEnded = "true";
+    status.textContent = SESSION_ENDED_GUIDANCE;
+  } else if (status?.dataset.sessionEnded) {
+    delete status.dataset.sessionEnded;
+    status.textContent = "";
+    status.hidden = true;
+  }
 }

@@ -1,0 +1,4 @@
+title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
+tasks: [cas-d17f]
+invariants: [HUB-J12-DURABLE-SEND-REF, HUB-J5-RECEIPT-STAGES]
+journeys: [HUB-J5, HUB-J12]

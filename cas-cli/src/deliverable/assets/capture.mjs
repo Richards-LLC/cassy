@@ -151,7 +151,9 @@ async function capture(plan) {
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node resolves module URLs while argv may retain a symlinked parent (macOS /var).
+if (process.argv[1] && existsSync(process.argv[1])
+    && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   const plan = JSON.parse(readFileSync(process.argv[2], 'utf8'));
   if (process.argv[3] === '--validate') {
     try { validateShots(plan.shots, { ...plan.config,root:plan.root }); process.stdout.write('{}\n'); }

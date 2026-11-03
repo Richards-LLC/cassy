@@ -10,7 +10,7 @@ pub const MIGRATION: Migration = Migration {
     up: &[
         "CREATE INDEX IF NOT EXISTS idx_recording_events_timestamp ON recording_events(timestamp_ms)",
     ],
-    detect: Some(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_recording_events_timestamp'",
-    ),
+    // Retired by m289, which drops the recording tables: always detected, so an
+    // upgraded store never recreates it and a fresh store never builds it.
+    detect: Some(super::m289_drop_recording_index::RETIRED_DETECT),
 };

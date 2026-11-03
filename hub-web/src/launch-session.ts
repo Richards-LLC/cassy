@@ -1,3 +1,5 @@
+import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
+import { accountCapacity, type AccountWindow } from "./accounts-model";
 // New session (cas-0f51): start a factory session on a paired machine from
 // Commander — machine → project → supervisor → start — and land on its
 // supervisor. The sheet lives on <body>, outside #app, so a shell rebuild
@@ -7,6 +9,7 @@
 // Wire contracts (cas-cli hub/projects.rs, hub/server.rs):
 //   GET  /v1/projects                  {projects[], browse_roots[]}
 //   GET  /v1/projects/browse?root&path {root, path, entries[], truncated}
+//   GET  /v1/launch/profiles?target   {claude, codex, grok}; optional JSON LaunchTarget
 //   POST /v1/sessions {target, supervisor_cli, workers?}
 //        202/200 {session, attached} · error {error, detail} · 403 scope_denied
 import { escapeHtml, projectTitle } from "./cloud-brand";
@@ -53,7 +56,7 @@ export interface BrowseListing { root: BrowseRoot; path: string; entries: Browse
 export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
-export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string }
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string; windows?: AccountWindow[]; usage_observed_at?: string | null }
 
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
@@ -137,8 +140,9 @@ export interface LaunchHost {
   currentMachineId(): string | undefined;
   origin: string;
   projects(machineId: string, signal: AbortSignal): Promise<ProjectCatalog>;
-  /** Each CLI's account profiles on the machine. */
-  profiles(machineId: string, signal: AbortSignal): Promise<LaunchProfiles>;
+  /** Each CLI's account profiles, recommended using the selected project's policy. */
+  checkUsage: CheckAccountUsage;
+  profiles(machineId: string, signal: AbortSignal, target?: LaunchTarget): Promise<LaunchProfiles>;
   browse(machineId: string, rootId: string, path: string, signal: AbortSignal): Promise<BrowseListing>;
   launch(machineId: string, request: LaunchRequest): Promise<LaunchResult>;
   grant(machineId: string): Promise<void>;
@@ -351,6 +355,8 @@ export class LaunchSheet {
   private cliChosen = false;
   private profiles: Load<LaunchProfiles> = { status: "idle" };
   private account: string | undefined;
+  private profilesGeneration = 0;
+  private readonly usageChecks: AccountUsageChecks;
   private loads = new AbortController();
   /** Bumped per launch; a stale wait never lands the operator anywhere. */
   private launchGeneration = 0;
@@ -363,7 +369,9 @@ export class LaunchSheet {
   /** The machines as last drawn, so a repeat refresh is free. */
   private signature = "";
 
-  constructor(private readonly host: LaunchHost, private readonly doc: Document = document) {}
+  constructor(private readonly host: LaunchHost, private readonly doc: Document = document) {
+    this.usageChecks = new AccountUsageChecks((...args) => host.checkUsage(...args), () => this.dialog, () => this.renderAccounts());
+  }
 
   get isOpen(): boolean { return this.dialog?.open === true; }
 
@@ -375,6 +383,7 @@ export class LaunchSheet {
    */
   open(machineId?: string): void {
     const dialog = this.ensureDialog();
+    this.usageChecks.reset();
     const machines = this.host.machines();
     const current = this.host.currentMachineId();
     const chosen = (machineId ? machines.find((m) => m.id === machineId) : undefined)
@@ -396,7 +405,7 @@ export class LaunchSheet {
   close(): void {
     this.launchGeneration += 1;
     this.stopTicker();
-    this.loads.abort();
+    this.loads.abort(); this.usageChecks.reset();
     if (this.dialog?.open) this.dialog.close();
   }
 
@@ -419,10 +428,11 @@ export class LaunchSheet {
     dialog.addEventListener("close", () => {
       this.launchGeneration += 1;
       this.stopTicker();
-      this.loads.abort();
+      this.loads.abort(); this.usageChecks.reset();
       if (!this.landing) this.host.returnFocus?.();
     });
     dialog.addEventListener("click", (event) => {
+      if (this.usageChecks.handle(event)) return;
       const target = event.target as HTMLElement;
       const action = target.closest<HTMLElement>("[data-launch-action]")?.dataset.launchAction;
       if (action === "close") { this.close(); return; }
@@ -521,16 +531,24 @@ export class LaunchSheet {
     return this.profiles.status === "ready" ? defaultAccount(this.profiles.data[cli]) : undefined;
   }
 
-  private async loadProfiles(machineId: string): Promise<void> {
+  /** Refresh account choices after a machine mutation, preserving project and workers. */
+  accountsChanged(machineId: string): void {
+    if (this.dialog?.open && this.machineId === machineId) void this.loadProfiles(machineId);
+  }
+
+  private async loadProfiles(machineId: string, resetAccount = false): Promise<void> {
+    const generation = ++this.profilesGeneration;
     const signal = this.loads.signal;
+    if (resetAccount) this.account = undefined;
     this.profiles = { status: "loading" };
     this.renderAccounts();
+    this.syncActions();
     try {
-      const data = await this.host.profiles(machineId, signal);
-      if (signal.aborted || this.machineId !== machineId) return;
+      const data = await this.host.profiles(machineId, signal, this.selection?.target);
+      if (signal.aborted || this.machineId !== machineId || generation !== this.profilesGeneration) return;
       this.profiles = { status: "ready", data };
     } catch {
-      if (signal.aborted || this.machineId !== machineId) return;
+      if (signal.aborted || this.machineId !== machineId || generation !== this.profilesGeneration) return;
       this.profiles = { status: "failed", message: "" };
     }
     // Keep a choice that is still usable; otherwise the default again.
@@ -569,7 +587,7 @@ export class LaunchSheet {
       body.innerHTML = `<p class="launch-empty launch-account-note" role="status">${escapeHtml(step.message)}</p><button type="button" class="launch-retry" data-launch-action="retry-accounts">Try again</button>`;
       return;
     }
-    body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${step.entry.profiles.map((profile) => accountRowMarkup(this.cli, profile, profile.name === this.account)).join("")}</div>`;
+    body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${step.entry.profiles.map((profile) => accountRowMarkup(this.cli, profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), this.usageChecks.hasResult(this.machineId!, `${this.cli}:${profile.name}`))).join("")}</div>`;
   }
 
   private async loadCatalog(machineId: string): Promise<void> {
@@ -635,6 +653,7 @@ export class LaunchSheet {
     const target = JSON.parse(input.dataset.launchTarget ?? "null") as LaunchTarget | null;
     if (!target) return;
     this.selection = { target, name: input.dataset.launchName ?? input.value, path: input.dataset.launchPath ?? "" };
+    if (this.machineId) void this.loadProfiles(this.machineId, true);
     this.syncChecked();
     this.$(".launch-invalid").hidden = true;
     this.syncActions();
@@ -971,18 +990,20 @@ export function commandTokensMarkup(command: string): string {
     .join(" ");
 }
 
-function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
+function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean, checkMarkup: string, checkedUsage: boolean): string {
   const name = escapeHtml(profile.name);
-  const recommendation = profile.recommendation ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(profile.recommendation)}</small>` : profile.exclusion ? `<small class="launch-row-path">${escapeHtml(profile.exclusion)}</small>` : "";
-  const usage = profile.usage?.split("; ").map((window) => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("") ?? "";
-  const tag = recommendation + usage + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
+  const reason = profile.windows && profile.recommendation ? "Based on the capacity and reset times below." : profile.recommendation;
+  const exclusion = profile.windows && profile.exclusion?.startsWith("resets later than ") ? "Other accounts reset sooner." : profile.exclusion;
+  const recommendation = reason ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(reason)}</small>` : exclusion ? `<small class="launch-row-path">${escapeHtml(exclusion)}</small>` : "";
+  const usage = (profile.windows ? accountCapacity(profile.windows, profile.usage_observed_at) : profile.usage?.split("; ") ?? []).map(window => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("");
+  const tag = recommendation + (checkedUsage ? "" : usage) + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
   if (profile.logged_in) {
-    return `<label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>`;
+    return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>${checkMarkup}</div>`;
   }
   // Logged out: shown so the operator sees every account, never selectable,
   // with the one command that fixes it.
   const command = accountLoginCommand(cli, profile.name);
-  return `<div class="launch-row launch-account-row launch-account-out"><label class="launch-account-label"><input type="radio" name="launch-account" value="${name}" disabled><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}<small class="launch-account-state">Logged out. Log in on the machine:</small></span></label><span class="launch-login"><code>${escapeHtml(command)}</code><button type="button" data-launch-action="copy" data-command="${escapeHtml(command)}" aria-label="Copy login command for ${name}">Copy</button></span></div>`;
+  return `<div class="launch-row launch-account-row launch-account-out"><label class="launch-account-label"><input type="radio" name="launch-account" value="${name}" disabled><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}<small class="launch-account-state">Logged out. Log in on the machine:</small></span></label><span class="launch-login"><code>${escapeHtml(command)}</code><button type="button" data-launch-action="copy" data-command="${escapeHtml(command)}" aria-label="Copy login command for ${name}">Copy</button></span>${checkMarkup}</div>`;
 }
 
 function browseProjectRowMarkup(entry: BrowseEntry, root: BrowseRoot, checked: boolean): string {

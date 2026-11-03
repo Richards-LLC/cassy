@@ -1,0 +1,4 @@
+title: Closed edit disclosures leave no stored tombstone and offline source evidence waits for reconnect before retrying
+tasks: [cas-edd9]
+invariants: [HUB-J25-GOAL]
+journeys: [HUB-J25]

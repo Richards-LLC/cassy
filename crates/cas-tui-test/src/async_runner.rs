@@ -344,14 +344,22 @@ impl AsyncPtyRunner {
         let mut interval = interval(self.poll_interval);
 
         loop {
-            // Check condition against accumulated output
-            let found = self.with_output(|output| condition(output.as_str_lossy().as_ref()));
+            // The reader appends output before marking EOF. Observe both under
+            // one lock so it cannot finish between an empty snapshot and the
+            // exit check, hiding the final matching output.
+            let (found, running) = {
+                let state = self.state.lock().unwrap();
+                (
+                    condition(state.output.as_str_lossy().as_ref()),
+                    state.running,
+                )
+            };
             if found {
                 return Ok(());
             }
 
             // Check if process is still running
-            if !self.is_running() {
+            if !running {
                 return Err(AsyncPtyError::ProcessExited);
             }
 

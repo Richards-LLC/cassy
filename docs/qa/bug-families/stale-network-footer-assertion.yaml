@@ -1,0 +1,4 @@
+title: Outage assertions must verify catalog counts independently of the Web version label
+tasks: [cas-3100]
+invariants: [HUB-J12-CATALOG-FOOTER]
+journeys: [HUB-J12]

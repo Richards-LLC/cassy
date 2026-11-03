@@ -322,6 +322,8 @@ pub(crate) struct QueueSelectRequest {
     pub(crate) supervisor_name: String,
     pub(crate) worker_names: Vec<String>,
     pub(crate) dead_workers: HashSet<String>,
+    /// Same-name replacements queued, provisioning or awaiting registration.
+    pub(crate) replacement_workers: HashSet<String>,
     pub(crate) limit: usize,
     /// Read the operator replies Commander clients are owed (cas-786a6).
     pub(crate) operator_replies: bool,
@@ -343,6 +345,8 @@ pub(crate) struct QueueSelection {
     pub(crate) retargeted_rows: Vec<i64>,
     /// Recipients that shut down; their unread rows were withdrawn.
     pub(crate) shut_down_recipients: Vec<String>,
+    /// Replacement intent read by selection, retained through control delivery.
+    pub(crate) replacement_workers: HashSet<String>,
     /// Session agents served by their native extension, not by the daemon.
     pub(crate) native_agents: HashSet<String>,
     /// The batch, stamped `Selected`. No claims: control claims each row just
@@ -363,7 +367,8 @@ pub(crate) enum ClaimOutcome {
     /// The transport claim was taken: the row may be injected on its next pass.
     Claimed(cas_store::ClaimToken),
     /// The recipient already has the row: a delivered handoff, a hook or a
-    /// poll (review M2).
+    /// poll (review M2), or explicitly settled its own copy. This control
+    /// result does not create transport or body evidence.
     HandedOff,
     /// A bare transport claim nobody handed off holds the row.
     NotClaimed,
@@ -434,6 +439,12 @@ pub(crate) fn run_claim_for_inject(
         }
         let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
             Some(token) => ClaimOutcome::Claimed(token),
+            // An explicit ACK/answer retires this member without claiming any
+            // new transport handoff or body observation. In particular, a
+            // broadcast ACK before first surfacing must not count as a failed
+            // bare claim and consume the broadcast's retry budget.
+            None if matches!(queue.recipient_delivery(row, recipient)?,
+                Some(cas_store::RecipientDelivery::Settled(_))) => ClaimOutcome::HandedOff,
             None if queue.recipient_handed_off(row, recipient)? => ClaimOutcome::HandedOff,
             None => ClaimOutcome::NotClaimed,
         };
@@ -925,6 +936,7 @@ pub(crate) struct QueueJobs {
     /// The generation of the mirror scan in flight; an older result is stale.
     mirror_generation: u64,
     mirror_state: Option<Box<super::MirrorScanState>>,
+    operator_receipt_watches: HashSet<i64>,
     config: ConfigCache,
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
     /// Rows with a settling stamp not yet landed, by row: the count of such
@@ -1016,6 +1028,7 @@ impl QueueJobs {
             mirror_in_flight: false,
             mirror_generation: 0,
             mirror_state: Some(Box::default()),
+            operator_receipt_watches: HashSet::new(),
             config: ConfigCache::default(),
             store: None,
             prunes_done: 0,
@@ -1386,6 +1399,10 @@ impl QueueJobs {
         });
     }
 
+    pub(crate) fn watch_operator_receipt(&mut self, id: i64) {
+        self.operator_receipt_watches.insert(id);
+    }
+
     /// Run the Commander mirror scan as a job unless one is running.
     pub(crate) fn submit_mirror_scan(
         &mut self,
@@ -1397,6 +1414,9 @@ impl QueueJobs {
         let Some(mut state) = self.mirror_state.take() else {
             return;
         };
+        // Keep the original watches until the current generation reports
+        // completion: a dropped job must not lose receipt subscriptions.
+        state.pending_operator_receipts.extend(self.operator_receipt_watches.iter().copied());
         let generation = self.generation();
         let spec = JobSpec {
             kind: "MirrorWrite",
@@ -1518,6 +1538,7 @@ impl QueueJobs {
                 QueueJobOutcome::Stamped(done) => {
                     self.stamp_landed(&done);
                     if let Some(message) = done.operator_message {
+                        self.operator_receipt_watches.remove(&message.notification_id);
                         self.operator_messages.push(message);
                     }
                     if let Some(error) = &done.error {
@@ -1590,7 +1611,7 @@ impl QueueJobs {
                         );
                     }
                 }
-                QueueJobOutcome::Mirrored(state) => {
+                QueueJobOutcome::Mirrored(mut state) => {
                     #[cfg(test)]
                     {
                         self.mirror_results_seen += 1;
@@ -1599,6 +1620,10 @@ impl QueueJobs {
                     // back; a scan whose drop was already reported is stale.
                     if self.mirror_in_flight && result.generation == self.mirror_generation {
                         self.mirror_in_flight = false;
+                        for id in state.finished_operator_receipts.drain(..) {
+                            self.operator_receipt_watches.remove(&id);
+                        }
+                        self.operator_messages.append(&mut state.operator_messages);
                         self.mirror_state = Some(state);
                     }
                 }
@@ -1809,6 +1834,7 @@ impl QueueJobs {
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).
+    #[cfg(test)]
     pub(crate) fn take_external_completions(&mut self) -> Vec<JobResult<ExternalOutcome>> {
         std::mem::take(&mut self.external)
     }

@@ -53,10 +53,14 @@ pub(crate) fn delivered_head(
     }
     // The durable branch remains the delivery after a lease release clears
     // the assignee; the closing checkout's HEAD may be the target itself.
-    let branch = task.assignee.as_deref().map(|assignee| {
-        super::close_ops::close_measured_factory_branch(repo, task, assignee)
-    }).or_else(|| super::close_ops::task_delivery_branch(repo, task));
-    if let Some(tip) = branch.as_deref().and_then(|branch| resolve_branch_sha(repo, branch))
+    let branch = task
+        .assignee
+        .as_deref()
+        .map(|assignee| super::close_ops::close_measured_factory_branch(repo, task, assignee))
+        .or_else(|| super::close_ops::task_delivery_branch(repo, task));
+    if let Some(tip) = branch
+        .as_deref()
+        .and_then(|branch| resolve_branch_sha(repo, branch))
     {
         let merged = !target_branch.is_empty()
             && Command::new("git")
@@ -74,7 +78,10 @@ pub(crate) fn delivered_head(
             .and_then(rev)
             .or(Some(tip));
     }
-    task.deliverables.factory_branch_anchor.as_deref().and_then(rev)
+    task.deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .and_then(rev)
         .or_else(|| rev("HEAD"))
 }
 
@@ -150,6 +157,7 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
 
 /// Run the gate. `Ok(notes)` carries decision-note lines to record on close;
 /// `Err(message)` is the complete rejection text.
+#[cfg(test)]
 pub(crate) fn qa_evidence_close_gate(
     cas_root: &Path,
     task: &Task,
@@ -157,7 +165,15 @@ pub(crate) fn qa_evidence_close_gate(
     target_branch: &str,
     commit_receipt: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None, None)
+    qa_evidence_close_gate_for_paths(
+        cas_root,
+        task,
+        repo,
+        target_branch,
+        commit_receipt,
+        None,
+        None,
+    )
 }
 
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
@@ -182,6 +198,90 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     }
 }
 
+/// Format preflight before either verification-dispatch path mutates state.
+/// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
+pub(crate) fn ledger_preflight(
+    cas_root: &Path,
+    task: &Task,
+    require_missing: bool,
+) -> Result<(), String> {
+    let config =
+        crate::config::Config::load(cas_root).map_err(|e| format!("QA LEDGER REJECTED: {e}"))?;
+    let paths = crate::config::resolved_factory_artifact_paths(
+        cas_root,
+        config.factory().artifacts_root.as_deref(),
+    );
+    let dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
+    let ledger = dir.join("LEDGER.md");
+    // Batch proof is owned by the existing shared-receipt gate, not an
+    // individual ledger. Uncovered existing ledgers still need a format check.
+    if !ledger.exists()
+        && (!require_missing
+            || !config.qa().evidence_gate
+            || config.qa().mode == crate::config::QaMode::Batch
+            || task.demo_statement.trim().is_empty()
+            || delivery_is_tier_zero(cas_root, task))
+    {
+        return Ok(());
+    }
+    if dir.exists()
+        && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none()
+    {
+        return Err(
+            "QA LEDGER REJECTED: task artifact directory escapes its project namespace".into(),
+        );
+    }
+    // A covering review owns the canonical evidence for shipped work. Do not
+    // apply a newer producer-ledger grammar retroactively to that delivery.
+    // Resolve the actual delivery, rather than using an old anchor alone: a
+    // newer unmerged task tip must not inherit its predecessor's approval.
+    // Only positively validated proof replaces lint; lookup failures retain
+    // the existing producer-ledger check below.
+    if let Ok((repo, target)) = crate::qa_batch::task_context(cas_root, task)
+        && let Some(head) = delivered_head(task, &repo, &target, None)
+        && (crate::qa_batch::satisfying_receipt(cas_root, task, &repo, &target, &head)
+            .is_ok_and(|receipt| receipt.is_some())
+            || crate::qa_batch::covering_pass(cas_root, task, &repo, &target, &head)
+                .is_ok_and(|pass| pass.is_some()))
+    {
+        return Ok(());
+    }
+    let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
+    if report.ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "QA LEDGER REJECTED before verification dispatch:\n{}\nRun cas qa ledger check {} --task {}",
+            report.refusal(),
+            ledger.display(),
+            task.id
+        ))
+    }
+}
+
+fn delivery_is_tier_zero(cas_root: &Path, task: &Task) -> bool {
+    crate::qa_batch::task_context(cas_root, task).ok().is_some_and(|(repo, _)| {
+        super::review_tier::tier_for_delivery(task, &repo)
+            .is_some_and(|decision| decision.tier == super::review_tier::VerificationTier::Mechanical)
+    })
+}
+
+/// A delivery that changes enforcement carries an adversarial probe in its task
+/// ledger, in batch mode too: a batch round does not probe one task's guard.
+fn adversarial_probe_refusal(task_id: &str, ledger: &Path, paths: &[String]) -> Option<String> {
+    let (tier, reason) = super::review_tier::tier_for_paths(paths)?;
+    if tier != super::review_tier::VerificationTier::Adversarial
+        || std::fs::read_to_string(ledger)
+            .is_ok_and(|text| super::review_tier::ledger_records_adversarial_probe(&text))
+    {
+        return None;
+    }
+    Some(format!(
+        "QA EVIDENCE REJECTED: Tier 2 delivery has no adversarial probe. {reason} Run `cas qa ledger init --task {task_id}` if {} is missing, add a row whose cell starts `Adversarial probe:` with what you tried to get past and what happened, then retry the close.",
+        ledger.display()
+    ))
+}
+
 /// A missing flat citation can outlive the namespace migration in a running
 /// service. Read its corresponding scoped file without rewriting task history.
 /// Existing historical files, unsafe relative paths and unrelated citations
@@ -204,7 +304,9 @@ fn task_qa_notes<'a>(
     let Ok(relative) = cited.strip_prefix(&legacy) else {
         return original;
     };
-    if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
         || !std::fs::symlink_metadata(&cited)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     {
@@ -214,7 +316,11 @@ fn task_qa_notes<'a>(
     if !replacement.is_file() {
         return original;
     }
-    std::borrow::Cow::Owned(format!("{}\nqa-bundle: {}", task.notes, replacement.display()))
+    std::borrow::Cow::Owned(format!(
+        "{}\nqa-bundle: {}",
+        task.notes,
+        replacement.display()
+    ))
 }
 
 /// The target a delivery is diffed against: `origin/<target>` when that ref
@@ -291,10 +397,15 @@ pub(super) fn approved_receipt_bundle(
             return None;
         }
         let reviewed = resolve_ref_commit_sha(repo, &pass.bound_head)?;
-        if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
-            resolve_ref_commit_sha(repo, anchor)
-                .is_none_or(|anchor| anchor != reviewed && anchor != receipt)
-        }) {
+        if task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .is_some_and(|anchor| {
+                resolve_ref_commit_sha(repo, anchor)
+                    .is_none_or(|anchor| anchor != reviewed && anchor != receipt)
+            })
+        {
             return None;
         }
         if reviewed == receipt
@@ -341,7 +452,10 @@ pub(super) fn approved_receipt_bundle(
             .notes
             .lines()
             .filter(|line| line.contains("PLATFORM_PROOF"))
-            .filter_map(|line| line.split_once(crate::qa_evidence::BUNDLE_CITATION))
+            .filter_map(|line| {
+                line.split_once(crate::qa_evidence::REVIEW_BUNDLE_CITATION)
+                    .or_else(|| line.split_once(crate::qa_evidence::BUNDLE_CITATION))
+            })
             .filter_map(|(_, rest)| rest.split_whitespace().next())
             .any(|raw| {
                 let path = raw.trim_matches(|ch: char| "(),[]{}<>\"'`;*.".contains(ch));
@@ -404,7 +518,8 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
     if (!qa.evidence_gate
         || task.task_type == TaskType::Epic
-        || task.execution_note.as_deref() == Some("no-code")) && !deferred
+        || task.execution_note.as_deref() == Some("no-code"))
+        && !deferred
     {
         return Ok(Vec::new());
     }
@@ -414,10 +529,23 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         }
         return Ok(Vec::new());
     };
-    let carried_bundle = approved_receipt_bundle(cas_root, task, repo, target_branch, commit_receipt);
-    let range = carried_bundle.as_ref().map(|(_, _, base)| (base.clone(), head.clone())).or_else(|| (!target_branch.is_empty())
-        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch), recorded_base))
-        .flatten());
+    let carried_bundle =
+        approved_receipt_bundle(cas_root, task, repo, target_branch, commit_receipt);
+    let range = carried_bundle
+        .as_ref()
+        .map(|(_, _, base)| (base.clone(), head.clone()))
+        .or_else(|| {
+            (!target_branch.is_empty())
+                .then(|| {
+                    delivery_range(
+                        repo,
+                        &head,
+                        &live_target_ref(repo, target_branch),
+                        recorded_base,
+                    )
+                })
+                .flatten()
+        });
     // An empty attributed set is authoritative: a merge-only or formatting-
     // only task delivered no reviewable UI, even if the branch's merge diff
     // contains UI files from the other parent (GH #1037).
@@ -435,22 +563,45 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 .and_then(|(from, to)| range_paths(repo, from, to)),
         }
     };
-    let journeys = changed
+    let mut journeys = changed
         .as_deref()
         .map(|paths| catalog_journeys_for(repo, Some(&head), paths))
         .unwrap_or_default();
+    // cas-1b4d: in an operator's rapid-response window only journeys whose
+    // owned files the delivery touched need evidence; the rest back-fill.
+    let rapid = crate::rapid_response::active_for_delivery(cas_root, repo, task, changed.as_deref());
+    if let Some(window) = rapid.as_ref()
+        && let Some(owned) = changed
+            .as_deref()
+            .and_then(|paths| crate::rapid_response::owned_journeys(repo, &qa, paths))
+    {
+        crate::rapid_response::narrow_journeys(cas_root, window, &task.id, &mut journeys, &owned);
+    }
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
-    let terminal_render = changed.as_deref().is_some_and(|paths| requires_terminal_qa(paths, &qa));
+    let terminal_render = changed
+        .as_deref()
+        .is_some_and(|paths| requires_terminal_qa(paths, &qa));
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
             .map(|diff| added_skip_markers(&diff))
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let paths = crate::config::resolved_factory_artifact_paths(cas_root, config.factory().artifacts_root.as_deref());
+    let paths = crate::config::resolved_factory_artifact_paths(
+        cas_root,
+        config.factory().artifacts_root.as_deref(),
+    );
     let artifacts_dir = task_qa_artifacts_dir(cas_root, &paths.base, task);
-    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&paths.base, &artifacts_dir).is_none() {
+    if artifacts_dir.exists()
+        && crate::config::canonical_factory_task_artifact_dir(&paths.base, &artifacts_dir).is_none()
+    {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
+    }
+    if let Some(refusal) = changed
+        .as_deref()
+        .and_then(|changed| adversarial_probe_refusal(&task.id, &artifacts_dir.join("LEDGER.md"), changed))
+    {
+        return Err(refusal);
     }
     let notes = task_qa_notes(&paths, task, &artifacts_dir);
     let ctx = EvidenceContext {
@@ -460,28 +611,53 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         delivered_head: &head,
         notes: &notes,
         deployed_origins: &qa.deployed_origins,
-        capture_configured: qa.capture.as_ref().is_some_and(|capture| capture.is_configured().unwrap_or(true)),
+        capture_configured: qa
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.is_configured().unwrap_or(true)),
         rebind_scope: changed.as_deref().map(|files| (&qa, files)),
     };
     let tier = evidence_tier(&reasons, terminal_render);
     let carried_bundle = carried_bundle.filter(|_| tier == EvidenceTier::Bundle);
-    let batch_receipt = if batch_mode || deferred {
+    let batch_receipt = if deferred {
+        crate::qa_batch::satisfying_deferred_receipt(cas_root, task, repo, target_branch, &head)
+            .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read deferred receipts: {e}"))?
+    } else if batch_mode {
         crate::qa_batch::satisfying_receipt(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch receipts: {e}"))?
-    } else { None };
-    let integrated = (batch_mode || deferred).then(|| crate::qa_batch::integration_state(repo, &head, target_branch)).flatten();
+    } else {
+        None
+    };
+    let integrated = (batch_mode || deferred)
+        .then(|| crate::qa_batch::integration_state(repo, &head, target_branch))
+        .flatten();
     let covering_pass = if deferred {
         crate::qa_batch::covering_pass(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read covering QA pass: {e}"))?
-    } else { None };
+    } else {
+        None
+    };
     if deferred && integrated != Some(false) && batch_receipt.is_none() && covering_pass.is_none() {
-        return Err(crate::qa_batch::debt_refusal(&task.id));
+        let recorded = rapid.as_ref().is_some_and(|window| {
+            crate::rapid_response::record_skip(
+                cas_root, window, &task.id, "batch-qa-receipt", "closed before its batch QA receipt",
+            )
+        });
+        if !recorded {
+            return Err(crate::qa_batch::debt_refusal(&task.id));
+        }
     }
     // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
-    let batch_defer = batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
+    let batch_defer =
+        batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
     // Optional citations alone do not upgrade None/Ledger proof requirements.
     // A declared comparison still applies when batch approval replaces a bundle.
-    let pair_coverage = if tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
+    let pair_coverage = if tier != EvidenceTier::Bundle
+        || batch_receipt.is_some()
+        || batch_defer
+        || covering_pass.is_some()
+        || carried_bundle.is_some()
+    {
         crate::qa_evidence::validate_cited_pair_coverage(&ctx)
     } else {
         Ok(false)
@@ -498,17 +674,55 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    let needs_bundle = tier == EvidenceTier::Bundle
+        && batch_receipt.is_none()
+        && !batch_defer
+        && covering_pass.is_none()
+        && carried_bundle.is_none();
+    let restored = if waiver.is_none() && (needs_bundle || pair_coverage.is_err()) {
+        crate::artifacts::qa::restore(cas_root, task, &notes, &artifacts_dir).map_err(|error| {
+            format!("QA EVIDENCE REJECTED: cannot restore published bundle: {error}")
+        })?
+    } else {
+        None
+    };
+    let resolved_notes = match restored {
+        Some(bundle) => format!("{notes}\nqa-bundle: {}", bundle.display()),
+        None => notes.to_string(),
+    };
+    let ctx = EvidenceContext {
+        notes: &resolved_notes,
+        ..ctx
+    };
+    let pair_coverage = if tier != EvidenceTier::Bundle
+        || batch_receipt.is_some()
+        || batch_defer
+        || covering_pass.is_some()
+        || carried_bundle.is_some()
+    {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx)
+    } else {
+        pair_coverage
+    };
     // Batch deferral/approval can replace full proof, but cannot silently drop
     // cells from a declared comparison. Only the authenticated exact-tip waiver
     // above (or the close handler's recorded supervisor override) waives it.
     if waiver.is_none() {
         pair_coverage.map_err(|refusal| {
-            format!("QA EVIDENCE REJECTED: {}. Next: {}", refusal.problem, refusal.command)
+            format!(
+                "QA EVIDENCE REJECTED: {}. Next: {}",
+                refusal.problem, refusal.command
+            )
         })?;
     }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        if waiver.is_some() || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
+        if waiver.is_some()
+            || batch_receipt.is_some()
+            || batch_defer
+            || covering_pass.is_some()
+            || carried_bundle.is_some()
+        {
             EvidenceTier::None
         } else {
             tier
@@ -524,7 +738,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         ));
     }
     if let Some(qa_pass) = covering_pass {
-        pass.notes.push(format!("QA batch debt satisfied by passed independent QA: pass={} head={}", qa_pass.id, qa_pass.bound_head));
+        pass.notes.push(format!(
+            "QA batch debt satisfied by passed independent QA: pass={} head={}",
+            qa_pass.id, qa_pass.bound_head
+        ));
     }
     if batch_defer {
         cas_store::defer_qa_batch_evidence(cas_root, &task.id, &head)
@@ -532,9 +749,23 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
     }
     if let Some(receipt) = batch_receipt {
-        pass.notes.push(format!("QA batch evidence PASS: receipt={} staging={} ledger={} task={} anchor={}",
-            receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, task.id,
-            receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")));
+        let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
+            "QA batch debt satisfied by release verdict"
+        } else {
+            "QA batch evidence PASS"
+        };
+        pass.notes.push(format!(
+            "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
+            receipt.id,
+            receipt.staging_sha,
+            receipt.ledger_artifact_id,
+            task.id,
+            receipt
+                .task_heads
+                .get(&task.id)
+                .map(String::as_str)
+                .unwrap_or("")
+        ));
     }
     if let Some(waiver) = waiver {
         let evidence = match tier {
@@ -584,6 +815,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tier_two_delivery_needs_an_adversarial_probe_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("LEDGER.md");
+        let guard = ["cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs".to_string()];
+        let source = ["cas-cli/src/lib.rs".to_string()];
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &source).is_none());
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_some());
+        std::fs::write(&ledger, "| P1 | Adversarial probe: chained write | refused | refused | PASS | fixture | a.txt | - |\n").unwrap();
+        assert!(adversarial_probe_refusal("cas-x", &ledger, &guard).is_none());
+    }
+
+    #[test]
+    fn ledger_preflight_preserves_batch_evidence_ownership() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_current_dir(dir.path());
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.artifacts_root", artifacts.to_str().unwrap())
+            .unwrap();
+        let mut task = Task::new("cas-ledger-batch".into(), "Batch delivery".into());
+        task.demo_statement = "Walk the assembled staging build".into();
+        for (mode, allowed_missing) in [("batch", true), ("per_task", false)] {
+            config.set("qa.mode", mode).unwrap();
+            config.save(&root).unwrap();
+            assert_eq!(
+                ledger_preflight(&root, &task, true).is_ok(),
+                allowed_missing,
+                "{mode}: shared batch evidence must not become a missing individual ledger"
+            );
+        }
+        config.set("qa.mode", "batch").unwrap();
+        config.save(&root).unwrap();
+        let task_dir =
+            crate::config::project_factory_artifacts_root(&root, &artifacts).join(&task.id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
+        assert!(
+            ledger_preflight(&root, &task, true)
+                .unwrap_err()
+                .contains("canonical evidence matrix header"),
+            "existing malformed batch evidence still refuses locally"
+        );
+    }
+
+    #[test]
     fn interaction_classification_is_conservative_and_configurable_cas_266e() {
         let mut qa = crate::config::QaConfig::default();
         let factory = vec!["cas-cli/src/ui/factory/daemon/runtime/output.rs".into()];
@@ -599,7 +878,10 @@ mod tests {
         qa.terminal_render_paths = vec!["**/ui/**".into()];
         qa.terminal_interaction_paths = vec!["**".into()];
         assert!(requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
-        assert!(!requires_terminal_qa(&["tests/cli/output_test.rs".into()], &qa));
+        assert!(!requires_terminal_qa(
+            &["tests/cli/output_test.rs".into()],
+            &qa
+        ));
         qa.terminal_render_paths.clear();
         assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
     }
@@ -701,7 +983,8 @@ mod tests {
         let cas_root = temp.path().join("project/.cas");
         std::fs::create_dir_all(&cas_root).unwrap();
         let base = temp.path().join("artifacts");
-        let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, "cas-a4b1");
+        let [scoped, legacy] =
+            crate::config::factory_task_artifact_dirs(&cas_root, &base, "cas-a4b1");
         let mut task = Task::new("cas-a4b1".into(), "QA evidence".into());
         std::fs::create_dir_all(scoped.join("github-issues")).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
@@ -722,14 +1005,64 @@ mod tests {
             repo: temp.path(),
             delivered_head: "",
             notes: &task.notes,
-            deployed_origins: &[], capture_configured: false, rebind_scope: None,
+            deployed_origins: &[],
+            capture_configured: false,
+            rebind_scope: None,
         };
-        let error = run_close_gate_with_write_dir(&ctx, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[], &scoped).unwrap_err();
+        let error = run_close_gate_with_write_dir(
+            &ctx,
+            EvidenceTier::Ledger { terminal_qa: false },
+            &["demo".into()],
+            &[],
+            &scoped,
+        )
+        .unwrap_err();
         let (problem, next) = error.split_once("Next: ").unwrap();
         assert!(problem.contains(legacy.to_str().unwrap()), "{error}");
         assert!(next.contains(scoped.to_str().unwrap()), "{error}");
         assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+    }
 
+    /// cas-1b4d: a merged delivery with deferred batch evidence closes inside
+    /// an operator's rapid-response window (skip ledgered) and is refused for
+    /// its batch receipt without one.
+    #[test]
+    fn rapid_response_window_skips_the_batch_debt_refusal_cas_1b4d() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, "README.md", "base\n");
+        let head = commit_file(repo, "src/lib.rs", "pub fn fixed() {}\n");
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\nevidence_gate=true\n").unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut epic = Task::new("cas-ep1c".into(), "Hotfix".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).unwrap();
+        let mut task = Task::new("cas-de11".into(), "Fix".into());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: base,
+        });
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        store.add(&task).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency::new(
+                task.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild,
+            ))
+            .unwrap();
+        cas_store::defer_qa_batch_evidence(&cas_root, &task.id, &head).unwrap();
+        let refusal = qa_evidence_close_gate(&cas_root, &task, repo, "main", Some(&head)).unwrap_err();
+        assert!(refusal.contains("waiting for batch receipt"), "{refusal}");
+        let window = crate::rapid_response::enable(
+            &cas_root, store.as_ref(), &epic.id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
+        )
+        .unwrap();
+        qa_evidence_close_gate(&cas_root, &task, repo, "main", Some(&head)).expect("the window skips the batch wait");
+        assert_eq!(crate::rapid_response::ledger(&cas_root, &window)[0].check, "batch-qa-receipt");
     }
 
     #[test]
@@ -744,6 +1077,7 @@ mod tests {
         let hub_web = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
 
         let mut task = Task::new("cas-e4d2-regression".to_string(), "Rust fix".to_string());
         task.assignee = Some("worker".to_string());
@@ -772,7 +1106,10 @@ mod tests {
         assert_eq!(delivered_head(&task, &repo, "main", None), Some(rust_only));
     }
 
-    fn merged_receipt_fixture_gh1181(first: &str, later: Option<&str>) -> (tempfile::TempDir, String) {
+    fn merged_receipt_fixture_gh1181(
+        first: &str,
+        later: Option<&str>,
+    ) -> (tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -781,13 +1118,26 @@ mod tests {
         git(&repo, &["switch", "-q", "-c", "factory/worker"]);
         commit_file(&repo, first, "first delivery\n");
         git(&repo, &["switch", "-q", "main"]);
-        git(&repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge first PR"]);
+        git(
+            &repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "Merge first PR",
+            ],
+        );
         let receipt = git(&repo, &["rev-parse", "HEAD"]);
         if let Some(later) = later {
             git(&repo, &["switch", "-q", "-c", "later-pr"]);
             commit_file(&repo, later, "later delivery\n");
             git(&repo, &["switch", "-q", "main"]);
-            git(&repo, &["merge", "-q", "--no-ff", "later-pr", "-m", "Merge later PR"]);
+            git(
+                &repo,
+                &["merge", "-q", "--no-ff", "later-pr", "-m", "Merge later PR"],
+            );
         }
         std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
         (temp, receipt)
@@ -796,16 +1146,26 @@ mod tests {
     #[test]
     fn backend_merge_receipt_does_not_require_qa_for_later_ui_merge_gh1181() {
         let (temp, receipt) = merged_receipt_fixture_gh1181(
-            "src/service.ts", Some("hub-web/dist/CoachReportPreview.vue"),
+            "src/service.ts",
+            Some("hub-web/dist/CoachReportPreview.vue"),
         );
         let repo = temp.path().join("repo");
         let mut task = Task::new("cas-8103".into(), "Backend delivery".into());
         task.assignee = Some("worker".into());
-        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
-            .expect("the earlier backend merge must not own the later UI merge");
+        qa_evidence_close_gate(
+            &temp.path().join(".cas"),
+            &task,
+            &repo,
+            "main",
+            Some(&receipt),
+        )
+        .expect("the earlier backend merge must not own the later UI merge");
         let (from, to) = delivery_range(&repo, &receipt, "main", None).unwrap();
         assert_eq!(to, receipt);
-        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+        assert_eq!(
+            range_paths(&repo, &from, &to),
+            Some(vec!["src/service.ts".into()])
+        );
     }
 
     #[test]
@@ -815,8 +1175,14 @@ mod tests {
             let repo = temp.path().join("repo");
             let mut task = Task::new("cas-8104".into(), "UI delivery".into());
             task.assignee = Some("worker".into());
-            let refusal = qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
-                .expect_err("the receipt's own UI still requires QA, even at the current target");
+            let refusal = qa_evidence_close_gate(
+                &temp.path().join(".cas"),
+                &task,
+                &repo,
+                "main",
+                Some(&receipt),
+            )
+            .expect_err("the receipt's own UI still requires QA, even at the current target");
             assert!(refusal.contains("own.vue"), "{refusal}");
             assert!(!refusal.contains("src/service.ts"), "{refusal}");
         }
@@ -835,10 +1201,30 @@ mod tests {
         git(&repo, &["switch", "-q", "main"]);
         commit_file(&repo, "hub-web/dist/epic.vue", "incoming epic UI\n");
         git(&repo, &["switch", "-q", "factory/worker"]);
-        git(&repo, &["merge", "-q", "--no-ff", "main", "-m", "Sync epic into worker"]);
+        git(
+            &repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Sync epic into worker",
+            ],
+        );
         let worker_tip = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["switch", "-q", "main"]);
-        git(&repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Integrate worker delivery"]);
+        git(
+            &repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "Integrate worker delivery",
+            ],
+        );
         let integration = git(&repo, &["rev-parse", "HEAD"]);
         std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
         let mut task = Task::new("cas-8105".into(), "Backend delivery after sync".into());
@@ -852,7 +1238,10 @@ mod tests {
                 .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
             let (from, to) = delivery_range(&repo, head, "main", None).unwrap();
             assert_eq!(to, integration, "head {head}");
-            assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+            assert_eq!(
+                range_paths(&repo, &from, &to),
+                Some(vec!["src/service.ts".into()])
+            );
         }
     }
 
@@ -931,6 +1320,7 @@ mod tests {
         commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[qa]\nmode='per_task'\n").unwrap();
         let mut task = Task::new("cas-bde8-squash".to_string(), "Backend fix".to_string());
         task.assignee = Some("worker".to_string());
 
@@ -979,12 +1369,20 @@ mod tests {
         .map(String::from)
         .to_vec();
         let reasons = user_facing_reasons(&task, &qa, Some(&fixtures), &[]).reasons;
-        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::None, "{reasons:?}");
+        assert_eq!(
+            evidence_tier(&reasons, false),
+            EvidenceTier::None,
+            "{reasons:?}"
+        );
 
         let mut mixed = fixtures.clone();
         mixed.push("hub-web/src/styles.css".into());
         let reasons = user_facing_reasons(&task, &qa, Some(&mixed), &[]).reasons;
-        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::Bundle, "{reasons:?}");
+        assert_eq!(
+            evidence_tier(&reasons, false),
+            EvidenceTier::Bundle,
+            "{reasons:?}"
+        );
     }
 
     #[test]
@@ -1000,29 +1398,53 @@ mod tests {
         let head = resolve_branch_sha(repo, "HEAD").unwrap();
         let mut config = crate::config::Config::default();
         config.set("qa.api_paths", "app/api/**, lib/**").unwrap();
-        assert_eq!(config.get("qa.api_paths").as_deref(), Some("app/api/**,lib/**"));
-        assert!(config.list().contains(&("qa.api_paths".into(), "app/api/**,lib/**".into())));
+        assert_eq!(
+            config.get("qa.api_paths").as_deref(),
+            Some("app/api/**,lib/**")
+        );
+        assert!(
+            config
+                .list()
+                .contains(&("qa.api_paths".into(), "app/api/**,lib/**".into()))
+        );
         let cas = crate::store::init_cas_dir(repo).unwrap();
         config.save(&cas).unwrap();
-        assert_eq!(crate::config::Config::load(&cas).unwrap().get("qa.api_paths"), config.get("qa.api_paths"));
+        assert_eq!(
+            crate::config::Config::load(&cas)
+                .unwrap()
+                .get("qa.api_paths"),
+            config.get("qa.api_paths")
+        );
         let qa = config.qa();
         let task = Task::new("cas-api".into(), "API status change".into());
         let mut paths = vec!["app/api/route.ts".into(), "lib/Server.tsx".into()];
-        let reasons = user_facing_reasons(&task, &qa, Some(&paths), &["broad-app-catalog".into()]).reasons;
+        let reasons =
+            user_facing_reasons(&task, &qa, Some(&paths), &["broad-app-catalog".into()]).reasons;
         let tier = evidence_tier(&reasons, false);
         assert_eq!(tier, EvidenceTier::Ledger { terminal_qa: false });
-        assert!(!reasons.is_empty(), "API paths must trigger QA without a demo");
+        assert!(
+            !reasons.is_empty(),
+            "API paths must trigger QA without a demo"
+        );
         let artifacts = repo.join("artifacts");
         std::fs::create_dir_all(&artifacts).unwrap();
         let transcript = format!(
             "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
-             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n\
+             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | LEDGER.md | - |\n\
              request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
         );
         std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();
         let ctx = EvidenceContext {
-            task_id: &task.id, task_artifacts_dir: &artifacts, repo,
-            delivered_head: &head, notes: "", deployed_origins: &[], capture_configured: false, rebind_scope: None,
+            task_id: &task.id,
+            task_artifacts_dir: &artifacts,
+            repo,
+            delivered_head: &head,
+            notes: "",
+            deployed_origins: &[],
+            capture_configured: false,
+            rebind_scope: None,
         };
         let missing = run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
             .expect_err("the contract comparison is required, even when it has no differences");
@@ -1030,18 +1452,41 @@ mod tests {
         std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
         run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
             .expect("two API artifacts suffice; no screenshots or bundle manifest");
-        crate::store::open_task_store_local(&cas).unwrap().add(&task).unwrap();
+        crate::store::open_task_store_local(&cas)
+            .unwrap()
+            .add(&task)
+            .unwrap();
         let round: cas_types::QaPass = serde_json::from_value(serde_json::json!({
             "id": "qp-api", "task_id": task.id, "round": 1, "implementer_agent_id": "worker",
             "branch": "factory/api", "bound_head": head, "state": "claimed",
             "requested_at": chrono::Utc::now(), "deadline_at": chrono::Utc::now(),
-        })).unwrap();
-        let approved = crate::qa_pass::validate_round_evidence(&cas, &artifacts.join("LEDGER.md"), &round, cas_types::QaVerdict::Approved).unwrap();
+        }))
+        .unwrap();
+        let approved = crate::qa_pass::validate_round_evidence(
+            &cas,
+            &artifacts.join("LEDGER.md"),
+            &round,
+            cas_types::QaVerdict::Approved,
+        )
+        .unwrap();
         assert_eq!(approved.0, "api-evidence:");
-        std::fs::write(artifacts.join("LEDGER.md"), transcript.replace("| PASS |", "| FAIL |")).unwrap();
-        crate::qa_pass::validate_round_evidence(&cas, &artifacts.join("LEDGER.md"), &round, cas_types::QaVerdict::Rejected)
-            .expect("an API defect can be rejected without a passing capture or visual bundle");
-        std::fs::write(artifacts.join("LEDGER.md"), transcript.replace("status: 400", "status: missing")).unwrap();
+        std::fs::write(
+            artifacts.join("LEDGER.md"),
+            transcript.replace("| PASS |", "| FAIL |"),
+        )
+        .unwrap();
+        crate::qa_pass::validate_round_evidence(
+            &cas,
+            &artifacts.join("LEDGER.md"),
+            &round,
+            cas_types::QaVerdict::Rejected,
+        )
+        .expect("an API defect can be rejected without a passing capture or visual bundle");
+        std::fs::write(
+            artifacts.join("LEDGER.md"),
+            transcript.replace("status: 400", "status: missing"),
+        )
+        .unwrap();
         assert!(run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts).is_err());
         paths.push("app/page.tsx".into());
         let mixed = user_facing_reasons(&task, &qa, Some(&paths), &[]).reasons;

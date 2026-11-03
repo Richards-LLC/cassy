@@ -515,8 +515,8 @@ pub fn find_session_for_project(
 
 /// List all factory sessions as unified SessionSummary.
 ///
-/// This provides rich session metadata using the unified session model
-/// from `cas_factory::UnifiedSessionManager`.
+/// This provides rich session metadata using the unified
+/// `cas_factory::SessionSummary` model.
 pub fn list_session_summaries() -> anyhow::Result<Vec<SessionSummary>> {
     let sessions = list_sessions()?;
     Ok(sessions.iter().map(|s| s.to_session_summary()).collect())

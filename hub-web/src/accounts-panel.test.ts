@@ -1,0 +1,164 @@
+// @vitest-environment jsdom
+import { beforeAll, afterEach, expect, it, vi } from "vitest";
+import { AccountsSheet, type AccountsHost } from "./accounts-panel";
+import { accountCapacity, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
+const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function() { this.removeAttribute("open"); this.dispatchEvent(new Event("close")); };
+});
+afterEach(() => { document.body.innerHTML = ""; vi.restoreAllMocks(); });
+const settle = async () => {
+  await vi.waitFor(() => {
+    expect(document.querySelector('.accounts-machine-body > [role="status"]')).toBeNull();
+    expect(document.querySelector(".accounts-notice")?.textContent).not.toBe("Changing account…");
+  });
+};
+function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
+  const host: AccountsHost = {
+    machines: () => [{ id: "linux", label: "Soundwave", scopes: manage ? ["machine-read", "factory-manage"] : ["machine-read"] }],
+    checkUsage: vi.fn(), list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
+  };
+  const sheet = new AccountsSheet(host); sheet.open();
+  return { sheet, host };
+}
+function click(selector: string) { document.querySelector<HTMLButtonElement>(selector)!.click(); }
+
+it("shows read-only pairings their disabled actions and the exact manage-access command", async () => {
+  let completeListing!: (catalog: AccountsCatalog) => void;
+  const listing = new Promise<AccountsCatalog>(resolve => { completeListing = resolve; });
+  const { host } = setup(false, row, () => listing);
+  expect(document.body.textContent).toContain("Loading accounts…");
+  const loaded = settle();
+  completeListing({ accounts: [row] });
+  await loaded;
+  expect(document.body.textContent).toContain("Stale login");
+  expect(document.body.textContent).toContain("Usage unknown");
+  expect(document.body.textContent).toContain("Read-only on Soundwave");
+  const operations = [...document.querySelectorAll<HTMLButtonElement>("[data-operation]")];
+  expect(operations.map(button => button.textContent)).toEqual(["Set default", "Rename", "Disable", "Remove"]);
+  expect(operations.every(button => button.disabled && button.title === "Needs manage access on this machine")).toBe(true);
+  click("[data-grant-command]"); await settle();
+  expect(host.copy).toHaveBeenCalledWith(`cas hub pair --origin ${location.origin} --scopes machine:read,factory:manage`);
+  click("[data-login]"); await settle();
+  expect(host.copy).toHaveBeenCalledWith("cas claude login spare");
+  click("[data-accounts-close]"); expect(host.returnFocus).toHaveBeenCalledOnce();
+});
+
+it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOperation[])("performs %s with required confirmation and invalidates New session", async operation => {
+  const { host, sheet } = setup(true, operation === "enable" ? { ...row, disabled: true, capabilities: { ...row.capabilities, enable: null, disable: "Already disabled" } } : row);
+  await settle();
+  click(`[data-operation="${operation}"]`);
+  if (["remove", "disable", "rename"].includes(operation)) {
+    expect(host.change).not.toHaveBeenCalled();
+    const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+    if (operation === "remove") {
+      input.value = "cancelled confirmation";
+      click("[data-accounts-cancel]");
+      expect(input.value).toBe("");
+      expect(document.querySelector(".accounts-editor h3")!.textContent).toBe("");
+      expect(document.querySelector(".accounts-explanation")!.textContent).toBe("");
+      expect(document.activeElement).toBe(document.querySelector('[data-operation="remove"]'));
+      expect(host.change).not.toHaveBeenCalled();
+      click('[data-operation="remove"]');
+      input.value = "closed confirmation";
+      click("[data-accounts-close]");
+      expect(input.value).toBe("");
+      sheet.open(); await settle();
+      click('[data-operation="remove"]');
+    }
+    if (operation !== "rename") {
+      input.value = "other";
+      document.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      expect(host.change).not.toHaveBeenCalled();
+    }
+    input.value = operation === "rename" ? "renamed" : row.key;
+    input.dispatchEvent(new Event("input"));
+    document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  }
+  await settle();
+  expect(host.change).toHaveBeenCalledWith("linux", expect.objectContaining({ operation, account: row.key }));
+  expect(host.changed).toHaveBeenCalledWith("linux");
+  expect(host.list).toHaveBeenCalledTimes(operation === "remove" ? 3 : 2);
+  expect(document.body.textContent).toContain("Account updated");
+  expect(document.querySelector<HTMLInputElement>(".accounts-editor input")!.value).toBe("");
+  expect(document.querySelector(".accounts-editor h3")!.textContent).toBe("");
+  expect(document.querySelector(".accounts-explanation")!.textContent).toBe("");
+});
+
+it("keeps other machines readable, retries failures, and refreshes after an uncertain mutation", async () => {
+  const { host, sheet } = setup();
+  vi.mocked(host.list).mockRejectedValueOnce(new Error("offline"));
+  host.machines = () => [{ id: "linux", label: "Soundwave", scopes: ["machine-read", "factory-manage"] }, { id: "mac", label: "Prowl", scopes: ["machine-read"] }];
+  sheet.open(); await settle();
+  expect(document.body.textContent).toContain("Could not load accounts on Soundwave");
+  expect(document.querySelector('section[data-machine="mac"]')!.textContent).toContain(row.display_name);
+  click("[data-retry]"); await settle();
+  vi.mocked(host.change).mockRejectedValue(new Error("partial change"));
+  click('[data-operation="set_default"]'); await settle();
+  expect(host.changed).toHaveBeenCalledWith("linux");
+  expect(document.body.textContent).toContain("Could not verify the complete change");
+});
+
+it("groups by provider in headroom order, says where each lives, and cleans up stale duplicates in one confirmation", async () => {
+  const healthy: AccountRow = { ...row, key: "claude:work", name: "work", display_name: "work@example.test", location: "~/.claude-work", login_state: "logged_in", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }] };
+  const duplicate: AccountRow = { ...row, key: "claude:main", name: "main", location: "~/.claude", duplicate_of: "claude:work", is_default: false };
+  const tight: AccountRow = { ...healthy, key: "claude:tight", name: "tight", display_name: "tight@example.test", location: "~/.claude-tight", windows: [{ name: "weekly", used_percent: 95, resets_at: "2099-11-02T18:20:00Z" }] };
+  const { host, sheet } = setup(true, healthy);
+  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
+  sheet.open(); await settle();
+  const groups = [...document.querySelectorAll(".accounts-provider-group")];
+  expect(groups.map(group => group.querySelector("h4")!.textContent)).toEqual(["Claude · 2", "Needs cleanup · 1"]);
+  expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
+  expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
+  expect(groups[0]!.textContent).toContain("Lives in ~/.claude-work on Soundwave · used by Claude Code");
+  expect(groups[0]!.textContent).toContain("62% left");
+  expect(groups[1]!.textContent).toContain("Duplicate of claude:work with a stale login.");
+  click("[data-cleanup]");
+  const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+  input.value = "clean up"; input.dispatchEvent(new Event("input"));
+  document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  await settle();
+  expect(host.change).toHaveBeenCalledExactlyOnceWith("linux", { operation: "remove", account: "claude:main", confirmation: "claude:main" });
+  expect(document.body.textContent).toContain("Account updated.");
+});
+
+it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {
+  const now = new Date("2026-10-28T16:00:00Z").getTime();
+  const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
+  expect(fresh).toContain("weekly 62% left"); expect(fresh).toContain("as of"); expect(fresh).toMatch(/AM|PM/);
+  expect(accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], null, now)[0]).toContain("usage unknown");
+  const zone = process.env.TZ;
+  try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
+  finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
+});
+
+
+it("shows the Codex alias and valid login help when identity metadata is unavailable", async () => {
+  const { host } = setup(false, { ...row, key: "codex:work", provider: "codex", name: "work", display_name: "work", login_state: "unknown" });
+  await settle();
+  expect(document.querySelector(".accounts-identity strong")!.textContent).toBe("work");
+  expect(document.body.textContent).toContain("codex:work");
+  click("[data-login]"); await settle();
+  expect(host.copy).toHaveBeenCalledWith("cas codex login work");
+});
+
+it.each(["claude", "codex"] as const)("rechecks %s usage without management or switching, with dated snapshots and retry", async provider => {
+  const account = { ...row, key: `${provider}:spare`, provider, login_state: "logged_in" as const };
+  const { host } = setup(false, account);
+  const check = vi.fn().mockResolvedValue({ checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: "2026-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2026-11-08T16:57:00Z" }] });
+  Object.assign(host, { checkUsage: check });
+  await settle();
+  const button = () => [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "Check usage")!;
+  expect(button()).toBeDefined(); button().click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Checked at Nov 3, 12:00 PM ET"));
+  expect(check).toHaveBeenCalledWith("linux", `${provider}:spare`, expect.any(AbortSignal));
+  expect(document.body.textContent).toContain("Usage as of Nov 3, 11:00 AM ET");
+  expect(document.body.textContent).toContain("5h 23% used");
+  expect(document.body.textContent).toContain("weekly 44% used");
+  expect(document.body.textContent).toContain("Snapshot is stale");
+  expect(host.change).not.toHaveBeenCalled(); expect(host.changed).not.toHaveBeenCalled();
+  check.mockRejectedValueOnce(Object.assign(new Error("GET usage failed (429)"), { status: 429 })); button().click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Usage check is rate-limited. Try again shortly."));
+  expect(button().disabled).toBe(false);
+});

@@ -12,8 +12,8 @@
 #   verifier projection) from the merged history, via
 #   scripts/gen-builtin-reference-history.sh.
 # Each step runs on its own: one failing step never leaves the other's output
-# stale. A failure prints one summary line first (Cassy's merge warning quotes
-# the first line), then each failed step's log, and exits non-zero.
+# stale. A failure prints one summary line first with retained log paths
+# (Cassy's merge warning quotes the first line), then the logs, and exits non-zero.
 set -euo pipefail
 old=${1:?pre-merge head}
 new=${2:?merged head}
@@ -24,18 +24,31 @@ regenerate_hub_web_dist() {
   fi
   (
     cd hub-web
-    # A merge may run in an ephemeral worktree with no node_modules: reuse the
-    # main checkout's when its lockfile matches, otherwise install from the lockfile.
-    if [ ! -e node_modules ]; then
-      main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
-      if [ -n "$main" ] && [ -d "$main/hub-web/node_modules" ] \
-        && cmp -s package-lock.json "$main/hub-web/package-lock.json"; then
-        ln -s "$main/hub-web/node_modules" node_modules
-      else
-        npm ci --prefer-offline --no-audit --no-fund >/dev/null
-      fi
+    # Detach legacy shared links so npm cannot change another checkout.
+    if [ -L node_modules ]; then
+      rm node_modules
     fi
-    npm run build >/dev/null
+    # npm's hidden lock omits the root package and uninstalled optional packages.
+    # Compare package metadata, not file bytes; stale or unreadable locks reinstall.
+    if ! node <<'JS'
+const fs = require('node:fs');
+const {isDeepStrictEqual} = require('node:util');
+try {
+  const wanted = JSON.parse(fs.readFileSync('package-lock.json')).packages;
+  const installed = JSON.parse(fs.readFileSync('node_modules/.package-lock.json')).packages;
+  for (const [path, entry] of Object.entries(wanted)) {
+    if (!path || (!installed[path] && entry.optional)) continue;
+    if (!isDeepStrictEqual(entry, installed[path]) || !fs.existsSync(path)) process.exit(1);
+  }
+  if (Object.keys(installed).some(path => !Object.hasOwn(wanted, path))) process.exit(1);
+} catch {
+  process.exit(1);
+}
+JS
+    then
+      npm ci --prefer-offline --no-audit --no-fund
+    fi
+    npm run build
   )
   if [ -n "$(git status --porcelain -- hub-web/dist)" ]; then
     git add -A hub-web/dist
@@ -90,27 +103,31 @@ regenerate_reference_history() {
 }
 
 logs=$(mktemp -d)
-trap 'rm -rf "$logs"' EXIT
 steps=(hub-web/dist reference-history)
 failed=()
+failed_steps=()
+trap 'if [ "${#failed[@]}" = 0 ]; then rm -rf "$logs"; fi' EXIT
 for step in "${steps[@]}"; do
   log=$logs/${step//\//-}
   # errexit holds inside the subshell only outside a conditional context.
   set +e
   case $step in
-    hub-web/dist) (set -e; regenerate_hub_web_dist) 2>"$log" ;;
-    reference-history) (set -e; regenerate_reference_history) 2>"$log" ;;
+    hub-web/dist) (set -e; regenerate_hub_web_dist) >"$log" 2>&1 ;;
+    reference-history) (set -e; regenerate_reference_history) >"$log" 2>&1 ;;
   esac
   status=$?
   set -e
   if [ "$status" != 0 ]; then
-    failed+=("$step failed (exit $status)")
+    failed+=("$step failed (exit $status, log: $log)")
+    failed_steps+=("$step")
+  else
+    cat "$log"
   fi
 done
 if [ "${#failed[@]}" != 0 ]; then
   summary=$(IFS=';'; echo "${failed[*]}")
   echo "regenerate-generated-artifacts: ${summary//;/; }" >&2
-  for step in "${steps[@]}"; do
+  for step in "${failed_steps[@]}"; do
     log=$logs/${step//\//-}
     if [ -s "$log" ]; then
       echo "--- $step" >&2

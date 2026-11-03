@@ -6,8 +6,7 @@ use tempfile::TempDir;
 use cas::store::{open_agent_store, open_prompt_queue_store};
 use cas::ui::factory::{SessionManager, create_metadata};
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
+use crate::test_env_guard;
 use test_env_guard::TestEnvGuard;
 
 fn cas_cmd(project_dir: &std::path::Path, home: &std::path::Path) -> Command {

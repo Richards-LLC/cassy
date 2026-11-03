@@ -14,7 +14,8 @@
 # prompt tag does not silently defeat the fast path. The prebuild is an
 # accelerator; it can never be the reason a release cannot ship.
 #
-# The only accepted match is a *successful* Release Prebuild run whose head
+# The accepted match is a successful run (or, for one platform, a proven
+# successful upload in a running workflow) whose head
 # commit is the commit being published or has exactly its tree (cas-28eb), so
 # adopted bytes always come from the tagged tree. The release builds run on
 # the merge_group event: the queue builds one entry at a time and lands its
@@ -30,7 +31,14 @@ event="${RELEASE_PREBUILD_EVENT:-merge_group}"
 wait_seconds="${RELEASE_PREBUILD_WAIT_SECONDS:-900}"
 poll_seconds="${RELEASE_PREBUILD_POLL_SECONDS:-15}"
 api_timeout_seconds="${RELEASE_PREBUILD_API_TIMEOUT_SECONDS:-30}"
-required_artifacts=("cas-x86_64-unknown-linux-gnu" "cas-aarch64-apple-darwin")
+platform="${RELEASE_PREBUILD_PLATFORM:-all}"
+platform_job=""
+case "$platform" in
+    linux) required_artifacts=("cas-x86_64-unknown-linux-gnu"); platform_job="Prebuild Linux x86_64" ;;
+    macos) required_artifacts=("cas-aarch64-apple-darwin"); platform_job="Prebuild macOS ARM64" ;;
+    all) required_artifacts=("cas-x86_64-unknown-linux-gnu" "cas-aarch64-apple-darwin") ;;
+    *) echo "error: RELEASE_PREBUILD_PLATFORM must be linux, macos or all" >&2; exit 2 ;;
+esac
 
 # Keep operator/test overrides bounded to non-negative integers. Invalid values
 # must not turn a release lookup into an unbounded wait or a shell arithmetic
@@ -188,16 +196,39 @@ has_pending_run() {
 complete_run_id=""
 artifacts_query_failed=false
 find_complete_run() {
-    local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
+    local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live jobs_json run_status
     local artifact_query_ok artifact_attempt artifact_retry_limit
     local remaining sleep_for failure_reason permanent_failure="" token_failure=""
     complete_run_id=""
     artifacts_query_failed=false
     mapfile -t run_ids < <(jq -r \
-        '.workflow_runs[]? | select(.status == "completed" and .conclusion == "success") | .id // empty' \
+        --arg platform "$platform" \
+        '.workflow_runs[]? | select((.status == "completed" and .conclusion == "success")
+          or ($platform != "all" and .status == "in_progress")) | .id // empty' \
         <<<"$runs_json" 2>/dev/null || true)
 
     for run_id in "${run_ids[@]}"; do
+        run_status="$(jq -r --argjson id "$run_id" '.workflow_runs[] | select(.id == $id) | .status' <<<"$runs_json")"
+        if [[ "$run_status" != completed ]]; then
+            # Upload follows every build/signing/build-input audit. The Jobs
+            # API must prove one unambiguous platform job and successful steps
+            # through that upload; later cache saves do not gate readiness.
+            if ! jobs_json="$(api_request "$deadline" "repos/$repo/actions/runs/$run_id/jobs?filter=latest&per_page=100")"; then
+                artifacts_query_failed=true
+                continue
+            fi
+            if ! jq -e --arg job "$platform_job" '
+              [.jobs[]? | select(.name == $job)] as $jobs
+              | ($jobs | length) == 1 and ($jobs[0] |
+                  (.conclusion == null or .conclusion == "success") and
+                  ([.steps[]? | select(.name == "Upload artifact" and .conclusion == "success")] | length) == 1 and
+                  ([.steps[]? | select(.name == "Upload artifact")][0].number as $upload
+                    | [.steps[]? | select(.number <= $upload)
+                        | select(.conclusion != "success" and .conclusion != "skipped")] | length) == 0)
+              ' <<<"$jobs_json" >/dev/null 2>&1; then
+                continue
+            fi
+        fi
         artifacts_json=""
         artifact_query_ok=false
         artifact_attempt=0

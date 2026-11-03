@@ -140,6 +140,10 @@ class Fixture(unittest.TestCase):
         self.repo = Path(self.temp.name) / 'repo'
         (self.repo / 'hub-web/dist').mkdir(parents=True)
         (self.repo / 'docs/qa').mkdir(parents=True)
+        (self.repo / 'docs/design').mkdir()
+        (self.repo / 'docs/design/design-tokens.json').write_text('{}\n')
+        (self.repo / 'cas-cli').mkdir()
+        (self.repo / 'cas-cli/Cargo.toml').write_text('version = "1.0.0"\n')
         (self.repo / 'scripts').mkdir()
         (self.repo / 'hub-web/dist/app.js').write_text('one\n')
         (self.repo / 'docs/qa/journeys.md').write_text('catalog\n')
@@ -162,13 +166,15 @@ class Fixture(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('pending', result.stdout)
         state = json.loads((self.repo / '.cas/merge-sweeps/journey-background.json').read_text())
-        tree = git(self.repo, 'rev-parse', 'HEAD:hub-web/dist')
+        tree = bg.evaluation_key(self.repo, 'HEAD')
         self.assertEqual(state['pending']['tree'], tree)
 
         # A finished background run for this tree and these inputs.
         source = Path(self.temp.name) / 'bg-artifacts'
         (source / 'journeys').mkdir(parents=True)
         (source / 'journey-receipt.json').write_text(json.dumps({'scope': 'full', 'suite_exit': 0}))
+        build = {'source_sha': self.tip, 'dist_sha256': 'a' * 64, 'dist_path': str(source / 'scratch/dist')}
+        (source / 'journey-build.json').write_text(json.dumps(build))
         inputs = bg.inputs(self.repo, 'HEAD')
         state = bg.record_finish(bg.load(self.repo), tree, 'PASS', self.tip, str(source), inputs, 'ok', now=1)
         bg.save(self.repo, state)
@@ -182,13 +188,16 @@ class Fixture(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('reused background evaluation', result.stdout)
         self.assertTrue((target / 'journey-receipt.json').is_file())
+        # pin: Reuse preserves every recorded provenance field without rebinding its source identity.
+        self.assertEqual(json.loads((target / 'journey-build.json').read_text()), build)
         marker = json.loads((target / 'journey-reuse.json').read_text())
         self.assertEqual((marker['tree'], marker['tip']), (tree, self.tip))
 
-        # A changed dist tree does not.
-        (self.repo / 'hub-web/dist/app.js').write_text('two\n')
+        # A source-only lane invalidates reuse while committed dist stays old.
+        (self.repo / 'hub-web/src').mkdir()
+        (self.repo / 'hub-web/src/ask.ts').write_text('new source\n')
         git(self.repo, 'add', '.')
-        git(self.repo, 'commit', '-qm', 'new bundle')
+        git(self.repo, 'commit', '-qm', 'source-only lane')
         result = self.cli('reuse', '--repo', str(self.repo), '--artifacts', str(Path(self.temp.name) / 'x'))
         self.assertEqual(result.returncode, 1)
         self.assertIn('no background evaluation', result.stdout)

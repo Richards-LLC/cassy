@@ -1,3 +1,6 @@
+import type { CheckedAccountUsage } from "./account-usage-check";
+import type { CommandReceipt } from "./supervisor-commands";
+import type { AccountChange, AccountsCatalog } from "./accounts-model";
 import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
 import { credentialFence, type CredentialFence } from "./commander-journal";
@@ -8,16 +11,18 @@ import { ConnectionDiagnostics, httpRefusalCause, type CauseEvidence } from "./c
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
 import { dpopHeaders } from "./dpop";
+import { uploadRequest } from "./upload-transport";
 import { localNetworkAccessHelp } from "./local-network-access";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
 import { SessionLaunchGrantError } from "./launch-session";
-import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
+import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, LaunchTarget, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
   connectingAnchor,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   HEARTBEAT_INTERVAL_MS,
   MACHINE_RETRY_CEILING_MS,
+  SESSION_RETRY_CEILING_MS,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
   SOCKET_PROBE_TIMEOUT_MS,
   stageFailureDetail,
@@ -29,7 +34,7 @@ import {
 } from "./connection-state";
 import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
-import { sessionsPath } from "./worker-visibility";
+import { sessionRunning, sessionStopped, sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
@@ -39,6 +44,11 @@ export type ConnectionState = ConnectionSnapshot;
 // Leave a retired writer readable briefly for its in-flight receipts. Calling
 // close() immediately discards those frames even with onmessage installed.
 const LEGACY_RECEIPT_DRAIN_MS = 5_000;
+// A short-lived SSE stream can flap while its terminal socket still speaks.
+// Keep that event-only retry backoff separate from actual outage recovery.
+const EVENT_RETRY_CEILING_MS = 10_000;
+// Match the hub's 60-second DPoP window; a 401 cannot move signing time farther.
+const MAX_HUB_CLOCK_OFFSET_MS = 60_000;
 
 function revealDormant(): boolean {
   let storage: Storage | undefined;
@@ -74,6 +84,8 @@ export function messageRejection(error: unknown, envelope?: Record<string, unkno
 }
 
 export interface HubCallbacks {
+  onSupervisorCommandSupport?(session: string, supported: boolean): void;
+  onSupervisorCommandReceipt?(session: string, receipt: CommandReceipt): void;
   onState(state: ConnectionState): void;
   onAttachState?(session: string, state: AttachSnapshot): void;
   onLatency?(latencyMs: number): void;
@@ -82,7 +94,7 @@ export interface HubCallbacks {
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
-  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number): void;
+  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number, stoppedSessions?: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
   /** `scrollback` is a pre-v3 daemon's raw pane bytes; a v3 daemon sends pane_bootstrap instead (cas-f285). */
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
@@ -149,6 +161,9 @@ export class AuthenticationError extends Error {
  */
 export class TransientAuthError extends Error {
   constructor(readonly reason: string) { super(`the hub refused a proof (${reason}); retrying`); }
+}
+class HubClockError extends Error {
+  constructor() { super("Device and machine clocks differ by more than 60 seconds. Check their date and time settings."); }
 }
 class EventRecoveryError extends Error {
   constructor(readonly code: "event_sequence_gap" | "viewer_lagged", readonly requestId?: string) { super(code); }
@@ -228,6 +243,7 @@ export class HubConnectionSupervisor {
   private attempt = 0;
   private eventAbort?: AbortController;
   private catalogRequest?: Promise<HubSession[]>;
+  private readonly sessionBirths = new Map<string, string>();
   /** SSE and multiplexed events share this lane; event delivery never waits. */
   private readonly eventCatalog = new CoalescedRefresh(async () => {
     if (!this.desired || this.lifecycle.phase !== "live") return;
@@ -316,8 +332,14 @@ export class HubConnectionSupervisor {
    */
   private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
+  private readonly endedSessions = new Set<string>();
+  /** Requested streams paused by an end receipt, until a live replacement appears. */
+  private readonly endedAttachRequests = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private healthPing?: { id: number; startedAt: number };
+  private attachStarts: number[] = [];
+  private attachRateQueue = Promise.resolve();
+  private attachRateAbort = new AbortController();
   private readonly eventRecovery = new EventRecovery();
   private readonly diagnostics = new ConnectionDiagnostics();
   private connectionGeneration = 0;
@@ -358,6 +380,7 @@ export class HubConnectionSupervisor {
     if (this.heartbeatTimer !== undefined) window.clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
     this.clearAttachRetries();
+    this.resetAttachRate();
     this.clearAttachTimeouts();
     for (const session of [...this.upstreamStreakResets.keys()]) this.cancelUpstreamStreakReset(session);
     this.machineSocket?.close(1000, "machine removed");
@@ -365,6 +388,7 @@ export class HubConnectionSupervisor {
     this.machineSocketReady = false;
     this.machineSocketOpening = undefined;
     this.desiredSessions.clear();
+    this.endedAttachRequests.clear();
     this.machineSubscriptions.clear();
     this.paneBootstraps.clear();
     this.healthPing = undefined;
@@ -480,29 +504,39 @@ export class HubConnectionSupervisor {
       }
       if (stage === "auth") {
         this.transition("auth", "auth");
-        await this.withStageTimeout("auth", async (signal) => {
-          await this.refreshMachineInfo(signal);
-          await this.refreshSessions(signal);
-        });
+        await this.withStageTimeout("auth", signal => this.refreshMachineInfo(signal));
         stage = "attaching";
       }
       this.transition("attaching", "attaching");
       const response = await this.withStageTimeout("attaching", (signal) => this.openEventStream(signal));
+      const recovering = this.connectionLost;
+      if (recovering) {
+        // After a machine outage it may have rebooted. Check the authoritative
+        // catalog before replaying any session demand or waiting messages.
+        try {
+          await this.refreshSessions(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+        } catch (error) {
+          // Missing catalog data is unknown. Health, auth and events already
+          // succeeded; only an authentication refusal invalidates that proof.
+          if (error instanceof AuthenticationError || this.eventAbort?.signal.aborted) {
+            this.eventAbort?.abort();
+            throw error;
+          }
+        }
+      }
       liveSince = Date.now();
       this.resumeStage = "resolving";
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
-      const recovering = this.connectionLost;
-      // Short event streams can repeatedly stop the heartbeat before its
-      // catalog read. Refresh on the backed-off recovery so live daemon
-      // traffic is not left beside an expired, empty conversation list.
-      if (recovering) await this.withStageTimeout("auth", signal => this.refreshSessions(signal));
       this.connectionLost = false;
       this.transition("live", "live");
+      // Catalog freshness is independent of authentication and transport.
+      this.refreshCatalog();
       this.startHeartbeat();
       // Event-stream loss alone does not condemn terminal transports that
       // still answer. A proved machine outage already abandoned them.
-      if (recovering) this.reattachDesired("Reconnected after the network changed");
+      if (recovering) this.reattachDesired("Reconnected");
+      else this.ensureAttachesPending();
       // A session can become ready before this event stream. Its earlier
       // flush was fenced while the machine was attaching; wake it now, after
       // missing or stale recovery sockets have been replaced.
@@ -553,6 +587,8 @@ export class HubConnectionSupervisor {
       // or local-network permission), even when a health probe succeeds.
       // Only AuthenticationError above is an explicit refusal (cas-b85a).
       this.stopHeartbeat();
+      this.resetAttachRate();
+      this.clearAttachRetryTimers();
       this.connectionLost = true;
       this.resumeStage = stage;
       const reason = error instanceof Error ? error.message : "unknown connection failure";
@@ -560,8 +596,10 @@ export class HubConnectionSupervisor {
       const cause = this.failureCause(error);
       this.transition("failed", stage, { reason: stageFailureDetail(stage, target, reason), cause });
       // Capped well below the backoff's 30 s ceiling: a network that returns
-      // without an event (Tailscale switched on) is noticed within 10 s.
-      const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(this.attempt++));
+      // without an event (Tailscale switched on) still has time to reattach
+      // within the five-second recovery window.
+      const ceiling = liveSince === undefined ? MACHINE_RETRY_CEILING_MS : EVENT_RETRY_CEILING_MS;
+      const delay = Math.min(ceiling, backoffDelay(this.attempt++));
       const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label, permission => { cause.permission = permission; }) : undefined;
       if (!this.desired) return;
       this.transition("backoff", stage, { reason: stageFailureDetail(stage, target, reason), retryInMs: delay, networkAccessHelp, cause });
@@ -580,6 +618,7 @@ export class HubConnectionSupervisor {
     if (error instanceof EventRecoveryError) return { code: error.code, layer: "events", retryable: true, requestId: error.requestId };
     if (error instanceof AuthenticationError) return { code: `auth_${error.kind.replaceAll("-", "_")}` as CauseEvidence["code"], layer: "auth", retryable: false, requestId: error.requestId };
     if (error instanceof TransientAuthError) return { code: "proof_refused", layer: "auth", retryable: true };
+    if (error instanceof HubClockError) return { code: "clock_skew", layer: "auth", retryable: true };
     if (error instanceof DOMException && error.name === "TimeoutError") return { code: "request_timeout", layer: "http", retryable: true };
     if (error instanceof HubRequestError) return { code: httpRefusalCause(error.status, error.code, error.detail), layer: "http", retryable: true, status: error.status, requestId: error.requestId };
     if (typeof navigator !== "undefined" && navigator.onLine === false) return { code: "browser_offline", layer: "browser", retryable: true };
@@ -615,7 +654,7 @@ export class HubConnectionSupervisor {
     return true;
   }
 
-  private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
+  private async authorizedFetch(method: string, path: string, init: RequestInit = {}, onProgress?: (fraction: number) => void): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
     const htu = path.split("?")[0] ?? path;
     let signedWith = this.machine.credentialId;
@@ -623,13 +662,18 @@ export class HubConnectionSupervisor {
       signedWith = this.machine.credentialId;
       const proof = await dpopHeaders(this.machine, method, htu, Date.now() + this.clockOffsetMs);
       init.signal?.throwIfAborted();
-      return fetch(new URL(path, this.machine.baseUrl), {
+      if (path === "/v1/auth/websocket-ticket" && !await this.waitForAttachSlot(init.signal)) {
+        throw new DOMException("Attachment cancelled", "AbortError");
+      }
+      const requestInit: RequestInit = {
       ...init,
       method,
       headers: { ...(init.headers as Record<string, string> | undefined), ...proof },
       cache: "no-store",
       credentials: "omit",
-    });
+    };
+      const url = new URL(path, this.machine.baseUrl);
+      return onProgress ? uploadRequest(url, requestInit, onProgress) : fetch(url, requestInit);
     };
     let response = await send();
     if ((response.status === 401 || response.status === 403) && (this.machine.credentialGeneration !== undefined || typeof indexedDB !== "undefined") && !this.installationMutation) {
@@ -654,26 +698,28 @@ export class HubConnectionSupervisor {
 
   private adoptHubClock(serverTime: number | undefined): void {
     if (serverTime === undefined) return;
+    // The hub refuses any future iat, so even sub-second corrections matter.
+    // Its integer second also rounds the retry down conservatively.
     const offset = serverTime * 1000 - Date.now();
-    // Inside a few seconds is latency and rounding, not drift.
-    this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
+    if (!Number.isFinite(offset) || Math.abs(offset) > MAX_HUB_CLOCK_OFFSET_MS) throw new HubClockError();
+    this.clockOffsetMs = offset;
   }
 
-  uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string }> {
-    // Budget the base64 wire payload at 64 KiB/s (512 kbit/s), plus signing,
+  uploadFile(session: string, id: string, name: string, data: string, onProgress?: (fraction: number) => void): Promise<{ path: string; artifact_id: string; mime: string }> {
+    // Budget the base64 wire payload at 512 kbit/s with 25% transfer margin, plus signing,
     // JSON overhead and hub storage time. Ordinary reads keep their short deadline.
-    const timeoutMs = 10_000 + Math.ceil(data.length / 65_536) * 1000;
-    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data }, undefined, timeoutMs);
+    const timeoutMs = 10_000 + Math.ceil(data.length / 64_000 * 1.25) * 1000;
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data }, undefined, timeoutMs, onProgress);
   }
 
-  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, timeoutMs?: number, onProgress?: (fraction: number) => void): Promise<T> {
     return withRequestDeadline(async boundedSignal => {
     const startedAt = performance.now();
     const { response, refusal } = await this.authorizedFetch(method, path, {
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: boundedSignal,
-    });
+    }, onProgress);
     if (response.status === 403) {
       const error = await hubRequestError(method, path, response.clone());
       if (error.code === "session_denied") throw error;
@@ -694,9 +740,20 @@ export class HubConnectionSupervisor {
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {
     signal.throwIfAborted();
     if (!this.catalogRequest) this.catalogRequest = (async () => {
-      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealDormant()), undefined, signal);
+      const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number; stopped_sessions?: HubSession[] }>("GET", sessionsPath(revealDormant()), undefined, signal);
       signal.throwIfAborted();
-      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
+      const stopped = (response.stopped_sessions ?? []).filter(sessionStopped);
+      for (const session of [...stopped, ...response.sessions]) {
+        const previous = this.sessionBirths.get(session.name);
+        if (sessionStopped(session) || (previous && session.started_at && previous !== session.started_at)) this.setSessionEnded(session.name, true);
+      }
+      // Let the owner archive the old birth's words before any attach can
+      // announce Live and flush. Missing rows never retire stream demand.
+      this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs, stopped);
+      for (const session of response.sessions.filter(sessionRunning)) {
+        if (session.started_at) this.sessionBirths.set(session.name, session.started_at);
+        this.setSessionEnded(session.name, false);
+      }
       return response.sessions;
     })().finally(() => { this.catalogRequest = undefined; });
     const request = this.catalogRequest;
@@ -711,14 +768,20 @@ export class HubConnectionSupervisor {
     try {
       const info = await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal);
       if (typeof info.version === "string") this.diagnostics.build(info.version);
-      this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
-      this.callbacks.onMachineInfo?.(info);
+      this.acceptMachineInfo(info);
     } catch (error) {
       if (error instanceof AuthenticationError || error instanceof TransientAuthError) throw error;
-      // Older hubs can still offer the read-only session surface. The UI shows
-      // a visible compatibility warning and leaves capability-gated controls off.
-      this.callbacks.onMachineInfo?.(undefined);
+      // Only a missing endpoint proves an old hub. A timeout or busy store
+      // cannot revoke capabilities this paired hub already advertised.
+      if (error instanceof HubRequestError && error.status === 404) {
+        this.acceptMachineInfo({ schema_version: 1, version: "unknown", capabilities: [] });
+      } else throw error;
     }
+  }
+
+  private acceptMachineInfo(info: HubMachineInfo): void {
+    this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
+    this.callbacks.onMachineInfo?.(info);
   }
 
   /**
@@ -789,9 +852,23 @@ export class HubConnectionSupervisor {
     return this.request("GET", "/v1/projects", undefined, signal);
   }
 
-  /** Each launch CLI's account profiles on the machine (cas-7b52). */
-  async launchProfiles(signal?: AbortSignal): Promise<LaunchProfiles> {
-    return this.request("GET", "/v1/launch/profiles", undefined, signal);
+  /** Registry-backed machine accounts; management uses the hub's allowlist. */
+  async accounts(signal?: AbortSignal): Promise<AccountsCatalog> {
+    return this.request("GET", "/v1/accounts", undefined, signal);
+  }
+
+  async checkAccountUsage(account: string, signal?: AbortSignal): Promise<CheckedAccountUsage> {
+    return this.request("GET", `/v1/accounts/usage?${new URLSearchParams({ account })}`, undefined, signal);
+  }
+
+  async changeAccount(change: AccountChange): Promise<void> {
+    await this.request("POST", "/v1/accounts/operations", change);
+  }
+
+  /** Each launch CLI's account profiles under the selected project's policy. */
+  async launchProfiles(signal?: AbortSignal, target?: LaunchTarget): Promise<LaunchProfiles> {
+    const query = target ? `?${new URLSearchParams({ target: JSON.stringify(target) })}` : "";
+    return this.request("GET", `/v1/launch/profiles${query}`, undefined, signal);
   }
 
   /** One folder under a configured launch root. */
@@ -887,6 +964,15 @@ export class HubConnectionSupervisor {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/write-grants`, body);
   }
 
+  /**
+   * Answer an agent's secret request (cas-1996). Needs factory:manage. The
+   * hub writes the value to a private file on its machine and replies to the
+   * supervisor with the path; the value never travels as a message.
+   */
+  async answerSecret(session: string, notificationId: number, answer: { value: string; auto_delete?: string } | { decline: true }): Promise<{ name?: string; path?: string; saved?: boolean; declined?: boolean; auto_delete?: string | null }> {
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/secrets/${notificationId}`, answer);
+  }
+
   async status(session: string): Promise<Record<string, unknown>> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/status`);
   }
@@ -908,6 +994,24 @@ export class HubConnectionSupervisor {
    * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
    * does. Needs factory-manage; a refusal throws like any other request.
    */
+  async dismissEndedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/dismiss`, { started_at: startedAt });
+    // Settle on a catalog that cannot predate the save: the caller then drops
+    // its local key, and an older read must not show the row again.
+    const signal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS);
+    try {
+      if (this.catalogRequest) await this.refreshSessions(signal).catch(() => {});
+      await this.refreshSessions(signal);
+    } catch { /* The hub already saved it; reconnect refreshes the catalog. */ }
+  }
+
+  /** Lift the hub's dismissal of an ended session for every paired device. */
+  async restoreDismissedSession(session: string, startedAt: string): Promise<void> {
+    await this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/restore`, { started_at: startedAt });
+    void this.refreshSessions().catch(() => { /* The hub already saved it; reconnect refreshes the catalog. */ });
+  }
+
+  /** Stop the daemon through the hub; requires factory-manage. */
   async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
     return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
   }
@@ -991,6 +1095,18 @@ export class HubConnectionSupervisor {
     this.heartbeatTimer = window.setInterval(() => void this.heartbeat(), HEARTBEAT_INTERVAL_MS);
   }
 
+  private refreshCatalog(): void {
+    const stream = this.eventAbort;
+    if (!stream) return;
+    // A signed catalog read belongs to this live transport, including while
+    // native signing is pending. Stop/replacement must cancel it before fetch.
+    void this.refreshSessions(anySignal([stream.signal, AbortSignal.timeout(3_000)])).catch(error => {
+      if (error instanceof AuthenticationError && this.desired && this.lifecycle.phase === "live") {
+        this.blockAuthentication(error.kind, error.message);
+      }
+    });
+  }
+
   private stopHeartbeat(): void {
     if (this.heartbeatTimer !== undefined) window.clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
@@ -1004,27 +1120,41 @@ export class HubConnectionSupervisor {
     if (!this.desired || this.lifecycle.phase !== "live") return;
     this.ensureAttachesPending();
     const started = performance.now();
+    // Catalog reads can wait on project stores while the machine socket is
+    // healthy. Refresh the rows independently: their deadline says nothing
+    // about transport liveness. A refused pairing still ends the connection.
+    this.refreshCatalog();
     try {
-      await this.refreshSessions(AbortSignal.timeout(3_000));
       if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
         if (this.healthPing) {
           this.missedHeartbeats += 1;
-          this.transition("live", "live", { reason: "machine WebSocket heartbeat missed" });
+          this.transition("live", "live", { reason: "machine WebSocket heartbeat missed", cause: { code: "request_timeout", layer: "socket", retryable: true } });
           if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) {
             // The hub answers HTTP but not this socket: it is half-open. A
             // close() on it can wait out a closing handshake that never
             // comes, so it is dropped and replaced now (cas-0978).
+            try {
+              await withRequestDeadline(signal => this.probeHealth(signal), undefined, SOCKET_PROBE_TIMEOUT_MS);
+            } catch {
+              if (this.desired && this.lifecycle.phase === "live" && this.healthPing) this.connectionLostNow("The socket and health endpoint stopped answering");
+              return;
+            }
+            if (!this.desired || this.lifecycle.phase !== "live" || !this.healthPing) return;
             this.missedHeartbeats = 0;
+            this.transition("live", "live");
             this.reattachDesired("Machine terminal transport stopped answering", true);
             return;
           }
+          // Keep the outstanding id through the grace period. Replacing it
+          // every tick discarded a delayed but valid pong under host load.
+          return;
         }
         const id = Date.now();
         this.healthPing = { id, startedAt: started };
         this.machineSocket.send(JSON.stringify({ channel: "health", ping: id }));
         return;
       }
-      await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      await withRequestDeadline(signal => this.probeHealth(signal), undefined, SOCKET_PROBE_TIMEOUT_MS);
       const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
@@ -1059,6 +1189,7 @@ export class HubConnectionSupervisor {
    * settle after retirement, never transport state.
    */
   private abandonSockets(reason: string): void {
+    this.resetAttachRate();
     this.machineSocketGeneration += 1;
     const machineSocket = this.machineSocket;
     if (machineSocket) {
@@ -1199,13 +1330,7 @@ export class HubConnectionSupervisor {
    * still answers, so a hint alone must not replace it.
    */
   private async probeNow(): Promise<void> {
-    try {
-      await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS));
-    } catch (error) {
-      if (error instanceof AuthenticationError || !this.desired) return;
-      this.connectionLostNow(error instanceof Error ? error.message : "machine did not answer");
-      return;
-    }
+    const health = withRequestDeadline(signal => this.probeHealth(signal), undefined, SOCKET_PROBE_TIMEOUT_MS).then(() => true, () => false);
     if (!this.desired) return;
     const socket = this.machineSocket;
     if (this.machineSocketReady && socket?.readyState === WebSocket.OPEN) {
@@ -1215,13 +1340,20 @@ export class HubConnectionSupervisor {
       this.probePingId = id;
       socket.send(JSON.stringify({ channel: "health", ping: id }));
       if (this.probeTimer !== undefined) window.clearTimeout(this.probeTimer);
-      this.probeTimer = window.setTimeout(() => {
+      this.probeTimer = window.setTimeout(async () => {
         this.probeTimer = undefined;
         if (this.machineSocket === socket && this.probePingId === id) {
+          const healthy = await health;
+          if (!this.desired || this.machineSocket !== socket || this.probePingId !== id) return;
           this.probePingId = undefined;
-          this.reattachDesired("Machine terminal transport stopped answering", true);
+          if (healthy) this.reattachDesired("Machine terminal transport stopped answering", true);
+          else this.connectionLostNow("The socket and health endpoint stopped answering");
         }
       }, SOCKET_PROBE_TIMEOUT_MS);
+      return;
+    }
+    if (!await health) {
+      if (this.desired) this.connectionLostNow("The health endpoint stopped answering");
       return;
     }
     if (this.sockets.size > 0) this.reattachDesired("Reattaching after the network changed");
@@ -1247,7 +1379,33 @@ export class HubConnectionSupervisor {
     else await installationLock(this.machine.id, rotate);
   }
 
+  /** A confirmed stop or catalog removal fences retries; transport closure alone does not. */
+  setSessionEnded(session: string, ended: boolean): void {
+    if (!ended) {
+      if (this.endedSessions.delete(session) && this.endedAttachRequests.delete(session)) {
+        void this.attach(session);
+      }
+      return;
+    }
+    if (this.endedSessions.has(session)) return;
+    this.endedSessions.add(session);
+    // A daemon replacement can be preceded by the old daemon's end receipt.
+    // Keep the requested stream separate from active demand: ended sessions
+    // still fence traffic and retries, but the next live catalog can resume it.
+    if (this.desiredSessions.delete(session)) this.endedAttachRequests.add(session);
+    this.machineSubscriptions.delete(session);
+    const timer = this.attachRetryTimers.get(session);
+    if (timer !== undefined) window.clearTimeout(timer);
+    this.attachRetryTimers.delete(session);
+    this.clearAttachTimeouts(session);
+    const socket = this.sockets.get(session);
+    if (socket) this.retireLegacySocket(socket);
+    this.sockets.delete(session);
+    this.transitionAttach(session, "idle", "idle");
+  }
+
   async attach(session: string): Promise<void> {
+    if (this.endedSessions.has(session)) return;
     this.attachesInFlight.set(session, (this.attachesInFlight.get(session) ?? 0) + 1);
     try {
       await this.openAttach(session);
@@ -1280,10 +1438,12 @@ export class HubConnectionSupervisor {
   }
 
   private async openAttach(session: string): Promise<void> {
-    if (!this.desired) return;
+    if (!this.desired || this.endedSessions.has(session)) return;
     const unsupported = unsupportedBrowserReason();
     if (unsupported) throw new UnsupportedBrowserError(unsupported);
     this.desiredSessions.add(session);
+    if (this.lifecycle.phase !== "live") return;
+    if (this.servedByMachineSocket(session)) return;
     const retryTimer = this.attachRetryTimers.get(session);
     if (retryTimer !== undefined) {
       window.clearTimeout(retryTimer);
@@ -1292,6 +1452,7 @@ export class HubConnectionSupervisor {
     if (this.machineMultiplex && !this.machineProtocolBlocked) {
       const connected = await this.ensureMachineSocket(session);
       if (connected) {
+        if (!await this.waitForAttachSlot()) return;
         this.subscribeMachineSession(session);
         return;
       }
@@ -1305,7 +1466,7 @@ export class HubConnectionSupervisor {
     const generation = this.machineSocketGeneration;
     this.transitionAttach(session, "auth", "auth");
     const ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", { session });
-    if (!this.desired || !this.desiredSessions.has(session) || generation !== this.machineSocketGeneration) return;
+    if (!this.desired || this.lifecycle.phase !== "live" || !this.desiredSessions.has(session) || generation !== this.machineSocketGeneration) return;
     // A heartbeat/recovery or another caller can attach while the ticket
     // awaits HTTP. Never replace its live/connecting socket: receipts for
     // sends on that socket would fail the current-socket check below.
@@ -1381,7 +1542,7 @@ export class HubConnectionSupervisor {
     }
     // Abandoned while the ticket was on its way: the replacement opening owns
     // the machine socket now (cas-7b31).
-    if (!this.desired || generation !== this.machineSocketGeneration) return true;
+    if (!this.desired || this.lifecycle.phase !== "live" || generation !== this.machineSocketGeneration) return true;
     const endpoint = new URL("/v1/attach", this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
@@ -1477,7 +1638,6 @@ export class HubConnectionSupervisor {
             resolve(true);
           }
           socket.send(JSON.stringify({ channel: "events", subscribe: true }));
-          for (const desired of this.desiredSessions) this.subscribeMachineSession(desired);
           return;
         }
         void this.handleMachineMessage(event.data, frameFence).catch(error => {
@@ -1514,6 +1674,8 @@ export class HubConnectionSupervisor {
   }
 
   private subscribeMachineSession(session: string): void {
+    // The session may have ended while this attach waited for its rate slot.
+    if (this.endedSessions.has(session) || !this.desiredSessions.has(session)) return;
     const socket = this.machineSocket;
     if (!this.machineSocketReady || !socket || socket.readyState !== WebSocket.OPEN) return;
     if (this.machineSubscriptions.has(session)) return;
@@ -1581,6 +1743,7 @@ export class HubConnectionSupervisor {
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.clearAttachRetries();
+    this.resetAttachRate();
     this.clearAttachTimeouts();
     this.machineSocket?.close(1000, "authentication blocked");
     this.machineSocket = undefined;
@@ -1598,12 +1761,13 @@ export class HubConnectionSupervisor {
   }
 
   private scheduleAttach(session: string): void {
-    if (!this.desired || this.attachRetryTimers.has(session)) return;
+    if (this.endedSessions.has(session)) return;
+    if (!this.desired || this.lifecycle.phase !== "live" || this.attachRetryTimers.has(session)) return;
     const attempt = this.socketAttempts.get(session) ?? 0;
-    // Capped like the machine connection's retry (cas-4ce5): a session held
+    // Capped independently of the machine connection's retry: a session held
     // down for a while must not wait 16–30 s to notice its machine is back.
     // HUB-J11 promises attempts at most 10 s apart.
-    const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(attempt));
+    const delay = Math.min(SESSION_RETRY_CEILING_MS, backoffDelay(attempt));
     this.socketAttempts.set(session, attempt + 1);
     const failed = this.attachLifecycles.get(session);
     this.transitionAttach(session, "backoff", failed?.stage ?? "dialing", { reason: failed?.reason, retryInMs: delay });
@@ -1616,9 +1780,41 @@ export class HubConnectionSupervisor {
   }
 
   private clearAttachRetries(): void {
+    this.clearAttachRetryTimers();
+    this.socketAttempts.clear();
+  }
+
+  private clearAttachRetryTimers(): void {
     for (const timer of this.attachRetryTimers.values()) window.clearTimeout(timer);
     this.attachRetryTimers.clear();
-    this.socketAttempts.clear();
+  }
+
+  private resetAttachRate(): void {
+    this.attachRateAbort.abort();
+    this.attachRateAbort = new AbortController();
+    this.attachStarts = [];
+    this.attachRateQueue = Promise.resolve();
+  }
+
+  private async waitForAttachSlot(parent?: AbortSignal | null): Promise<boolean> {
+    const signal = anySignal([this.attachRateAbort.signal, ...(parent ? [parent] : [])]);
+    const previous = this.attachRateQueue;
+    let release!: () => void;
+    this.attachRateQueue = new Promise<void>(resolve => { release = resolve; });
+    try {
+      await previous;
+      if (signal.aborted) return false;
+      const wait = (this.attachStarts.at(-2) ?? -Infinity) + 1_000 - Date.now();
+      if (wait > 0) await new Promise<void>(resolve => {
+        const done = () => { window.clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+        const timer = window.setTimeout(done, wait);
+        signal.addEventListener("abort", done, { once: true });
+      });
+      if (signal.aborted || !this.desired || this.lifecycle.phase !== "live") return false;
+      this.attachStarts.push(Date.now());
+      this.attachStarts = this.attachStarts.slice(-2);
+      return true;
+    } finally { release(); }
   }
 
   private startOpenTimeout(session: string, socket: WebSocket): void {
@@ -1707,6 +1903,7 @@ export class HubConnectionSupervisor {
   }
 
   send(session: string, message: unknown, clientRef?: string): boolean {
+    if (this.endedSessions.has(session)) return false;
     // While a probe waits on the machine socket it may be half-open, and
     // while heartbeats go unanswered (unsteady) it may be dead: a message
     // sent into it could vanish, so it is refused here and the caller holds
@@ -1982,6 +2179,7 @@ export class HubConnectionSupervisor {
     if (message.Welcome) {
       // Before the attach turns live: its listeners read what the daemon offers.
       this.workEventSupport.set(session, workEventSupport(message.Welcome.capabilities));
+      this.callbacks.onSupervisorCommandSupport?.(session, Array.isArray(message.Welcome.capabilities) && message.Welcome.capabilities.includes("supervisor_commands"));
       const socket = this.sockets.get(session);
       if (socket) {
         this.readySockets.add(socket);
@@ -2020,6 +2218,8 @@ export class HubConnectionSupervisor {
       const bootstrap = Array.isArray(welcome.pane_bootstrap) ? welcome.pane_bootstrap as PaneBootstrap[] : [];
       if (bootstrap.length > 0) this.paneBootstraps.set(session, bootstrap); else this.paneBootstraps.delete(session);
       this.callbacks.onSessionState(session, welcome.state, bootstrap.length > 0 || authoritative ? undefined : welcome.scrollback);
+    } else if (message.SupervisorCommandReceipt) {
+      this.callbacks.onSupervisorCommandReceipt?.(session, message.SupervisorCommandReceipt.receipt as CommandReceipt);
     } else if (message.ScrollbackPage) {
       this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage as ScrollbackPage);
     } else if (message.PaneKeyframe || message.PaneSize) {

@@ -266,15 +266,33 @@ mod tests {
         ))));
         let owner = PtyInput::start("gate", writer, 16).unwrap();
         let input = owner.input().clone();
-        let started = Instant::now();
-        input.write(b"0123456789").unwrap();
-        input.write(b"abcdef").unwrap();
-        assert!(matches!(input.write(b"x"), Err(Error::InputFull { .. })));
-        assert!(input.is_full());
-        assert!(started.elapsed() < Duration::from_millis(50), "writes never wait on the PTY");
+        let writer_input = input.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let writes = std::thread::spawn(move || {
+            let first = writer_input.write(b"0123456789");
+            let second = writer_input.write(b"abcdef");
+            let refused = writer_input.write(b"x");
+            let full = writer_input.is_full();
+            done_tx.send((first, second, refused, full)).unwrap();
+        });
+
+        // The child writer is still held at the gate. Completion is the
+        // contract; the timeout only prevents a regressed blocking write from
+        // hanging this test forever.
+        let completed = done_rx.recv_timeout(Duration::from_secs(10));
 
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
+        if completed.is_err() {
+            writes.join().unwrap();
+            panic!("input writes did not return while the PTY writer was held");
+        }
+        let (first, second, refused, full) = completed.unwrap();
+        writes.join().unwrap();
+        first.unwrap();
+        second.unwrap();
+        assert!(matches!(refused, Err(Error::InputFull { .. })));
+        assert!(full);
         assert!(input.wait_drained(Duration::from_secs(5)));
         assert_eq!(&*out.lock().unwrap(), b"0123456789abcdef", "bytes keep their order");
         input.write(b"!").unwrap();

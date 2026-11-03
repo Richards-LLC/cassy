@@ -24,7 +24,7 @@ class PolicyTests(unittest.TestCase):
         for entry in cls.entries + prose:
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
-        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml'])
+        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/actions/run-script-suite-tests/action.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -41,6 +41,37 @@ class PolicyTests(unittest.TestCase):
 
     def ci(self):
         return copy.deepcopy(policy.load(self.root / '.github/workflows/ci.yml'))
+
+    def test_hosted_precheck_selects_queue_jobs_without_advisory_builds(self):
+        jobs = self.ci()['jobs']
+        common = {'needs.ci-diff.outputs.class':'rust-touched',
+                  'needs.ci-diff.outputs.web-check-needed':'true',
+                  'needs.ci-diff.outputs.bridge-check-needed':'true',
+                  'needs.ci-diff.outputs.script-tests-needed':'true',
+                  'needs.ci-diff.result':'success',
+                  'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'true',
+                  'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                  'github.repository':'Richards-LLC/cassy',
+                  'github.event.repository.default_branch':'main'}
+        def selected(event, ref):
+            context = dict(common, **{'github.event_name':event, 'github.ref':ref})
+            return {name for name, job in jobs.items() if self.gh_expr(job.get('if','true'),context)}
+        queue = selected('merge_group','refs/heads/gh-readonly-queue/main/pr-1')
+        precheck = selected('workflow_dispatch','refs/heads/precheck/'+'a'*40)
+        # Publication writes queue-only flake evidence; precheck runs every producer.
+        self.assertEqual(precheck,queue-{'queue-flake-publication'})
+        self.assertIn('fast-validation-suite-shards',precheck)
+        self.assertIn('fast-validation-journeys',precheck)
+        action = policy.load(policy.ROOT/'.github/actions/classify-required-diff/action.yml')
+        body = action['runs']['steps'][0]['run']
+        output = self.root/'classification'
+        result = self.run_body(body, {'FULL_VALIDATION':'true','BASE_SHA':'HEAD',
+                                     'ZERO_BASE_REF':'origin/main','GITHUB_OUTPUT':str(output)})
+        self.assertEqual(result.returncode,0,result.stderr)
+        values = dict(line.split('=',1) for line in output.read_text().splitlines())
+        self.assertEqual(values['rust-unaffected'],'false')
+        self.assertEqual(values['web-check-needed'],'true')
+        self.assertEqual(values['bridge-check-needed'],'true')
 
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
@@ -80,9 +111,9 @@ class PolicyTests(unittest.TestCase):
 
     def test_real_parser_provisioning_step_reuses_yaml_or_isolates_installation(self):
         step = next(s for s in self.ci()['jobs']['fast-validation-ci-tiers']['steps']
-                    if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
-        # Isolate tool orchestration and the pip network boundary. The make
-        # fixture runs the actual parsed-policy suite, without recursive make.
+                    if s.get('name') == 'Test release publication guards')
+        # Isolate tool orchestration and the pip boundary. The tier runner
+        # fixture runs parsed policy rather than recursively launching itself.
         interpreter = shlex.quote(sys.executable)
         parser = shlex.quote(str(policy.HERE / 'policy.py'))
         for mode in ['present', 'absent', 'venv-failure', 'install-failure']:
@@ -92,7 +123,7 @@ class PolicyTests(unittest.TestCase):
                 runner_temp = fixture / 'runner';runner_temp.mkdir()
                 log = fixture / 'calls'
                 log.write_text('')
-                (bin_dir / 'python3').write_text('''#!/usr/bin/env bash
+                (bin_dir / 'python3').write_text(f'''#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == -c ]]; then
   echo import >> "$CALLS"
@@ -103,6 +134,11 @@ elif [[ "$1 $2" == '-m venv' ]]; then
   mkdir -p "$3/bin"
   cp "$FIXTURE/pip" "$3/bin/pip"
   cp "$FIXTURE/venv-python" "$3/bin/python3"
+elif [[ "$1" == scripts/ci-script-tests-for-diff.py ]]; then
+  [[ "$*" == 'scripts/ci-script-tests-for-diff.py --all --scope-base verified-base' ]]
+  echo tier >> "$CALLS"
+  command -v python3 >> "$CALLS"
+  {interpreter} {parser} check
 else
   printf 'unexpected python %s\\n' "$*" >> "$CALLS"
   exit 2
@@ -113,29 +149,18 @@ set -euo pipefail
 printf 'pip %s\\n' "$*" >> "$CALLS"
 [[ "$MODE" != install-failure ]]
 ''')
-                (fixture / 'venv-python').write_text(f'#!/usr/bin/env bash\nexec {interpreter} "$@"\n')
+                (fixture / 'venv-python').write_text('#!/usr/bin/env bash\nexec "$FIXTURE/bin/python3" "$@"\n')
                 # cas-a1b0: the pinned linter comes from the root lockfile.
                 (bin_dir / 'npm').write_text('#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$CALLS"\n')
-                (bin_dir / 'make').write_text(f'''#!/usr/bin/env bash
-set -euo pipefail
-[[ "$*" == '-C cas-cli test-ci-tiers' ]]
-echo make >> "$CALLS"
-command -v python3 >> "$CALLS"
-if [[ "$MODE" == present ]]; then
-  {interpreter} {parser} check
-else
-  python3 {parser} check
-fi
-''')
                 for child in [*bin_dir.iterdir(), fixture / 'pip', fixture / 'venv-python']:
                     child.chmod(0o755)
                 result = self.run_body(step['run'], dict(
                     PATH=f'{bin_dir}:/usr/bin:/bin', RUNNER_TEMP=str(runner_temp),
-                    CALLS=str(log), MODE=mode, FIXTURE=str(fixture)))
+                    CALLS=str(log), MODE=mode, FIXTURE=str(fixture), BASE_SHA='verified-base'))
                 calls = log.read_text().splitlines()
                 if mode in ['venv-failure', 'install-failure']:
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn('make', calls)
+                    self.assertNotIn('tier', calls)
                     if mode == 'venv-failure': self.assertEqual(calls, ['import', 'venv'])
                     self.assertNotIn('npm ci --no-audit --no-fund', calls)
                 else:
@@ -143,13 +168,13 @@ fi
                     count = len(self.entries) + len(json.loads((policy.HERE / 'prose-pins.json').read_text()))
                     self.assertIn(f'parsed policy/prose: {count} passed; 0 failed', result.stdout)
                     if mode == 'present':
-                        self.assertEqual(calls, ['import', 'npm ci --no-audit --no-fund', 'make', str(bin_dir / 'python3')])
+                        self.assertEqual(calls, ['import', 'npm ci --no-audit --no-fund', 'tier', str(bin_dir / 'python3')])
                         self.assertFalse((runner_temp / 'ci-tiers-venv').exists())
                     else:
                         self.assertEqual(calls, ['import', 'venv',
                             'pip install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt',
                             'npm ci --no-audit --no-fund',
-                            'make', str(runner_temp / 'ci-tiers-venv/bin/python3')])
+                            'tier', str(runner_temp / 'ci-tiers-venv/bin/python3')])
 
     def test_parsed_archive_fail_open_contract_and_all_four_mutations(self):
         job = self.ci()['jobs']['fast-validation-suite-build']
@@ -172,6 +197,38 @@ fi
         actual_disable, _ = policy.role(changed, 'Disable sccache for the self-hosted suite archive', source)
         actual_archive, _ = policy.role(changed, 'Build full suite archive', source)
         self.assertGreater(actual_disable, actual_archive)
+
+    def test_preflight_default_check_runs_only_without_the_archive_build(self):
+        jobs = self.ci()['jobs']
+        preflight = jobs['fast-validation-preflight']
+        archive = jobs['fast-validation-suite-build']
+        check = next(s for s in preflight['steps'] if s.get('run') == 'cargo check -p cas')
+        build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
+        self.assertNotIn('--no-default-features', shlex.split(build['run']))
+        portable = next(s for s in preflight['steps'] if s.get('run') == 'cargo build -p cas --no-default-features')
+        consumer = next(s for s in preflight['steps'] if 'export CAS_TEST_BINARY=' in s.get('run', ''))
+        context = {'github.event_name': 'merge_group',
+                   'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
+                   'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                   'steps.classify-diff.outputs.rust-unaffected': 'false'}
+        for reuse, unaffected, expected_check, expected_archive, expected_portable in [
+            ('', 'false', False, True, True),
+            ('full-gate', 'false', True, False, True),
+            ('', 'true', False, False, False),
+        ]:
+            with self.subTest(reuse=reuse, unaffected=unaffected):
+                case = {**context,
+                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        'steps.classify-diff.outputs.rust-unaffected': unaffected}
+                # These functions are GitHub job status, not routing inputs.
+                selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
+                    step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
+                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(archive, build), expected_archive)
+                self.assertEqual(selected(preflight, portable), expected_portable)
+                self.assertEqual(selected(preflight, consumer), expected_portable)
 
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
@@ -201,7 +258,7 @@ fi
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
-        body = re.sub(r'\b(?:github|needs|steps|vars)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads})
@@ -232,32 +289,46 @@ fi
         self.assertNotIn('pull_request_target', ci['on'])
         jobs = lane['jobs']
         self.assertEqual(jobs['full']['uses'], './.github/workflows/ci.yml')
-        # cas-c44f: a step in ci.yml cannot run on a slim factory push.
-        terminal_command = '--only scripts/terminal-qa.test.mjs'
-        terminal_steps = [step for step in jobs['scoped-validation-fast']['steps']
-                          if terminal_command in step.get('run', '')]
-        self.assertEqual(len(terminal_steps), 1, 'slim terminal QA belongs in lane.yml')
-        self.assertFalse(any(terminal_command in step.get('run', '')
-                             for job in ci['jobs'].values() for step in job.get('steps', [])),
-                         'ci.yml must not retain the unreachable slim-only copy')
-        terminal = terminal_steps[0]
-        self.assertEqual(terminal['env']['BASE_SHA'], '${{ needs.ci-diff.outputs.comparison-base }}')
+        # GitHub validates every callee job, including jobs skipped on a lane.
+        authority = {'none':0,'read':1,'write':2}
+        ceiling = jobs['full']['permissions']
+        for name,job in ci['jobs'].items():
+            for permission,value in job.get('permissions',ci['permissions']).items():
+                self.assertLessEqual(authority[value],authority[ceiling.get(permission,'none')],
+                                     f'{name} requests {permission}:{value} above the reusable caller ceiling')
+        # All slim factory diffs execute the rows once, in classification,
+        # before either docs or code admission can pass. No worker receipt is trusted.
+        fast_steps = [(name, step) for name, job in jobs.items()
+                      for step in job.get('steps', [])
+                      if './scripts/release-gate.sh --fast-rows' in step.get('run', '')]
+        self.assertEqual(len(fast_steps), 1)
+        name, fast = fast_steps[0]
+        self.assertEqual(name, 'ci-diff')
+        self.assertNotIn('if', fast)
+        self.assertNotIn('--only scripts/terminal-qa.test.mjs', json.dumps(jobs),
+                         'the changed-script row already runs terminal QA')
+        self.assertEqual(fast['env']['BASE_SHA'], '${{ steps.classify-diff.outputs.comparison-base }}')
         bin_dir = self.root / 'bin';bin_dir.mkdir()
-        calls = self.root / 'terminal-selector.args'
-        python = bin_dir / 'python3'
-        python.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CALLS"\n')
-        python.chmod(0o755)
+        calls = self.root / 'fast-rows.args'
+        npm = bin_dir / 'npm'
+        npm.write_text('#!/bin/sh\nexit 0\n')
+        npm.chmod(0o755)
+        gate = self.root / 'scripts/release-gate.sh'
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CALLS"\nexit "${GATE_STATUS:-0}"\n')
+        gate.chmod(0o755)
         for base, expected in [('comparison-base', 'comparison-base'),
                                ('', 'origin/main'), ('0' * 40, 'origin/main')]:
-            with self.subTest(terminal_base=base):
-                result = self.run_body(terminal['run'], dict(
+            with self.subTest(fast_rows_base=base):
+                result = self.run_body(fast['run'], dict(
                     PATH=f'{bin_dir}:{os.environ["PATH"]}', CALLS=str(calls),
                     BASE_SHA=base, ZERO_BASE_REF='origin/main'))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(calls.read_text().splitlines(), [
-                    'scripts/ci-script-tests-for-diff.py', '--base',
-                    expected,
-                    '--only', 'scripts/terminal-qa.test.mjs'])
+                self.assertEqual(calls.read_text().splitlines(), ['--fast-rows', '--base', expected])
+        failed = self.run_body(fast['run'], dict(
+            PATH=f'{bin_dir}:{os.environ["PATH"]}', CALLS=str(calls),
+            BASE_SHA='comparison-base', ZERO_BASE_REF='origin/main', GATE_STATUS='1'))
+        self.assertNotEqual(failed.returncode, 0, 'failed rows must fail CI admission')
         slim_jobs = {name: job for name, job in jobs.items() if name != 'full'}
         self.assertEqual(
             {job['name'] for job in slim_jobs.values()},
@@ -279,45 +350,190 @@ fi
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
 
-    def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
-        job = self.ci()['jobs']['macos-check']
-        def context(event, ref, run='false', reuse='', diff='rust-touched'):
-            return {'github.event_name': event, 'github.ref': ref, 'github.base_ref': 'main',
-                    'github.event.repository.default_branch': 'main', 'needs.ci-diff.outputs.class': diff,
-                    'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': run,
-                    'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse}
+    def test_suite_fanin_reuses_classification_without_source_checkout(self):
+        job = self.ci()['jobs']['fast-validation-suite']
+        self.assertFalse(any(step.get('uses') for step in job['steps']))
+        report, assertion = job['steps']
+        for unaffected in ('true', 'false'):
+            context = {'needs.ci-diff.outputs.rust-unaffected': unaffected,
+                       'needs.ci-diff.outputs.class': 'hub-web-only'}
+            self.assertEqual(self.gh_expr(report['if'], context), unaffected == 'true')
+            self.assertEqual(self.gh_value(report['env']['DIFF_CLASS'], context), 'hub-web-only')
+        for result in ('success', 'failure', 'cancelled', 'skipped'):
+            run = subprocess.run(['bash', '-c', assertion['run']], env={**os.environ, 'SHARDS': result})
+            self.assertEqual(run.returncode == 0, result == 'success', result)
+
+    def test_green_queue_receipt_cannot_skip_clippy(self):
+        job = self.ci()['jobs']['clippy']
+        context = {'github.event_name': 'push', 'github.ref': 'refs/heads/main',
+                   'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'merge-queue',
+                   'steps.tree-dedupe.outputs.run-heavy': 'false'}
+        self.assertTrue(self.gh_expr(job['if'], context))
+        for step in job['steps']:
+            self.assertTrue(self.gh_expr(step.get('if', 'true'), context), step.get('name', step.get('uses')))
+
+    def test_archive_main_cache_priming_preserves_validation_and_trusted_writes(self):
+        jobs = self.ci()['jobs']
+        archive = jobs['fast-validation-suite-build']
+        prime = jobs['fast-validation-suite-cache']
+        setup = lambda job: next(step for step in job['steps']
+            if step.get('uses') == './.github/actions/setup-rust-linux')
+        consumer, producer = setup(archive), setup(prime)
+        action = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        cache = next(step for step in action['runs']['steps']
+                     if step.get('uses') == 'Swatinem/rust-cache@v2')
+        for field in ('cache-key', 'shared-key'):
+            self.assertTrue(consumer['with'][field])
+            self.assertEqual(consumer['with'][field], producer['with'][field])
+        self.assertEqual(producer['with'].get('cache-on-failure'), 'false',
+                         'cancelled or timed-out priming must not freeze a partial exact cache')
+        self.assertEqual(cache['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
+        self.assertEqual(action['inputs']['cache-on-failure']['default'], 'true')
+        self.assertEqual(archive['env'], prime['env'], 'cache lookup must see the actual archive profile')
+        for name in ('CARGO_PROFILE_DEV_DEBUG','CARGO_PROFILE_TEST_DEBUG'):
+            self.assertEqual(archive['env'][name],'0')
+        self.assertTrue(prime['continue-on-error'], 'cache maintenance cannot fail a required validation')
+        build = next(step for step in archive['steps'] if step.get('name') == 'Build full suite archive')
+        seed = next(step for step in prime['steps'] if step.get('name') == 'Prime full suite archive dependencies')
+        self.assertEqual(build['run'], seed['run'])
+        calls = self.root / 'cargo.calls'
+        bin_dir = self.root / 'cache-bin';bin_dir.mkdir()
+        cargo = bin_dir / 'cargo'
+        cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit "${CARGO_STATUS:-0}"\n')
+        cargo.chmod(0o755)
         cases = [
-            # A deduplicated main push still runs: it saves main's Darwin cache.
-            (context('push', 'refs/heads/main'), True),
-            (context('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', run='true'), True),
-            (context('push', 'refs/heads/main', diff='docs-only'), False),
-            (context('push', 'refs/heads/factory/x', run='true'), False),
+            ('push', 'refs/heads/main', 'merge-queue', 'false', True, False, True),
+            ('push', 'refs/heads/main', '', 'true', False, True, True),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', '', 'true', False, True, False),
+            ('workflow_dispatch', 'refs/heads/train', '', 'true', False, True, False),
+            ('schedule', 'refs/heads/main', '', 'true', False, True, False),
+            ('push', 'refs/tags/v1', '', 'true', False, True, False),
+            ('push', 'refs/heads/factory/x', '', 'true', False, False, False),
         ]
-        for ctx, expected in cases:
-            with self.subTest(event=ctx['github.event_name'], ref=ctx['github.ref'], diff=ctx['needs.ci-diff.outputs.class']):
-                self.assertEqual(self.gh_expr(job['if'], ctx), expected)
-        # Mutation control: without the main-push clause main never warms the cache.
-        without = job['if'].replace("|| (github.event_name == 'push' && github.ref == 'refs/heads/main')", '')
-        self.assertNotEqual(without, job['if'])
-        self.assertFalse(self.gh_expr(without, cases[0][0]))
-        # Only main saves the cargo cache; queue and tag refs restore main's copy.
-        cache = next(step for step in job['steps'] if str(step.get('uses', '')).startswith('Swatinem/rust-cache'))
-        save_if = cache['with']['save-if']
-        for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False)]:
-            with self.subTest(save_ref=ref):
-                self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
+        for event, ref, reuse, run, primes, validates, writes in cases:
+            for hit in ('true', 'false', '', 'unexpected'):
+                with self.subTest(event=event, ref=ref, hit=hit):
+                    context = {'github.event_name':event, 'github.ref':ref,
+                        'github.repository':'Richards-LLC/cassy',
+                        'github.event.repository.fork':False,
+                        'needs.ci-diff.outputs.class':'rust-touched',
+                        'needs.ci-diff.outputs.rust-unaffected':'false',
+                        'steps.classify-diff.outputs.rust-unaffected':'false',
+                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':run,
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source':reuse,
+                        'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                        'steps.rust-setup.outputs.cache-hit':hit}
+                    self.assertEqual(self.gh_value(action['outputs']['cache-hit']['value'],
+                        {f'steps.{cache["id"]}.outputs.cache-hit':hit}),hit)
+                    self.assertEqual(self.gh_expr(prime['if'],context),primes)
+                    self.assertEqual(self.gh_expr(archive['if'],context),validates)
+                    self.assertTrue(self.gh_expr(build['if'],context), 'queue cache hits still compile current source')
+                    self.assertEqual(self.gh_expr(seed['if'],context),hit != 'true')
+                    for caller in (consumer, producer):
+                        save = self.gh_value(caller['with']['cache-save-if'],context)
+                        inputs = {f'inputs.{name}':info.get('default','') for name,info in action['inputs'].items()}
+                        inputs.update({'inputs.cache-key':caller['with']['cache-key'],
+                                       'inputs.shared-key':caller['with']['shared-key'],
+                                       'inputs.cache-save-if':str(save).lower()})
+                        self.assertEqual(self.gh_expr(cache['with']['save-if'],inputs),writes)
+                        for field in ('key','shared-key'):
+                            source = 'cache-key' if field == 'key' else field
+                            self.assertEqual(self.gh_value(cache['with'][field],inputs),caller['with'][source])
+                        self.assertEqual(self.gh_value(cache['with']['cache-targets'],inputs),'true',
+                                         'read-only consumers must still restore target dependencies')
+                    if primes and self.gh_expr(seed['if'],context):
+                        calls.write_text('')
+                        result = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
+                                                           'CALLS':str(calls)})
+                        self.assertEqual(result.returncode,0,result.stderr)
+                        self.assertEqual(calls.read_text().splitlines(),[
+                            'nextest archive --workspace --archive-file fast-validation-suite.tar.zst'])
+        # Cache maintenance must not sit in the transitive graph of required contexts.
+        def dependencies(name):
+            needs = jobs[name].get('needs', [])
+            if isinstance(needs,str): needs = [needs]
+            return set(needs).union(*(dependencies(parent) for parent in needs))
+        for name in ('fast-validation','macos-check'):
+            self.assertNotIn('fast-validation-suite-cache',dependencies(name))
+        docs = {**context,'github.event_name':'push','github.ref':'refs/heads/main',
+                'needs.fast-validation-main-push-dedupe.outputs.reuse-source':'merge-queue',
+                'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'false',
+                'needs.ci-diff.outputs.class':'docs-only'}
+        self.assertFalse(self.gh_expr(prime['if'],docs))
+        self.assertFalse(self.gh_expr(prime['if'],{**docs,
+            'needs.ci-diff.outputs.class':'rust-touched',
+            'vars.CASSY_MERGE_QUEUE_SELF_HOSTED':'enabled'}))
+        calls.write_text('')
+        failed = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
+                                           'CALLS':str(calls),'CARGO_STATUS':'17'})
+        self.assertEqual(failed.returncode,17, 'a compile failure cannot become a claimed prime')
+
+    def test_macos_check_only_warms_missing_main_cache_after_queue_proof(self):
+        job = self.ci()['jobs']['macos-check']
+        cache = next(step for step in job['steps'] if step.get('id') == 'cargo-cache')
+        decision = next(step for step in job['steps'] if step.get('id') == 'cache-work')
+        compile_step = next(step for step in job['steps'] if step.get('name') == 'Check workspace')
+        seed = next(step for step in job['steps'] if step.get('id') == 'seed-cache')
+        cases = [
+            ('push', 'refs/heads/main', 'merge-queue', 'true', False),
+            ('push', 'refs/heads/main', 'merge-queue', 'false', True),
+            ('push', 'refs/heads/main', 'merge-queue', '', True),
+            ('push', 'refs/heads/main', '', 'true', True),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', '', 'true', True),
+        ]
+        for event, ref, reuse, hit, expected in cases:
+            with self.subTest(event=event, reuse=reuse, hit=hit):
+                context = {'github.event_name': event, 'github.ref': ref,
+                           'github.base_ref': 'main', 'github.event.repository.default_branch': 'main',
+                           'needs.ci-diff.outputs.class': 'rust-touched',
+                           'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
+                           'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                           'steps.classify-diff.outputs.rust-unaffected': 'false'}
+                self.assertTrue(self.gh_expr(job['if'], context))
+                self.assertEqual(self.gh_value(cache['with']['lookup-only'], context), reuse == 'merge-queue')
+                output = self.root / 'cache-decision.output'
+                output.write_text('')
+                result = subprocess.run(['bash', '-c', decision['run']], text=True, capture_output=True,
+                    env={**os.environ, 'GITHUB_OUTPUT': str(output), 'GITHUB_EVENT_NAME': event,
+                         'GITHUB_REF': ref, 'REUSE_SOURCE': reuse, 'CACHE_HIT': hit,
+                         'PRIOR_RUN_URL': 'https://example.test/queue/123'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(outputs['run-check'] == 'true', expected)
+                if not expected:
+                    self.assertIn('https://example.test/queue/123', result.stdout)
+                context['steps.cache-work.outputs.run-check'] = str(expected).lower()
+                self.assertEqual(self.gh_expr(seed['if'], context), reuse == 'merge-queue' and expected)
+                # Both cache actions must address the same job/profile key.
+                self.assertEqual(seed['uses'], cache['uses'])
+                for key in ('key', 'shared-key', 'prefix-key', 'workspaces'):
+                    self.assertEqual(seed.get('with', {}).get(key), cache['with'].get(key))
+                self.assertEqual(self.gh_expr(cache['with']['save-if'], context), ref == 'refs/heads/main' and reuse != 'merge-queue')
+                self.assertEqual(self.gh_expr(compile_step['if'], context), expected)
+                for name in ('Install Zig', 'Setup sccache', 'Probe sccache backend'):
+                    step = next(s for s in job['steps'] if s.get('name') == name)
+                    self.assertEqual(self.gh_expr(step['if'], context), expected)
+        self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
+            'github.ref': 'refs/heads/factory/x'}))
+        self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
+            'github.ref': 'refs/heads/main', 'needs.ci-diff.outputs.class': 'docs-only'}))
 
     def test_lane_slim_is_off_by_default_and_only_slims_factory_pushes_cas_eac2(self):
         jobs = self.ci()['jobs']
         def runs(job, name, slim, fast, event='push', ref='refs/heads/factory/w'):
             step = next(s for s in jobs[job]['steps'] if s.get('name') == name)
-            return self.gh_expr(step['if'], {
+            context = {
+                'needs.ci-diff.outputs.class': 'rust-touched',
                 'github.event_name': event, 'github.ref': ref, 'vars.CAS_LANE_SLIM': slim,
-                'steps.classify-diff.outputs.fast-admission': fast,
-                'steps.classify-diff.outputs.rust-unaffected': 'false'})
+                'needs.ci-diff.outputs.fast-admission': fast,
+                'needs.ci-diff.outputs.rust-unaffected': 'false'}
+            for key, value in jobs[job].get('env', {}).items():
+                context[f'env.{key}'] = str(self.gh_value(value, context)).lower()
+            return self.gh_expr(step['if'], context)
         rust = 'Run change-scoped tests with impact evidence'
         for job, name, fast in [
-            ('docs-lint', 'Run no-build release gate rows', 'true'), ('docs-lint', 'Markdown lint', 'true'),
+            ('docs-lint', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', rust, 'true'),
             ('scoped-validation-fast', 'Test snapshot-pinned CLI output surfaces', 'true'),
@@ -328,6 +544,66 @@ fi
                 self.assertTrue(runs(job, name, '', fast), 'unset CAS_LANE_SLIM keeps the lane as it was')
                 self.assertFalse(runs(job, name, 'true', fast))
         self.assertTrue(runs('scoped-validation', rust, 'true', 'false', event='pull_request', ref='refs/pull/1/merge'))
+        # Factory fast rows already lint the same Markdown diff. Other events
+        # retain the standalone lint instead of losing their only owner.
+        for slim in ['', 'true']:
+            self.assertFalse(runs('docs-lint', 'Markdown lint', slim, 'true'))
+            for event in ['pull_request', 'merge_group']:
+                self.assertTrue(runs('docs-lint', 'Markdown lint', slim, 'true',
+                                     event=event, ref='refs/pull/1/merge'))
+
+    def test_release_fixtures_run_only_for_scripts_changes_in_both_lane_paths(self):
+        scripts = ['test-release.sh', 'test-release-publish.sh', 'test-install-on-publish.sh', 'test-hub-pin.sh']
+        calls = self.root / 'fixture-calls'
+        for name in scripts:
+            script = self.root / 'scripts' / name
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "${0##*/}" >> "$CALLS"\n'
+                              '[[ "${FAIL_FIXTURE:-}" != "${0##*/}" ]]\n')
+            script.chmod(0o755)
+        # Pre-push runs this suite with Git's repository-local variables set.
+        # Keep both fixture Git commands and workflow bodies in this repository.
+        environment = os.environ.copy()
+        for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
+            environment.pop(key, None)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.root), *args], env=environment, text=True).strip()
+        def run(step, base, failing=''):
+            return subprocess.run([shutil.which('bash'), '-euo', 'pipefail', '-c', step['run']],
+                                  cwd=self.root, env={**environment, 'HOME': str(self.root),
+                                  'BASE_SHA': base, 'CALLS': str(calls), 'FAIL_FIXTURE': failing},
+                                  text=True, capture_output=True)
+        git('init', '-q')
+        git('config', 'user.name', 'CI fixture')
+        git('config', 'user.email', 'fixture@example.test')
+        git('add', '.')
+        git('commit', '-qm', 'base')
+        for changed, expected in [('scripts/fixture.sh', scripts), ('docs/fixture.md', []),
+                                  ('.github/workflows/fixture.yml', [])]:
+            base = git('rev-parse', 'HEAD')
+            path = self.root / changed
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n')
+            git('add', changed)
+            git('commit', '-qm', changed)
+            for workflow in ['ci.yml', 'lane.yml']:
+                with self.subTest(workflow=workflow, changed=changed):
+                    job = policy.load(self.root / '.github/workflows' / workflow)['jobs']['scoped-validation']
+                    steps = [s for s in job['steps'] if './scripts/test-release.sh' in s.get('run', '')]
+                    self.assertEqual(len(steps), 1, 'release fixtures must be wired once in the existing scoped job')
+                    step = steps[0]
+                    signal = {'steps.pr-dedupe.outputs.covered': 'false'}
+                    self.assertTrue(self.gh_expr(step['if'], signal))
+                    self.assertFalse(self.gh_expr(step['if'], {**signal, 'steps.pr-dedupe.outputs.covered': 'true'}))
+                    calls.write_text('')
+                    result = run(step, base)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), expected)
+                    if expected:
+                        calls.write_text('')
+                        result = run(step, base, scripts[1])
+                        self.assertNotEqual(result.returncode, 0, 'a red fixture must redden the lane')
+                        self.assertEqual(calls.read_text().splitlines(), scripts[:2])
 
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
@@ -426,6 +702,11 @@ else:
 
     def test_real_required_rollup_rejects_every_failed_or_cancelled_dependency(self):
         job = self.ci()['jobs']['fast-validation']
+        pr = next(s for s in job['steps'] if 'SCOPED' in s.get('env', {}))
+        self.assertIn('scoped-validation-fast', job['needs'])
+        for state in ['success', 'skipped', 'failure', 'cancelled', '']:
+            self.assertEqual(self.run_body(pr['run'], {'CI_DIFF': 'success', 'SCOPED': state}).returncode == 0,
+                             state in ['success', 'skipped'])
         step = next(s for s in job['steps'] if 'test "$PREFLIGHT" = success' in s.get('run', ''))
         healthy = dict(PREFLIGHT='success', SUITE='success', DOCS='success',
                        CI_TIERS='success', SLACK_BRIDGE='success', WEB='success', JOURNEYS='success')
@@ -448,6 +729,108 @@ else:
         self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
         for result in ['failure', 'cancelled']:
             self.assertNotEqual(self.run_body(shard['run'], {'SHARDS':result}).returncode, 0)
+        publication = next(s for s in job['steps'] if 'PUBLICATION' in s.get('env', {}))
+        self.assertIn('queue-flake-publication',job['needs'])
+        for result in ['success','skipped','failure','cancelled','']:
+            with self.subTest(publication=result):
+                self.assertEqual(self.run_body(publication['run'],{'PUBLICATION':result}).returncode == 0,
+                                 result in ['success','skipped'])
+
+    def test_real_script_suite_action_runs_an_input_pr_and_installs_nothing_for_unrelated_pr(self):
+        action = '.github/actions/run-script-suite-tests'
+        jobs = self.ci()['jobs']
+        lane = policy.load(self.root / '.github/workflows/lane.yml')
+        for job in [jobs['scoped-validation-fast'], lane['jobs']['scoped-validation-fast'], jobs['fast-validation-ci-tiers']]:
+            self.assertEqual(sum(step.get('uses') == f'./{action}' for step in job['steps']), 1)
+        admission = jobs['scoped-validation-fast']
+        self.assertFalse(any(step.get('uses') == f'./{action}' for step in jobs['ci-diff']['steps']))
+        # Full Rust lanes run the Makefile tier, so their classifier must not
+        # run the provisioned suites a second time. PRs and web-only queues do.
+        for event, ref, unaffected, expected in [
+            ('pull_request', 'refs/pull/1/merge', 'false', True),
+            ('push', 'refs/heads/factory/example', 'false', True),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'false', False),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'true', True),
+        ]:
+            self.assertEqual(self.gh_expr(admission['if'], {'github.event_name': event, 'github.ref': ref,
+                'needs.ci-diff.outputs.class': 'docs-only' if unaffected == 'true' else 'rust-touched',
+                'needs.ci-diff.outputs.script-tests-needed': 'true',
+                'needs.ci-diff.outputs.rust-unaffected': unaffected}), expected)
+        steps = policy.load(self.root / action / 'action.yml')['runs']['steps']
+        select = next(s for s in jobs['ci-diff']['steps'] if s.get('id') == 'script-tests')
+        run = steps[-1]
+        for path in ['scripts/ci-script-tests-for-diff.py', 'cas-cli/Makefile']:
+            destination = self.root / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(policy.ROOT / path, destination)
+        subject = self.root / 'scripts/journey-bundles.py'
+        subject.write_text('baseline\n')
+        # Fake only the leaf suite, keeping real Git diffs, Makefile parsing,
+        # action conditions and its shell bodies on the production path.
+        (self.root / 'scripts/test-journey-bundles.py').write_text("print('suite actually ran')\n")
+        unrelated = self.root / 'docs/unrelated.md'
+        unrelated.write_text('baseline\n')
+        def git(*args):
+            subprocess.run(['git', '-C', str(self.root), *args], check=True, capture_output=True)
+        git('init', '-q')
+        git('add', '.')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR base')
+        for file, expected in [(subject, True), (unrelated, False)]:
+            with self.subTest(pr=file.name):
+                file.write_text('PR input changed\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    '-c', 'commit.gpgsign=false', 'commit', '-qm', 'PR head')
+                output = self.root / 'selection-output'
+                output.write_text('')
+                env = dict(BASE_SHA='HEAD^', GITHUB_OUTPUT=str(output), FULL_TIER='false')
+                result = self.run_body(select['run'], env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                signals = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(signals['needed'], str(expected).lower())
+                self.assertEqual({key: val for key, val in signals.items() if key != 'needed'},
+                                 dict(web='false', browser='false', pdf='false', lint='false'))
+                context = {'inputs.full-tier': 'false', **{
+                    f'steps.script-tests.outputs.{key}': val for key, val in signals.items()}}
+                routing = {'github.event_name': 'pull_request', 'github.ref': 'refs/pull/1/merge',
+                           'needs.ci-diff.outputs.class': 'docs-only',
+                           'needs.ci-diff.outputs.script-tests-needed': signals['needed']}
+                self.assertEqual(self.gh_expr(admission['if'], routing), expected)
+                self.assertFalse(self.gh_expr(admission['env']['LEGACY_SCOPED'], routing))
+                # Reusing the job for PR suites must not start its legacy Rust
+                # or release checks for events that previously skipped them.
+                for step in admission['steps'][1:]:
+                    if step.get('uses') != f'./{action}':
+                        self.assertFalse(self.gh_expr(step['if'], {**routing, 'env.LEGACY_SCOPED': 'false'}))
+                # Unrelated PRs select no setup, install, or suite step.
+                for step in steps[1:]:
+                    self.assertEqual(self.gh_expr(step['if'], context),
+                                     expected and 'uses' not in step)
+                if expected:
+                    # The full integration tier scopes visual tool fixtures
+                    # using this same comparison base, before provisioning.
+                    full_output = self.root / 'full-output'
+                    result = self.run_body(steps[0]['run'], dict(env,
+                        FULL_TIER='true', GITHUB_OUTPUT=str(full_output)))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    full_signals = dict(line.split('=', 1) for line in full_output.read_text().splitlines())
+                    self.assertEqual(full_signals['browser'], 'false')
+                    full_output.unlink()
+                    # This no-dependency suite needs no fake npm/pip/browser.
+                    provision = self.run_body(steps[-2]['run'], dict(FULL_TIER='false',
+                        NEED_LINT='false', NEED_WEB='false', NEED_BROWSER='false', NEED_PDF='false'))
+                    self.assertEqual(provision.returncode, 0, provision.stderr)
+                    result = self.run_body(run['run'], env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('suite actually ran', result.stdout)
+                    self.assertIn('PASS python3 scripts/test-journey-bundles.py', result.stdout)
+                    (self.root / 'scripts/test-journey-bundles.py').write_text('raise SystemExit(17)\n')
+                    failed = self.run_body(run['run'], env)
+                    self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+                    self.assertIn('FAIL (exit 17)', failed.stdout)
+                git('reset', '--hard', 'HEAD^')
+                output.unlink()
 
     def test_real_markdown_step_filters_assets_and_skips_an_asset_only_diff(self):
         source = {'file': '.github/workflows/ci.yml', 'job': 'docs-lint'}

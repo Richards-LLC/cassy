@@ -776,10 +776,9 @@ fn stop_inner(
 /// Terminate the registered workload and prove that the target and every
 /// descendant observed before shutdown are gone.
 ///
-/// A dedicated cgroup is authoritative when available: it includes every
-/// descendant even after `setsid`, and `kill_scope` reaches children that are
-/// no longer in the process group. Hosts without delegated cgroup v2 use the
-/// dedicated process group plus fingerprinted descendant cleanup.
+/// A dedicated cgroup reaches descendants even after `setsid`. Workloads that
+/// move into another scope still need the dedicated process group plus
+/// fingerprinted descendant cleanup used on hosts without delegated cgroup v2.
 fn terminate_server(
     record: &RegisteredServer,
     scope_ops: &dyn super::cgroup::ScopeOps,
@@ -788,8 +787,13 @@ fn terminate_server(
     if let Some(ref dir) = record.cgroup {
         scope_ops.kill_scope(dir)?;
         scope_ops.remove_scope(dir);
-        if scope_ops.cgroup_kill_is_authoritative() {
-            return verify_no_survivors(record, &initial, false);
+        // Scope teardown proves only its current members are gone. A process
+        // moved by systemd-run can survive outside it; retain the same captured
+        // identities for the ownership-checked fallback below.
+        if scope_ops.cgroup_kill_is_authoritative()
+            && remaining_processes(record, &initial, false).is_empty()
+        {
+            return Ok(());
         }
     }
 

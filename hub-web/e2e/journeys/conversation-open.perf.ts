@@ -231,7 +231,7 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
     await page.goto(`${origin}/commander/`);
     await hub.seedPaired();
     await page.reload();
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
     await expect(row).toBeVisible();
     const measure = async (phase: string, action: () => Promise<void>) => {
       const base = await startProfile(cdp);

@@ -211,13 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn test_indexing_result_default() {
-        let result = IndexingResult::default();
-        assert_eq!(result.indexed, 0);
-        assert!(result.errors.is_empty());
-    }
-
-    #[test]
     fn test_in_memory_indexer() {
         let indexer = BackgroundIndexer::in_memory().unwrap();
         assert!(indexer.is_operational());

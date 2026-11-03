@@ -14,6 +14,7 @@ use crate::config::QaConfig;
 
 pub mod github_gate;
 pub mod preflight;
+pub mod sync;
 pub use github_gate::{github_merge_refusal, merge_request_qa_hold};
 
 /// Label carried by every Cassy-created QA work item.
@@ -67,11 +68,11 @@ pub fn is_non_surface_path(path: &str) -> bool {
 /// a checker, not a product surface: `scripts/visual-qa-fixtures/clip-box.html`
 /// matched `**/*.html` and gated cas-0d16 behind a QA bundle and an
 /// independent round. Only directory segments count, never the file name.
-fn fixture_directory(lower: &str) -> bool {
+pub(crate) fn fixture_directory(lower: &str) -> bool {
     let mut segments: Vec<&str> = lower.split('/').collect();
     segments.pop();
     segments.iter().any(|segment| {
-        matches!(*segment, "__fixtures__" | "fixture" | "__mocks__")
+        matches!(*segment, "fixtures" | "__fixtures__" | "fixture" | "__mocks__")
             || segment.ends_with("-fixtures")
             || segment.ends_with("_fixtures")
     })
@@ -199,7 +200,17 @@ pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && passes.iter().any(|pass| !pass.is_withdrawn())
+        // Pending replacements can share a rejection-based round ordinal.
+        // Follow the store's latest-history ordering, not max(round).
+        && passes.iter().filter(|pass| !pass.is_withdrawn())
+            .max_by_key(|pass| (pass.requested_at, pass.round, pass.id.as_str()))
+            .is_some_and(|latest| {
+                // A logged waiver completes the per-task obligation in batch
+                // mode. Older rounds must not recreate it for the next tip;
+                // a newer explicit request still binds. Batch evidence debt
+                // is enforced separately and cannot be waived here.
+                qa.mode != crate::config::QaMode::Batch || latest.state != cas_types::QaPassState::Waived
+            })
 }
 
 /// cas-5c38 (GH #999): an operations/artifact task (`execution_note=no-code`)
@@ -391,14 +402,31 @@ pub(crate) fn delivery_branch(
         .iter()
         .find(|pass| !pass.is_withdrawn() && !pass.branch.trim().is_empty())
         .map(|pass| normalize(&pass.branch));
+    let was_handed_off = |branch: &str| {
+        task.deliverables
+            .handoff_branches
+            .iter()
+            .any(|previous| normalize(previous) == branch)
+    };
     for branch in [parked.as_ref(), round.as_ref()].into_iter().flatten() {
-        if branch != &own {
+        if branch != &own && !was_handed_off(branch) {
             return branch.clone();
         }
     }
     let task_branch = crate::factory_isolation::worker_task_branch(implementer, &task.id);
     if !implementer.is_empty() && branch_exists(&task_branch) {
         return task_branch;
+    }
+    // A current repark may land on the current assignee's plain lane. Use it
+    // after the recorded companion and per-task candidates, so an anchor from
+    // task A cannot hide task B's own branch. A handed-off QA source is skipped
+    // above, allowing the current anchored repark to supersede it.
+    if let Some(branch) = parked.as_ref().filter(|branch| {
+        branch.as_str() == own.as_str()
+            && task.deliverables.factory_branch_anchor.is_some()
+            && branch_exists(branch)
+    }) {
+        return branch.clone();
     }
     parked.or(round).unwrap_or(own)
 }
@@ -556,6 +584,9 @@ pub fn carry_verdict(
             return None;
         }
     };
+    if let Err(error) = sync::record(cas_root, &task.id) {
+        tracing::warn!(task = %task.id, %error, "carried QA snapshot not recorded");
+    }
     let line = format!(
         "[{}] DECISION: independent QA verdict carried over from @{} to @{} (pass {} → {}): {reason}. (cas-0c988)",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -937,7 +968,8 @@ pub(crate) fn validate_round_evidence(
             return Ok(("api-evidence:", transcript));
         }
     }
-    validate_round_bundle(ledger_path, pass, verdict).map(|path| ("qa-bundle:", path))
+    validate_round_bundle(ledger_path, pass, verdict)
+        .map(|path| (crate::qa_evidence::REVIEW_BUNDLE_CITATION, path))
 }
 
 /// Bind an independent web bundle to the round. Rejections need no visual pass.
@@ -1035,8 +1067,8 @@ pub fn validate_round_bundle(
 
 /// A `qa_record` issue the reviewer marked `"scope": "pre-existing"`: the base
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
-/// finding 1). Cassy files each one as a follow-up task linked to the
-/// delivery instead of letting it reject a correct, narrow change.
+/// finding 1). It never rejects a correct, narrow change. Cassy files it as a
+/// follow-up linked to the delivery only when it clears the spawn threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
     /// The ledger's finding id ("F10"), when the reviewer gave one.
@@ -1048,6 +1080,17 @@ pub struct PreExistingIssue {
     pub suggestion: String,
     /// The screenshot or file the reviewer cited, if any.
     pub evidence: String,
+    /// The steps or command, plus the wrong output observed.
+    pub repro: String,
+    /// Who acts on the wrong output today.
+    pub affected: String,
+}
+
+impl PreExistingIssue {
+    /// cas-0ad8: the spawn threshold. Anything else stays in the verdict.
+    pub fn clears_spawn_threshold(&self) -> bool {
+        !self.repro.is_empty() && !self.affected.is_empty()
+    }
 }
 
 /// One finding line in a ledger's "## Pre-existing" section (cas-2849).
@@ -1210,6 +1253,8 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
                 problem,
                 suggestion: first(&["suggestion", "fix"]),
                 evidence: first(&["file", "evidence"]),
+                repro: text("repro"),
+                affected: text("affected"),
             });
         } else {
             delivery += 1;
@@ -1318,9 +1363,18 @@ pub fn follow_up_task(
     task.scope = crate::types::Scope::Project;
     task.origin_project = delivery.origin_project.clone();
     task.description = follow_up_description(delivery, pass, issue, ledger_path);
+    task.notes = crate::mcp::tools::core::task::lifecycle::review_loop::origin_note(
+        &format!("qa:{}", delivery.id),
+        &issue.repro,
+        &issue.affected,
+    );
     task.priority = follow_up_priority(&issue.severity);
     task.risk = vec![cas_types::TaskRisk::None];
-    task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
+    task.labels = vec![
+        "qa-follow-up".to_string(),
+        "pre-existing".to_string(),
+        crate::mcp::tools::core::task::lifecycle::review_loop::FINDING_LABEL.to_string(),
+    ];
     task.external_ref = Some(ledger_path.to_string());
     task.deliverables.work_target = delivery.deliverables.work_target.clone();
     task.delivery_mode = delivery.delivery_mode;
@@ -1383,7 +1437,8 @@ with matchMedia (for example matchMedia('(forced-colors: active)').matches is tr
 - A failure the base build already has is pre-existing only when it falls outside the delivery's stated \
 purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or \
 edits. Record only those findings under Pre-existing in LEDGER.md and pass them to qa_record with \
-\"scope\": \"pre-existing\"; Cassy files them as follow-up tasks linked to the delivery.\n\
+\"scope\": \"pre-existing\". Cassy files one as a follow-up only when it also carries \
+\"repro\" (steps or command, plus the wrong output) and \"affected\" (who acts on it today); the rest stay in the verdict.\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.
@@ -1746,7 +1801,7 @@ mod tests {
         )
         .unwrap();
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         assert_eq!(
             merge_gate(&task, &qa, &passes, &tip),
             Ok(()),
@@ -1855,7 +1910,7 @@ mod tests {
     #[test]
     fn merge_gate_requires_a_satisfying_round_for_the_exact_head() {
         use cas_types::QaPassState::*;
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
 
@@ -1929,6 +1984,16 @@ mod tests {
     #[test]
     fn merge_gate_binds_only_recorded_rounds() {
         let qa = QaConfig::default();
+        let waived = pass("old-tip", cas_types::QaPassState::Waived);
+        assert!(merge_gate(&task(), &qa, &[waived.clone()], "new-tip").is_ok(),
+            "a historical waiver must not opt batch deliveries back into per-task QA");
+        let mut per_task = qa.clone();
+        per_task.mode = crate::config::QaMode::PerTask;
+        assert!(merge_gate(&task(), &per_task, &[waived.clone()], "new-tip").is_err());
+        let mut requested = pass("new-tip", cas_types::QaPassState::Pending);
+        requested.round = waived.round + 1;
+        assert!(merge_gate(&task(), &qa, &[waived, requested], "new-tip").is_err(),
+            "a newer explicit QA request still gates the delivery");
         assert!(merge_gate(&task(), &qa, &[], "aaaa1111").is_ok());
         // A path-eligible delivery is bound once the park recorded a round.
         assert!(

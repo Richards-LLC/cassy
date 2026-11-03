@@ -77,7 +77,33 @@ pub(crate) fn is_harness_prompt(prompt: &str) -> bool {
     prompt.lines().any(|line| {
         let line = line.trim_start();
         MACHINE_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
-    })
+    }) || is_harness_whole_message(prompt.trim())
+}
+
+/// cas-7cd1: Codex records its launch context as user turns of their own
+/// (`# AGENTS.md instructions for …`, or a whole `<environment_context>`
+/// block), and the factory daemon types agent mail into a pane as
+/// `Message from <sender>: [cas #…]` (`delivery::attribute_for_pty`) and its
+/// wakes as `Message from lifecycle-…: …`. These shapes are classified on the
+/// whole trimmed message, never per line, so an operator who pastes one of
+/// them inside their own text still reaches Commander.
+fn is_harness_whole_message(message: &str) -> bool {
+    if message.starts_with("# AGENTS.md instructions for ")
+        || (message.starts_with("<environment_context>")
+            && message.ends_with("</environment_context>"))
+    {
+        return true;
+    }
+    message
+        .strip_prefix("Message from ")
+        .and_then(|rest| rest.split_once(": "))
+        .is_some_and(|(sender, body)| {
+            !sender.is_empty()
+                && !sender.contains(char::is_whitespace)
+                && (body.starts_with("[cas #")
+                    || sender.starts_with("lifecycle-")
+                    || sender.starts_with("lifecycle:"))
+        })
 }
 
 pub fn handle_user_prompt_submit(
@@ -120,20 +146,6 @@ pub fn handle_user_prompt_submit(
             }
             factory_context.push_str(&mail);
         }
-        if let Some(root) = cas_root {
-            // cas-1f0c: the mail above is already receipted; recall may not
-            // take it down (panic) or push the output past Claude Code's cap.
-            if let Some(packet) = super::factory_inbox::after_mail(|| {
-                crate::ambient_recall::build_ambient_recall_context(
-                    input,
-                    root,
-                    input.submitted_prompt(),
-                    false,
-                )
-            }) {
-                super::factory_inbox::push_within_hook_cap(&mut factory_context, &packet.full, 0);
-            }
-        }
     }
     // cas-a1ed: a turn whose prompt is a Teams copy Claude Code rendered
     // delivered that row. Record it after the "already shown" read above, so
@@ -158,7 +170,13 @@ pub fn handle_user_prompt_submit(
                 && is_operator_terminal_prompt(input, prompt)
             {
                 if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
-                    let _ = queue.record_terminal_operator_turn(&session, prompt);
+                    if let Some(id) = input.prompt_id.as_deref() {
+                        let _ = queue.record_terminal_transcript_turn(
+                            &session, &input.session_id, id, prompt, chrono::Utc::now(),
+                        );
+                    } else {
+                        let _ = queue.record_terminal_operator_turn(&session, prompt);
+                    }
                 }
             }
         }
@@ -492,7 +510,7 @@ pub fn is_important_prompt(prompt: &str) -> bool {
 /// Whether an otherwise-important prompt deserves a *memory* entry.
 ///
 /// Prompt attribution is deliberately broader and keeps every prompt in its
-/// own non-injected store. This gate protects the memory/ambient-recall path
+/// own non-injected store. This gate protects the memory path
 /// from transient chat, recursive prompt-analysis payloads, and a single
 /// oversized request that could consume a whole context budget.
 pub fn is_context_memory_worthy_prompt(prompt: &str) -> bool {
@@ -510,7 +528,7 @@ pub fn is_context_memory_worthy_prompt(prompt: &str) -> bool {
     // (`<task-notification>`), teammate relays and wakes through
     // UserPromptSubmit with no factory provenance, so they arrive typed as
     // operator prompts. They were 43% of the memory corpus and crowded every
-    // real lesson out of ambient recall. A harness envelope on any line is
+    // real lesson out of memory retrieval. A harness envelope on any line is
     // never an operator request.
     if is_harness_prompt(prompt) {
         return false;

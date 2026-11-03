@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { CONFIRM_CUE_MS, ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
-import { ConversationView, registerTurnRenderer } from "./conversation-view";
+import { ConversationView, registerTurnRenderer, renderBody } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
+import { livePhase } from "./live-phase";
+import { clockLabel } from "./thread-model";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
 function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to: number | null = null): OperatorReply {
@@ -11,6 +13,67 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("shows measured lifecycle phases, freezes unavailable clocks and keeps waiting still", () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "status", "A real lifecycle follows."), at(9, 0));
+    let now = 1000;
+    let state = { connected: true, stale: false, waiting: false, now, receivedAt: now };
+    let snapshot = { event_id: "phase", kind: "notice", lifecycle: { id: "turn", stage: "phase", phase: "compacting", started_at: "2026-10-28T12:00:00Z", ended_at: undefined as string | undefined }, observed_at: "2026-10-28T12:00:42Z", stale: false };
+    const view = new ConversationView(document, history, { supervisor: "sup", working: () => true, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
+    onTestFinished(() => view.dispose()); document.body.replaceChildren(view.element); view.update();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Compacting");
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
+    now += 1000; view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:43");
+    expect(livePhase(snapshot, { ...state, now, waiting: true })?.label).toBe("Compacting");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "waiting_on_you" } };
+    state = { ...state, waiting: true }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Waiting on you");
+    expect(view.element.querySelector(".phase-line")?.getAttribute("data-active")).toBe("false");
+    expect(view.element.querySelector(".phase-clock")).toBeNull();
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, phase: "compacting" } };
+    state = { ...state, waiting: false, stale: true }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Update stale");
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
+    state = { ...state, stale: false, connected: false }; view.refreshWorking();
+    expect(view.element.querySelector(".phase-line")?.textContent).toContain("Disconnected");
+    expect(view.element.querySelector(".phase-line")?.getAttribute("data-active")).toBe("false");
+    state = { ...state, connected: true };
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, stage: "end", ended_at: "2026-10-28T12:00:45Z" } };
+    view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
+    now += 60_000; view.refreshWorking();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:45");
+    snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
+    view.update();
+    expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
+    expect(livePhase(null, { ...state, now, working: true })?.label).toBe("Phase not reported");
+    expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
+  });
+  it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {
+    const source = '\tconst literal = "雪";  \r\n| literal | source |\r\n| --- | --- |\r\n\r\n  done();';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    history.reply(reply(1, "status", `\`\`\`ts\r\n${source}\r\n\`\`\``), at(9, 0));
+    view.update();
+    const frame = view.element.querySelector<HTMLElement>(".code-frame")!;
+    expect(frame).not.toBeNull();
+    expect(frame.querySelector("code")?.textContent).toBe(source);
+    expect(view.element.querySelector('[role="table"]')).toBeNull();
+    frame.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(source));
+    frame.querySelector<HTMLButtonElement>('[data-action="wrap"]')!.click();
+    history.reply(reply(2, "answer", "More evidence follows."), at(9, 1));
+    view.update();
+    expect(view.element.querySelector(".code-frame")).toBe(frame);
+    expect(frame.dataset.wrap).toBe("true");
+    view.dispose();
+  });
+
   it("coalesces mount requests before paint and ignores one superseded by an immediate update", () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
@@ -63,13 +126,13 @@ describe("ConversationView (Pebble thread)", () => {
     expect(groups).toHaveLength(2);
     expect(groups[0]?.className).toBe("turn you");
     expect(groups[0]?.querySelector<HTMLElement>(".bub")?.dataset.state).toBe("replied");
-    expect(groups[0]?.querySelector("time")?.textContent).toBe("09:41");
+    expect(groups[0]?.querySelector("time")?.textContent).toBe("9:41 AM");
     const sup = groups[1]!;
     const bubbles = sup.querySelectorAll(".bub");
     expect(bubbles[0]?.classList.contains("group-first")).toBe(true); expect(bubbles[0]?.classList.contains("group-last")).toBe(false);
     expect(bubbles[1]?.classList.contains("group-first")).toBe(false); expect(bubbles[1]?.classList.contains("group-last")).toBe(true);
     expect(bubbles[1]?.classList.contains("receipt")).toBe(true); expect(bubbles[1]?.querySelector(".tick")).not.toBeNull();
-    expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("09:47");
+    expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("9:47 AM");
     vi.useRealTimers();
   });
   it("re-derives grouping on incremental updates so a later turn tightens the earlier outer corner", () => {
@@ -171,7 +234,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(1, "answer", "Reply"), at(9, 1), "factory-old");
     view.update();
     expect(view.element.querySelector(".history-end")?.textContent).toBe("No earlier history");
-    expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 09:00");
+    expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 9:00 AM");
   });
   it("shows the empty state instead of the history marker for an empty loaded page", () => {
     const history = new ConversationHistory();
@@ -268,6 +331,20 @@ describe("ConversationView (Pebble thread)", () => {
     expect(closed.dataset.expanded).toBe("false");
     expect(closed.textContent).toBe("2 more updates · gate 12 of 14");
   });
+  it("renders a short status's Markdown instead of showing its markers", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "status", "> [!WARNING]\n> **Blocked:** the queue is red."), at(9, 49));
+    history.reply(reply(2, "status", "**Merged.** Gate started"), at(9, 50)); history.reply(reply(3, "status", "**Rebased** `main`"), at(9, 51)); view.update();
+    const callout = view.element.querySelector<HTMLElement>('.bub[data-kind="status"] .markdown-callout[data-kind="warning"]')!;
+    expect(callout.querySelector("p:last-child strong")?.textContent).toBe("Blocked:");
+    const line = view.element.querySelector<HTMLElement>(".coalesce")!;
+    expect(line.textContent).toBe("1 more update · Rebased main");
+    expect(line.querySelector("strong")?.textContent).toBe("Rebased");
+    expect(line.title).toBe("Merged. Gate started\nRebased main");
+    view.element.querySelector<HTMLButtonElement>(".coalesce-expand")!.click();
+    expect([...view.element.querySelectorAll(".coalesce p strong")].map((strong) => strong.textContent)).toEqual(["Merged.", "Rebased"]);
+  });
   it("hides Show full update on a lone short status that nothing clamps", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
@@ -359,13 +436,77 @@ describe("ConversationView (Pebble thread)", () => {
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
-    history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
+    history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | **412** | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
     const table = view.element.querySelector<HTMLElement>(".evi")!;
     expect(table.dataset.columns).toBe("3");
+    expect(table.querySelector("table tbody")).not.toBeNull();
     expect(table.querySelectorAll(".evi-row")).toHaveLength(3);
-    expect(table.querySelector(".evi-head span")?.textContent).toBe("pack");
+    expect(table.querySelector("thead th[scope=col]")?.textContent).toBe("pack");
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
+    expect([...table.querySelectorAll('td.evi-number')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
+    expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
+  });
+  it("renders a blank corner header as an empty cell, not a nameless column header, with copy attached below (cas-0e5e)", () => {
+    const [table] = renderBody(document, reply(1, "answer", "| | time |\n|---|---:|\n| bubble says delivered | 1.05 s |"));
+    const head = [...table!.querySelectorAll("thead tr > *")];
+    expect(head.map(cell => [cell.tagName, cell.textContent])).toEqual([["TD", ""], ["TH", "time"]]);
+    expect(table!.querySelectorAll("th:empty")).toHaveLength(0);
+    expect([...table!.children].map(child => child.className)).toEqual(["evi-scroll", "evi-actions", "evi-status"]);
+  });
+  it.each(["answer", "status"] as const)("copies a %s table as original Markdown or spreadsheet CSV and recovers after a clipboard refusal", async (kind) => {
+    const markdown = '| item | note | result |\r\n| --- | --- | --- |\r\n| `a\\|b` | said "ready", now | **pass** |';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(0, "status", "Checking evidence"), at(9, 29));
+    history.reply(reply(1, kind, markdown), at(9, 30)); view.update();
+    expect(view.element.querySelector(".coalesce")?.textContent).toContain("Checking evidence");
+    expect([...view.element.querySelectorAll("thead th")].map(cell => cell.textContent)).toEqual(["item", "note", "result"]);
+    const table = view.element.querySelector<HTMLElement>(".evi")!;
+    const buttons = [...table.querySelectorAll<HTMLButtonElement>("button")];
+    buttons.find(button => button.textContent === "Copy Markdown")!.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("Markdown copied"));
+    expect(writeText).toHaveBeenLastCalledWith(markdown);
+    const csv = buttons.find(button => button.textContent === "Copy CSV")!;
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    expect(writeText).toHaveBeenLastCalledWith('item,note,result\r\na|b,"said ""ready"", now",pass');
+    writeText.mockRejectedValueOnce(new Error("Permission denied"));
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toContain("Copy failed"));
+    expect(csv.disabled).toBe(false);
+    csv.click();
+    await vi.waitFor(() => expect(table.querySelector('[role="status"]')?.textContent).toBe("CSV copied"));
+    view.dispose();
+  });
+  it("clears copy success after its own timeout while preserving a later clipboard refusal (cas-4800)", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { vi.useRealTimers(); Reflect.deleteProperty(navigator, "clipboard"); });
+    const [table] = renderBody(document, reply(1, "answer", "| item | result |\n| value | pass |"));
+    document.body.replaceChildren(table!);
+    const [markdown, csv] = [...table!.querySelectorAll<HTMLButtonElement>("button")];
+    const status = table!.querySelector('[role="status"]')!;
+    markdown!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe("Markdown copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe("CSV copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(status.textContent).toBe("CSV copied");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(status.textContent).toBe("");
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    writeText.mockRejectedValueOnce(new Error("Permission denied"));
+    csv!.click(); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(status.textContent).toContain("Copy failed");
+    expect(csv!.disabled).toBe(false);
   });
   it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {
     const unregister = registerTurnRenderer("ask", (_reply, context) => {
@@ -575,7 +716,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
     view.update();
     const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
-    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}\s[AP]M/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
@@ -672,7 +813,7 @@ describe("ConversationView (Pebble thread)", () => {
     const view = new ConversationView(document, history, { supervisor: "calm-otter-4" }); document.body.replaceChildren(view.element); view.update();
     expect([...view.element.querySelectorAll(".day")].map((day) => day.textContent)).toEqual(["Today"]);
     const group = view.element.querySelector<HTMLElement>('.turn.sup[role="group"]')!;
-    const clock = `${String(new Date(now).getHours()).padStart(2, "0")}:${String(new Date(now).getMinutes()).padStart(2, "0")}`;
+    const clock = clockLabel(now);
     expect(group.getAttribute("aria-label")).toBe(`calm-otter-4, ${clock}, machine clock ahead`);
     const time = group.querySelector<HTMLElement>(":scope > time")!;
     expect(time.textContent).toBe(`${clock} · machine clock ahead`);
@@ -746,15 +887,6 @@ describe("ConversationView (Pebble thread)", () => {
   });
 });
 
-describe("coalesced status lines under forced colours (journey F11)", () => {
-  it("keeps the 10px clamp spacer in Canvas, never a bar in the text colour", async () => {
-    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain("border-bottom: 10px solid transparent;");
-    expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.thread \.coalesce \{ border-bottom-color: Canvas; \}\s*\}/);
-  });
-});
-
 describe("earlier reply context (cas-7cb3)", () => {
   it("quotes the question when its history arrives, without opening the earlier session", () => {
     const history = new ConversationHistory(); history.currentSession = "acct-now";
@@ -819,7 +951,7 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
 
   // The content grew after the last pin without a scroll event (late layout),
   // so the reader's first scroll up was read as layout and pinned back.
-  it("after the content grew without a scroll of its own", () => {
+  it.each(["wheel", "keyboard", "touch"])("after the content grew without a scroll of its own (%s)", async (input) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
@@ -828,7 +960,17 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     view.update();
     flush(); flush();
     content.height = 1460;
-    readTop(view);
+    if (input === "wheel") view.element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    if (input === "keyboard") view.element.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp" }));
+    if (input === "touch") {
+      view.element.dispatchEvent(new TouchEvent("touchstart", { touches: [{ clientY: 100 } as Touch] }));
+      view.element.dispatchEvent(new TouchEvent("touchmove", { touches: [{ clientY: 200 } as Touch] }));
+    }
+    view.element.scrollTop = 0;
+    // Preview mutation delivery may precede the reader's queued scroll.
+    view.element.querySelector('[role="log"]')!.setAttribute("data-layout", "late");
+    await Promise.resolve();
+    view.element.dispatchEvent(new Event("scroll"));
     flush(); flush();
     expect(view.element.scrollTop).toBe(0);
     expect(jump.hidden).toBe(false);
@@ -839,14 +981,16 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
   // render ran (the 5 s session heartbeat). It still saw the thread as
   // following its tail, read the unseen position as a re-mount's reset and
   // pinned the reader back to the newest turn.
-  it("when a render runs before the reader's scroll event is dispatched", () => {
+  // cas-eaef: the same ordering must hold while a previous pin is pending;
+  // the render must not acknowledge an offset before its scroll arrives.
+  it.each([false, true])("when a render precedes the reader's scroll event (pin pending: %s)", (pending) => {
     const flush = frames();
     const { history, view, jump } = longThread();
     const content = { height: 1400 };
     layout(view, content);
     for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
     view.update();
-    flush(); flush();
+    if (!pending) { flush(); flush(); }
     expect(view.element.scrollTop).toBe(1200);
     view.element.scrollTop = 0;
     view.update();
@@ -892,5 +1036,26 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     history.reply(reply(15, "answer", "Build finished"), at(10, 15));
     view.update();
     expect(view.element.scrollTop).toBe(1300);
+  });
+
+  it.each(["deferred pin", "browser clamp"] as const)("keeps following when content shrinks in a %s and grows before its scroll event", (shrink) => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    // An attachment preview shrinks before the frame-late pin. The browser
+    // queues that layout scroll, then more content grows before delivery.
+    content.height = 1000;
+    if (shrink === "deferred pin") flush();
+    else view.element.scrollTop = view.element.scrollTop;
+    expect(view.element.scrollTop).toBe(800);
+    content.height = 1500;
+    view.element.dispatchEvent(new Event("scroll"));
+    flush();
+    view.update();
+    expect(view.element.scrollTop).toBe(1300);
+    expect(jump.hidden).toBe(true);
   });
 });

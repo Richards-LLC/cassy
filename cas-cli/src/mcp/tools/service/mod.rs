@@ -5,7 +5,7 @@
 //! - cas_task: All task and dependency operations
 //! - cas_rule: All rule operations
 //! - cas_skill: All skill operations
-//! - cas_coordination: Agent, factory, and worktree operations (merged)
+//! - cas_coordination: Agent identity, messaging and reminders
 //! - cas_search: Search, context, and entity operations
 //! - cas_system: Diagnostics, stats, and maintenance
 //! - cas_verification: Task quality gates
@@ -23,6 +23,7 @@ use rmcp::model::Content;
 use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
+use crate::async_runtime::heap_future;
 use crate::mcp::server::CasCore;
 
 mod imports;
@@ -345,7 +346,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle/dependencies. Workers start then close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (optional note_type). create project= files a cross-project proposal in the Cloud proposal_* inbox, never a task row. Supervisor cancel requires reason (optional superseded_by) for ended work without delivery. request_changes reopens AwaitingMerge or a blocked parked delivery after failed review, retaining assignee. Supervisor rebind_branch approves a fresh delivery branch with reason and an old-tip audit."
+        description = "Task lifecycle. Workers start/close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (note_type optional). create project= files a Cloud proposal_* entry, never a task row. Supervisor cancel: ended work without delivery; reason required, superseded_by optional. request_changes reopens failed parked deliveries, retaining assignee. Supervisor rebind_branch: fresh branch, reason and old-tip audit."
     )]
     pub async fn task(
         &self,
@@ -576,19 +577,18 @@ impl CasService {
     }
 
     // ========================================================================
-    // cas_coordination - Agent, factory, and worktree operations (merged)
+    // cas_coordination - Agent identity, messaging and reminders
     // ========================================================================
 
     #[tool(
-        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory; legacy control calls forward here for one release with a deprecation note. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let action = canonical_coordination_action(&req.action).to_string();
-        // cas-8563b (D2): agent actions only. The factory actions moved to the
-        // `factory` tool and stay accepted here for one release.
+        // Only agent actions dispatch here; retired factory routes fail before mutation.
         let result = match action.as_str() {
             // cas-269ab: one action registry (`cas_mcp::actions`) drives the
             // published enum, this routing and the invalid-action message.
@@ -596,18 +596,14 @@ impl CasService {
             agent if cas_mcp::actions::COORDINATION_ACTIONS.contains(&agent) => {
                 self.coordination_dispatch(req).await
             }
-            external if cas_mcp::actions::EXTERNAL_WORK_ACTIONS.contains(&external) => {
+            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
                 Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Slack-thread authority action `{external}` is available only through the supervisor factory tool: `{}factory action={external}`",
+                        "Factory action `{moved}` is available only through the factory tool: `{}factory action={moved}`",
                         self.inner.guidance_prefix()
                     ),
                 ))
-            }
-            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
-                let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
-                Self::append_notice(self.coordination_dispatch(req).await, &notice)
             }
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -622,12 +618,14 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, record_test_receipt, recover_branch, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers stop only their own); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: one disposable Neon branch per task, deleted at close; DATABASE_URL only in the worker's .env.cas-db; workers ask by blocker); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack); Slack-thread authority, authenticated supervisor only (claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent). clear_context types the harness's reset command and verifies it in the new transcript; an unproven reset errors. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Factory operations: workers/task queues, epics, worktrees, servers, loops, notices, leases and GC. worker_queue inspects/reorders/clears pending task_ids; ordered spawns use isolated checkouts. clear_context verifies a transcript reset or errors. Workers manage only owned servers. Neon: supervisor only, one branch/task, deleted at close; DATABASE_URL stays in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent require an authenticated supervisor. Identity/messages/reminders: coordination."
     )]
     pub async fn factory(
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let mut req = req;
+        normalize_factory_aliases(&req.action, &mut req.target, &mut req.worker_names);
         let action = req.action.clone();
         let result = match action.as_str() {
             // cas-269ab: routed from the same registry as the published enum.
@@ -780,12 +778,13 @@ impl CasService {
                 "qa_waive" => this.verification_qa_waive(req).await,
                 "qa_request" => this.verification_qa_request(req).await,
                 "qa_status" => this.verification_qa_status(req).await,
+                "qa_reconcile" => this.verification_qa_reconcile(req).await,
                 #[cfg(feature = "mcp-proxy")]
                 "external_verify" => this.verification_external(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown verification action: {}. Valid: shadow, add, show, list, latest, batch_receipt, qa_record, qa_waive, qa_request, qa_status{}",
+                        "Unknown verification action: {}. Valid: shadow, add, show, list, latest, batch_receipt, qa_record, qa_waive, qa_request, qa_status, qa_reconcile{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") {
                             ", external_verify"
@@ -809,7 +808,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked. publish with notes and note_type attaches a portable proof receipt; fetch with task_id and id downloads and verifies its bytes on any machine."
+        description = "Artifacts: publish a local path; runtime hashes, measures, records and uploads when Cloud is live, returning artifact_id even offline. Never compute digests or handle upload URLs. post: SHA-256-checked Slack share via Violet. publish notes/note_type: portable proof receipt. fetch task_id/id: download and verify on any machine."
     )]
     pub async fn artifact(
         &self,
@@ -1155,39 +1154,21 @@ fn canonical_task_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)
 }
 
-/// Deprecation note for a factory action called through `coordination`
-/// (cas-8563b, D2). The alias works for one release.
-fn moved_to_factory_notice(action: &str, prefix: &str) -> String {
-    format!(
-        "Deprecated: `coordination action={action}` moved to the supervisor factory tool. \
-         Call `{prefix}factory action={action}`; this coordination alias is accepted for one \
-         release only."
-    )
-}
-
 fn canonical_coordination_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)
 }
 
-fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
+fn normalize_factory_aliases(
+    action: &str,
+    target: &mut Option<String>,
+    worker_names: &mut Option<String>,
+) {
     match action {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
+        "shutdown_workers" if worker_names.is_none() => {
+            *worker_names = target.take();
         }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
-        }
-        _ => {}
-    }
-}
-
-fn normalize_factory_aliases(req: &mut FactoryRequest) {
-    match req.action.as_str() {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
-        }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
+        "hold_worker" | "release_worker" if target.is_none() => {
+            *target = worker_names.take();
         }
         _ => {}
     }
@@ -1213,7 +1194,7 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 
 // ============================================================================
 // Backwards-compatible wrapper methods for tests
-// These are not exposed as MCP tools; use `coordination` tool instead.
+// These are not exposed as MCP tools; use the matching public tool instead.
 // ============================================================================
 
 impl CasService {
@@ -1234,7 +1215,6 @@ impl CasService {
             let mut req = req;
             let action = canonical_coordination_action(&req.action).to_string();
             req.action.clone_from(&action);
-            normalize_coordination_aliases(&mut req, &action);
             if action == "spawn_workers"
                 && req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty())
             {
@@ -1255,13 +1235,16 @@ impl CasService {
             // was exactly `shutdown_workers id=...` falling through to ALL).
             let allowed: Option<&[&str]> = match action.as_str() {
                 "recycle_worker" => Some(&["action", "target"]),
+                "restart_supervisor" => Some(&["action"]),
                 "shutdown_workers" => {
                     Some(&["action", "id", "count", "worker_names", "force", "reason"])
                 }
                 "sync_all_workers" => {
                     Some(&["action", "id", "branch", "worker_names", "force"])
                 }
-                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target"]),
+                // Presentation flags are consumed by the cleanup projector;
+                // they never alter the existing mutation consent gates.
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts", "reclaim_unknown_target", "full", "json"]),
                 "server_stop" => Some(&["action", "id"]),
                 "worktree_cleanup" => {
                     Some(&["action", "id", "all", "orphans", "dry_run", "force"])
@@ -1305,6 +1288,9 @@ impl CasService {
                 }
             }
 
+            // cas-6a57: a debug-build poll frame reserves space for every arm it
+            // could await. Unboxed, these arms made this frame 452 KB of the
+            // stack every merge nests its close under.
             let result = match action.as_str() {
                 // ---- Agent domain ----
                 "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
@@ -1333,23 +1319,23 @@ impl CasService {
                         "message" | "interrupt"
                     ) && req.cross_session.unwrap_or(false);
                     match action.as_str() {
-                        "register" => this.agent_register(agent_req).await,
-                        "unregister" => this.agent_unregister(agent_req).await,
-                        "whoami" => this.agent_whoami(agent_req).await,
-                        "heartbeat" => this.agent_heartbeat(agent_req).await,
-                        "session_start" => this.agent_session_start(agent_req).await,
-                        "session_end" => this.agent_session_end(agent_req).await,
-                        "loop_start" => this.loop_start(agent_req).await,
-                        "loop_cancel" => this.loop_cancel(agent_req).await,
-                        "loop_status" => this.loop_status(agent_req).await,
-                        "lease_history" => this.lease_history(agent_req).await,
-                        "queue_notify" => this.queue_notify(agent_req).await,
-                        "queue_poll" => this.queue_poll(agent_req).await,
-                        "queue_peek" => this.queue_peek(agent_req).await,
-                        "queue_ack" => this.queue_ack(agent_req).await,
-                        "inbox_poll" => this.inbox_poll(agent_req).await,
+                        "register" => heap_future(|| this.agent_register(agent_req)).await,
+                        "unregister" => heap_future(|| this.agent_unregister(agent_req)).await,
+                        "whoami" => heap_future(|| this.agent_whoami(agent_req)).await,
+                        "heartbeat" => heap_future(|| this.agent_heartbeat(agent_req)).await,
+                        "session_start" => heap_future(|| this.agent_session_start(agent_req)).await,
+                        "session_end" => heap_future(|| this.agent_session_end(agent_req)).await,
+                        "loop_start" => heap_future(|| this.loop_start(agent_req)).await,
+                        "loop_cancel" => heap_future(|| this.loop_cancel(agent_req)).await,
+                        "loop_status" => heap_future(|| this.loop_status(agent_req)).await,
+                        "lease_history" => heap_future(|| this.lease_history(agent_req)).await,
+                        "queue_notify" => heap_future(|| this.queue_notify(agent_req)).await,
+                        "queue_poll" => heap_future(|| this.queue_poll(agent_req)).await,
+                        "queue_peek" => heap_future(|| this.queue_peek(agent_req)).await,
+                        "queue_ack" => heap_future(|| this.queue_ack(agent_req)).await,
+                        "inbox_poll" => heap_future(|| this.inbox_poll(agent_req)).await,
                         "message" | "interrupt" => {
-                            let result = this.message_send(agent_req).await;
+                            let result = heap_future(|| this.message_send(agent_req)).await;
                             if cross_session_notice {
                                 Self::append_notice(
                                     result,
@@ -1362,32 +1348,32 @@ impl CasService {
                                 result
                             }
                         }
-                        "message_ack" => this.message_ack(agent_req).await,
-                        "message_status" => this.message_status_query(agent_req).await,
+                        "message_ack" => heap_future(|| this.message_ack(agent_req)).await,
+                        "message_status" => heap_future(|| this.message_status_query(agent_req)).await,
                         _ => unreachable!(),
                     }
                 }
                 // agent_list and agent_cleanup: prefixed to avoid collision with worktree
                 "agent_list" => {
                     let agent_req = req.to_agent_request("list");
-                    this.agent_list(agent_req).await
+                    heap_future(|| this.agent_list(agent_req)).await
                 }
                 "agent_cleanup" => {
                     let agent_req = req.to_agent_request("cleanup");
-                    this.agent_cleanup(agent_req).await
+                    heap_future(|| this.agent_cleanup(agent_req)).await
                 }
 
                 // cas-e477: read-only peer supervisor discovery.
-                "peers" => this.coordination_peers(req).await,
+                "peers" => heap_future(|| this.coordination_peers(req)).await,
 
                 // cas-72d3: journaled external Slack-thread authority.
                 "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim"
-                | "renew_claim" | "reply_intent" => this.external_work(req).await,
+                | "renew_claim" | "reply_intent" => heap_future(|| this.external_work(req)).await,
 
                 // ---- Disposable database branches (cas-0033) ----
-                "db_branch_create" => this.db_branch_create(&req).await,
-                "db_branch_show" => this.db_branch_show(&req).await,
-                "db_branch_delete" => this.db_branch_delete(&req).await,
+                "db_branch_create" => heap_future(|| this.db_branch_create(&req)).await,
+                "db_branch_show" => heap_future(|| this.db_branch_show(&req)).await,
+                "db_branch_delete" => heap_future(|| this.db_branch_delete(&req)).await,
 
                 "recover_branch" => {
                     let task_id = req.task_id.as_deref().ok_or_else(|| Self::error(
@@ -1417,44 +1403,47 @@ impl CasService {
 
                 // ---- Factory domain ----
                 "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
-                | "worker_status" | "worker_activity"
+                | "worker_status" | "worker_activity" | "worker_queue"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
-                | "restart_spawn_queue" => {
+                | "candidate_request" | "restart_spawn_queue" | "restart_supervisor" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
-                        "spawn_workers" => this.factory_spawn_workers(factory_req).await,
-                        "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
-                        "recycle_worker" => this.factory_recycle_worker(factory_req).await,
-                        "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
-                        "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
-                        "worker_status" => this.factory_worker_status(factory_req).await,
-                        "clear_context" => this.factory_clear_context(factory_req).await,
-                        "my_context" => this.factory_my_context(factory_req).await,
-                        "worker_activity" => this.factory_worker_activity(factory_req).await,
-                        "sync_all_workers" => this.factory_sync_all_workers(factory_req).await,
-                        "gc_report" => this.factory_gc_report(factory_req).await,
-                        "gc_cleanup" => this.factory_gc_cleanup(factory_req).await,
+                        "spawn_workers" => heap_future(|| this.factory_spawn_workers(factory_req)).await,
+                        "shutdown_workers" => heap_future(|| this.factory_shutdown_workers(factory_req)).await,
+                        "recycle_worker" => heap_future(|| this.factory_recycle_worker(factory_req)).await,
+                        "hold_worker" => heap_future(|| this.factory_set_worker_hold(factory_req, true)).await,
+                        "release_worker" => heap_future(|| this.factory_set_worker_hold(factory_req, false)).await,
+                        "worker_status" => heap_future(|| this.factory_worker_status(factory_req)).await,
+                        "worker_queue" => heap_future(|| this.factory_worker_queue(factory_req)).await,
+                        "clear_context" => heap_future(|| this.factory_clear_context(factory_req)).await,
+                        "my_context" => heap_future(|| this.factory_my_context(factory_req)).await,
+                        "worker_activity" => heap_future(|| this.factory_worker_activity(factory_req)).await,
+                        "sync_all_workers" => heap_future(|| this.factory_sync_all_workers(factory_req)).await,
+                        "gc_report" => heap_future(|| this.factory_gc_report(factory_req)).await,
+                        "gc_cleanup" => heap_future(|| this.factory_gc_cleanup(factory_req)).await,
                         // cas-8f8f: per-child branch merge-state diagnostic.
                         // Same data source as the epic-close gate so report
                         // and gate cannot disagree.
-                        "epic_status" => this.factory_epic_status(factory_req).await,
-                        "focus_epic" => this.factory_focus_epic(factory_req).await,
+                        "epic_status" => heap_future(|| this.factory_epic_status(factory_req)).await,
+                        "focus_epic" => heap_future(|| this.factory_focus_epic(factory_req)).await,
                         // cas-4736: split an epic with a peer supervisor.
-                        "epic_split" => this.factory_epic_split(factory_req).await,
-                        "remind" => this.factory_remind(factory_req).await,
-                        "remind_list" => this.factory_remind_list(factory_req).await,
-                        "remind_cancel" => this.factory_remind_cancel(factory_req).await,
+                        "epic_split" => heap_future(|| this.factory_epic_split(factory_req)).await,
+                        "remind" => heap_future(|| this.factory_remind(factory_req)).await,
+                        "remind_list" => heap_future(|| this.factory_remind_list(factory_req)).await,
+                        "remind_cancel" => heap_future(|| this.factory_remind_cancel(factory_req)).await,
                         // cas-7c93 (GH #87): sanctioned lifecycle for servers
                         // that must outlive a task or be shared across workers.
-                        "server_start" => this.factory_server_start(factory_req).await,
-                        "server_stop" => this.factory_server_stop(factory_req).await,
-                        "server_list" => this.factory_server_list(factory_req).await,
+                        "server_start" => heap_future(|| this.factory_server_start(factory_req)).await,
+                        "server_stop" => heap_future(|| this.factory_server_stop(factory_req)).await,
+                        "server_list" => heap_future(|| this.factory_server_list(factory_req)).await,
+                        "candidate_request" => heap_future(|| this.factory_candidate_request(factory_req)).await,
                         // cas-73b5 (GH #970): unwedge the spawn queue in place.
                         "restart_spawn_queue" => {
-                            this.factory_restart_spawn_queue(factory_req).await
+                            heap_future(|| this.factory_restart_spawn_queue(factory_req)).await
                         }
+                        "restart_supervisor" => heap_future(|| this.factory_restart_supervisor(factory_req)).await,
                         _ => unreachable!(),
                     }
                 }
@@ -1546,12 +1535,12 @@ impl CasService {
                         reason: req.reason,
                     };
                     match wt_action {
-                        "create" => this.worktree_create(wt_req).await,
-                        "list" => this.worktree_list(wt_req).await,
-                        "show" => this.worktree_show(wt_req).await,
-                        "cleanup" => this.worktree_cleanup(wt_req).await,
-                        "merge" => this.worktree_merge(wt_req).await,
-                        "status" => this.worktree_status(wt_req).await,
+                        "create" => heap_future(|| this.worktree_create(wt_req)).await,
+                        "list" => heap_future(|| this.worktree_list(wt_req)).await,
+                        "show" => heap_future(|| this.worktree_show(wt_req)).await,
+                        "cleanup" => heap_future(|| this.worktree_cleanup(wt_req)).await,
+                        "merge" => heap_future(|| this.worktree_merge(wt_req)).await,
+                        "status" => heap_future(|| this.worktree_status(wt_req)).await,
                         _ => unreachable!(),
                     }
                 }
@@ -1590,7 +1579,7 @@ impl CasService {
                     });
                 }
             } else if !action.starts_with("db_branch_") {
-                this.db_branch_sweep().await;
+                heap_future(|| this.db_branch_sweep()).await;
             }
 
             if let Err(error) = &result {
@@ -1633,7 +1622,9 @@ impl CasService {
                     | "server_start"
                     | "server_stop"
                     | "server_list"
+                    | "candidate_request"
                     | "restart_spawn_queue"
+                    | "restart_supervisor"
                     | "record_test_receipt"
                     | "db_branch_create"
                     | "db_branch_show"
@@ -1665,7 +1656,7 @@ impl CasService {
         Parameters(req): Parameters<FactoryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mut req = req;
-        normalize_factory_aliases(&mut req);
+        normalize_factory_aliases(&req.action, &mut req.target, &mut req.worker_names);
         let action = req.action.clone();
         let result = match action.as_str() {
             "spawn_workers" => self.factory_spawn_workers(req).await,
@@ -1674,6 +1665,7 @@ impl CasService {
             "hold_worker" => self.factory_set_worker_hold(req, true).await,
             "release_worker" => self.factory_set_worker_hold(req, false).await,
             "worker_status" => self.factory_worker_status(req).await,
+            "worker_queue" => self.factory_worker_queue(req).await,
             "clear_context" => self.factory_clear_context(req).await,
             "my_context" => self.factory_my_context(req).await,
             "worker_activity" => self.factory_worker_activity(req).await,
@@ -1686,10 +1678,12 @@ impl CasService {
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
             "restart_spawn_queue" => self.factory_restart_spawn_queue(req).await,
+            "restart_supervisor" => self.factory_restart_supervisor(req).await,
             "remind_cancel" => self.factory_remind_cancel(req).await,
             "server_start" => self.factory_server_start(req).await,
             "server_stop" => self.factory_server_stop(req).await,
             "server_list" => self.factory_server_list(req).await,
+            "candidate_request" => self.factory_candidate_request(req).await,
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!("Unknown factory action: {action}"),
@@ -1709,6 +1703,7 @@ pub(crate) mod agent_search_system;
 #[cfg(feature = "mcp-proxy")]
 mod artifact_post;
 mod coordination_external_work;
+mod candidate_ops;
 mod core;
 mod db_branch_ops;
 mod epic_split_ops;

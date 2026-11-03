@@ -8,7 +8,9 @@ pub struct VerificationAddRequest {
     pub task_id: String,
 
     /// Verification status
-    #[schemars(description = "Status: 'approved', 'rejected', 'error', 'skipped'")]
+    #[schemars(
+        description = "Status: 'approved', 'rejected', 'supervisor_call' (question in summary; supervisor answers with add on the same dispatch), 'error', 'skipped'"
+    )]
     pub status: String,
 
     /// Summary of the verification decision
@@ -32,8 +34,10 @@ pub struct VerificationAddRequest {
     #[serde(default)]
     pub files_reviewed: Option<String>,
 
-    /// Duration of verification in milliseconds
-    #[schemars(description = "How long verification took in milliseconds")]
+    /// Explicit review duration; omitted values use durable timing boundaries.
+    #[schemars(
+        description = "Optional duration override in milliseconds. Omitted: child bound-to-consumed time, or dispatch-to-verdict fallback including review wait for direct verdicts."
+    )]
     #[serde(default)]
     pub duration_ms: Option<u64>,
 

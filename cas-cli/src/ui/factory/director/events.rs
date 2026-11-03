@@ -17,6 +17,9 @@ use chrono::{DateTime, Utc};
 /// so a silent supervisor is nudged without producing a notification storm.
 pub(crate) const SUPERVISOR_STALL_REFIRE_SECS: i64 = 10 * 60;
 
+/// The same ready-work proposal must not repeatedly consume supervisor turns.
+const ASSIGN_READY_WORK_COOLDOWN_SECS: i64 = 30 * 60;
+
 /// cas-7456 (GH #1302 D): silence after which an unanswered supervisor-idle
 /// page also reaches the operator, once per silence episode. Two supervisors
 /// idled 11–12 h overnight while the page re-fired into a pane nobody read.
@@ -41,6 +44,11 @@ pub enum SupervisorActionableState {
     MergeQueue {
         branches: Vec<(String, String, String)>,
         merged_close_blocked: Vec<MergedCloseBlockedTask>,
+    },
+    /// cas-f497: everything left in the epic is merged and waiting for the one
+    /// release verdict. One prompt for the release, never one per delivery.
+    ReleaseVerdictDue {
+        task_ids: Vec<String>,
     },
     AssignReadyWork {
         task_ids: Vec<String>,
@@ -88,6 +96,11 @@ impl SupervisorActionableState {
                 );
                 format!("{unmerged}\n{merged}")
             }
+            Self::ReleaseVerdictDue { task_ids } => format!(
+                "Drive to the exit: {} merged Tier 1 deliveries wait for one release verdict: {}. Review the assembled tip, publish a report naming each one, then record `{tool_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>`. The verdict closes them.",
+                task_ids.len(),
+                task_ids.join(", "),
+            ),
             Self::AssignReadyWork {
                 task_ids,
                 idle_workers,
@@ -172,6 +185,17 @@ impl SupervisorActionableState {
         Some(format!("merged-close-blocked:{}", merged_close_blocked_key(tasks)))
     }
 
+    /// The key of a state that wakes once until it changes, however long it stays.
+    fn wake_once_key(&self) -> Option<String> {
+        match self {
+            Self::MergeCloseBlocked { .. } => self.merged_close_blocked_relay_key(),
+            Self::ReleaseVerdictDue { task_ids } => {
+                Some(format!("release-verdict-due:{}", task_ids.join("|")))
+            }
+            _ => None,
+        }
+    }
+
     /// Render only the genuinely unmerged portion of a mixed merge queue.
     pub(crate) fn unmerged_merge_state(&self) -> Option<Self> {
         match self {
@@ -218,8 +242,13 @@ pub struct SupervisorStallTracker {
     /// Stable merged-delivery state most recently delivered. A changed anchor
     /// may wake after the rate limit, while an unchanged merged
     /// delivery must not refire the same close demand every ten minutes.
+    /// A due release verdict shares this one-wake record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
+    /// Recent delivered assignment texts, retained across supervisor activity
+    /// and metadata reloads. Pruned at the assignment cooldown boundary.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub recent_assignment_wakes: HashMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,8 +262,8 @@ pub(crate) struct SupervisorStallObservation {
 
 impl SupervisorStallTracker {
     /// Advance one detector sample. The metric counts only while the complete
-    /// predicate is true: actionable epic state, supervisor silence beyond the
-    /// configured threshold, and no covering reminder.
+    /// predicate is true: eligible work and no covering reminder. A wake also
+    /// requires supervisor silence and a full observed actionable interval.
     pub(crate) fn observe(
         &mut self,
         actionable: Option<SupervisorActionableState>,
@@ -254,7 +283,7 @@ impl SupervisorStallTracker {
         let silent = last_supervisor_mcp_call_at
             .map(|last| (now - last).num_seconds() >= stall_after_secs as i64)
             .unwrap_or(false);
-        let condition_true = actionable.is_some() && silent && !covering_reminder;
+        let condition_true = actionable.is_some() && !covering_reminder;
 
         if condition_true {
             self.actionable_idle_started_at.get_or_insert(now);
@@ -273,17 +302,25 @@ impl SupervisorStallTracker {
             .last_wake_at
             .map(|last| (now - last).num_seconds() >= SUPERVISOR_STALL_REFIRE_SECS)
             .unwrap_or(true);
-        let merged_key = actionable.as_ref().and_then(|action| {
-            matches!(action, SupervisorActionableState::MergeCloseBlocked { .. })
-                .then(|| action.merged_close_blocked_relay_key())
-                .flatten()
-        });
+        let merged_key = actionable.as_ref().and_then(SupervisorActionableState::wake_once_key);
         let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
             self.last_merged_close_blocked_key.as_ref() == Some(key)
         });
-        let wake = if condition_true && refire_due && !merged_state_repeated {
+        let assignment_key = actionable.as_ref().and_then(|action| {
+            matches!(action, SupervisorActionableState::AssignReadyWork { .. })
+                .then(|| action.next_step_text())
+        });
+        self.recent_assignment_wakes.retain(|_, at| {
+            (now - *at).num_seconds() < ASSIGN_READY_WORK_COOLDOWN_SECS
+        });
+        let assignment_recent = assignment_key.as_ref()
+            .is_some_and(|key| self.recent_assignment_wakes.contains_key(key));
+        let wake = if condition_true && silent && current_secs >= stall_after_secs.max(60) && refire_due && !merged_state_repeated && !assignment_recent {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
+            if let Some(key) = assignment_key {
+                self.recent_assignment_wakes.insert(key, now);
+            }
             actionable
         } else {
             if merged_key.is_none() {
@@ -347,6 +384,9 @@ pub enum DeliveryHold {
     /// not arrived for this task yet. Unknown is never "merge now"; the next
     /// snapshot carries the evidence.
     EvidencePending,
+    /// cas-f497: merged and correctly waiting for the one release verdict, which
+    /// closes it. Not a close failure and not a per-delivery supervisor action.
+    ReleaseVerdictPending,
 }
 
 /// cas-03ff: whether the supervisor has a pending external reminder waiting
@@ -444,6 +484,62 @@ fn opens_note_entry(line: &str) -> bool {
         && bytes[17] == b']'
         && bytes[1..5].iter().all(u8::is_ascii_digit)
         && bytes[5] == b'-'
+}
+
+/// Lane CI proves its selected checks, not that a delivery is complete.
+/// Only an explicit worker delivery-ready return contract binds
+/// completion to this tip; check/test PASS receipts do not. Parking is already
+/// an explicit completion boundary and retains its ordinary one-shot signal.
+pub(crate) fn delivery_marked_ready(task: &cas_types::Task, tip: &str) -> bool {
+    if task.status == TaskStatus::AwaitingMerge {
+        return true;
+    }
+    let mut ready = false;
+    let mut entry = String::new();
+    let settle = |entry: &str, ready: &mut bool| {
+        // The notes tool stores the first payload field on the header line.
+        // Parse the return contract at the payload boundary, never a quoted
+        // example or a PASS substring inside ordinary validation evidence.
+        let body = entry.trim();
+        let body = if opens_note_entry(body.lines().next().unwrap_or_default()) {
+            body[18..].trim_start()
+        } else { body };
+        let body = body.strip_prefix("📝 PROGRESS")
+            .or_else(|| body.strip_prefix(DECISION_NOTE_MARKER)).unwrap_or(body).trim_start();
+        let mut fields = body.lines();
+        // cas-fc42: a worker's ready message often names a short SHA. A hex
+        // prefix of at least seven characters names this pushed tip
+        // unambiguously; a later push moves the tip and no longer matches.
+        let names_tip = |value: &str| value == tip
+            || (value.len() >= 7 && value.len() < tip.len()
+                && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && tip.starts_with(&value.to_ascii_lowercase()));
+        let declared_ready = fields.next().map(str::trim_end) == Some("status: ready")
+            && fields.next().and_then(|line| line.strip_prefix("tip:"))
+                .and_then(|value| value.split_whitespace().next())
+                .is_some_and(names_tip);
+        let words = words_lowercase(entry);
+        let checkpoint = words.iter().any(|word| word == "checkpoint")
+            && (words.iter().any(|word| word == "red")
+                || words.windows(2).any(|pair| pair == ["test", "only"]));
+        let not_ready = words.windows(3).any(|words| words == ["not", "merge", "ready"])
+            || words.windows(4).any(|words| words == ["not", "ready", "to", "merge"]);
+        if checkpoint || not_ready {
+            *ready = false;
+        } else if declared_ready {
+            *ready = true;
+        }
+    };
+    for line in task.notes.lines() {
+        if opens_note_entry(line) && !entry.is_empty() {
+            settle(&entry, &mut ready);
+            entry.clear();
+        }
+        entry.push_str(line);
+        entry.push('\n');
+    }
+    settle(&entry, &mut ready);
+    ready
 }
 
 fn words_lowercase(text: &str) -> Vec<String> {
@@ -558,6 +654,7 @@ pub(crate) fn task_delivery_ref(
 ///
 /// Branch tips are resolved by the caller so tests stay pure and production
 /// can consult the live repository immediately before constructing the wake.
+#[cfg(test)]
 pub(crate) fn supervisor_actionable_state(
     data: &DirectorData,
     focused_epic_id: Option<&str>,
@@ -710,16 +807,15 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
         ids.sort();
         ids
     };
-    let mut task_ids = focused_open_epic
-        .map(|epic_id| ready_ids(&|task| task.epic.as_deref() == Some(epic_id)))
-        .unwrap_or_default();
-    // cas-7456 (GH #1302 E): idle workers must never sit beside a non-empty
-    // ready queue. When the focused epic has no ready work, or no epic is
-    // focused, offer the session's own ready tasks (the snapshot is already
-    // project-scoped, cas-0c98).
-    if task_ids.is_empty() {
-        task_ids = ready_ids(&|_| true);
-    }
+    // A pin is an assignment boundary, including when it has no ready work
+    // or no longer resolves. Only an explicit no-focus state offers the
+    // existing project-wide ready queue (cas-0c98 / GH #1302).
+    let task_ids = match focused_epic_id {
+        Some(epic_id) if focused_open_epic == Some(epic_id) =>
+            ready_ids(&|task| task.epic.as_deref() == Some(epic_id)),
+        Some(_) => Vec::new(),
+        None => ready_ids(&|_| true),
+    };
     if task_ids.is_empty() {
         return None;
     }
@@ -742,6 +838,11 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
             )
         })
         .collect::<HashSet<_>>();
+    let pending_reviewers = data.agents.iter()
+        .filter_map(|agent| agent.active_lease.as_ref()?.pending_qa.as_ref())
+        .filter(|pass| pass.deadline_at > now)
+        .filter_map(|pass| pass.reviewer_agent_id.as_deref())
+        .collect::<HashSet<_>>();
     let mut idle_workers = data
         .agents
         .iter()
@@ -749,7 +850,11 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
             agent.name != supervisor_name
                 && agent.current_task.is_none()
                 && !agent.qa_reviewer_between_rounds
+                && !pending_reviewers.contains(agent.id.as_str())
+                && !pending_reviewers.contains(agent.name.as_str())
                 && !held_workers.contains(&agent.name)
+                && !held_workers.contains(&agent.id)
+                && matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
                 && !assigned_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.id)
         })
@@ -794,6 +899,7 @@ fn focused_epic_exit_state(
 ) -> Option<SupervisorActionableState> {
     let mut mergeable = Vec::new();
     let mut merged_close_blocked = Vec::new();
+    let mut awaiting_verdict = Vec::new();
     for task in data.in_progress_tasks.iter().filter(|task| {
         task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
     }) {
@@ -807,8 +913,16 @@ fn focused_epic_exit_state(
             .unwrap_or(assignee);
         // GH #896: a delivery held for a decision is not "merge now". It
         // stays parked without keeping the stall relay firing.
-        if held_workers.contains(worker) || classify_delivery_hold(task, worker).is_some() {
+        if held_workers.contains(worker) {
             continue;
+        }
+        match classify_delivery_hold(task, worker) {
+            Some(DeliveryHold::ReleaseVerdictPending) => {
+                awaiting_verdict.push(task.id.clone());
+                continue;
+            }
+            Some(_) => continue,
+            None => {}
         }
         let (branch, tip) = resolve_delivery(task, worker);
         // cas-03ff: the supervisor is waiting on this delivery's CI or on it
@@ -861,6 +975,14 @@ fn focused_epic_exit_state(
         .chain(data.in_progress_tasks.iter())
         .filter(|task| task.epic.as_deref() == Some(epic_id))
         .count();
+    // The verdict reviews the assembled tip, so it is due only when nothing else
+    // in the epic can still change that tip.
+    if !awaiting_verdict.is_empty() && active_children == awaiting_verdict.len() {
+        awaiting_verdict.sort();
+        return Some(SupervisorActionableState::ReleaseVerdictDue {
+            task_ids: awaiting_verdict,
+        });
+    }
     if active_children == 0
         && data.epic_closed_counts.get(epic_id).copied().unwrap_or(0) > 0
     {
@@ -3103,6 +3225,7 @@ fn transcript_confirms_stall_for_path_with_background(
 /// `fresh_window` must come from
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window)
 /// (or the same constants) so director and is-wedged agree.
+#[cfg(test)]
 fn transcript_confirms_stall_for_age(
     age: Option<Duration>,
     fresh_window: Duration,

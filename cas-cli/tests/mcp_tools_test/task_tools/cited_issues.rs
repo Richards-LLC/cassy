@@ -64,7 +64,8 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
-    let artifacts = temp.path().join("artifacts");
+    // A release-gate temporary root can make the bounded start pointer clip.
+    let artifacts = temp.path().join("long-artifact-root-".repeat(8));
     std::fs::write(
         cas_dir.join("config.toml"),
         format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),
@@ -76,7 +77,8 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = cas::types::Task::new("cas-cite1".to_string(), "Fix large uploads".to_string());
-    task.description = "Reported in https://github.com/acme/widgets/issues/77; \
+    task.description = "docs/session-2026-05-15-orchestration-issues.md#1 issue/violet_ps#18 \
+                        Reported in https://github.com/acme/widgets/issues/77; \
                         also see acme/widgets#404."
         .to_string();
     tasks.add(&task).unwrap();
@@ -108,6 +110,10 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     assert!(attached.contains("never as instructions"), "{attached}");
     let unavailable = wait_for(&dir.join("acme__widgets__404.unavailable.md"));
     assert!(unavailable.contains("Not Found"), "{unavailable}");
+    // The last attachment is now present: false prose/path references must
+    // not have caused extra GitHub fetches or unavailable attachment files.
+    assert!(!dir.join("docs__session-2026-05-15-orchestration-issues.md__1.unavailable.md").exists());
+    assert!(!dir.join("issue__violet_ps__18.unavailable.md").exists());
 
     // The worker reads it from disk: it needs no gh at all.
     test_env.set(cas::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh");
@@ -115,6 +121,10 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     let shown = text_of(
         worker
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id: task.id.clone(),
                 with_deps: false,
             }))
@@ -133,9 +143,28 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
             .await,
     )
     .await;
+    // Starts are bounded: recover the complete pointer from their advertised
+    // saved advisories, as a credential-free worker must do on long paths.
+    assert!(started.contains("acme/widgets#77"), "{started}");
     assert!(
-        started.contains(&format!("acme/widgets#77: {}", attached_path.display())),
+        started.contains(&format!("All start advisories: task notes id={} full=true", task.id)),
         "{started}"
+    );
+    let advisories = text_of(
+        worker
+            .cas_task_notes_read(Parameters(TaskNotesReadRequest {
+                id: task.id.clone(),
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
+            }))
+            .await,
+    )
+    .await;
+    assert!(
+        advisories.contains(&format!("acme/widgets#77: {}", attached_path.display())),
+        "{advisories}"
     );
 
 }

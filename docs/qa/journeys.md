@@ -105,14 +105,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
+1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath; a known live MCP version sits beside its supervisor, with an upgrade arrow and reconnect guidance when the installed binary is newer
 2. Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago"; no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
 3. Notice a new reply while away — before opening it, the row shows an unread count and the reply's first line
 4. Open the conversation, then notice its next reply — opening clears the unread count; a later reply while away brings it back
 5. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active descendant; opening a result clears the search and brings the whole list back; the header names the project once
 6. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
-   - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
+   - A 40-character machine name wraps in its project header and stays separate from session times — the full name remains keyboard reachable at 1280 and 390px
 7. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / Machines / Appearance / Advanced, the same groups with a conversation open, Advanced collapsed and holding only the dormant-session switch; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); a filter that matches nothing says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant ("light" marks "Jump to lighthouse")
 8. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
@@ -130,10 +130,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Edge paths
 
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
-- A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
+- A machine becomes unreachable while a message is pending: its last-known running row stays without a repeated retry/pending line; machine recovery is shown once. A fresh catalog that confirms the destination stopped removes its row and settles the waiting message as Not sent, retaining its words in Saved messages.
 - At 390px the machine name's glyphs fit vertically inside the clipped host line, in light and dark. Its full machine and supervisor identity stays available when the codename yields; long machine names still ellipsise horizontally. The header parts also cover desktop identity, forced colors, reduced motion, increased contrast, and a keyboard revisit (cas-9412).
 - Many rows: the list is not sorted by attention.
 - On a Mac, every surface names the palette chord "⌘K" (the list search and the Appearance & commands tooltip, with a conversation open too), never "Ctrl K", and ⌘K reaches the search and then the palette. This runs as a separate HUB-J3 part; the journeys declare a Linux keyboard platform by default, so they read the same on any host (cas-2a33).
+
+Stopped-session draft regression (cas-45b8): type in two conversations, leave one draft inactive and the other composer focused, stop both sessions, and read both drafts through Saved messages after reload. A same-name replacement opens empty, with archived words still reachable.
 
 ### HUB-J4 · Read the conversation history
 
@@ -156,11 +158,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - Recent turns appear without any action, grouped by speaker and day.
-- Loading earlier keeps the reading position; the button shows progress.
+- Loading earlier keeps the reading position; scrolling up to the button survives an intervening render even while a tail pin is pending, and the button shows progress.
+- A short status with a callout, heading or list renders it as a full message, and inline Markdown renders in the quiet status box, so no marker shows at any length. Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting, prefixing formula-leading cells with an apostrophe. Success feedback clears after two seconds; clipboard refusal offers a persistent visible retry. Long paths wrap at phone width without widening the page (cas-4800).
 - The end of history is stated, not implied.
 
 #### Edge paths
 
+- A late attachment preview shrinks in a deferred pin or browser clamp, then grows before its queued scroll, even back to the same height: the latest turn stays visible without Jump to latest; upward wheel, keyboard and touch gestures still keep the reader's place (cas-d587).
 - The hub never answers a history request ("Loading earlier…" has no timeout).
 - The socket closes while loading.
 - A hub without history support: the thread starts empty.
@@ -205,6 +209,10 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Write and send — the message appears at once as "Sending…" and the composer clears
 3. See it delivered — durable acceptance turns "Sending…" into "Queued for supervisor", without a delivery check. Only a real supervisor transport receipt earns "Delivered" and its check. Queue acceptance and delivery remain visible after a reload and on another paired device; older history/receipts never reverse delivery or a reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header. Queue and transport receipts alone never claim the supervisor is working.
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
+
+   Same-name Claude replacement regression (cas-33e6): send during startup so Claude consumes the message as a queued-command attachment or through the prompt hook's incoming-message context. Its answer appears live under the original send, with the paired device and message id preserved in durable history. Queue enqueue/dequeue records alone never bind an answer, unrelated attachments do not replace the prompt, and another session's or recipient's queue row cannot supply reply binding. Reload retains exactly one answer.
+
+   Mid-turn Claude regression (cas-5e3a): a real background completion notification cannot take over an operator's answer. If a typed question and two Commander sends enter the same native turn, preserve a bound answer for each consumed question, including multiple operator envelopes delivered by one prompt hook. Repeated transport copies and text projections do not add answers. Each answer retains the original question's device and survives reload.
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
    - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
 6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
@@ -222,6 +230,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
+- A semantic send refused after device revocation names re-pairing, with no Take control action (cas-5e60). Missing message:send permission names the Send messages to supervisors grant. The refused text and a newer composer draft remain separate and recoverable; Edit never overwrites that draft, and the header's Re-pair opens pairing. Actual terminal lease refusals retain ownership guidance.
 - Once its edit is sent, a refused message cannot be retried.
 - A failed message never has to stay on screen: it can be dismissed or swiped away, and it is one tap to bring back.
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
@@ -285,6 +294,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 12. Read a question on a short phone screen — at 390px by 440px, the waiting bookmark remains visible
 13. A double tap jumps without sending — the full question in the thread gains focus, no reply is sent, and no duplicate card opens above the composer
 14. Deliberately choose an option in the thread — the chosen answer is sent in reply to that question, and the bookmark clears
+15. The supervisor asks for a secret — a separate part on a pairing with factory:manage: the card names the secret, says what it is for and that it is saved only on the machine as a private mode-600 file, offers a masked field (autocomplete off), Save securely and Decline, and the context rail lists it as waiting
+16. Save it securely — the value goes only to the hub's secrets route; the card clears its field and shows the saved file's path, and it no longer waits in the context rail; no session frame, send, page storage or thread text carries the value
 
 #### Expected experience
 
@@ -400,7 +411,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.") and not sent; the attention rail raises no transport alarm of its own, and its counts agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
 3. It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces the return), the held message goes out exactly once and is delivered, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
@@ -425,6 +436,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** the conversation reconnects by itself and every message I send is delivered exactly once
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/main.ts`
 - **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`: one main test and several part tests marked `journeyPart`. Each part writes its receipts under `journeys/HUB-J12/parts/<part>/`, and `scripts/journey-bundles.py` folds every part's stages, cells and verdict into the HUB-J12 bundle and its JOURNEYS.md total (cas-1f7e)
+- **Revoked before first Welcome (cas-3286):** the code re-pairing part holds the initial session attach until pairing is revoked; the conversation immediately replaces Opening with its pairing failure and a named Re-pair action, then completes re-pairing through that control. A stale attach cannot override the machine's authentication verdict.
 - **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
 
 #### Steps
@@ -444,11 +456,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 13. Both machines reconnect — both rows and the full conversation count return to live
 14. The machine stays down past its catalog's freshness — with only Atlas offline and Studio live, both Atlas conversations are last known and the footer says "2 conversations · 1 last known" (cas-c552)
 15. Atlas reconnects — both rows and the full conversation count return to live
-16. The machines answer with no live supervisors — the list is empty and the footer says "0 conversations"
+16. Missing catalog entries are unknown and keep both running rows — a successful incomplete catalog cannot hide a running conversation
+17. The machines positively confirm both daemons stopped — the list is empty and the footer says "0 conversations"
 
 #### Expected experience
 
 - A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
+- A client clock 1–4 seconds ahead recovers after one retry on the hub's clock; future-dated DPoP proofs are refused before and after a hub restart (cas-3b22; auth and connection regression tests).
 - Working requires recent pane activity, a live authenticated machine and an unanswered message. An idle prompt repaint, Reconnecting or Needs pairing never claims work (cas-a252).
 - A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
 - Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.
@@ -471,7 +485,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
 2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
-4. Choose the account — every Claude account on the machine is listed with the recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
+4. Choose the account — every Claude account on the machine is listed with the selected project’s recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); changing the project refreshes that recommendation using its account selection and threshold settings; the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
 6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
 7. A running project attaches instead of starting again — Attach opens the existing session's conversation
@@ -496,18 +510,19 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A named-profile startup brief written to Teams before pane readiness retries its wake once ready, submits once and leaves one Teams body (the real queue/PTY regression for cas-dd2e).
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
+- The Accounts entry remains visible before the dialog opens: a user-group glyph, tooltip and accessible name "Accounts", with the header actions inside the panel inset and spaced apart at desktop/390px in light/dark (cas-a9d3).
 
 ### HUB-J14 · Tell a project's live sessions apart
 
 - **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
-- **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; I can retire a stale one
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/connection.ts`
+- **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; stopped sessions disappear automatically
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`, `hub-web/src/worker-visibility.ts`, `cas-cli/src/hub/server.rs`, `cas-cli/src/ui/factory/session.rs`, `cas-cli/src/cli/factory/lifecycle.rs`
 - **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
 - **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
 
 #### Steps
 
-1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view
+1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view. A single-supervisor project with no workers has no worker-count summary, and its machine chip is a pill. Ended and crashed sessions are absent, even with dormant recovery enabled or pending operator messages; they make no attach attempts for two minutes on the real hub. A project with no running sessions has no card. A running replacement appears without reloading. Per-row Dismiss and Clear ended are unnecessary; earlier history remains readable. A focused draft cannot keep the stopped conversation interactive, and unsent words remain available under Saved messages.
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Read the empty session's raw output — the header's Raw output opens the supervisor's terminal text ("The supervisor is ready.") though it has not written to me; Escape returns to Raw output and the empty thread
@@ -528,6 +543,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
 - Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
+- Every canonical project has one closed outlined card across machines, including singletons. Machine chips expose online state and filter; rows expose supplied harness/email or gracefully omit them. Verify boundaries at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
+- Needs you pins operator decisions above the cards; unread alone never pins. All/Needs you/machine filters intersect search with an explicit no-results recovery. A shortcut opens its own session without sending an answer.
+- Collapse by keyboard retains focus and survives reload on this device; search temporarily reveals matches. The paired-machine footer applies the same machine filter and keeps machine-management access.
+
+- Catalog failure on a live connection cannot hold an explicit send. A reconnect with health, authentication and event-stream proof settles even while catalog reads fail; held older words still need a matching session birth before replay.
+- Upgrading a running session preserves drafts with no recorded birth. A missing identity alone never proves a stop. A rejected message from an older birth cannot change a replacement's new in-flight messages. If archiving a stopped draft fails, the original durable draft survives reload.
+- A phone offline during a daemon crash and native stale cleanup receives the retained stop receipt on reconnect and removes its cached running row. A positively stopped focused conversation closes; a replacement becomes selectable without automatically opening.
 
 ### HUB-J15 · See a delivery problem as attention, not conversation
 
@@ -542,7 +564,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
 2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
 3. The delivery problem is one attention item — the notice is a single warning dated "Sep 29, 17:49", headed "The supervisor missed an update: a worker stopped", with the worker named in plain words and no baked age; the group is "Accounting · happy-cheetah-1", has no redundant Dismiss group for one item, and a repeat adds nothing
-4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
+4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date; at390px in light/dark, the warning badge, identity and every header action stay inside the viewport, with Raw output using its named icon while the badge is shown
 5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss stays there across a 5 s heartbeat; with a notice's Details open, Copy occupies its own row above the full raw diagnostic at390 and1280px; with Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
 6. A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes the palette, the sheet stays open and focus is back on the control it left
 7. Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
@@ -595,7 +617,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge task, on a device paired with factory:operate and factory:manage
 - **Goal:** pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming, and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing on a timer
-- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Touches:** `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts`, `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/fleet-ops.journey.ts`
 - **Gaps:** the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe, 409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
 
@@ -605,7 +627,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
 3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
 4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
-5. A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears without a disabled Stop and restart button.
+5. A pairing without factory:manage — Stop… is disabled and names the missing permission; the header hides unavailable controls behind one collapsed Permissions line. Expanding it explains the actual grant and re-pair actions and links to Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears without a disabled Stop and restart button.
 
 #### Expected experience
 
@@ -614,6 +636,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Edge paths
 
+- The project catalog includes foreign and terminal epics: default groups and the header use only this supervisor's open pinned epic, otherwise its assigned or verification-owned epics (matching name or registration ID). Foreign and closed-epic tasks appear only after All tasks. HUB-J7 and the server-shaped progress-model regression cover this boundary (cas-5a42).
 - A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
 - A refused operation shows the hub's detail on the row.
 - A fleet change that overlaps an older catalog heartbeat still refreshes the roster: a stopped worker disappears without waiting for the next heartbeat (cas-66ea).
@@ -735,31 +758,37 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/`, a paired machine and its supervisor conversation, at 1280×800 and 390×844 in light and dark
 - **Goal:** inspect a Mermaid diagram, a collapsible unified diff, an image, a PDF first page and playable video/audio without leaving the conversation, with source and original files reachable
-- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
+- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-syntax.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
 - **Suite:** `hub-web/e2e/journeys/rich-content.journey.ts`
 - **Gaps:** hub tickets and proxy responses are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build under a self-only media CSP. Ticket binding, revocation and proxy authorization are proven by the hub handler tests. Hosted Commander cross-origin media remains outside this hub-served proof.
 
 #### Steps
 
 1. Open plain text without loading rich renderers
-2. Read a diagram and inspect its source; bad input stays readable
-3. Expand a unified diff
-4. Decode an inline image without moving its file caption
-5. Read the real PDF first page inline
-6. Play video and audio on demand; unavailable files keep Open
+2. Copy exact source and wrap a code frame with the keyboard
+3. Read a diagram and inspect its source; bad input stays readable
+4. Expand a unified diff
+5. Decode an inline image without moving its file caption
+6. Read the real PDF first page inline
+7. Play video and audio on demand; unavailable files keep Open
+
+Code, diagram and diff use the same Copy/Wrap/Expand header. Rich previews retain a Source/Preview toggle; the diagram step exercises both views with the keyboard, and expansion in the source view, because a rendered diagram shows whole with no Expand or Wrap.
 
 The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
 
 #### Expected experience
 
+- Tagged JS/TS, JSON, Python, Rust and shell source colors lazily in light/dark; forced colors use system ink. Delayed coloring and message repaint retain selection. Failed or oversized coloring keeps exact source and a visible Plain text note.
+- Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
-- Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
+- Diffs retain literal code and line markers, and a hand-written `+`/`-` change without an `@@` line colors the same way with no line numbers. More than 24 lines start collapsed and allocate line DOM only when opened.
 - Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
-- PDF previews render only the first page as pixels. The original file link remains beneath every preview, including unavailable ones.
+- PDF previews render only the first page as pixels. Each file's chip and supported preview share one card; image thumbnails replace their type plate and open the original preview. A failed preview leaves a compact chip with an inline note.
 
 #### Edge paths
 
+- Rust lifetimes stay plain beside colored character literals; JSX word apostrophes and unfinished script single-quoted strings never consume the next line; shell single quotes preserve complete multi-line awk/jq programs. A block that exceeds the retained-cache budget leaves earlier entries cached. Named regressions: `hub-web/src/markdown-renderer.test.ts` (cas-7457).
 - Invalid diagram syntax remains readable source.
 - Missing or local-only artifacts show Preview unavailable beside their original Open link.
 - A transient preview failure recovers after the session reconnects, without rebuilding the attachment or moving its caption.
@@ -767,9 +796,9 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 ### HUB-J24 · Paste text, screenshots and files into a supervisor message
 
-- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
-- **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
-- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`
+- **Entry:** A paired conversation at 1440×800 or 390×844, in light or dark.
+- **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with resolvable local paths; sent bubbles show image previews or named file sheets, including after reload and on another paired phone.
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/upload-transport.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
 - **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
 - **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
 
@@ -778,16 +807,22 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 1. Paste plain text inline
 2. Preview a long paste, screenshot and picked file together
 3. A connection loss keeps the files visibly, then reuses the upload identity
+4. Sent files show their names and an image preview after reload and on another phone
+5. A missing preview stays on its own file card
+6. A slow 10 MiB photo shows byte progress, then Saving, then Delivered
+7. A refusal names its file and keeps the hub's reason
 
 #### Expected experience
 
 - Every attachment is named and removable before sending; long text has a bounded preview and screenshots have thumbnails.
+- Native Commander's real image policy permits pending raster object-URL thumbnails to decode; SVG and HTML remain named files without previews. The real-hub HUB-J24 part loads the embedded document directly on loopback and checks image-policy events before upload.
+- Sent and received images use a reserved thumbnail inside their own named file card; the card opens the existing full preview. A real failing content fetch collapses the preview to an inline note without an empty panel.
 - Files remain through reconnect and shell replacement, with a visible reminder to send before closing the page.
 
 #### Edge paths
 
 - The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
-- A slow 512 kbit/s phone upload budgets the base64 payload size (4 and 10 MiB regression rows); ordinary requests still time out promptly.
+- A slow 512 kbit/s phone upload budgets the base64 payload size with at least 25% margin (4 and 10 MiB regression rows); ordinary requests still time out promptly.
 - A refusal names the failed attachment, keeps all pending files, and gives no reconnect advice for an unsupported type. A missing session shows the hub's own explanation.
 - Phone HEIC, AVIF and MOV containers are identified from their brands and stored with their correct media types, regardless of filename.
 - Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.
@@ -810,9 +845,12 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
 7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
 8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
+10. Scan tool-reported edits without opening the tool log — the latest cumulative file list appears once per turn; open a path for its recorded unified diff or exact source detail. Card and file expansion survive reload, paths wrap at 390px, and the summary makes no Git or line-count claim.
 
 #### Expected experience
 
+- Live status never regresses when an older heartbeat read arrives late; an unmatched compaction start stops claiming activity after five minutes without newer native evidence (cas-d17e). Deferred status success/failure is covered by `status-refresh.test.ts`; native expiry and selected-session queue isolation by the Rust work-events and bridge session tests.
 - Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
 - The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
 - Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.
@@ -822,3 +860,65 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
 - A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
 - A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.
+
+### HUB-J26 · See live staffing beside a conversation
+
+- **Entry:** `/commander/` at desktop 1280 and phone 390, a supervisor conversation with three live worker registrations
+- **Goal:** see the selected supervisor's workers, tasks, authoritative state and receipt trail alongside epic merge progress without opening raw output
+- **Touches:** `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/bridge/server/session.rs`, `cas-cli/src/bridge/server/types.rs`, `crates/cas-pty/src/pty.rs`
+- **Suite:** `hub-web/e2e/journeys/team.journey.ts`
+- **Gaps:** the protocol double supplies lifecycle events; acceptance additionally compares a read-only real hub with simultaneous factory worker and epic readbacks
+
+#### Steps
+
+1. Open Team beside the supervisor conversation — keyboard-select the lazy tab; read epic progress, worker tasks and reported model, with no output requests.
+2. A lifecycle event updates staffing without reloading — change a worker state and read it within five seconds while Team stays selected.
+3. Read Team with forced colors and reduced motion — keep lanes readable without animation or phone overflow, then return to the conversation and composer.
+
+#### Expected experience
+
+- Team loads only when selected, with the same session roster, task titles and epic progress as Tasks & progress.
+- Every receipt mark names actual lifecycle evidence; missing model, start time and evidence remain explicitly unreported.
+- A Codex worker's resolved spawn model reaches its CAS registration through the restricted MCP environment; an omitted model stays unreported across registration and status reads.
+- Needs you opens the existing conversation or fleet controls, and the conversation draft stays intact while viewing Team.
+
+#### Edge paths
+
+- An empty session roster stays empty; unrelated project workers never enter the view.
+- Unavailable or stale status remains labeled and a failed status request offers Retry staffing.
+- When the last active worker parks, its staffed release keeps priority over idle historical epics for bounded delivery reads; Git-proven merged tasks retain their merged state.
+- Forced colors and reduced motion preserve textual state and evidence without decorative animation or phone overflow.
+
+### HUB-J27 · Run a supervisor command and read what the harness did
+
+- **Entry:** `/commander/`, paired Claude or Codex conversation, desktop and 390 px
+- **Goal:** choose a curated command from `/` or the header, confirm destructive actions, and distinguish requested input from observed harness execution
+- **Touches:** `hub-web/src/supervisor-commands.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/hub/auth.rs`
+- **Suite:** `hub-web/e2e/journeys/supervisor-commands.journey.ts`
+- **Gaps:** browser outcomes use protocol doubles. Rust tests enforce the allowlist, lease, confirmation and private receipts; disposable real Claude and Codex probes verify native mappings.
+
+#### Steps
+
+1. Choose Usage from the slash palette with the keyboard
+2. Read the observed native result without resending the command
+3. Send pasted paths and unknown slash text as messages (cas-62ea)
+4. Submit an exact Usage token from the composer (cas-62ea)
+5. Cancel Clear, then confirm Exit for the named supervisor
+6. Remove the stopped session after Exit without claiming an unobserved command result
+7. Open the quick controls and read the permission explanation
+8. Read adjacent Raw output and return by keyboard
+
+#### Expected experience
+
+- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Only an exact supported first token reserves a command. Paths such as `/home/pippenz/notes.md`, unknown slash text and `//usage` send as ordinary messages; prefix suggestions still require an explicit choice (cas-62ea). A leading space also sends a supported command as ordinary text.
+- Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
+- After a disconnect refusal followed by an authenticated ended catalog, Exit is observed without a not-sent/retry claim or mutation replay; an earlier Usage keeps its own observed result (cas-7f2a).
+- Exit settlement uses the same 95-second window as outcome polling. A timed-out Exit stays unconfirmed when an unrelated session end arrives later; late status or reconnect refusals do not borrow that end as execution proof (cas-a031).
+- Unsupported harnesses offer no choices. Busy panes and operator drafts refuse injection. Reconnection polls outcomes without replaying mutations.
+
+#### Edge paths
+
+- An unsupported harness offers no choices, and a pairing without input rights sees its permission reason.
+- Busy panes and operator drafts refuse injection; uncertain outcomes never automatically replay mutations.
+- A destructive confirmation can be cancelled without a command frame, and Raw output keeps its existing keyboard route.

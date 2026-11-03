@@ -98,6 +98,27 @@ if [[ -n "$draft" ]]; then
     replace_draft_token '{{MACOS_SHA256}}' "$macos_sha"
 fi
 
+# Record once inside the existing off-clock receipt step. The latency producer
+# owns GitHub's actual landing/publication timestamps; the CLI derives commit
+# latency from tag history and deduplicates the release event by version.
+record_release_quality() (
+    local script_dir cas_bin latency_receipt
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    cas_bin="${CAS_BIN:-cas}"
+    command -v "$cas_bin" >/dev/null || return 1
+    latency_receipt="$workdir/release-latency.receipt"
+    "$script_dir/release-latency-receipt.sh" "$tag" >"$latency_receipt" || return 1
+    # Publication creates this tag remotely after release.sh stops watching.
+    # Fetch it so the CLI can measure commit-to-main rather than report unknown.
+    git -C "$script_dir/.." fetch --quiet "${RELEASE_REMOTE:-origin}" \
+        "refs/tags/$tag:refs/tags/$tag" || return 1
+    cd "$script_dir/.." || return 1
+    "$cas_bin" ledger record-release --receipt "$latency_receipt"
+)
+if ! record_release_quality >&2; then
+    printf 'WARN: could not record %s in the friction ledger; publication receipt remains valid\n' "$tag" >&2
+fi
+
 printf 'TAG=%s\n' "$tag"
 printf 'PUBLISHED_AT=%s\n' "$(jq -r '.publishedAt' "$release_json")"
 printf 'LINUX_ASSET=%s\n' "$linux_asset"

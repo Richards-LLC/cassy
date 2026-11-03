@@ -407,11 +407,31 @@ pub(crate) fn queue_approved_verification_close_retry(
     cas_root: &Path,
     task: &cas_types::Task,
     dispatch_id: &str,
-) -> Result<Option<i64>, String> {
-    if task.is_terminal() || !matches!(task.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
-        return Ok(None);
+) -> Result<ApprovedCloseRetry, String> {
+    // cas-7fc3 (GH #1388): a worker waiting, Blocked, on exactly this
+    // dispatch is the documented verification wait. Its approval is what the
+    // worker waits for, so it gets the retry like an in-progress worker.
+    let eligible = match task.status {
+        TaskStatus::InProgress | TaskStatus::AwaitingMerge => true,
+        TaskStatus::Blocked => {
+            super::super::block_hold::blocked_only_by_verification_wait(cas_root, &task.id, dispatch_id)
+        }
+        _ => false,
+    };
+    if !eligible {
+        return Ok(ApprovedCloseRetry::NotQueued(match task.status {
+            TaskStatus::Blocked => format!(
+                "task {} is blocked by a hold other than the verification wait for {dispatch_id}; resolve that hold, then retry task close",
+                task.id
+            ),
+            status => format!("task {} is {status}", task.id),
+        }));
     }
-    queue_assignee_notice(cas_root, task, |worker_name| {
+    let worker_name = match auto_unblock_worker_target(cas_root, task)? {
+        AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
+        AutoUnblockWorkerTarget::Skipped(reason) => return Ok(ApprovedCloseRetry::NotQueued(reason)),
+    };
+    let prompt_id = enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
         (
             format!("verification-approved-close:{dispatch_id}:worker:{worker_name}"),
             format!(
@@ -420,11 +440,21 @@ pub(crate) fn queue_approved_verification_close_retry(
             ),
             format!("Verification approved: retry close {}", task.id),
         )
-    })
+    })?;
+    Ok(ApprovedCloseRetry::Queued(prompt_id))
+}
+
+/// cas-7fc3: the outcome of queueing a worker close retry after an approved
+/// verdict. `NotQueued` names the specific reason, never a generic
+/// "no live worker" when the worker is live but another gate holds.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ApprovedCloseRetry {
+    Queued(i64),
+    NotQueued(String),
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
-/// merged delivery, so it neither waits for a merge reply nor re-closes.
+/// merged delivery, in its next-turn digest without waking it.
 pub(crate) fn queue_cassy_merge_close_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -440,7 +470,8 @@ pub(crate) fn queue_cassy_merge_close_notice(
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                "{}Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id,
                 if task.deliverables.parked_close_reason.is_some() {
                     "with your parked close reason"
@@ -454,7 +485,7 @@ pub(crate) fn queue_cassy_merge_close_notice(
 }
 
 /// cas-e9d6: tell the worker once that a supervisor merge parked its lane
-/// tip and released its lease, so it neither resumes nor re-closes.
+/// tip and released its lease. This is next-turn context, not a worker action.
 pub(crate) fn queue_merged_lane_parked_notice(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -465,7 +496,8 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
             format!("Merged and parked by Cassy: {}", task.id),
@@ -576,15 +608,24 @@ fn queue_assignee_notice(
     let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
         return Ok(None);
     };
+    enqueue_worker_notice(cas_root, &worker_name, content).map(Some)
+}
+
+/// Enqueue one idempotent prompt for an already-resolved live worker.
+fn enqueue_worker_notice(
+    cas_root: &Path,
+    worker_name: &str,
+    content: impl FnOnce(&str) -> (String, String, String),
+) -> Result<i64, String> {
     let queue = crate::store::open_prompt_queue_store(cas_root)
         .map_err(|error| format!("worker notice queue open failed: {error}"))?;
     let factory_session = std::env::var("CAS_FACTORY_SESSION")
         .ok()
         .filter(|session| !session.trim().is_empty());
-    let (key, prompt, summary) = content(&worker_name);
+    let (key, prompt, summary) = content(worker_name);
     let result = queue.enqueue_idempotent(
         "supervisor",
-        &worker_name,
+        worker_name,
         &prompt,
         factory_session.as_deref(),
         Some(&summary),
@@ -597,7 +638,7 @@ fn queue_assignee_notice(
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     };
     crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
-    Ok(Some(prompt_id))
+    Ok(prompt_id)
 }
 
 /// Truthful repair guidance after task mutation succeeded but lifecycle push failed.
@@ -944,6 +985,7 @@ fn build_prompt_body(
 /// Task mutation must already have succeeded. Callers must surface errors with
 /// [`lifecycle_push_failure_message`] — never claim the original task op retry is safe.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn emit_task_lifecycle_transition(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: Option<&dyn PromptQueueStore>,
@@ -977,6 +1019,7 @@ pub fn emit_task_lifecycle_transition(
 /// transitions need this extra identity because `AwaitingMerge` is reusable
 /// after a supervisor requests changes.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn emit_task_lifecycle_transition_with_branch_tip(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: Option<&dyn PromptQueueStore>,
@@ -993,7 +1036,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
 ) -> Result<LifecyclePushResult, String> {
     emit_task_lifecycle_transition_in_project(
         supervisor_queue, prompt_queue, agent_store, task_id, task_title,
-        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None,
+        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None, false,
     )
 }
 
@@ -1012,6 +1055,7 @@ fn emit_task_lifecycle_transition_in_project(
     occurrence_id: &str,
     branch_tip: Option<&str>,
     cas_dir: Option<&Path>,
+    escalation: bool,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some((supervisor, recipient)) =
@@ -1020,21 +1064,30 @@ fn emit_task_lifecycle_transition_in_project(
         return Ok(LifecyclePushResult::NoSupervisor);
     };
 
-    let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
-        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
+    let verification_wait = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        owned_verification_wait(root, task_id, &recipient.id).is_some()
     });
-    let answered_blocker = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+    let answered_blocker = !escalation && kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
     });
 
-    let key = transition_key(
-        task_id,
-        old_status,
-        new_status,
-        factory_session.as_deref(),
-        kind,
-        occurrence_id,
-    );
+    let key = if kind == LifecycleTransition::Blocked && let Some(root) = cas_dir {
+        let task = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?
+            .get(task_id).map_err(|e| e.to_string())?;
+        let (_, episode) = super::super::block_hold::alert_episode(root, &task)?;
+        format!("{task_id}:blocked-episode:{}:{}:{episode}:{}", factory_session.as_deref().unwrap_or(""), recipient.id,
+            if escalation { "deadline" } else { "initial" })
+    } else {
+        transition_key(task_id, old_status, new_status, factory_session.as_deref(), kind, occurrence_id)
+    };
+    // Quiet refreshes only read completed episodes; they must not take a
+    // SQLite writer transaction every two seconds for an unchanged wait.
+    if kind == LifecycleTransition::Blocked && cas_dir.is_some()
+        && let Some(row) = supervisor_queue.get_by_transition_key(&key).map_err(|e| e.to_string())?
+        && row.prompt_delivered_at.is_some()
+    {
+        return Ok(LifecyclePushResult::AlreadyComplete { notification_id: row.id });
+    }
     let now = Utc::now();
     let payload = json!({
         "task_id": task_id,
@@ -1080,6 +1133,15 @@ fn emit_task_lifecycle_transition_in_project(
     // Fully complete occurrence — no side effects.
     if prompt_already_delivered {
         return Ok(LifecyclePushResult::AlreadyComplete { notification_id });
+    }
+
+    // Episode retries can arrive with newer activity timestamps. Recover the
+    // original payload rather than changing the envelope under its durable key.
+    if already_existed && kind == LifecycleTransition::Blocked && cas_dir.is_some() {
+        let notification = supervisor_queue.get(notification_id).map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing lifecycle outbox row {notification_id}"))?;
+        let pq = prompt_queue.ok_or_else(|| "prompt_queue unavailable; lifecycle outbox remains pending".to_string())?;
+        return deliver_lifecycle_outbox_row_with_agents(supervisor_queue, pq, &notification, Some(agent_store));
     }
 
     // The owning supervisor already knows about lifecycle mutations they performed.
@@ -1144,6 +1206,139 @@ fn emit_task_lifecycle_transition_in_project(
     }
 }
 
+/// Recent unresolved dispatches use the daemon's expiry relay. Older active
+/// waits retain the generic deadline alert instead of disappearing as history.
+pub(crate) const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
+
+/// Exact verification waits have their own action path: the dispatch relay
+/// owns expiry (including close-persisted timeouts), and an approved verdict
+/// hands close back to the worker for a bounded grace period.
+/// Other verdicts, owners and independent holds retain the blocker alert.
+fn owned_verification_wait(
+    root: &Path,
+    task_id: &str,
+    recipient: &str,
+) -> Option<cas_types::VerificationDispatch> {
+    let dispatch = cas_store::get_latest_verification_dispatch(root, task_id).ok().flatten()?;
+    if dispatch.owner_agent_id != recipient
+        || !super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        return None;
+    }
+    let owned = match dispatch.state {
+        cas_types::VerificationDispatchState::Pending
+        | cas_types::VerificationDispatchState::Claimed
+        | cas_types::VerificationDispatchState::TimedOut => true,
+        cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+                .ok()
+                .flatten()
+                .is_some_and(|verdict| verdict.status == cas_types::VerificationStatus::Approved)
+        }
+        _ => false,
+    };
+    owned.then_some(dispatch)
+}
+
+/// Reconcile the director's blocked/liveness signals with the lifecycle
+/// outbox, never a direct prompt. The outbox is the durable episode memory:
+/// one initial receipt and at most one escalation for other blockers. Exact
+/// verification waits use their dispatch/worker action path instead. Runs on
+/// the daemon's store lane; `now` is injectable.
+pub(crate) fn reconcile_blocked_task_alert(
+    root: &Path,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    if task.status != TaskStatus::Blocked {
+        return Ok(());
+    }
+    let Some(actor) = task.assignee.as_deref() else {
+        return Ok(());
+    };
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    let session = resolve_lifecycle_factory_session(agents.as_ref(), actor);
+    let Some((_, recipient)) = lifecycle_notice_owner(agents.as_ref(), session.as_deref()) else {
+        return Ok(());
+    };
+    let sq = open_supervisor_queue_store(root).map_err(|e| e.to_string())?;
+    let pq = open_prompt_queue_store(root).map_err(|e| e.to_string())?;
+    let (start, _) = super::super::block_hold::alert_episode(root, &task)?;
+    let emit = |escalation, reason| {
+        emit_task_lifecycle_transition_in_project(
+            sq.as_ref(),
+            Some(pq.as_ref()),
+            agents.as_ref(),
+            &task.id,
+            &task.title,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            actor,
+            reason,
+            LifecycleTransition::Blocked,
+            &start.min(task.updated_at).to_rfc3339(),
+            None,
+            Some(root),
+            escalation,
+        )
+    };
+    emit(false, None)?;
+    if let Some(dispatch) = owned_verification_wait(root, task_id, &recipient.id) {
+        // Keep the initial receipt quiet. Unresolved and timed-out dispatches
+        // share the expiry relay; approval gives the worker five minutes to
+        // retry before this episode's single deadline alert takes over.
+        if dispatch.state == cas_types::VerificationDispatchState::Resolved
+            && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
+                + chrono::Duration::minutes(5)
+        {
+            emit(true, Some(
+                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
+            ))?;
+        }
+        if matches!(dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+                | cas_types::VerificationDispatchState::TimedOut)
+            && now >= dispatch.deadline_at
+                + chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS)
+        {
+            emit(true, Some(
+                "Verification is overdue beyond the expiry relay window; inspect the live task, re-dispatch verification and finish its close.",
+            ))?;
+        }
+        return Ok(());
+    }
+    if super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some() {
+        return Ok(());
+    }
+    let mut deadline = start + chrono::Duration::minutes(5);
+    if let Some(dispatch) =
+        cas_store::get_latest_verification_dispatch(root, task_id).map_err(|e| e.to_string())?
+        && super::super::block_hold::blocked_only_by_verification_wait(root, task_id, &dispatch.id)
+    {
+        deadline = if matches!(
+            dispatch.state,
+            cas_types::VerificationDispatchState::Pending
+                | cas_types::VerificationDispatchState::Claimed
+        ) {
+            deadline.min(dispatch.deadline_at)
+        } else {
+            now
+        };
+    }
+    if now >= deadline {
+        emit(
+            true,
+            Some(
+                "Blocker deadline reached or verification ended; inspect the live task and resolve its next step.",
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 /// Source marker for the verification-dispatch handoff (cas-8725).
 ///
 /// Deliberately NOT a `lifecycle-wake:` source: this row is not a task
@@ -1166,6 +1361,7 @@ pub const VERIFICATION_DISPATCH_SOURCE_PREFIX: &str = "verification-dispatch:";
 /// of it. Idempotent on the dispatch id: a retried close for the same dispatch
 /// re-uses the row rather than queueing a second copy.
 pub fn emit_verification_dispatch_handoff(
+    cas_root: &Path,
     prompt_queue: &dyn PromptQueueStore,
     dispatch_id: &str,
     task_id: &str,
@@ -1176,13 +1372,22 @@ pub fn emit_verification_dispatch_handoff(
     bound_head: Option<&str>,
     approved_verdict_id: Option<&str>,
 ) -> Result<(), String> {
+    let reason_manifest = close_reason.filter(|reason| reason.len() > 400).and_then(|reason| {
+        match crate::review_body::relay_evidence_manifest(cas_root, task_id, reason) {
+            Ok(reference) => Some(reference),
+            Err(error) => {
+                tracing::warn!(%error, task_id, "dispatch manifest unavailable; retaining full reason");
+                None
+            },
+        }
+    });
     let body = crate::prompt_revalidation::verification_dispatch_envelope(
         dispatch_id,
         task_id,
         owner_agent_id,
         &deadline.to_rfc3339(),
         worker,
-        close_reason,
+        reason_manifest.as_deref().or(close_reason),
         bound_head,
         approved_verdict_id,
     );
@@ -1390,6 +1595,7 @@ fn parse_required_status(
 ///
 /// Fail-closed on corrupt/incomplete payloads (cas-3a47): leaves
 /// `prompt_delivered_at` unmarked so a later fix can re-drain.
+#[cfg(test)]
 pub fn deliver_lifecycle_outbox_row(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: &dyn PromptQueueStore,
@@ -1542,6 +1748,7 @@ fn deliver_lifecycle_outbox_row_with_agents(
 /// Drain all pending lifecycle outbox rows (callable repair + daemon auto-drain).
 ///
 /// Does **not** re-run task mutations. Safe after process restart.
+#[cfg(test)]
 pub fn drain_lifecycle_outbox(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: &dyn PromptQueueStore,
@@ -1677,6 +1884,7 @@ impl CasCore {
             occurrence_id,
             branch_tip,
             Some(&self.cas_root),
+            false,
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {
@@ -1900,6 +2108,43 @@ mod tests {
     }
 
     #[test]
+    fn merged_worker_notices_wait_for_next_turn_without_a_wake() {
+        use cas_store::HookDrain;
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-merge-notices")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents.register(&agent_in_session(
+            "merge-worker-id", "merge-worker", AgentRole::Worker, "sess-merge-notices",
+        )).unwrap();
+        let mut task = Task::new("cas-merge-notice".into(), "merged delivery".into());
+        task.assignee = Some("merge-worker".into());
+        let parked = queue_merged_lane_parked_notice(temp.path(), &task, "delivery-tip", "merge-tip")
+            .unwrap().unwrap();
+        let closed = queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap().unwrap();
+        assert_eq!(queue_cassy_merge_close_notice(temp.path(), &task, "merge-tip").unwrap(), Some(closed));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap().is_empty(),
+            "merged/parked facts must never reach worker wake transport");
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::Unseen, 10, 10000).unwrap().rows.is_empty());
+        let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        for row in &digest {
+            assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
+                "the next turn must retain task and merge evidence");
+        }
+        assert!(queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
+            HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "digest is shown once");
+        let rejected = queue_rejected_merge_reopen_notice(temp.path(), &task, "verdict", "fix the regression")
+            .unwrap().unwrap();
+        assert_eq!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
+    }
+
+    #[test]
     fn approved_verification_wakes_worker_once_to_retry_close_gh_1036() {
         let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wake")]);
         let temp = TempDir::new().unwrap();
@@ -1934,12 +2179,105 @@ mod tests {
         assert!(!rows[0].urgent);
 
         task.status = TaskStatus::Closed;
-        assert_eq!(
+        assert!(matches!(
             queue_approved_verification_close_retry(temp.path(), &task, "vdispatch-approved-2")
                 .unwrap(),
-            None,
-        );
+            ApprovedCloseRetry::NotQueued(_),
+        ));
         assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+    }
+
+    /// cas-7fc3 (GH #1388): a live worker Blocked on the documented
+    /// verification wait for exactly this dispatch gets the close retry. A
+    /// task held by any other blocker is not retried, and the receipt names
+    /// that hold rather than claiming no live worker exists.
+    #[test]
+    fn approved_verification_retries_close_for_worker_in_verification_wait_cas_7fc3() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wait")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut worker =
+            agent_in_session("wait-worker-id", "wait-worker", AgentRole::Worker, "sess-verdict-wait");
+        worker.status = AgentStatus::Idle;
+        agents.register(&worker).unwrap();
+        let tasks = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let blocked = |id: &str, blocker: &str| {
+            let mut task = Task::new(id.into(), "No-code artifact delivery".into());
+            task.status = TaskStatus::Blocked;
+            task.assignee = Some("wait-worker".into());
+            task.execution_note = Some("no-code".into());
+            task.notes = format!("[2026-10-27 15:00] 🚫 BLOCKER {blocker}");
+            tasks.add(&task).unwrap();
+            task
+        };
+
+        let waiting = blocked(
+            "cas-verdict-wait",
+            &crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-wait"),
+        );
+        let queued =
+            queue_approved_verification_close_retry(temp.path(), &waiting, "vdispatch-wait").unwrap();
+        assert!(matches!(queued, ApprovedCloseRetry::Queued(_)), "{queued:?}");
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "wait-worker");
+        // pin: the retry prompt must name the task whose wait was approved.
+        assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wait now"));
+
+        // A wait note left by an earlier, rejected dispatch A belongs to a
+        // finished cycle and must not disqualify the approval of dispatch B.
+        let mut restarted = Task::new("cas-verdict-restart".into(), "No-code artifact rework".into());
+        restarted.status = TaskStatus::Blocked;
+        restarted.assignee = Some("wait-worker".into());
+        restarted.notes = format!(
+            "[2026-10-27 14:00] 🚫 BLOCKER {}\n[2026-10-27 15:00] 🚫 BLOCKER {}",
+            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-rejected-a"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-current-b"),
+        );
+        tasks.add(&restarted).unwrap();
+        let retried =
+            queue_approved_verification_close_retry(temp.path(), &restarted, "vdispatch-current-b").unwrap();
+        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
+        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
+
+        // An ordinary blocker answered before this dispatch was requested
+        // ("need credentials") belongs to an earlier cycle and must not
+        // disqualify the retry the current wait is waiting for.
+        let dispatch = cas_store::create_verification_dispatch(
+            temp.path(),
+            "cas-verdict-answered",
+            "wait-worker-id",
+            "supervisor-id",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let mut answered = Task::new("cas-verdict-answered".into(), "No-code artifact delivery".into());
+        answered.status = TaskStatus::Blocked;
+        answered.assignee = Some("wait-worker".into());
+        answered.notes = format!(
+            "[2026-01-02 09:00] 🚫 BLOCKER Need hub credentials before publishing.\n[{}] 🚫 BLOCKER {}",
+            dispatch.requested_at.format("%Y-%m-%d %H:%M"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id),
+        );
+        tasks.add(&answered).unwrap();
+        let retried =
+            queue_approved_verification_close_retry(temp.path(), &answered, &dispatch.id).unwrap();
+        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
+
+        let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");
+        let refused =
+            queue_approved_verification_close_retry(temp.path(), &held, "vdispatch-held").unwrap();
+        let ApprovedCloseRetry::NotQueued(reason) = refused else {
+            panic!("a task held by another blocker must not be retried: {refused:?}");
+        };
+        assert!(reason.contains("blocked by a hold other than the verification wait"), "{reason}");
+        assert!(!reason.contains("no live assigned worker"), "{reason}");
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
     }
 
     #[test]
@@ -2535,6 +2873,7 @@ mod tests {
     /// operator had already left.
     #[test]
     fn relays_follow_the_supervisor_across_a_mid_session_restart() {
+        let mut env = TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
         agents.init().unwrap();
@@ -2601,7 +2940,7 @@ mod tests {
         let pq = SqlitePromptQueueStore::open(temp_q.path()).unwrap();
         pq.init().unwrap();
 
-        unsafe { std::env::set_var("CAS_FACTORY_SESSION", "cas-src-fast-pelican-83") };
+        env.set("CAS_FACTORY_SESSION", "cas-src-fast-pelican-83");
         let result = emit_task_lifecycle_transition(
             &sq,
             Some(&pq),
@@ -2616,7 +2955,6 @@ mod tests {
             "2026-08-07T18:51:51+00:00",
         )
         .unwrap();
-        unsafe { std::env::remove_var("CAS_FACTORY_SESSION") };
 
         let notification_id = match result {
             LifecyclePushResult::Enqueued { notification_id } => notification_id,

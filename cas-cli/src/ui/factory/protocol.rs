@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use cas_types::ArtifactRef;
+use super::supervisor_commands::{SupervisorCommand, SupervisorCommandKey, SupervisorCommandReceipt};
 
 /// Original daemon protocol version used before explicit negotiation existed.
 pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
@@ -27,6 +28,7 @@ pub enum ProtocolCapability {
     /// Local framed Unix GUI control only; never advertised by WS/relay.
     BindingIntakeControlV1,
     TargetedInterrupt,
+    SupervisorCommands,
     AttributedSendMessage,
     /// A pane can be initialized from terminal state instead of a raw-byte tail.
     AuthoritativePaneKeyframes,
@@ -58,6 +60,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::MessageClientRefDedupe,
         ProtocolCapability::WorkEvents,
         ProtocolCapability::WorkEventsLive,
+        ProtocolCapability::SupervisorCommands,
     ]
 }
 
@@ -107,7 +110,7 @@ where
 /// H3 transports and persists these values but does not authenticate them; H2 owns
 /// that boundary. Every field is required on the wire. `null` means explicitly
 /// unavailable and is never interpreted as supervisor or MCP identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageAttribution {
     pub device_id: Option<String>,
     pub credential_id: Option<String>,
@@ -136,6 +139,10 @@ pub enum OperatorTurnKind {
     Receipt,
     Ask,
     Blocker,
+    /// A request for a credential. The row names it (`summary`) and says what
+    /// it is for (`message`); the value is answered over the hub's secrets
+    /// route and never travels in any turn (cas-1996).
+    Secret,
 }
 
 impl Default for OperatorTurnKind {
@@ -152,8 +159,19 @@ impl OperatorTurnKind {
             Self::Receipt => "receipt",
             Self::Ask => "ask",
             Self::Blocker => "blocker",
+            Self::Secret => "secret",
         }
     }
+}
+
+/// A secret request's name, which is also its file name in the destination
+/// folder: 1-64 of `[A-Za-z0-9_.-]`, not starting with a dot (cas-1996).
+pub fn valid_secret_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// Durable supervisor-to-Commander reply payload. The device id is included
@@ -188,10 +206,13 @@ pub struct OperatorReplyPayload {
 ///
 /// This is intentionally a send-shaped projection rather than a `QueuedPrompt`:
 /// the browser must never receive pane/transcript fields, and the durable
-/// notification id is the only stable identity available after a reconnect.
+/// notification id and original client_ref correlate accepted sends after a reconnect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationHistoryMessage {
     pub notification_id: i64,
+    /// Original send identity, including when the live MessageQueued ACK was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ref: Option<String>,
     pub target: String,
     pub text: String,
     /// acknowledged: durably queued; delivered: actual recipient transport proof.
@@ -261,7 +282,7 @@ pub struct ConversationHistoryReply {
 
 /// Version of the [`WorkEvent`] schema; documented in
 /// `docs/guides/commander-work-events.md` (cas-8f88).
-pub const WORK_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const WORK_EVENT_SCHEMA_VERSION: u32 = 2;
 /// Default and largest page of work events.
 pub const WORK_EVENT_PAGE_SIZE: u16 = 100;
 
@@ -283,6 +304,75 @@ pub enum WorkEventKind {
     Notice,
     #[serde(other)]
     Other,
+}
+
+/// Additive v2 tool facts. Strings intentionally allow future operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkTool {
+    pub name: String,
+    pub operation: String,
+    pub targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<WorkToolCounts>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkToolCounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches: Option<u64>,
+}
+
+/// The latest observed state of an operation, never inferred from elapsed time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLifecycle {
+    pub id: String,
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkReasoning {
+    pub summary: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLineCounts {
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkChangedFile {
+    pub path: String,
+    pub operation: String,
+    pub source_event_id: String,
+    /// The source event's edit counts, never cumulative or a net Git diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_counts: Option<WorkLineCounts>,
+}
+
+/// A cumulative per-turn snapshot of successful explicit edit calls, not Git state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkChangedFiles {
+    pub files: Vec<WorkChangedFile>,
+    pub provenance: String,
+    pub complete: bool,
 }
 
 /// One item of a session's work stream (cas-8f88). Read from transcripts,
@@ -310,6 +400,14 @@ pub struct WorkEvent {
     /// The tool call failed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<WorkTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<WorkLifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<WorkReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<WorkChangedFiles>,
 }
 
 impl MessageAttribution {
@@ -448,6 +546,29 @@ pub enum ClientMessage {
     /// deliberately distinct from legacy focused-pane Ctrl+C `Interrupt`.
     InterruptPane { pane_id: String },
 
+    /// Closed allowlist. The actual supervisor pane and mapping belong to the daemon.
+    SupervisorCommand {
+        command: SupervisorCommand,
+        client_ref: String,
+        #[serde(default)]
+        confirmed: bool,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+    /// Read the original command receipt; this never sends a second command.
+    SupervisorCommandStatus {
+        client_ref: String,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+    /// Navigate only the original caller's currently open native chooser.
+    SupervisorCommandStep {
+        client_ref: String,
+        key: SupervisorCommandKey,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+
     /// Enqueue an attributed semantic message through the durable coordination
     /// delivery path (inbox + wake / urgent interrupt-and-redirect machinery).
     SendMessage {
@@ -520,7 +641,10 @@ pub enum ClientMessage {
 
     /// Request the redacted detail of one work event (cas-8f88): a tool's
     /// input and result, or a thinking block's full text.
-    WorkEventDetailRequest { request_id: String, event_id: String },
+    WorkEventDetailRequest {
+        request_id: String,
+        event_id: String,
+    },
 
     /// Request current state snapshot
     GetState,
@@ -568,7 +692,9 @@ pub enum PaneSizeAuthority {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
     /// Local-only response. An acknowledgement exists only after both tasks drain.
-    BindingIntake { reply: super::daemon::runtime::violet_intake::IntakeReply },
+    BindingIntake {
+        reply: super::daemon::runtime::violet_intake::IntakeReply,
+    },
     /// Welcome message on attach with current state
     Welcome {
         /// Session name
@@ -588,6 +714,8 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pane_bootstrap: Vec<PaneBootstrap>,
     },
+
+    SupervisorCommandReceipt { receipt: SupervisorCommandReceipt },
 
     /// A supervisor reply addressed to one authenticated Commander device.
     /// The queue row remains the retry/receipt authority until this frame is
@@ -1303,7 +1431,10 @@ mod tests {
         };
         let encoded = serde_json::to_string(&current).unwrap();
         assert!(!encoded.contains("reply_to_session"), "{encoded}");
-        assert!(!encoded.contains("options"), "empty choices stay absent: {encoded}");
+        assert!(
+            !encoded.contains("options"),
+            "empty choices stay absent: {encoded}"
+        );
         let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, current);
         assert_eq!(legacy.reply_to_session, None);
@@ -1316,7 +1447,10 @@ mod tests {
         };
         let decoded: OperatorReplyPayload =
             serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
-        assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
+        assert_eq!(
+            decoded.reply_to_session.as_deref(),
+            Some("acct-wise-lion-31")
+        );
 
         // cas-7ebc: choices must survive the same payload boundary used by
         // persisted operator turns, rather than existing only in hub doubles.
@@ -1477,6 +1611,7 @@ mod tests {
             request_id: "history-1".into(),
             messages: vec![ConversationHistoryMessage {
                 notification_id: 3139,
+                client_ref: None,
                 target: "supervisor".into(),
                 text: "status?".into(),
                 state: "acknowledged".into(),
@@ -1498,7 +1633,11 @@ mod tests {
         assert_eq!(json["ConversationHistory"]["request_id"], "history-1");
         // cas-55a4: the earlier-session section is additive. An empty one is
         // not on the wire, and an older page without it still decodes.
-        assert!(json["ConversationHistory"].get("earlier_messages").is_none());
+        assert!(
+            json["ConversationHistory"]
+                .get("earlier_messages")
+                .is_none()
+        );
         assert!(json["ConversationHistory"].get("earlier_replies").is_none());
         let legacy: DaemonMessage = serde_json::from_value(serde_json::json!({
             "ConversationHistory": {"request_id": "h", "messages": [], "replies": [], "has_earlier": false}

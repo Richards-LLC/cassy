@@ -286,3 +286,54 @@ fn refusals_preserve_blockers_and_keep_unknown_attempts_unresolved() {
         );
     }
 }
+
+#[test]
+fn no_eligible_readers_is_a_definite_retryable_refusal_without_settlement() {
+    let mut legacy: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/binding_reconciliation/v1/legacy-intake-active.json"
+    ))
+    .unwrap();
+    legacy["code"] = json!("no_eligible_readers");
+    legacy["reason"] = json!("no_eligible_readers");
+    legacy["next_action"] = json!("retry_later");
+    legacy["guidance"] = json!("Pending activity would reach no supervisor of this project. Start one, then retry; nothing was settled.");
+    legacy["blockers"] = Value::Null;
+    legacy["retry_after_secs"] = Value::Null;
+    legacy["latest_attempt"]["quiescence"]["blocking_v1_leases"] = json!(0);
+    legacy["latest_attempt"]["quiescence"]["blocking_v1_consumers"] = json!([]);
+    let parsed = parse(&legacy, 409).expect("legacy pending rows need a retryable refusal");
+    assert_eq!(parsed.code, ReconciliationCode::NoEligibleReaders);
+    assert_eq!(parsed.next_action, NextAction::RetryLater);
+    assert_eq!(parsed.strict_activation, Some(StrictActivation::Refused));
+    assert_eq!(parsed.settled.unwrap().migrated, 0);
+
+    let mut managed = completed();
+    managed["code"] = json!("no_eligible_readers");
+    managed["reason"] = json!("no_eligible_readers");
+    managed["next_action"] = json!("retry_later");
+    managed["strict_activation"] = json!("unevidenced");
+    managed["guidance"] = legacy["guidance"].clone();
+    managed["latest_attempt"]["outcome"] = json!("refused");
+    managed["latest_attempt"]["prior_mode"] = json!("managed");
+    managed["latest_attempt"]["settled"] = json!({"migrated_v1_rows":0,"retired_v1_rows":0,"invalidated_v1_leases":0});
+    managed["settled"] = json!({"migrated":0,"retired":0,"invalidated_leases":0});
+    let parsed = parse(&managed, 409).expect("managed binding retains its original fence");
+    assert_eq!(parsed.strict_activation, Some(StrictActivation::Unevidenced));
+    assert!(parsed.fence_receipt.is_some());
+
+    for (pointer, replacement) in [
+        ("/code", json!("authority_unavailable")),
+        ("/next_action", json!("operator_repair")),
+        ("/settled/migrated", json!(1)),
+        ("/binding/fence_generation", json!(1)),
+        ("/reason", json!("unknown_future_refusal")),
+    ] {
+        let mut corrupt = legacy.clone();
+        *corrupt.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&corrupt, 409).is_err(), "accepted malformed refusal at {pointer}");
+    }
+    assert!(parse(&legacy, 503).is_err());
+    let mut missing = legacy;
+    missing.as_object_mut().unwrap().remove("next_action");
+    assert!(parse(&missing, 409).is_err());
+}

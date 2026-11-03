@@ -59,15 +59,7 @@ pub use routing::{
     validate_model_matches_cli, is_claude_model_slug, validate_model_is_active,
     validate_model_slug, validate_model_slug_with, normalize_spec_for_harness,
 };
-pub use session::lifecycle::SessionManager;
-pub use session::resume::{
-    SharedUnifiedSessionManager, UnifiedSessionConfig, UnifiedSessionManager,
-    new_shared_unified_manager,
-};
-pub use session::state::{
-    AgentState, SessionCache, SessionError, SessionId, SessionInfo, SessionState, SessionSummary,
-    SessionType,
-};
+pub use session::state::{AgentState, SessionId, SessionState, SessionSummary, SessionType};
 pub use spec_resolver::{
     ConfigSources, SpecResolverError, apply_codex_fallback, apply_codex_fallback_for_supervisor,
     configured_factory_default_model, configured_worker_llm_defaults, resolve_specs,

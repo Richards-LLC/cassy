@@ -1,4 +1,4 @@
-import { CONTROL_CAPABILITY, FACTORY_MANAGE_CAPABILITY, FACTORY_OPERATE_CAPABILITY, READ_CAPABILITY, canEnableFactoryOperate, scopeGrantCommand, scopeSummary } from "./pairing-scopes";
+import { CONTROL_CAPABILITY, READ_CAPABILITY, canEnableFactoryOperate, scopeGrantCommand, scopeSummary } from "./pairing-scopes";
 import { NOT_ALLOWED_ON_PAIRING, fleetControlGate, fleetOperationScope, type FleetOperation } from "./fleet-permissions";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
@@ -383,8 +383,6 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
   it("says what they allow in plain words, beside the exact scopes", () => {
     expect(scopeSummary([...CONTROL, "factory-operate"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY, "Manage workers and tasks"]);
     expect(scopeSummary([...CONTROL, "factory-manage"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY, "Stop and restart workers and sessions"]);
-    expect(FACTORY_OPERATE_CAPABILITY).toBe("Manage workers and tasks");
-    expect(FACTORY_MANAGE_CAPABILITY).toBe("Stop and restart workers and sessions");
   });
 
   it("offers a fleet scope's box only when the invitation grants it, ticked", () => {

@@ -24,6 +24,7 @@ pub(crate) use pull::{
     render_task_proposal_provenance, take_rendered_provenance,
 };
 mod push;
+pub(crate) mod quality_events;
 mod team_push;
 
 #[cfg(test)]

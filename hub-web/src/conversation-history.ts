@@ -1,3 +1,4 @@
+import { sentMessageLabel } from "./sent-attachments";
 import type { ConversationHistoryMessage, ConversationHistoryReply, MessageQueued, OperatorReply } from "./types";
 import type { PendingSend } from "./conversation-store";
 
@@ -27,6 +28,7 @@ export interface ConversationSend {
   id: string;
   target: string;
   text: string;
+  sessionStartedAt?: string;
   /** `unconfirmed`: sent, but the hub's receipt never came (cas-1622). It may
    * or may not have arrived; the operator can retry it. */
   state: "sending" | "acknowledged" | "delivered" | "replied" | "error" | "unconfirmed";
@@ -236,6 +238,20 @@ export class ConversationHistory {
    * even when the machine's clock runs ahead.
    */
   private insertDurable(event: ConversationEvent): void {
+    // Terminal input is captured asynchronously from the harness. Its queue
+    // ID records the capture, not when the operator asked the question. Keep
+    // ordinary traffic sequenced as before, then place terminal inputs by
+    // their original machine timestamp on every live/history arrival.
+    const terminal = (item: ConversationEvent) => item.kind === "send" && item.value.target === "terminal-history";
+    const inputs = this.events.filter(terminal);
+    this.events.splice(0, this.events.length, ...this.events.filter(item => !terminal(item)));
+    if (terminal(event)) inputs.push(event);
+    else this.insertSequenced(event);
+    inputs.sort((a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY));
+    for (const input of inputs) this.insert(input);
+  }
+
+  private insertSequenced(event: ConversationEvent): void {
     const seq = durableSeq(event);
     if (seq === undefined) { this.insert(event); return; }
     const later = this.events.findIndex((existing) => { const other = durableSeq(existing); return other !== undefined && other > seq; });
@@ -288,9 +304,9 @@ export class ConversationHistory {
    * unreachable. It shows in the thread as waiting and has no receipt
    * deadline until `release` puts it on the wire.
    */
-  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string, sessionStartedAt?: string): void {
     const key = Math.max(at, this.latestAt());
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }), ...(sessionStartedAt === undefined ? {} : { sessionStartedAt }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
   /**
@@ -331,6 +347,7 @@ export class ConversationHistory {
       if (!state || at === undefined || !Number.isFinite(at)) return [];
       return [{
         id: send.id, target: send.target, text: send.text, state, at,
+        ...(send.sessionStartedAt === undefined ? {} : { sessionStartedAt: send.sessionStartedAt }),
         ...(send.sentAt === undefined || send.held ? {} : { sentAt: send.sentAt }),
         ...(send.replyTo === undefined ? {} : { replyTo: send.replyTo }),
         ...(send.error === undefined ? {} : { error: send.error }),
@@ -406,7 +423,7 @@ export class ConversationHistory {
     const held: PendingSend[] = [];
     for (const stored of sends) {
       if (this.events.some((event) => event.kind === "send" && event.value.id === stored.id)) continue;
-      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }) };
+      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }), ...(stored.sessionStartedAt === undefined ? {} : { sessionStartedAt: stored.sessionStartedAt }) };
       if (stored.state === "held") {
         value.held = true;
         held.push(stored);
@@ -470,6 +487,10 @@ export class ConversationHistory {
       this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: incoming, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
       return;
     }
+    // A reconnect can lose MessageQueued even though the durable turn arrived.
+    // Reuse receipt correlation before the notification-id merge: the pending
+    // send knows its client_ref, but cannot yet know the queue's notification id.
+    if (message.client_ref) this.acknowledge({ client_ref: message.client_ref, notification_id: message.notification_id, target: message.target, stamped: message.stamped, operator_label: message.operator_label });
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
     if (existing?.kind === "send") {
       existing.value.target = message.target;
@@ -486,6 +507,8 @@ export class ConversationHistory {
       // not re-open the ask it answered or move it across the session line
       // (cas-1f13); in_reply_to never changes after the send.
       existing.value.replyTo = message.reply_to ?? existing.value.replyTo;
+      delete existing.value.unconfirmedAt;
+      delete existing.value.restored;
       existing.session ??= message.session;
       return;
     }
@@ -493,7 +516,7 @@ export class ConversationHistory {
     // cas-e7b1: an unsettled message restored from the journal that the machine's
     // history now shows did arrive. It becomes that row instead of a second
     // copy of the message.
-    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
+    const restored = message.client_ref ? undefined : this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
       && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
       && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
     if (restored?.kind === "send") {
@@ -564,8 +587,9 @@ export class ConversationHistory {
     this.events.forEach((event, index) => {
       if (event.kind !== "reply") return;
       const reply = event.value;
-      if ((reply.kind === "ask" || reply.kind === "blocker") && this.retirementAt(index)) return;
-      if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
+      if ((reply.kind === "ask" || reply.kind === "blocker" || reply.kind === "secret") && this.retirementAt(index)) return;
+      // A secret request (cas-1996) is answered like an ask: the hub's reply names it.
+      if ((reply.kind === "ask" || reply.kind === "secret") && !this.answered(reply.notification_id)) out.push(reply);
       else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed")) out.push(reply);
     });
     return out;
@@ -585,9 +609,9 @@ export class ConversationHistory {
   }
   private retirementAt(index: number): AskRetirement | undefined {
     const event = this.events[index];
-    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker")) return undefined;
+    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker" && event.value.kind !== "secret")) return undefined;
     const reply = event.value;
-    if (reply.kind === "ask" && this.answered(reply.notification_id)) return undefined;
+    if ((reply.kind === "ask" || reply.kind === "secret") && this.answered(reply.notification_id)) return undefined;
     if (this.dismissedAsks.has(reply.notification_id)) return "dismissed";
     if (this.attentionSnapshot && reply.notification_id <= this.attentionSnapshot.through && !this.attentionSnapshot.open.has(reply.notification_id)) return "handled";
     const later = this.events.slice(index + 1);
@@ -692,10 +716,10 @@ export class ConversationHistory {
    * deadline. Held sends are not on the wire and are left alone. Returns the
    * ids that changed.
    */
-  unconfirmInFlight(now: number): string[] {
+  unconfirmInFlight(now: number, ids?: ReadonlySet<string>): string[] {
     const changed: string[] = [];
     for (const event of this.events) {
-      if (event.kind !== "send" || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
+      if (event.kind !== "send" || (ids && !ids.has(event.value.id)) || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
       event.value.state = "unconfirmed";
       event.value.unconfirmedAt = now;
       changed.push(event.value.id);
@@ -800,9 +824,9 @@ export class ConversationHistory {
       // A failed send the operator dismissed is out of the thread, so out of the preview too.
       if (event.value.dismissed && this.isFailedSend(event.value)) continue;
       // cas-b00c: a message whose delivery was never confirmed says so in the list too.
-      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${event.value.text}`;
-      if (event.value.state !== "error") return `You: ${event.value.text}`;
-      if (!event.value.replaced) return `Not sent: ${event.value.text}`;
+      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${sentMessageLabel(event.value.text)}`;
+      if (event.value.state !== "error") return `You: ${sentMessageLabel(event.value.text)}`;
+      if (!event.value.replaced) return `Not sent: ${sentMessageLabel(event.value.text)}`;
     }
     return undefined;
   }

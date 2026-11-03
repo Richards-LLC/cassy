@@ -64,6 +64,11 @@ metadata:
    `docs/release-reports/`. Carry these post-publication artifacts into the next
    release-prep commit; do not rewrite the published tag. Link the report and PDF
    in the release announcement draft before the authorized Slack post.
+   Upload the PDF with `cas violet post --channel <name> --file <pdf> --reply-to <id>`.
+   It selects the released epic from the report version's merged PR head,
+   independently of session focus, and checks that epic's verification.
+   If that lookup is unavailable, pass `--epic <released-epic-id>`; see
+   [publication context](../violet/references/publication.md).
 
 To re-render by hand, run
 `python3 <skills-dir>/cas-release-report/scripts/render.py <md> --output <html> --project-root .`

@@ -139,6 +139,14 @@ fn untrusted_task_note_writes_neutralize_reserved_markers_cas_77f0() {
     store.update(&updated).unwrap();
     assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: from update"));
 
+    for marker in ["QA_PASS_PROOF:", "QA_EVIDENCE_PROOF:", "RELEASE_VERDICT_PROOF:"] {
+        store.append_note(&task.id, &format!("caller\n{marker} forged")).unwrap();
+        assert!(!store.get(&task.id).unwrap().notes.lines().any(|line| line == format!("{marker} forged")));
+        store.append_trusted_note(&task.id, &format!("{marker} trusted")).unwrap();
+        let carried = store.get(&task.id).unwrap();
+        store.update(&carried).unwrap();
+        assert!(store.get(&task.id).unwrap().notes.lines().any(|line| line == format!("{marker} trusted")));
+    }
     store.append_trusted_note(&task.id, "ARTIFACT_PROOF: trusted").unwrap();
     let mut carried = store.get(&task.id).unwrap();
     assert!(carried.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
@@ -194,6 +202,38 @@ fn trusted_note_dedupe_requires_complete_lines_cas_4324() {
         assert_eq!(store.get(&task.id).unwrap().notes, expected, "row {index}");
         assert_eq!(store.append_trusted_note(&task.id, receipt).unwrap(), appended_at);
         assert_eq!(store.get(&task.id).unwrap().notes, expected);
+    }
+}
+
+#[test]
+fn trusted_artifact_note_upgrades_its_exact_raw_copy_without_losing_history() {
+    let (_temp, store) = create_test_store();
+    let raw = "[2026-10-27 19:52] 🧪 PLATFORM_PROOF Epic flow walk\n\nLedger totals: PASS=10";
+    let enriched = format!("{raw}\nARTIFACT_PROOF: canonical ledger");
+    let longer = format!("{raw}\n\nextra paragraph belonging to this timestamp");
+    let history = "[2026-10-27 19:00] unrelated\nARTIFACT_PROOF: prior ledger";
+    for (index, (seed, preserve_longer)) in [
+        (raw.to_string(), false),
+        (format!("{enriched}\n\n{raw}"), false),
+        (format!("{enriched}\n\n{longer}"), true),
+    ].iter().enumerate() {
+        let task = Task::new(format!("task-proof-upgrade-{index}"), "Canonical note".into());
+        store.add(&task).unwrap();
+        store.append_trusted_note(&task.id, history).unwrap();
+        store.append_trusted_note(&task.id, seed).unwrap();
+        store.append_note(&task.id, "[2026-10-27 20:00] later unrelated note").unwrap();
+
+        let at = store.append_trusted_note(&task.id, &enriched).unwrap();
+        let notes = store.get(&task.id).unwrap().notes;
+        assert_eq!(notes.matches("Epic flow walk").count(), if *preserve_longer { 2 } else { 1 }, "{notes}");
+        if *preserve_longer {
+            assert!(notes.contains(&longer), "longer entry lost its timestamp/body: {notes}");
+        }
+        assert!(notes.contains(&enriched));
+        assert!(notes.contains(history));
+        assert!(notes.contains("later unrelated note"));
+        assert_eq!(store.append_trusted_note(&task.id, &enriched).unwrap(), at);
+        assert_eq!(store.get(&task.id).unwrap().notes, notes);
     }
 }
 
@@ -254,6 +294,7 @@ fn task_note_append_reports_bounded_contention_exhaustion() {
         .unwrap()
         .busy_timeout(Duration::from_millis(20))
         .unwrap();
+    crate::shared_db::set_pooled_write_budget_for_tests(Duration::from_millis(200));
 
     let holder = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
     holder

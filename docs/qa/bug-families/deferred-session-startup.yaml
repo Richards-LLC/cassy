@@ -1,0 +1,4 @@
+title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
+tasks: [cas-dd2e]
+invariants: [HUB-J13-GOAL, HUB-J13-STARTUP-WAKE]
+journeys: [HUB-J13]

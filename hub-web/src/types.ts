@@ -31,7 +31,18 @@ export interface PairingInstallIdentity {
   generation: number;
 }
 
+export interface SessionEndOutcome {
+  at: string;
+  reason: string;
+  workers_stopped: string[];
+  orphans: string[];
+  unverified?: string[];
+}
+
 export interface HubSession {
+  ended?: SessionEndOutcome;
+  /** Hub-persisted dismissal for this session generation, shared by paired devices. */
+  dismissed?: boolean;
   name: string;
   project_dir?: string;
   supervisor: string;
@@ -54,6 +65,21 @@ export interface HubSession {
   started_at?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), so the app switcher opens Explorer on it. */
   cloud_project_id?: string;
+  /** Additive session-read metadata; omitted by older hubs. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  /** The supervisor's model and effort (cas-2dcc); older hubs omit them. */
+  model?: string;
+  effort?: string;
+  account_email?: string;
+  project?: string;
+  /** The project's human name (cas-6f79): its configured display name, else its
+   * folder; never the canonical id. Older hubs omit it. */
+  project_name?: string;
+  machine_online?: boolean;
+  /** This supervisor's observed MCP binary, never the hub's running version. */
+  mcp_version?: string;
+  /** The Cassy binary installed on this supervisor's machine. */
+  installed_version?: string;
 }
 
 export interface PaneInfo {
@@ -73,7 +99,7 @@ export interface SessionState {
   rows: number;
 }
 
-export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker";
+export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker" | "secret";
 
 export interface ArtifactRef {
   artifact_id: string;
@@ -131,6 +157,8 @@ export interface OperatorNoticeResolved {
 /** Durable operator message projected by the daemon's history page. */
 export interface ConversationHistoryMessage {
   notification_id: number;
+  /** Original send identity, so history can settle a send whose live ACK was lost. */
+  client_ref?: string | null;
   target: string;
   text: string;
   /** acknowledged = durable queue acceptance; delivered = actual supervisor transport proof. */

@@ -34,6 +34,7 @@ export const USAGE_ACTIONS = {
   "session.end": "HUB-J16",
   "fleet.operation": "HUB-J17",
   "supervisor.control": "HUB-J18",
+  "supervisor.command": "HUB-J27",
   "inbox.open": "HUB-J19",
   "write-grant": "HUB-J20",
   "app-switch.explorer": "HUB-J21",
@@ -41,6 +42,7 @@ export const USAGE_ACTIONS = {
   "reply.attachment": "HUB-J24",
   "show-work.toggle": "HUB-J25",
   "worker.timeline": "HUB-J25",
+  "team.open": "HUB-J26",
 } as const;
 
 export type UsageAction = keyof typeof USAGE_ACTIONS;
@@ -159,6 +161,21 @@ export const usage = new UsageCounter();
 
 export function countUsage(action: UsageAction): void {
   usage.count(action);
+}
+
+/** Count explicit rich-content inspection independently of asynchronous paints. */
+export function bindRichInspectionUsage(root: HTMLElement, counter: Pick<UsageCounter, "count"> = usage): void {
+  // Native toggle tasks coalesce: a quick open/close can report only closed.
+  // Summary activation (including keyboard) sees the state before the default
+  // action, so each opening counts once even if no open toggle is delivered.
+  root.addEventListener("click", event => {
+    if (event.defaultPrevented) return;
+    const source = event.target instanceof Element ? event.target.closest('[data-action="source"]') : null;
+    if (source?.getAttribute("aria-pressed") === "true") counter.count("rich-content.inspect");
+    const summary = event.target instanceof Element ? event.target.closest("summary") : null;
+    const detail = summary?.parentElement;
+    if (detail instanceof HTMLDetailsElement && !detail.open && detail.closest(".rich-diagram, .rich-diff")) counter.count("rich-content.inspect");
+  });
 }
 
 /** Count a delivered notice being retired, once for the still-open group. */

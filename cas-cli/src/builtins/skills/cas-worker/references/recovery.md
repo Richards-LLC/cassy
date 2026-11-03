@@ -1,6 +1,14 @@
 # Recovery — Rejections and Interrupted Work
 
-Read when a tool rejects delivery, connectivity fails or assignment changes.
+Read for a rejection, blocked work, interruption or branch transition.
+
+- [Merge required](#merge-required)
+- [Queued successor and branch reuse](#queued-successor-and-branch-reuse)
+- [Blockers and review waits](#blockers-and-review-waits)
+- [Verification-required close](#verification-required-close)
+- [Connectivity failure](#universal-denial-or-connectivity-failure)
+- [Tool loading](#toolsearch-resolved-the-tool-but-you-still-cant-call-it)
+- [Interrupted assignment or checkout](#interrupted-assignment-or-checkout)
 
 ## MERGE REQUIRED
 
@@ -19,6 +27,30 @@ A squash/cherry-pick mismatch may need `commit_receipt`; transactional
 for receipt fields. If rejected, forward the exact error and receipt identity;
 never bypass close with `status=closed` or an invented verification record.
 
+## Queued successor and branch reuse
+
+A queued successor may already be started by Cassy on its task branch. Inspect
+its task and branch, then continue that assignment. Checkpoint dirty work before
+changing history. If a task branch has a recorded parked delivery anchor, merge
+the target into it; never rebase it. On other reused checkouts where rebasing is
+allowed, checkpoint before `git rebase <target>`.
+
+### Returned delivery with a queued successor
+
+When the supervisor returns delivery A while queued successor B is running:
+
+1. Checkpoint B's unfinished changes as B's commits.
+2. Run `task action=update id=B status=blocked`; this releases its lease while
+   preserving its current queue slot.
+3. Find A's recorded delivery branch with `task action=show id=A full=true`.
+   Switch to that branch, run `task action=start id=A`, then correct and
+   re-deliver A. Preserve its parked ancestry by merging its target.
+4. After A closes or parks, switch to B's recorded branch, run
+   `task action=update id=B status=open`, then `task action=start id=B`.
+
+Pending work remains behind held B. The start refusal names the exact hold
+command when another queue task is active.
+
 ### While the merge is pending
 
 The supervisor owns the landing signal. Queue attempts take minutes, it sees
@@ -27,11 +59,35 @@ which is scarcest late in a lane.
 
 - Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
   supervisor message you receive, never in a self-reminder loop.
-- Set a reminder for that check only while the supervisor has not acknowledged
-  your merge request, and never sooner than 300 seconds.
+- While the supervisor has not acknowledged your merge request, use one
+  `branch_contained_in` reminder for the delivered SHA and target; never a delay
+  reminder that rechecks merge status.
 - When the supervisor says it owns the merge or the close, or asks you to stop
   polling, cancel those reminders (`coordination action=remind_cancel`) and
   stay idle until it messages you.
+
+## Blockers and review waits
+
+For build-admission capacity refusals, use [Capacity waits](discipline.md#capacity-waits)
+before this sequence.
+
+When required supervisor review or approval blocks work (e.g. publication),
+enter awaiting supervisor review:
+
+1. Add a `note_type=blocker` task note with the required decision, blocked next
+   action, commit and proof; run `task action=update id=<task-id> status=blocked`.
+2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
+   using the return contract with `status: blocked` and `blocker: <cause>`.
+   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
+3. Save the notification ID; wait for the review reply. Record its ID and actual
+   decision/action. Clear the review hold with
+   `task action=update id=<task-id> status=open`, then
+   `task action=start id=<task-id>` before resuming.
+   Track transport delivery and inbox receipt separately with `message_status`.
+   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
+
+Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
+Wake eligibility never guarantees a turn.
 
 ## Verification-required close
 
@@ -63,8 +119,16 @@ fails, report that error rather than repeating schema lookup.
 
 - Reassignment or stand-down: checkpoint authorized WIP, push unless local_merge,
   note completed/remaining work and send its SHA; stop edits on that task.
-- Low context: at about 80% context used, commit and push unless local_merge,
-  then write `HANDOFF.md` in the task artifact directory: done work with SHAs,
+- Low context: at 80% measured context used, commit and push unless local_merge,
+  using Cassy's `context used: N%` notice from harness accounting. Never infer
+  occupancy from cumulative billing tokens, tool-output size or a guessed
+  model window; `context used: unknown` is not evidence of exhaustion.
+  Queued tasks keep their context by default. Only an explicit
+  `factory.restart_worker_between_tasks=true` opts in to fresh conversations
+  between tasks; automatic task-boundary restarts default off. Context-used
+  notices work either way. Do not request an early
+  recycle just because a prior task was long. Then
+  write `HANDOFF.md` in the task artifact directory: done work with SHAs,
   remaining steps, the next command and open questions. Cite it in a progress
   note and request respawn; the respawned worker resumes from it. Do not keep
   working into compaction.

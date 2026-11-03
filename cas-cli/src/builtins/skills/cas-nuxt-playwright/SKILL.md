@@ -8,7 +8,14 @@ disable-model-invocation: true
 
 # Nuxt + Playwright E2E Testing
 
-Guide for writing and debugging Playwright E2E tests against Nuxt (3 & 4) apps with Firebase auth and Quasar UI. Grounded in real failures across production projects. Targets `@playwright/test` **1.63**. Check the installed version with `npx playwright --version`. If it is older, upgrade before using the APIs marked with a version below.
+Guide for writing and debugging Playwright E2E tests against Nuxt (3 & 4) apps with Firebase auth and Quasar UI. Grounded in real failures across production projects. Targets `@playwright/test` **1.64**. Check the installed version with `npx playwright --version`. If it is older, upgrade before using the APIs marked with a version below.
+
+For coding agents, default to `npx playwright cli`; reserve MCP for long
+exploratory walks. In 1.64, video uses VP9 and `video`/`recordVideo`/screencast
+options accept `fps` (QA starts at 10). Action captions use
+`showActions({ style: { title: 'font-size: 16px' } })` instead of `fontSize`.
+Follow `cas-playwright-debug` for guarded healer trials and agent regeneration;
+see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
 
 ## Step 1: Detect the SSR mode
 
@@ -45,6 +52,7 @@ See `references/auth-fixture-template.md` for the ready-to-copy fixture and the 
 **When to use:** Default choice for testing against staging or production. The fixture logs in once via the real sign-in form, then every test in the worker reuses that authenticated page.
 
 **Key properties:**
+
 - Worker-scoped (`{ scope: 'worker' }`) — login happens once, not per test
 - Includes `navigateTo()` helper for protected routes on SSR apps
 - Includes cleanup tracker for test-created resources
@@ -70,6 +78,7 @@ await page.context().storageState({ path: statePath });
 **When to use:** Setup projects that pre-authenticate for dependent suites. Faster than UI login but couples to Firebase REST API shape.
 
 **Critical:** When the app writes the Pinia store itself, for example after a UI login, wait for persistence before saving storageState:
+
 ```ts
 await expect
   .poll(() => page.localStorage.getItem('your-app-auth'), { timeout: 10_000 })
@@ -101,6 +110,7 @@ await page.route('**/accounts/me', (route) => route.fulfill({ json: ACCOUNT_SEED
 **When to use:** Tests that must not depend on a running backend.
 
 **Rules:**
+
 - `addInitScript` must be called BEFORE `page.goto()` — it runs before page scripts
 - EVERY endpoint the page calls on load must be mocked — missing mocks cause connection refused → redirect to sign-in
 - Clear Firebase localStorage keys to prevent the SDK from calling `reload()`/`getIdToken()`, which hangs on unmocked Google API calls
@@ -153,10 +163,12 @@ async function navigateTo(page: Page, path: string) {
 **After navigating,** assert on the page content with a web-first assertion such as `await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()`. Do not add a load-state wait.
 
 **Correct Nuxt 3+ router access:**
+
 - `window.__nuxt.$router` — correct
 - `document.querySelector('#__nuxt').__vue_app__.config.globalProperties.$router` — also correct
 
 **DO NOT use:**
+
 - `window.$nuxt` — **Nuxt 2 only.** Does not exist in Nuxt 3+.
 - `window.__nuxt_app__` — not a real global.
 
@@ -176,6 +188,7 @@ await page.route('**/api/users', ...);
 **Rule 2: Check the actual backend URL.** Read `NUXT_PUBLIC_SERVER_URL`, `NUXT_PUBLIC_API_BASE`, or equivalent runtime config. Compare against what mocks intercept.
 
 **Rule 3: Mock Firebase Google API calls** when using addInitScript (Pattern C):
+
 - `securetoken.googleapis.com` — token refresh (getIdToken)
 - `identitytoolkit.googleapis.com` — user lookup (reload)
 

@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::store::{find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::{DaemonMessage, SessionInfo, SessionManager};
 
+mod accounts;
 mod attention;
 mod auth;
 mod connector;
@@ -30,6 +31,7 @@ pub mod open_files;
 pub mod operator_inbox;
 pub mod projects;
 mod runtime;
+pub mod secret_auto_delete;
 mod chunk_assets;
 mod server;
 pub(crate) mod state;
@@ -503,6 +505,39 @@ pub enum DaemonLiveness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubSession {
     pub name: String,
+    /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_version: Option<String>,
+    /// Installed CLI on this machine; may be newer than a connected MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+    /// The recorded supervisor harness, normalized to its backend name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Supervisor model ID or display name, including its model version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Recorded identities for this session. `workers` remains a name list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<crate::agent_model::AgentModel>,
+    /// Local account-file identity for the recorded selector. Only exposed
+    /// through the session:read-authorized session catalog, never credentials.
+    /// Legacy registrations without a proven selector remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+    /// Canonical project identity, falling back to the main project's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Human project name for Commander: `[project] display_name`, else the
+    /// main project's folder name; never the canonical id (cas-6f79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    /// This machine answered the local catalog. A dormant session's daemon
+    /// may be dead while its machine remains online; those are separate facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_online: Option<bool>,
     pub project_dir: Option<String>,
     pub supervisor: String,
     pub workers: Vec<String>,
@@ -514,6 +549,11 @@ pub struct HubSession {
     /// default, but can be revealed for recovery.
     #[serde(default)]
     pub dormant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<crate::ui::factory::SessionEndOutcome>,
+    /// Hub-owned navigation preference; the session and its history remain readable.
+    #[serde(default)]
+    pub dismissed: bool,
     /// When the session last did anything (cas-55a4): its newest queue row,
     /// Commander-facing or not. Lets Commander tell apart several live
     /// sessions of one project and show activity for a session that has not
@@ -560,6 +600,15 @@ pub struct LocalSessionReadModel {
     /// [`LAST_ACTIVITY_TTL`] so a device's five-second catalog refresh does
     /// not query every project's queue each time.
     activity: Arc<std::sync::Mutex<HashMap<String, CachedActivity>>>,
+    versions: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, CachedVersions>>>,
+}
+
+const MCP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone)]
+struct CachedVersions {
+    read_at: std::time::Instant,
+    snapshot: Option<crate::factory_binary_skew::Snapshot>,
 }
 
 /// How long a session's last activity is reused before it is read again.
@@ -650,6 +699,29 @@ fn cloud_project_id(cas_root: &std::path::Path) -> Option<String> {
     id
 }
 
+/// The project's human name: a non-empty `[project] display_name` in
+/// `<cas_root>/config.toml`, else the main project's folder name. The
+/// canonical id is a grouping key, never a label (cas-6f79).
+fn project_display_name(cas_root: &std::path::Path) -> Option<String> {
+    let configured = std::fs::read_to_string(cas_root.join("config.toml"))
+        .ok()
+        .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+        .and_then(|parsed| {
+            parsed
+                .get("project")?
+                .get("display_name")?
+                .as_str()
+                .map(|name| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty());
+    configured.or_else(|| {
+        cas_root
+            .parent()?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+}
+
 fn session_cas_root(session: &SessionInfo) -> Option<std::path::PathBuf> {
     let project_dir = session.metadata.project_dir.as_deref()?;
     find_cas_root_ignoring_env(std::path::Path::new(project_dir)).ok()
@@ -665,8 +737,30 @@ impl LocalSessionReadModel {
             .iter()
             .map(|session| {
                 let mut projected = hub_session(session);
-                projected.cloud_project_id = session_cas_root(session)
-                    .and_then(|cas_root| cloud_project_id(&cas_root));
+                let cas_root = session_cas_root(session);
+                projected.cloud_project_id = cas_root.as_deref().and_then(cloud_project_id);
+                projected.project = projected.cloud_project_id.clone().or_else(|| {
+                    cas_root
+                        .as_deref()?
+                        .parent()?
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
+                projected.project_name = cas_root.as_deref().and_then(project_display_name);
+                if !projected.dormant && projected.liveness == DaemonLiveness::Live
+                    && let Some(snapshot) = cas_root.as_deref().and_then(|root| self.mcp_versions(root))
+                {
+                    projected.installed_version = Some(snapshot.installed.clone()).filter(|version| version != "unknown");
+                    let matches: Vec<_> = snapshot.servers.iter().filter(|server| {
+                        server.role == cas_types::AgentRole::Supervisor
+                            && server.session.as_deref() == Some(session.name.as_str())
+                            && server.name == projected.supervisor
+                    }).collect();
+                    // Reconnecting can briefly leave two live MCP processes.
+                    // Different observations are unknown, never an arbitrary version.
+                    projected.mcp_version = matches.first().and_then(|server| server.version.clone())
+                        .filter(|version| matches.iter().all(|server| server.version.as_ref() == Some(version)));
+                }
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -674,6 +768,77 @@ impl LocalSessionReadModel {
                 projected
             })
             .collect()
+    }
+
+    fn project_with_ends(&self, sessions: &[SessionInfo], ended: Vec<crate::ui::factory::EndedSession>) -> Vec<HubSession> {
+        let mut rows = self.project(sessions);
+        for receipt in ended {
+            // A same-name replacement owns the conversation; old receipts cannot end it.
+            if sessions.iter().any(|session| session.name == receipt.metadata.name
+                && session.metadata.created_at != receipt.metadata.created_at) {
+                continue;
+            }
+            rows.retain(|row| row.name != receipt.metadata.name);
+            let recorded = SessionInfo {
+                name: receipt.metadata.name.clone(),
+                metadata: receipt.metadata.clone(),
+                is_running: false,
+                socket_exists: false,
+            };
+            let identity = hub_session(&recorded);
+            let cas_root = session_cas_root(&recorded);
+            let project = cas_root.as_deref().and_then(|root| {
+                cloud_project_id(root).or_else(|| {
+                    root.parent()?.file_name().map(|name| name.to_string_lossy().into_owned())
+                })
+            });
+            let project_name = cas_root.as_deref().and_then(project_display_name);
+            rows.push(HubSession {
+                name: receipt.metadata.name,
+                mcp_version: None,
+                installed_version: None,
+                harness: identity.harness,
+                model: identity.model,
+                effort: identity.effort,
+                agents: identity.agents,
+                account_email: identity.account_email,
+                project,
+                project_name,
+                machine_online: Some(false),
+                project_dir: receipt.metadata.project_dir,
+                supervisor: receipt.metadata.supervisor.name,
+                workers: receipt.ended.orphans.clone(),
+                epic_id: receipt.metadata.epic_id,
+                ws_port: None,
+                liveness: DaemonLiveness::StaleMetadata,
+                dormant: false,
+                last_activity_at: Some(receipt.ended.at.clone()),
+                last_activity: Some("Session ended".into()),
+                started_at: Some(receipt.metadata.created_at),
+                cloud_project_id: None,
+                daemon_identity: None,
+                ended: Some(receipt.ended),
+                dismissed: false,
+            });
+        }
+        rows
+    }
+
+    fn mcp_versions(&self, cas_root: &std::path::Path) -> Option<crate::factory_binary_skew::Snapshot> {
+        let mut cache = self.versions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(cas_root)
+            && cached.read_at.elapsed() < MCP_VERSION_TTL
+        {
+            return cached.snapshot.clone();
+        }
+        let installed = crate::factory_binary_skew::installed_version();
+        let snapshot = crate::factory_binary_skew::snapshot_with_installed(
+            cas_root, installed.as_deref().unwrap_or("unknown"), chrono::Utc::now(),
+        ).ok();
+        cache.insert(cas_root.to_path_buf(), CachedVersions {
+            read_at: std::time::Instant::now(), snapshot: snapshot.clone(),
+        });
+        snapshot
     }
 
     fn last_activity(&self, session: &SessionInfo) -> Option<(String, String)> {
@@ -776,8 +941,23 @@ pub(crate) fn activity_label(source: &str, target: &str) -> String {
 /// this metadata is read from carries an empty `workers[]` even for a session
 /// running five of them, which made every session report "0 workers".
 fn hub_session(session: &SessionInfo) -> HubSession {
+    let (harness, account_email) = session_account(session);
+    let agents = session_agent_models(session);
+    let supervisor = agents.iter().find(|agent| agent.role == "supervisor" && agent.name == session.metadata.supervisor.name);
+    let model = supervisor.and_then(|agent| agent.model.clone());
+    let effort = supervisor.and_then(|agent| agent.effort.clone());
     HubSession {
         name: session.name.clone(),
+        mcp_version: None,
+        installed_version: None,
+        harness,
+        model,
+        effort,
+        agents,
+        account_email,
+        project: None,
+        project_name: None,
+        machine_online: Some(true),
         project_dir: session.metadata.project_dir.clone(),
         supervisor: session.metadata.supervisor.name.clone(),
         workers: session.project_worker_names(),
@@ -791,6 +971,8 @@ fn hub_session(session: &SessionInfo) -> HubSession {
             DaemonLiveness::Live
         },
         dormant: !has_live_supervisor(session),
+        ended: None,
+        dismissed: false,
         last_activity_at: None,
         last_activity: None,
         started_at: Some(session.metadata.created_at.clone()).filter(|at| !at.trim().is_empty()),
@@ -804,6 +986,66 @@ fn hub_session(session: &SessionInfo) -> HubSession {
                 pid_starttime,
             }),
     }
+}
+
+fn session_agent_models(session: &SessionInfo) -> Vec<crate::agent_model::AgentModel> {
+    let agents = session_cas_root(session)
+        .and_then(|root| open_agent_store(&root).ok())
+        .and_then(|store| store.list(None).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| agent.visible_to_factory_session(Some(&session.name))
+            && crate::agent_model::metadata_prefix(agent.role).is_some())
+        .collect();
+    crate::mcp::tools::service::factory_ops::dedupe_authoritative_agents(agents).0
+        .iter().map(crate::agent_model::AgentModel::from_agent).collect()
+}
+
+/// Read only this session's registered supervisor. Neither names/prompts nor
+/// the hub process's provider variables establish the account of another pane.
+fn session_account(session: &SessionInfo) -> (Option<String>, Option<String>) {
+    let agent = session_cas_root(session)
+        .and_then(|root| open_agent_store(&root).ok())
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| {
+            agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.role == cas_types::AgentRole::Supervisor
+                        && agent.factory_session.as_deref() == Some(session.name.as_str())
+                        && agent.name == session.metadata.supervisor.name
+                })
+                .max_by_key(|agent| (agent.last_heartbeat, agent.registered_at))
+        });
+    let Some(agent) = agent else {
+        return (None, None);
+    };
+    let Some(harness) = agent
+        .metadata
+        .get("supervisor_cli")
+        .and_then(|cli| crate::harness_policy::parse_harness(cli))
+    else {
+        return (None, None);
+    };
+    let provider = match harness {
+        cas_mux::SupervisorCli::Claude => Some(crate::accounts::Provider::Claude),
+        cas_mux::SupervisorCli::Codex => Some(crate::accounts::Provider::Codex),
+        _ => None,
+    };
+    let email = provider.and_then(|provider| {
+        // Older registrations wrote CODEX_HOME here even for Claude. Require
+        // the provider binding captured alongside the corrected selector.
+        let recorded = agent.metadata.get("supervisor_account_harness")?;
+        if crate::harness_policy::parse_harness(recorded) != Some(harness) {
+            return None;
+        }
+        let selector = std::path::Path::new(agent.metadata.get("supervisor_account_dir")?);
+        if !selector.is_absolute() {
+            return None;
+        }
+        provider.login_email(&dirs::home_dir()?, selector)
+    });
+    (Some(harness.backend().name().to_owned()), email)
 }
 
 /// A session's metadata names the supervisor, but does not prove that the
@@ -842,7 +1084,8 @@ fn has_live_supervisor(session: &SessionInfo) -> bool {
 
 impl SessionReadModel for LocalSessionReadModel {
     fn list_sessions(&self) -> Result<Vec<HubSession>> {
-        Ok(self.project(&SessionManager::new().list_sessions()?))
+        let manager = SessionManager::new();
+        Ok(self.project_with_ends(&manager.list_sessions()?, manager.ended_sessions()?))
     }
 }
 
@@ -969,6 +1212,16 @@ impl SessionReadModel for RecordingReadModel {
 pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
+        mcp_version: None,
+        installed_version: None,
+        harness: None,
+        model: None,
+        effort: None,
+        agents: Vec::new(),
+        account_email: None,
+        project: None,
+        project_name: None,
+        machine_online: None,
         project_dir: Some("/tmp/project".into()),
         supervisor: "supervisor".into(),
         workers: vec!["worker-1".into()],
@@ -976,6 +1229,8 @@ pub fn fixture_session(name: &str) -> HubSession {
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
         dormant: false,
+        ended: None,
+        dismissed: false,
         last_activity_at: None,
         last_activity: None,
         started_at: None,

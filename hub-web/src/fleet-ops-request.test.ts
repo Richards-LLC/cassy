@@ -19,6 +19,7 @@ type Answer = { outcome?: Record<string, unknown> };
 describe("fleet async selection/request ownership (cas-5bef0)", () => {
   it.each([
     [403, "permission_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
+    [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
     [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
     [401, "expired", "the pairing is no longer accepted. Pair the machine again."],
   ])("explains the actual connection request's auth refusal (%s %s)", async (status, reason, detail) => {

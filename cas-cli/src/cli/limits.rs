@@ -1,14 +1,11 @@
 //! Machine-local provider capacity snapshots for worker routing.
 //!
-//! This deliberately reads credentials only long enough to make the Claude
-//! usage request. Tokens are never included in errors or output.
+//! Capacity comes only from official harness output. Claude statusline snapshots
+//! and Codex rollout records contain usage metadata, never login credentials.
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
 use std::time::Duration;
-
-use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use clap::Args;
@@ -17,12 +14,11 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::cli::Cli;
-use std::fmt;
 
-const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-// Keep Keychain interaction inside the picker's four-second usage budget.
-const CLAUDE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(2);
-const CLAUDE_USAGE_DEADLINE: Duration = Duration::from_secs(4);
+// An observation without a known reset cannot establish capacity indefinitely.
+// Known future windows remain useful after an idle session, with their age shown.
+const CLAUDE_SNAPSHOT_MAX_AGE: i64 = 5 * 60;
+const CLAUDE_SNAPSHOT_FILE: &str = ".cas-claude-usage.json";
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LimitsArgs {
@@ -43,11 +39,13 @@ struct AccountLimit {
     plan: Option<String>,
     state: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_at: Option<DateTime<Utc>>,
     windows: Vec<LimitWindow>,
     detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LimitWindow {
     name: String,
     used_percent: Option<f64>,
@@ -55,18 +53,62 @@ struct LimitWindow {
     spend_dollars: Option<f64>,
 }
 
+/// Only documented, non-secret fields from Claude Code's statusline stdin.
+/// Unknown fields are discarded during deserialization and never cached.
 #[derive(Debug, Deserialize)]
-struct ClaudeCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    oauth: Option<ClaudeOauth>,
+pub(super) struct ClaudeRateLimits {
+    five_hour: Option<ClaudeRateWindow>,
+    seven_day: Option<ClaudeRateWindow>,
 }
 
-#[derive(Deserialize)]
-struct ClaudeOauth {
-    #[serde(rename = "accessToken")]
-    access_token: String,
-    #[serde(rename = "subscriptionType")]
-    subscription_type: Option<String>,
+#[derive(Debug, Deserialize)]
+struct ClaudeRateWindow {
+    used_percentage: Option<f64>,
+    resets_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClaudeSnapshot {
+    identity: Option<String>,
+    observed_at: DateTime<Utc>,
+    windows: Vec<LimitWindow>,
+}
+
+fn claude_snapshot_identity(config_dir: &Path) -> Option<String> {
+    // Registry's Claude branch reads only .claude.json account metadata, never
+    // .credentials.json. Re-login must not reuse another subscription's cache.
+    let home = config_dir.parent()?;
+    let account = crate::account_registry::account(crate::accounts::Provider::Claude, home, config_dir.to_owned());
+    account.identity.and_then(|identity| serde_json::to_string(&identity).ok())
+}
+
+/// Cache only the native binary's documented capacity fields, scoped to the
+/// exact profile that emitted them. This is not an authentication signal.
+pub(super) fn record_claude_statusline(config_dir: &Path, limits: ClaudeRateLimits) {
+    let snapshot = ClaudeSnapshot {
+        identity: claude_snapshot_identity(config_dir),
+        observed_at: Utc::now(),
+        windows: [("5h", limits.five_hour), ("weekly", limits.seven_day)]
+            .into_iter().filter_map(|(name, window)| {
+                let window = window?;
+                let used_percent = window.used_percentage
+                    .filter(|used| used.is_finite() && (0.0..=100.0).contains(used));
+                let reset_at = window.resets_at.and_then(local_unix);
+                (used_percent.is_some() || reset_at.is_some()).then(|| LimitWindow {
+                    name: name.into(), used_percent, reset_at, spend_dollars: None,
+                })
+            }).collect(),
+    };
+    // Atomic replacement avoids partial JSON when statuslines overlap.
+    let write = || -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(config_dir)?;
+        serde_json::to_writer(&mut file, &snapshot)?;
+        file.flush()?;
+        file.persist(config_dir.join(CLAUDE_SNAPSHOT_FILE))?;
+        Ok(())
+    };
+    let _ = write(); // Status display must still work on read-only profiles.
 }
 
 pub fn execute(args: &LimitsArgs, cli: &Cli) -> anyhow::Result<()> {
@@ -97,115 +139,38 @@ fn collect_limits() -> LimitsReport {
 }
 
 fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
-    collect_claude_with(
-        account,
-        config_dir,
-        cfg!(target_os = "macos"),
-        Deadline::after(CLAUDE_USAGE_DEADLINE),
-        &mut run_command,
-        |request| request.call(),
-    )
+    collect_claude_snapshot(account, config_dir).0
 }
 
-fn collect_claude_with(
-    account: &str,
-    config_dir: &Path,
-    macos: bool,
-    deadline: Deadline,
-    run: &mut impl FnMut(&mut Command, Deadline, Duration) -> Result<Output, BoundedCommandError>,
-    fetch: impl FnOnce(ureq::Request) -> Result<ureq::Response, ureq::Error>,
-) -> AccountLimit {
-    let credentials_path = config_dir.join(".credentials.json");
-    let keychain_credentials = if macos {
-        let is_main = dirs::home_dir().is_some_and(|home| config_dir == home.join(".claude"));
-        let selector = config_dir.to_string_lossy();
-        let service =
-            crate::claude_credentials::keychain_service((!is_main).then_some(selector.as_ref()));
-        let mut command = Command::new("security");
-        command.args(["find-generic-password", "-s", &service, "-w"]);
-        // Never surface security's stdout/stderr or errors: stdout holds the
-        // credential, and locked/denied Keychains are ordinary missing usage.
-        run(&mut command, deadline, CLAUDE_KEYCHAIN_TIMEOUT)
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<ClaudeCredentials>(&output.stdout).ok())
-    } else {
-        None
+fn collect_claude_snapshot(account: &str, config_dir: &Path) -> (AccountLimit, Option<DateTime<Utc>>) {
+    let snapshot = fs::read(config_dir.join(CLAUDE_SNAPSHOT_FILE)).ok()
+        .and_then(|bytes| serde_json::from_slice::<ClaudeSnapshot>(&bytes).ok());
+    let Some(mut snapshot) = snapshot else {
+        return (unavailable(account, "claude", "unavailable",
+            "usage unknown; no Claude Code statusline snapshot"), None);
     };
-    let credentials = match keychain_credentials.or_else(|| {
-        fs::read_to_string(&credentials_path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-    }) {
-        Some(value) => value,
-        None => return unavailable(account, "claude", "absent", "credential file not found"),
-    };
-    let Some(oauth) = credentials.oauth else {
-        return unavailable(
-            account,
-            "claude",
-            "auth-needed",
-            "OAuth credentials not available",
-        );
-    };
-    let plan = oauth.subscription_type;
-    let timeout = if macos {
-        deadline.remaining()
-    } else {
-        Duration::from_secs(8)
-    };
-    if timeout.is_zero() {
-        return unavailable_with_plan(
-            account,
-            "claude",
-            plan,
-            "unavailable",
-            "usage endpoint unavailable",
-        );
+    if snapshot.identity != claude_snapshot_identity(config_dir) {
+        return (unavailable(account, "claude", "unavailable",
+            "usage unknown; account changed since Claude Code statusline snapshot"), None);
     }
-    let request = ureq::get(CLAUDE_USAGE_URL)
-        .set("Authorization", &format!("Bearer {}", oauth.access_token))
-        .set("Accept", "application/json")
-        .set("anthropic-version", "2023-06-01")
-        .set("anthropic-beta", "oauth-2025-04-20")
-        .timeout(timeout);
-    let response = fetch(request);
-    match response {
-        Ok(response) => match response.into_json::<Value>().ok().map(parse_claude_usage) {
-            Some(windows) if !windows.is_empty() => AccountLimit {
-                account: account.to_string(),
-                provider: "claude".to_string(),
-                plan,
-                state: "active".to_string(),
-                source: "live".to_string(),
-                windows,
-                detail: None,
-            },
-            _ => unavailable_with_plan(
-                account,
-                "claude",
-                plan,
-                "unavailable",
-                "usage response had no recognized windows",
-            ),
-        },
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-            unavailable_with_plan(
-                account,
-                "claude",
-                plan,
-                "auth-needed",
-                "OAuth token rejected; run claude login",
-            )
+    let age = Utc::now().signed_duration_since(snapshot.observed_at).num_seconds();
+    if age < 0 || snapshot.windows.is_empty() {
+        return (unavailable(account, "claude", "unavailable",
+            "usage unknown; Claude Code statusline snapshot empty or from the future"), Some(snapshot.observed_at));
+    }
+    for window in &mut snapshot.windows {
+        let reset = window.reset_at.as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok());
+        if expired(window.reset_at.as_deref())
+            || (age > CLAUDE_SNAPSHOT_MAX_AGE && !reset.is_some_and(|at| at > Utc::now())) {
+            window.used_percent = None;
         }
-        Err(_) => unavailable_with_plan(
-            account,
-            "claude",
-            plan,
-            "unavailable",
-            "usage endpoint unavailable",
-        ),
     }
+    (AccountLimit {
+        account: account.into(), provider: "claude".into(), plan: None,
+        state: "active".into(), source: "Claude Code statusline".into(), observed_at: Some(snapshot.observed_at),
+        windows: snapshot.windows, detail: None,
+    }, Some(snapshot.observed_at))
 }
 
 fn collect_codex(account: &str, root: &Path) -> AccountLimit {
@@ -231,6 +196,7 @@ fn collect_codex_snapshot(account: &str, root: &Path) -> (AccountLimit, Option<D
             plan,
             state: "active".to_string(),
             source: "live transcript".to_string(),
+            observed_at: Some(observed_at),
             windows,
             detail: None,
         },
@@ -268,7 +234,7 @@ fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::pat
 }
 
 /// Structured account usage for the shared registry. The collector remains
-/// provider-owned, including its credential-store implementation.
+/// provider-owned and consumes only native harness usage metadata.
 #[derive(Clone)]
 pub(crate) struct AccountUsage {
     pub observed_at: Option<DateTime<Utc>>,
@@ -285,6 +251,11 @@ fn usage_cache() -> &'static UsageCache {
 }
 
 pub(crate) fn cached_account_usage(provider: crate::accounts::Provider, dir: &Path) -> Option<AccountUsage> {
+    if provider == crate::accounts::Provider::Claude {
+        // Status reads the small native snapshot too, so an old in-process
+        // entry cannot bypass its freshness or account-identity checks.
+        return Some(account_usage(provider, dir));
+    }
     usage_cache().lock().ok()?.get(&(provider.name(), dir.canonicalize().unwrap_or_else(|_| dir.to_owned()))).cloned()
 }
 
@@ -292,20 +263,20 @@ pub(crate) fn cached_account_usage(provider: crate::accounts::Provider, dir: &Pa
 pub(crate) fn transcript_windows(record: &Value) -> Vec<crate::account_registry::UsageWindow> {
     find_rate_limits(record).map(|limits| report_windows(&AccountLimit {
         account: String::new(), provider: String::new(), plan: None,
-        state: String::new(), source: String::new(), windows: parse_codex_limits(limits), detail: None,
+        state: String::new(), source: String::new(), observed_at: None, windows: parse_codex_limits(limits), detail: None,
     })).unwrap_or_default()
 }
 
 pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> AccountUsage {
     let (limit, observed_at) = match provider {
-        crate::accounts::Provider::Claude => (collect_claude("account", dir), None),
+        crate::accounts::Provider::Claude => collect_claude_snapshot("account", dir),
         crate::accounts::Provider::Codex => collect_codex_snapshot("account", dir),
     };
     let usage = AccountUsage {
         observed_at,
         plan: limit.plan,
         rejected: limit.state == "auth-needed",
-        authenticated: provider == crate::accounts::Provider::Claude && limit.state == "active",
+        authenticated: false, // Cached usage cannot establish a current login.
         windows: limit
             .windows
             .into_iter()
@@ -326,22 +297,88 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
     usage
 }
 
-/// Human reset text; the stored/JSON instant stays UTC RFC3339.
-pub(crate) fn format_reset(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
-    format_reset_in(reset, now.with_timezone(&Local))
+/// An on-demand read of the exact native sources used by `cas limits`.
+/// Checked time never replaces the harness's observation time.
+#[derive(Serialize)]
+pub(crate) struct CheckedAccountUsage {
+    checked_at: DateTime<Utc>,
+    observed_at: Option<DateTime<Utc>>,
+    source: String,
+    windows: Vec<crate::account_registry::UsageWindow>,
+    reason: Option<String>,
 }
 
-fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>) -> String
-where Tz::Offset: fmt::Display {
+pub(crate) fn check_account_usage(provider: crate::accounts::Provider, dir: &Path) -> CheckedAccountUsage {
+    let (limit, observed_at) = match provider {
+        crate::accounts::Provider::Claude => collect_claude_snapshot("account", dir),
+        crate::accounts::Provider::Codex => collect_codex_snapshot("account", dir),
+    };
+    let checked_at = Utc::now();
+    let windows = report_windows(&limit);
+    let reason = limit.detail.map(|detail| {
+        if detail.contains("account changed") {
+            "The account changed since its native snapshot. Open a session on this account to refresh.".into()
+        } else {
+            "No usable native usage snapshot for this account. Open a session on this account to refresh.".into()
+        }
+    }).or_else(|| {
+        if observed_at.is_some_and(|at| checked_at.signed_duration_since(at).num_seconds() > CLAUDE_SNAPSHOT_MAX_AGE) {
+            Some("Snapshot is stale. Open a session on this account to refresh.".into())
+        } else if windows.len() < 2 || windows.iter().any(|window| window.used_percent.is_none()) {
+            Some("Some usage windows are missing or have reset. Open a session on this account to refresh.".into())
+        } else { None }
+    });
+    let source = match provider {
+        crate::accounts::Provider::Claude => "Claude Code statusline snapshot",
+        crate::accounts::Provider::Codex => "Codex session snapshot",
+    }.into();
+    CheckedAccountUsage { checked_at, observed_at, source, windows, reason }
+}
+
+/// Keep observation age next to capacity rather than implying a live probe.
+pub(crate) fn observation_label(observed_at: Option<DateTime<Utc>>) -> String {
+    observation_label_at(observed_at, Utc::now())
+}
+
+pub(crate) fn observation_label_at(observed_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    observed_at.map(|at| {
+        let at = super::release_report::eastern(at);
+        let stamp = if at.date_naive() == super::release_report::eastern(now).date_naive() {
+            at.format("%-I:%M %p ET").to_string()
+        } else {
+            at.format("%-d %B %Y · %-I:%M %p ET").to_string()
+        };
+        format!(" as of {stamp}")
+    }).unwrap_or_default()
+}
+
+pub(crate) fn summarize_account_at(account: &crate::account_registry::Account, now: DateTime<Utc>) -> Option<String> {
+    let observed = account.usage_observed_at.filter(|_| account.provider == crate::accounts::Provider::Claude);
+    summarize_windows_at(&account.windows, now)
+        .map(|summary| match observed {
+            Some(_) => format!("{summary};{}", observation_label_at(observed, now)),
+            None => summary,
+        })
+}
+
+/// Human reset text; the stored/JSON instant stays UTC RFC3339.
+pub(crate) fn format_reset(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    format_reset_in(reset, now)
+}
+
+fn format_reset_in(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let Some(reset) = reset else { return "reset time unknown".into() };
-    let local = reset.with_timezone(&now.timezone());
-    let seconds = reset.signed_duration_since(now.with_timezone(&Utc)).num_seconds();
+    let now_eastern = super::release_report::eastern(now);
+    let reset_eastern = super::release_report::eastern(reset);
+    let seconds = reset.signed_duration_since(now).num_seconds();
     let minutes = (seconds + 59) / 60;
-    if local <= now { return "reset, usage unknown until next session".into() }
-    let tomorrow = now.date_naive().succ_opt();
-    let stamp = if local.date_naive() == now.date_naive() || Some(local.date_naive()) == tomorrow {
-        local.format("%a %H:%M").to_string()
-    } else { local.format("%a %b %-d %H:%M").to_string() };
+    if reset <= now { return "reset, usage unknown until next session".into() }
+    let tomorrow = now_eastern.date_naive().succ_opt();
+    let stamp = if reset_eastern.date_naive() == now_eastern.date_naive()
+        || Some(reset_eastern.date_naive()) == tomorrow
+    {
+        reset_eastern.format("%a %-I:%M %p ET").to_string()
+    } else { reset_eastern.format("%a %b %-d %-I:%M %p ET").to_string() };
     let relative = if minutes < 60 { format!("{}m", minutes.max(1)) }
         else if seconds < 24 * 3600 { format!("{}h", (minutes + 59) / 60) }
         else {
@@ -369,6 +406,7 @@ pub(crate) fn summarize_windows_at(windows: &[crate::account_registry::UsageWind
     (!summaries.is_empty()).then(|| summaries.join("; "))
 }
 
+#[cfg(test)]
 pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
     summarize_windows_at(windows, Utc::now())
 }
@@ -380,18 +418,9 @@ fn report_windows(limit: &AccountLimit) -> Vec<crate::account_registry::UsageWin
     }).collect()
 }
 
+#[cfg(test)]
 fn summarize(limit: &AccountLimit) -> Option<String> {
     summarize_windows(&report_windows(limit))
-}
-
-/// Shared registry capacity for several accounts at once. Duplicate Codex
-/// folders use their newest snapshot; unfinished work is left out at deadline.
-pub(crate) fn usage_summaries(
-    provider: crate::accounts::Provider,
-    accounts: Vec<(String, std::path::PathBuf)>,
-    deadline: std::time::Duration,
-) -> std::collections::HashMap<String, String> {
-    crate::account_registry::picker_usage_summaries(provider, accounts, deadline)
 }
 
 fn collect_exa() -> AccountLimit {
@@ -415,6 +444,7 @@ fn collect_exa() -> AccountLimit {
         plan: None,
         state: "unavailable".to_string(),
         source: "ESTIMATE ledger".to_string(),
+        observed_at: None,
         windows,
         detail: Some(
             "API key configured; no supported balance endpoint (cost is a local estimate)"
@@ -467,41 +497,10 @@ fn unavailable_with_plan(
         plan,
         state: state.to_string(),
         source: "none".to_string(),
+        observed_at: None,
         windows: Vec::new(),
         detail: Some(detail.to_string()),
     }
-}
-
-fn parse_claude_usage(value: Value) -> Vec<LimitWindow> {
-    let mut windows = Vec::new();
-    for (key, label) in [
-        ("five_hour", "5h"),
-        ("seven_day", "weekly"),
-        ("seven_day_opus", "weekly opus"),
-        ("seven_day_sonnet", "weekly sonnet"),
-    ] {
-        let Some(bucket) = value.get(key).filter(|v| !v.is_null()) else {
-            continue;
-        };
-        windows.push(LimitWindow {
-            name: label.to_string(),
-            used_percent: bucket.get("utilization").and_then(Value::as_f64),
-            reset_at: bucket
-                .get("resets_at")
-                .and_then(Value::as_str)
-                .and_then(local_rfc3339),
-            spend_dollars: None,
-        });
-    }
-    if let Some(extra) = value.get("extra_usage").filter(|v| !v.is_null()) {
-        windows.push(LimitWindow {
-            name: "extra usage".to_string(),
-            used_percent: extra.get("utilization").and_then(Value::as_f64),
-            reset_at: None,
-            spend_dollars: extra.get("used_credits").and_then(Value::as_f64),
-        });
-    }
-    windows
 }
 
 fn latest_codex_limits(root: &Path) -> Option<(Option<String>, Vec<LimitWindow>, DateTime<Utc>)> {
@@ -587,13 +586,6 @@ fn local_unix(timestamp: i64) -> Option<String> {
         .map(|time| time.with_timezone(&Utc).to_rfc3339())
 }
 
-fn local_rfc3339(timestamp: &str) -> Option<String> {
-    timestamp
-        .parse::<DateTime<Utc>>()
-        .ok()
-        .map(|time| time.to_rfc3339())
-}
-
 fn compact_line(report: &LimitsReport) -> String {
     let now = Utc::now();
     let mut entries = report.accounts.iter().map(|account| {
@@ -604,7 +596,8 @@ fn compact_line(report: &LimitsReport) -> String {
         let (text, reset) = if let Some(window) = constraining {
             let used = window.used_percent.map(|used| format!("{used:.0}%")).unwrap_or_else(|| "unknown".into());
             let reset = format_reset(window.resets_at, now);
-            (format!("{alias} {used} {}", reset.split(" (in ").next().unwrap_or(&reset)), window.resets_at)
+            let observation = observation_label(account.observed_at.filter(|_| account.provider == "claude"));
+            (format!("{alias} {used}{observation} {}", reset.split(" (in ").next().unwrap_or(&reset)), window.resets_at)
         } else if !windows.is_empty() { (format!("{alias} reset/unknown"), None) }
         else { (format!("{alias}:{}", account.state), None) };
         (reset, text)
@@ -642,7 +635,8 @@ fn render_human(report: &LimitsReport) -> String {
     for account in &report.accounts {
         out.push('\n');
         let header = format!("{}{} - {} [{}]", display_alias(&account.account, 48), account.plan.as_ref().map(|plan| format!(" ({plan})")).unwrap_or_default(), account.state, account.source);
-        out.push_str(&crate::cloud::presence::wrap_line(&header));
+        let observation = observation_label(account.observed_at.filter(|_| account.provider == "claude"));
+        out.push_str(&crate::cloud::presence::wrap_line(&format!("{header}{observation}")));
         for window in &account.windows {
             let typed = crate::account_registry::UsageWindow {
                 name: window.name.clone(), used_percent: window.used_percent,
@@ -670,221 +664,44 @@ fn render_human(report: &LimitsReport) -> String {
 
 fn print_human(report: &LimitsReport) { print!("{}", render_human(report)); }
 
-// Holds a live Claude OAuth access token read from secure storage or disk.
-impl fmt::Debug for ClaudeOauth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ClaudeOauth")
-            .field("access_token", &"[redacted]")
-            .field("subscription_type", &self.subscription_type)
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn security_output(code: i32, stdout: &[u8]) -> Output {
-        use std::os::unix::process::ExitStatusExt;
-        Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
-            stdout: stdout.to_vec(),
-            stderr: b"fixture-secret".to_vec(),
-        }
-    }
-
-    #[cfg(unix)]
-    const KEYCHAIN_JSON: &[u8] =
-        br#"{"claudeAiOauth":{"accessToken":"fixture-secret","subscriptionType":"max"}}"#;
-
-    #[cfg(unix)]
-    fn keychain_usage_fixture(dir: &Path, service: &str) {
-        let mut called = false;
-        let limit = collect_claude_with(
-            "account",
-            dir,
-            true,
-            Deadline::after(Duration::from_secs(4)),
-            &mut |command, deadline, cap| {
-                called = true;
-                assert_eq!(command.get_program(), "security");
-                assert_eq!(
-                    command.get_args().collect::<Vec<_>>(),
-                    ["find-generic-password", "-s", service, "-w"]
-                );
-                assert!(deadline.remaining() <= Duration::from_secs(4));
-                assert_eq!(cap, Duration::from_secs(2));
-                Ok(security_output(0, KEYCHAIN_JSON))
-            },
-            |request| {
-                assert_eq!(request.url(), CLAUDE_USAGE_URL);
-                assert!(request.header("Authorization") == Some("Bearer fixture-secret"));
-                ureq::Response::new(
-                    200,
-                    "OK",
-                    r#"{"five_hour":{"utilization":12},"seven_day":{"utilization":34}}"#,
-                )
-            },
-        );
-        assert!(called);
-        assert_eq!(limit.state, "active");
-        assert_eq!(limit.plan.as_deref(), Some("max"));
-        // The accounts reset contract (cas-0dda) names a window whose reset the
-        // usage API omits.
-        assert_eq!(
-            summarize(&limit).as_deref(),
-            Some("5h 12%, reset time unknown; weekly 34%, reset time unknown")
-        );
-        assert!(
-            !serde_json::to_string(&limit)
-                .unwrap()
-                .contains("fixture-secret")
-        );
-        assert!(!format!("{limit:?}").contains("fixture-secret"));
-        assert!(!dir.join(".credentials.json").exists());
-    }
-
-    #[cfg(unix)]
     #[test]
-    fn cas_3870_main_keychain_usage_reaches_picker() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        keychain_usage_fixture(&env.home().join(".claude"), "Claude Code-credentials");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cas_3870_named_keychain_usage_uses_nfc_selector() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        // pin: Claude's service for this NFC-normalized selector, without
-        // canonicalization (the fixture directory intentionally does not exist).
-        keychain_usage_fixture(
-            Path::new("/Users/fixture/.claude-e\u{301}"),
-            "Claude Code-credentials-4d1fceb7",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cas_3870_keychain_failures_preserve_fallback_and_states() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = env.home().join(".claude");
-        fs::create_dir_all(&dir).unwrap();
-        let file = dir.join(".credentials.json");
-        use BoundedCommandError::{Io, TimedOut};
-        // Missing, denied, locked, launch failure, timeout, malformed JSON,
-        // no OAuth, file fallback, and the unchanged Linux file path.
-        for (reply, file_present, macos, expected) in [
-            (
-                Ok(security_output(44, KEYCHAIN_JSON)),
-                false,
-                true,
-                "absent",
-            ),
-            (Ok(security_output(1, KEYCHAIN_JSON)), false, true, "absent"),
-            (
-                Ok(security_output(36, KEYCHAIN_JSON)),
-                false,
-                true,
-                "absent",
-            ),
-            (Err(Io), false, true, "absent"),
-            (Err(TimedOut), false, true, "absent"),
-            (
-                Ok(security_output(0, b"invalid fixture-secret")),
-                false,
-                true,
-                "absent",
-            ),
-            (Ok(security_output(0, b"{}")), false, true, "auth-needed"),
-            (Ok(security_output(44, b"")), true, true, "active"),
-            (Err(Io), true, false, "active"),
-        ] {
-            if file_present {
-                fs::write(&file, KEYCHAIN_JSON).unwrap();
-            }
-            let mut reply = Some(reply);
-            let limit = collect_claude_with(
-                "account",
-                &dir,
-                macos,
-                Deadline::after(Duration::from_secs(4)),
-                &mut |_, _, _| reply.take().unwrap(),
-                |request| {
-                    assert_eq!(
-                        expected, "active",
-                        "missing credentials must skip the usage endpoint"
-                    );
-                    assert!(request.header("Authorization") == Some("Bearer fixture-secret"));
-                    ureq::Response::new(200, "OK", r#"{"five_hour":{"utilization":12}}"#)
-                },
-            );
-            assert_eq!(reply.is_none(), macos, "Linux must not access Keychain");
-            assert_eq!(limit.state, expected);
-            assert_eq!(summarize(&limit).is_some(), expected == "active");
-            assert!(
-                !serde_json::to_string(&limit)
-                    .unwrap()
-                    .contains("fixture-secret")
-            );
-            assert!(!format!("{limit:?}").contains("fixture-secret"));
-            if file_present {
-                fs::remove_file(&file).unwrap();
-            }
-        }
-        // Exercise the real bounded runner with an expired deadline: it must
-        // return before trying to spawn security, even on this Linux host.
-        let expired = collect_claude_with(
-            "account",
-            &dir,
-            true,
-            Deadline::after(Duration::ZERO),
-            &mut run_command,
-            |_| panic!("expired Keychain lookup must not fetch usage"),
-        );
-        assert_eq!(expired.state, "absent");
-        assert_eq!(summarize(&expired), None);
+    fn claude_usage_without_native_snapshot_is_unknown_not_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".credentials.json"), "{}").unwrap();
+        let report = collect_claude("fixture", dir.path());
+        assert_eq!(report.state, "unavailable");
+        assert!(report.detail.as_deref().unwrap().contains("Claude Code statusline"));
+        let usage = account_usage(crate::accounts::Provider::Claude, dir.path());
+        assert!(!usage.rejected && !usage.authenticated);
     }
 
     #[test]
-    fn local_reset_format_table() {
-        use chrono::FixedOffset;
-        let zone = FixedOffset::west_opt(4 * 3600).unwrap();
-        let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap().with_timezone(&zone);
+    fn limits_rows_format_resets_in_eastern_twelve_hour_time() {
+        let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
         for (reset, expected) in [
-            (Some("2026-10-27T18:00:00Z"), "resets Tue 14:00 (in 6h)"),
-            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d 1h)"),
-            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d 1h)"),
-            (Some("2026-10-28T11:59:00Z"), "resets Wed 07:59 (in 24h)"),
-            (Some("2026-10-28T12:00:00Z"), "resets Wed 08:00 (in 1d)"),
-            (Some("2026-10-29T11:56:00Z"), "resets Thu Oct 29 07:56 (in 1d 23h)"),
-            (Some("2026-11-03T11:00:00Z"), "resets Tue Nov 3 07:00 (in 6d 23h)"),
-            (Some("2026-10-27T11:00:00Z"), "reset, usage unknown until next session"),
-            (None, "reset time unknown"),
+            (Some("2026-10-27T18:00:00Z"), "5h 34%, resets Tue 2:00 PM ET (in 6h)"),
+            (Some("2026-10-28T02:00:00Z"), "5h 34%, resets Tue 10:00 PM ET (in 14h)"),
+            (Some("2026-10-28T13:00:00Z"), "5h 34%, resets Wed 9:00 AM ET (in 1d 1h)"),
+            (Some("2026-10-31T13:00:00Z"), "5h 34%, resets Sat Oct 31 9:00 AM ET (in 4d 1h)"),
+            (Some("2026-10-28T11:59:00Z"), "5h 34%, resets Wed 7:59 AM ET (in 24h)"),
+            (Some("2026-10-28T12:00:00Z"), "5h 34%, resets Wed 8:00 AM ET (in 1d)"),
+            (Some("2026-10-29T11:56:00Z"), "5h 34%, resets Thu Oct 29 7:56 AM ET (in 1d 23h)"),
+            (Some("2026-11-03T11:00:00Z"), "5h 34%, resets Tue Nov 3 6:00 AM ET (in 6d 23h)"),
+            (Some("2026-11-01T18:00:00Z"), "5h 34%, resets Sun Nov 1 1:00 PM ET (in 5d 6h)"),
+            (Some("2026-10-27T11:00:00Z"), "5h reset, usage unknown until next session"),
+            (None, "5h 34%, reset time unknown"),
         ] {
-            let reset = reset.map(|value| value.parse().unwrap());
-            assert_eq!(format_reset_in(reset, now), expected);
+            let window = crate::account_registry::UsageWindow {
+                name: "5h".into(),
+                used_percent: Some(34.0),
+                resets_at: reset.map(|value| value.parse().unwrap()),
+            };
+            assert_eq!(window_summary(&window, now), expected);
         }
-        // UTC tomorrow can still be local today; keep the local calendar date.
-        let late = "2026-10-28T02:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        // pin: the shared local-calendar reset format is the operator contract.
-        assert_eq!(format_reset_in(Some(late), now), "resets Tue 22:00 (in 14h)");
-    }
-
-    #[test]
-    fn structured_auth_needed_marks_stale_without_matching_error_prose() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join(".credentials.json"), "{}").unwrap();
-        let usage = account_usage(crate::accounts::Provider::Claude, home.path());
-        assert!(
-            usage.rejected,
-            "auth-needed is a login failure regardless of detail text"
-        );
-        std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
-        assert!(
-            !account_usage(crate::accounts::Provider::Claude, home.path()).rejected,
-            "absent credentials are not rejected credentials"
-        );
     }
 
     #[test]
@@ -927,28 +744,56 @@ mod tests {
     }
 
     #[test]
-    fn parses_claude_windows_and_optional_model_caps() {
-        let value: Value = serde_json::json!({"five_hour":{"utilization":6.0,"resets_at":"2026-04-08T18:59:59Z"},"seven_day":null,"seven_day_opus":{"utilization":12.0,"resets_at":"2026-04-14T17:59:59Z"},"extra_usage":{"utilization":12.5,"used_credits":12.5}});
-        let windows = parse_claude_usage(value);
-        assert_eq!(
-            windows
-                .iter()
-                .map(|window| window.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["5h", "weekly opus", "extra usage"]
-        );
-        assert_eq!(windows[2].spend_dollars, Some(12.5));
-        let structured = windows.iter().map(|window| crate::account_registry::UsageWindow {
-            name: window.name.clone(), used_percent: window.used_percent, resets_at: None,
-        }).collect::<Vec<_>>();
-        let summary = summarize_windows(&structured).unwrap();
-        assert!(summary.contains("5h") && summary.contains("weekly opus"));
-        assert!(!summary.contains("extra usage"));
-        assert!(summarize_windows(&structured[2..]).is_none());
-        let report = LimitsReport { accounts: vec![AccountLimit { account: "claude".into(), provider: "claude".into(), plan: None, state: "active".into(), source: "fixture".into(), windows, detail: None }] };
+    fn weekly_observation_date_follows_the_eastern_day() {
+        use crate::accounts::Provider;
+        let mut account = crate::account_selection::tests::row(Provider::Claude, "weekly", 1, 12.0, 34.0);
+        for (observed, now, expected) in [
+            ("2026-10-27T03:30:00Z", "2026-10-27T13:00:00Z", "as of 26 October 2026 · 11:30 PM ET"),
+            ("2026-10-26T22:30:00Z", "2026-10-27T03:55:00Z", "as of 6:30 PM ET"),
+        ] {
+            account.usage_observed_at = Some(observed.parse().unwrap());
+            let summary = summarize_account_at(&account, now.parse().unwrap()).unwrap();
+            assert!(summary.contains(expected), "{observed} at {now}: {summary}");
+        }
+    }
+
+    #[test]
+    fn native_claude_snapshot_reaches_limits_without_authentication() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude-fixture");
+        fs::create_dir(&dir).unwrap();
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        record_claude_statusline(&dir, serde_json::from_value(serde_json::json!({
+            "five_hour": {"used_percentage": 12.0, "resets_at": reset.timestamp()},
+            "seven_day": {"used_percentage": 34.0, "resets_at": reset.timestamp()},
+            "accessToken": "must-not-be-cached"
+        })).unwrap());
+        let report = collect_claude("fixture", &dir);
+        assert_eq!(report.windows[0].used_percent, Some(12.0));
+        assert_eq!(report.windows[0].reset_at.as_deref(), Some(local_unix(reset.timestamp()).unwrap().as_str()));
+        assert!(render_human(&LimitsReport { accounts: vec![report] }).contains("12%"));
+        assert!(!account_usage(crate::accounts::Provider::Claude, &dir).authenticated);
+        assert!(!fs::read_to_string(dir.join(CLAUDE_SNAPSHOT_FILE)).unwrap().contains("must-not-be-cached"));
+        assert!(collect_claude("other", home.path()).windows.is_empty(), "profiles do not share usage");
+        let mut snapshot: ClaudeSnapshot = serde_json::from_slice(&fs::read(dir.join(CLAUDE_SNAPSHOT_FILE)).unwrap()).unwrap();
+        snapshot.observed_at = Utc::now() - chrono::Duration::hours(3);
+        fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let report = collect_claude("fixture", &dir);
+        assert_eq!(report.windows.get(1).and_then(|window| window.used_percent), Some(34.0), "unreset weekly observation survives idle sessions");
+        assert_eq!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows[1].used_percent, Some(34.0));
+        let report = LimitsReport { accounts: vec![report] };
+        let compact = compact_line(&report);
+        assert!(compact.contains("34% as of ") && compact.contains(" ET"), "{compact}");
         let human = render_human(&report);
-        let spend = human.lines().find(|line| line.contains("extra usage")).unwrap();
-        assert!(spend.contains("$12.50 spent") && !spend.contains("reset"));
+        assert!(human.contains("34%") && human.contains("as of ") && human.contains(" ET"), "{human}");
+        snapshot.observed_at = Utc::now();
+        for window in &mut snapshot.windows {
+            window.reset_at = Some((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        }
+        fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert!(collect_claude("fixture", &dir).windows.iter().all(|window| window.used_percent.is_none()));
+        fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"accountUuid":"new-account"}}"#).unwrap();
+        assert!(collect_claude("fixture", &dir).windows.is_empty(), "a re-login invalidates old capacity");
     }
 
     #[test]
@@ -965,6 +810,7 @@ mod tests {
             plan: None,
             state: "active".into(),
             source: "live".into(),
+            observed_at: None,
             windows,
             detail: None,
         };
@@ -999,22 +845,5 @@ mod tests {
         let legacy: Value = serde_json::json!({"costDollars":0.003});
         assert_eq!(parse_exa_cost(&v2), Some(0.007));
         assert_eq!(parse_exa_cost(&legacy), Some(0.003));
-    }
-}
-
-#[cfg(test)]
-mod credential_redaction_tests {
-    use super::*;
-
-    #[test]
-    fn the_claude_oauth_debug_never_prints_the_access_token() {
-        let oauth = ClaudeOauth {
-            access_token: "SECRET-tok-9f3a1c".to_string(),
-            subscription_type: Some("max".to_string()),
-        };
-        let rendered = format!("{oauth:?}");
-        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
-        assert!(rendered.contains("[redacted]"), "{rendered}");
-        assert!(rendered.contains("max"), "{rendered}");
     }
 }

@@ -38,13 +38,14 @@ def minutes(secs: int) -> str:
 
 
 def call_task_create(cas_bin: str, cwd: Path, arguments: dict) -> str:
+    # Unbuffered pipes: select() watches the fd, so a buffered readline could
+    # hold a reply that arrived in the same write as an earlier line.
     proc = subprocess.Popen([cas_bin, "serve"], cwd=cwd, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
     deadline = time.monotonic() + TIMEOUT_SECS
 
     def send(message: dict) -> None:
-        proc.stdin.write(json.dumps(message) + "\n")
-        proc.stdin.flush()
+        proc.stdin.write((json.dumps(message) + "\n").encode())
 
     def response(request_id: int) -> dict:
         while True:

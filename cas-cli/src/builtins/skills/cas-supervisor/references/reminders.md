@@ -9,9 +9,10 @@ authoritative task/worker state once before acting.
 
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, run the verifier on Cassy's dispatch (its verdict closes or returns the task; no worker message), then cancel any phase reminder |
-| GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
-| Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
+| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge; if Cassy opened a dispatch, run the verifier on it (its verdict closes or returns the task; no worker message); a Tier 1 delivery in `qa.mode=batch` waits for the release verdict. Then cancel any phase reminder |
+| Parked merge refused only for pending CI | Let the exact-SHA retry Cassy armed finish | No — green retries automatically; red or a moved lane sends one notice | Act only on that notice |
+| Other GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
+| Long release, publication, or other detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice | Check the authoritative job/task state once |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
 | Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One task-filtered event reminder, lasting until task terminal | Cancel it if the phase completes through another path |
@@ -19,6 +20,7 @@ authoritative task/worker state once before acting.
 Never create a reminder instead of checking authoritative task acceptance,
 reading inbox updates, or processing an authenticated typed lifecycle event. Do not sleep,
 watch CI, or repeatedly poll. One active reminder per task/phase is the limit.
+Never run a reminder loop to catch operator messages. If they do not wake you, file the defect.
 
 ## API contract
 
@@ -31,22 +33,22 @@ visible owner notice. Keep the returned reminder ID, list only to reconcile a
 known phase, and cancel or supersede it when state changes. Closing/merging a
 task must leave no stale phase reminder.
 
-### Time checkpoint: release or detached command
+### Time checkpoint: a real deadline
+
+Use a delay only for work that becomes due at that time, such as an expiring
+context handoff or a build-admission retry. A timer that checks inbox, CI, task,
+merge or detached-job status is refused with the matching event forms.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
-  remind_message="Release <name>: inspect the authoritative job receipt and task state"
+  remind_message="Context handoff deadline: escalate to the next owner"
 ```
 
-The reminder is self-targeted by default. If the release finishes early, clean
-it up rather than letting it fire:
+Keep the returned ID and cancel it when the owner acknowledges:
 
 ```text
 coordination action=remind_cancel remind_id=<reminder-id>
 ```
-
-If it remains in flight, cancel the old checkpoint first, then create one new,
-later bounded time reminder — do not accumulate timers.
 
 ### Event checkpoint: only for a concrete lifecycle event
 
@@ -105,22 +107,21 @@ true, delivering the existing supervisor notification and prompt-queue wake.
 
 ## Role patterns
 
-- **Supervisors:** after dispatch, end the turn. For a long official release or
-  merge/publication queue, schedule one bounded checkpoint only when there is
-  no push expected before the next decision. On firing, inspect the official
-  receipt and task/worker state once, then merge, release, reassign, or set one
-  superseding checkpoint. Never retain reminders after merge or close.
-- **Workers:** before ending a turn for a detached command, persist the command
-  receipt/log path and next action in a progress note, message the supervisor
-  if it needs a decision, then create one bounded self-reminder. On firing,
-  read the receipt once and explicitly hand off the result; do not turn it into
-  a poll loop. Context handoff is commit + push + task note + supervisor
-  message first; the reminder only protects a quiet external follow-up.
+- **Supervisors:** after dispatch, end the turn. Wait for CI with `ci_completed`,
+  for landing with `branch_contained_in`, and for a task with its filtered event.
+  Detached commands use the harness background-task completion notice. On the
+  signal, inspect the official receipt once and advance the work.
+- **Workers:** persist a detached command's log/receipt and next action in a
+  progress note. Use its background-task completion notice; use an event reminder
+  for a concrete external condition. A capped build-admission refusal may use
+  one timer to retry the refused work at its admission time. Context handoff is
+  commit + push + task note + supervisor message.
 
-The model pattern: one 2–5 minute checkpoint after an unreachable external
-workflow, followed by a single authoritative check and state advance — not a
-stream of stale reminders.
+Cancel any pending reminder when its phase completes. Never arm a timer to find
+operator messages: Commander already wakes the supervisor. Report a missing wake
+as a defect and remove old inbox polling workarounds.
 
 ## Peer release updates
 
-Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.
+Peer FYIs default to `kind=receipt` and wait for the peer's next turn. Use
+`kind=ask` or `blocker=true` when a decision is required. Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.

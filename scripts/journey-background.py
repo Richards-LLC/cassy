@@ -2,17 +2,17 @@
 """Background journey evaluation on green integration tips (cas-bb5e).
 
 A full journey evaluation costs about 12.5 minutes of four browsers (about
-3.7 cores, 3.5 GiB). The factory daemon therefore evaluates a hub-web/dist
-tree in the background only when:
+3.7 cores, 3.5 GiB). The factory daemon therefore evaluates a source/build input set
+in the background only when:
 
 - the integration that produced it is green;
-- that dist tree has not been evaluated (or is not being evaluated) already;
+- that source input set has not been evaluated (or is not being evaluated) already;
 - no evaluation is running: a running one is never cancelled, and when it
   finishes only the newest pending tree starts (intermediate ones are skipped);
 - the build guard reports the host idle (no cargo builders);
 - at least --min-interval-secs (default 1800) passed since the last start.
 
-The receipt is keyed by the dist tree and also records the evaluated journey
+The receipt is keyed by the source/build inputs and also records the evaluated journey
 inputs (the hub-web tree with its specs, the catalog, the runner scripts). The
 cut's `journey-eval.sh --full` reuses it only when all of them match; the
 taste-lane report stays a cut-time step.
@@ -37,8 +37,8 @@ import time
 SCHEMA = 1
 DEFAULT_MIN_INTERVAL = 1800
 RUNNER_INPUTS = ("scripts/journey-eval.sh", "scripts/journey-receipt.py",
-                 "scripts/journey-bundles.py", "scripts/journeys-for-diff.py")
-REUSED_FILES = ("journeys", "playwright", "journey-receipt.json", "journey-selection.json")
+                 "scripts/journey-bundles.py", "scripts/journeys-for-diff.py", "scripts/journey_dist.py", "scripts/journey-background.py")
+REUSED_FILES = ("journeys", "playwright", "journey-receipt.json", "journey-selection.json", "journey-build.json")
 # Harness identity must not reach the runner: journey-receipt.py reserves
 # --full for a supervisor or an unset role.
 SCRUBBED = ("CAS_AGENT_ROLE", "CAS_AGENT_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID",
@@ -158,8 +158,9 @@ def locked(repo):
         yield
 
 
-def dist_tree(repo, rev):
-    return git(repo, "rev-parse", f"{rev}:hub-web/dist")
+def evaluation_key(repo, rev):
+    """Source-only lanes must invalidate a cached evaluation without a dist commit."""
+    return hashlib.sha256(json.dumps(inputs(repo, rev), sort_keys=True).encode()).hexdigest()
 
 
 def inputs(repo, rev):
@@ -168,6 +169,8 @@ def inputs(repo, rev):
     for name in RUNNER_INPUTS:
         runner.update(f"{name}\0{git(repo, 'rev-parse', f'{rev}:{name}')}\n".encode())
     return {"hub_web": git(repo, "rev-parse", f"{rev}:hub-web"),
+            "version_source": git(repo, "rev-parse", f"{rev}:cas-cli/Cargo.toml"),
+            "token_source": git(repo, "rev-parse", f"{rev}:docs/design/design-tokens.json"),
             "catalog": git(repo, "rev-parse", f"{rev}:docs/qa/journeys.md"),
             "runner": runner.hexdigest()}
 
@@ -185,7 +188,7 @@ def alive(pid):
 # Commands ----------------------------------------------------------------
 
 def command_offer(args):
-    tree = dist_tree(args.repo, args.tip)
+    tree = evaluation_key(args.repo, args.tip)
     evaluated = inputs(args.repo, args.tip)
     with locked(args.repo):
         state, outcome = offer(load(args.repo), args.tip, tree, evaluated, args.green, int(time.time()))
@@ -225,7 +228,7 @@ def command_tick(args):
 
 
 def command_run(args):
-    """Evaluate one dist tree in a private detached worktree, then record it."""
+    """Evaluate one source input set in a private detached worktree, then record it."""
     root = shared_root(args.repo)
     checkout = Path(args.artifacts) / "checkout"
     status, detail = "FAIL", "not started"
@@ -240,7 +243,7 @@ def command_run(args):
         receipt = json.loads((Path(args.artifacts) / "journey-receipt.json").read_text())
         ok = (result.returncode == 0 and receipt.get("suite_exit") == 0 and not receipt.get("errors")
               and receipt.get("scope") == "full" and receipt.get("head_sha") == args.tip
-              and dist_tree(root, args.tip) == args.tree)
+              and evaluation_key(root, args.tip) == args.tree)
         status = "PASS" if ok else "FAIL"
         detail = f"journey-eval exit {result.returncode}, suite_exit {receipt.get('suite_exit')}"
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -262,10 +265,10 @@ def command_reuse(args):
     if os.environ.get("JOURNEY_EVAL_FRESH") == "1":
         print("journey-background: JOURNEY_EVAL_FRESH=1; not reusing")
         return 1
-    tree = dist_tree(args.repo, "HEAD")
+    tree = evaluation_key(args.repo, "HEAD")
     receipt = lookup(load(args.repo), tree, inputs(args.repo, "HEAD"))
     if not receipt or not Path(receipt["artifacts"]).is_dir():
-        print(f"journey-background: no background evaluation of hub-web/dist {tree[:12]} to reuse")
+        print(f"journey-background: no background evaluation of source inputs {tree[:12]} to reuse")
         return 1
     source, target = Path(receipt["artifacts"]), Path(args.artifacts)
     target.mkdir(parents=True, exist_ok=True)
@@ -278,7 +281,7 @@ def command_reuse(args):
     (target / "journey-reuse.json").write_text(json.dumps(
         {"tree": tree, "tip": receipt["tip"], "source": str(source),
          "finished_epoch": receipt["finished_epoch"]}, indent=2) + "\n")
-    print(f"journey-eval: reused background evaluation of hub-web/dist {tree[:12]} at "
+    print(f"journey-eval: reused background evaluation of source inputs {tree[:12]} at "
           f"{receipt['tip'][:12]} from {source}; set JOURNEY_EVAL_FRESH=1 to rerun")
     return 0
 

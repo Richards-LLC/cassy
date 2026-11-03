@@ -101,6 +101,7 @@ impl Measurement {
 
     /// Preserve explicit fixture/project roots while letting shared-store
     /// consumers follow a cwd in another linked checkout of that repository.
+    #[cfg(test)]
     pub fn for_store(cas_root: &Path) -> Self {
         Self::resolve_store(cas_root, false)
     }
@@ -301,9 +302,10 @@ impl UpkeepReport {
             .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .collect();
-        let registry = measurement
-            .read(&qa.registry.path)
-            .map(|text| crate::qa_registry::parse(&text));
+        let registry = crate::qa_registry::load_with(&qa.registry.path, &tracked, |path| {
+            Ok(measurement.read(path))
+        })
+        .transpose();
         let status = crate::qa_seed::status_with_registry(qa, registry, &tracked);
         if status.present {
             report

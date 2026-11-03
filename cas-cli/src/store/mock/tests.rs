@@ -37,15 +37,6 @@ fn test_mock_store_archive() {
 }
 
 #[test]
-fn test_mock_store_error_injection() {
-    let store = MockStore::new();
-    store.inject_error(StoreError::NotFound("injected".to_string()));
-
-    let result = store.list();
-    assert!(result.is_err());
-}
-
-#[test]
 fn test_mock_store_not_found() {
     let store = MockStore::new();
     let result = store.get("nonexistent");
@@ -176,23 +167,4 @@ fn test_mock_skill_store_search() {
     let results = store.search("git").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Git Commit");
-}
-
-#[test]
-fn test_fixtures_entry() {
-    let value = entry("test", "content");
-    assert_eq!(value.id, "test");
-    assert_eq!(value.content, "content");
-}
-
-#[test]
-fn test_fixtures_entry_with_tags() {
-    let value = entry_with_tags("test", "content", vec!["tag1", "tag2"]);
-    assert_eq!(value.tags.len(), 2);
-}
-
-#[test]
-fn test_fixtures_task_priority() {
-    let value = task_with_priority("t1", "High priority", 0);
-    assert_eq!(value.priority.0, 0);
 }

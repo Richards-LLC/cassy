@@ -8,11 +8,11 @@ use crate::bridge::server::session::{
     resolve_session_by_name, wait_for_supervisor_ack,
 };
 use crate::bridge::server::types::{
-    ActivityJson, AgentLatestActivityJson, AgentSummaryJson, InboxAckJson, InboxAckRequest,
+    ActivityJson, InboxAckJson, InboxAckRequest,
     InboxCountJson, InboxPeekJson, InboxPollJson, MessageRequest, MessageResponse, PaneTailJson,
-    PingJson, StatusJson, TargetsJson, session_json,
+    PingJson, TargetsJson, session_json,
 };
-use crate::store::{open_prompt_queue_store, open_supervisor_queue_store};
+use crate::store::open_supervisor_queue_store;
 
 pub(crate) fn handle_session_routes(
     req: &mut tiny_http::Request,
@@ -299,60 +299,7 @@ pub(crate) fn handle_session_routes(
                     }
                 }
             }
-            let allowed = allowed_agent_names(&session);
-
-            let data = cas_factory::DirectorData::load_for_project(
-                &cas_root,
-                None,
-                false,
-                crate::cloud::resolve_canonical_id(&cas_root).as_deref(),
-            )?;
-
-            let mut activity = data.activity;
-            filter_events_for_session_agents(&mut activity, &allowed);
-            if activity.len() > 20 {
-                activity.truncate(20);
-            }
-
-            let agents: Vec<AgentSummaryJson> = data
-                .agents
-                .into_iter()
-                .filter(|a| allowed.contains(&a.name))
-                .map(|a| AgentSummaryJson {
-                    generation: crate::ops::fleet::worker_generation(&cas_root, &session.name, &a.name)
-                        .ok()
-                        .flatten(),
-                    id: a.id,
-                    name: a.name,
-                    status: format!("{:?}", a.status).to_lowercase(),
-                    current_task: a.current_task,
-                    latest_activity: a.latest_activity.map(|(s, ts)| AgentLatestActivityJson {
-                        summary: s,
-                        created_at_rfc3339: ts.to_rfc3339(),
-                    }),
-                    last_heartbeat_rfc3339: a.last_heartbeat.map(|ts| ts.to_rfc3339()),
-                })
-                .collect();
-
-            let task_store = crate::store::open_task_store(&cas_root).ok();
-            let to_task = |t: cas_factory::TaskSummary| {
-                super::session::task_summary_json(t, task_store.as_deref())
-            };
-
-            let queue = open_prompt_queue_store(&cas_root)?;
-            let pending = queue.pending_count()?;
-
-            let body = StatusJson {
-                schema_version: 1,
-                session: sj,
-                prompt_queue_pending: pending,
-                activity,
-                agents,
-                tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
-                tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
-                epics: data.epic_tasks.into_iter().map(to_task).collect(),
-                focused_epic: crate::ops::fleet::pinned_epic(&session.name),
-            };
+            let body = super::session::build_status_json(&session, &cas_root, 20)?;
 
             let bytes = serde_json::to_vec_pretty(&body).unwrap_or_else(|_| b"{}".to_vec());
             if let Ok(mut c) = status_cache.lock() {

@@ -595,11 +595,24 @@ struct Fixture {
 /// Two idle, clean workers (one Claude, one Codex) and a shutdown row the
 /// daemon has already dequeued: `processed_at` is set, nothing has run yet.
 fn processed_but_unexecuted_shutdown() -> Fixture {
+    processed_but_unexecuted_shutdown_with_dead_worker(false)
+}
+
+fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon(&cas_dir);
     let mut pids = Vec::new();
     let mut names = Vec::new();
+    if include_dead {
+        register_idle_worker(&cas_dir, "already-dead");
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut dead = agents.get("agent-already-dead").unwrap();
+        dead.status = cas_types::AgentStatus::Stale;
+        dead.pid = Some(i32::MAX as u32);
+        agents.update(&dead).unwrap();
+        names.push("already-dead".to_string());
+    }
     for (name, harness) in [
         ("idle-claude", cas_mux::SupervisorCli::Claude),
         ("idle-codex", cas_mux::SupervisorCli::Codex),
@@ -755,17 +768,81 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
     );
 }
 
+/// A background writer owns the pooled connection, as in the October 28
+/// mixed dead/live batch. Reads needed to authorize a stop must still work;
+/// retiring a dead identity must not prevent the held live pane from stopping.
+#[tokio::test(flavor = "current_thread")]
+async fn mixed_shutdown_survives_a_busy_shared_connection_cas_bc52() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let Fixture { _dir, mut daemon, request_id: request, pids } = processed_but_unexecuted_shutdown_with_dead_worker(true);
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let agents = open_agent_store(&cas_dir).unwrap();
+    assert_ne!(agents.get("agent-already-dead").unwrap().status,
+        cas_types::AgentStatus::Shutdown, "the dead worker still requires deferred retirement");
+    let names = vec!["already-dead".to_string(), pids[0].0.clone(), pids[1].0.clone()];
+    for name in &names {
+        let mut agent = agents.get(&format!("agent-{name}")).unwrap();
+        agent.factory_session = Some(SESSION.into());
+        agents.update(&agent).unwrap();
+    }
+    let mut foreign = cas_types::Agent::new("foreign-dead-name".into(), "already-dead".into());
+    foreign.role = cas_types::AgentRole::Worker;
+    foreign.factory_session = Some("another-factory".into());
+    foreign.pid = Some(std::process::id());
+    agents.register(&foreign).unwrap();
+    let metadata_path = crate::ui::factory::session::metadata_path(SESSION);
+    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    let metadata = crate::ui::factory::session::create_metadata(
+        SESSION, std::process::id(), "supervisor", &names, None, None, None,
+    );
+    std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    crate::ui::factory::persist_session_metadata_worker_hold_at(&metadata_path, &pids[1].0, true).unwrap();
+    daemon.app.set_factory_session(SESSION.into());
+    daemon.app.refresh_data().unwrap();
+    assert!(crate::ui::factory::worker_holds_from_session_metadata_named(SESSION).unwrap().contains(&pids[1].0));
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _connection = shared.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+    {
+        let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+        daemon.process_pending_spawns().await;
+    }
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    assert!(wait_until(Duration::from_secs(15), || shutdown_row_state(&cas_dir, request).0
+        .is_some_and(|state| SpawnLifecycleState::from_str(&state).is_some_and(|state| state.is_terminal()))));
+    let (state, detail) = shutdown_row_state(&cas_dir, request);
+    assert_eq!(state.as_deref(), Some(SpawnLifecycleState::Stopped.as_str()), "mixed batch: {detail:?}");
+    for (name, pid) in &pids {
+        assert!(wait_until(Duration::from_secs(5), || !alive(*pid)), "{name} must stop despite pooled contention");
+        assert!(!daemon.app.worker_names().contains(name), "{name} must leave the roster");
+    }
+    assert!(wait_until(Duration::from_secs(15), || names.iter().all(|name| {
+        agents.get(&format!("agent-{name}")).is_ok_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    })), "all identities retire after the writer releases the connection");
+    assert_eq!(agents.get(&foreign.id).unwrap().status, foreign.status, "a same-name foreign identity is preserved");
+    assert!(!crate::ui::factory::worker_holds_from_session_metadata_named(SESSION).unwrap().contains(&pids[1].0), "the stopped worker's durable hold is cleared");
+    for name in names {
+        assert!(detail.as_deref().unwrap().contains(&name), "each outcome must be recorded: {detail:?}");
+    }
+}
+
 /// cas-981e (GH #1185): a `clear_context` recycle runs the same shutdown, so
 /// under a spent pass budget it used to abort before stopping the worker and
 /// reported nothing: the worker kept its old context and the supervisor never
-/// heard back. The old process must stop, and an outcome must reach both the
-/// queue row and the supervisor. The recipe here passes routing policy, so
-/// the stop runs (cas-033a refuses a policy-rejected recipe before it), but
-/// its Claude account holds a malformed `.claude.json`: the relaunch refuses
-/// to record workspace trust after the old worker stops, which exercises the
-/// failure report without launching a real harness.
+/// heard back. An outcome must reach both the queue row and the supervisor.
+/// The recipe here passes routing policy, but
+/// its Claude account holds a malformed `.claude.json`. Relaunch preflight
+/// must catch that failure while the old worker still runs (cas-08e6), even
+/// when this pass's store-wait budget is spent.
 #[tokio::test(flavor = "current_thread")]
-async fn recycle_under_a_spent_budget_stops_the_old_worker_and_reports_its_outcome_cas_981e() {
+async fn recycle_under_a_spent_budget_keeps_an_unlaunchable_worker_running_cas_08e6() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -806,10 +883,8 @@ async fn recycle_under_a_spent_budget_stops_the_old_worker_and_reports_its_outco
     }
     lock.join().unwrap();
 
-    assert!(
-        wait_until(Duration::from_secs(5), || !alive(pid)),
-        "the recycle's shutdown half must stop the old worker"
-    );
+    assert!(alive(pid), "known launch failure must be refused before stopping the worker");
+    assert!(daemon.app.worker_names().iter().any(|worker| worker == name));
     assert!(
         wait_until(Duration::from_secs(15), || shutdown_row_state(
             &cas_dir, request_id
@@ -1007,10 +1082,10 @@ fn receipts(
 /// (relay.rs `buffer_pane_output`). The replacement's register-timeout
 /// diagnostic therefore quoted the previous session's transcript ("the pane
 /// still showed the old session's transcript"), so the operator could not see
-/// what the relaunched Codex actually printed. Stopping the old worker must
-/// drop its buffer, so whatever the diagnostic quotes is the new process.
+/// what the relaunched Codex actually printed. A successful stop drops its
+/// buffer; a refused launch must preserve the still-running session instead.
 #[tokio::test(flavor = "current_thread")]
-async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
+async fn recycle_refusal_preserves_the_running_sessions_pane_buffer_cas_08e6() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -1022,8 +1097,8 @@ async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
         .adopt_worker_pane_for_test(idle_worker_pane(name, cas_mux::SupervisorCli::Codex));
     daemon.buffer_pane_output(name, b"OLD SESSION TRANSCRIPT: every prior delivery\r\n");
 
-    // A recipe routing refuses after the old worker stops, so no real
-    // harness launches; the shutdown half is what this test pins.
+    // A known launch refusal leaves the existing pane and its transcript
+    // untouched. Successful relaunch transcript clearing is covered below.
     let refused = cas_mux::WorkerSpec {
         cli: cas_mux::SupervisorCli::Claude,
         model: Some("claude-haiku-4-5".to_string()),
@@ -1046,8 +1121,8 @@ async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
         .map(|buffer| buffer.as_plain_text())
         .unwrap_or_default();
     assert!(
-        !tail.contains("OLD SESSION TRANSCRIPT"),
-        "the stopped session's output must not be quoted for its replacement: {tail}"
+        tail.contains("OLD SESSION TRANSCRIPT"),
+        "a refused relaunch must retain the running session's transcript: {tail}"
     );
 }
 
@@ -1059,7 +1134,7 @@ async fn long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2() {
     if !run_hermetic_recycle_child(
         "long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2",
     ) {
-        long_transcript_recycle(false).await;
+        long_transcript_recycle(false, cas_mux::SupervisorCli::Codex).await;
     }
 }
 
@@ -1068,8 +1143,268 @@ async fn long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2() {
 #[tokio::test(flavor = "current_thread")]
 async fn long_transcript_recycle_registers_fresh_session_cas_c1a2() {
     if !run_hermetic_recycle_child("long_transcript_recycle_registers_fresh_session_cas_c1a2") {
-        long_transcript_recycle(true).await;
+        long_transcript_recycle(true, cas_mux::SupervisorCli::Codex).await;
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_no_worktree_recycle_preserves_two_lanes_and_recipe_cas_08e6() {
+    if !run_hermetic_recycle_child("claude_no_worktree_recycle_preserves_two_lanes_and_recipe_cas_08e6") {
+        long_transcript_recycle(true, cas_mux::SupervisorCli::Claude).await;
+    }
+}
+
+/// Block the store worker until the real recycle has queued the replacement's
+/// brief, reproducing cleanup that loses a race with an unregistered successor.
+#[tokio::test(flavor = "current_thread")]
+async fn dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0ac() {
+    if run_hermetic_recycle_child(
+        "dead_pane_recycle_preserves_resume_after_store_worker_catches_up_cas_b0ac",
+    ) {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    let name = "dead-pane-recycle";
+    register_idle_worker(&cas_dir, name);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    // SessionEnd may retire the old identity before its pane disappears.
+    // Its dead PID cannot vouch for the unregistered same-name replacement.
+    old.status = cas_types::AgentStatus::Shutdown;
+    old.pid = Some(i32::MAX as u32);
+    agents.update(&old).unwrap();
+    assert!(!daemon.app.worker_names().iter().any(|worker| worker == name));
+    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas_types::Task::new("cas-resume-race".into(), "Continue held work".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some(name.into());
+    tasks.add(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex,
+        model: Some("gpt-6.1-sol".into()),
+        effort: Some(cas_mux::Effort::High),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store_worker = super::store_worker::global();
+    assert!(store_worker.submit("pause before dead-worker cleanup", move || {
+        blocked_tx.send(()).unwrap();
+        // Dropping the sender on assertion failure also releases the worker.
+        let _ = release_rx.recv();
+    }));
+    blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    open_spawn_queue_store(&cas_dir).unwrap().enqueue_recycle(
+        name, Some(&serde_json::to_string(&spec).unwrap()), Some(SESSION),
+    ).unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+    let brief = queue.peek_all(100).unwrap().into_iter().find(|row| {
+        row.target == name && row.prompt.contains(&task.id)
+    }).expect("the replacement's resume brief is queued before the store worker catches up");
+    assert!(daemon.app.mux.get(name).is_some(), "replacement pane launched");
+    assert_eq!(agents.list(None).unwrap().len(), 1, "replacement has not registered");
+    release_tx.send(()).unwrap();
+    assert!(store_worker.wait_idle(Duration::from_secs(10)), "delayed cleanup completed");
+    assert_eq!(agents.get(&old.id).unwrap().status, cas_types::AgentStatus::Shutdown);
+    // cas-c71e: selection runs while the old registration is Shutdown and
+    // the new same-name pane exists, but has not registered yet.
+    daemon.process_prompt_queue().await.unwrap();
+    assert_ne!(queue.message_delivery_report(brief.id).unwrap().unwrap().pending_reason,
+        Some(cas_store::PendingReason::ShutdownCancelled),
+        "selection must preserve the unregistered replacement's resume brief");
+    let mut replacement = cas_types::Agent::new("replacement-id".into(), name.into());
+    replacement.factory_session = Some(SESSION.into());
+    agents.register(&replacement).unwrap();
+    let inbox = queue.poll_unseen_for_recipient(name, Some(SESSION), 100).unwrap();
+    assert!(inbox.iter().any(|row| row.id == brief.id), "replacement receives its resume brief");
+    let held = tasks.get(&task.id).unwrap();
+    assert_eq!(held.status, cas_types::TaskStatus::InProgress);
+    assert_eq!(held.assignee.as_deref(), Some(name), "recycle retains the replacement's work");
+}
+
+/// A dead-worker recovery request must not stop a same-name successor that
+/// has a live pane but has not registered its new identity yet.
+#[tokio::test(flavor = "current_thread")]
+async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
+    const TEST: &str = "dead_recycle_refuses_unregistered_live_replacement_cas_35f6";
+    if run_hermetic_recycle_child(TEST) { return; }
+    use crate::mcp::{CasCore, tools::CasService};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas = crate::store::init_cas_dir(dir.path()).unwrap();
+    let name = "replacement-before-register";
+    let mut daemon = daemon(&cas);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    register_idle_worker(&cas, name);
+    let agents = open_agent_store(&cas).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    old.status = cas_types::AgentStatus::Shutdown;
+    old.pid = Some(i32::MAX as u32);
+    old.metadata.insert("worker_cli".into(), "codex".into());
+    old.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+    agents.update(&old).unwrap();
+    let tasks = crate::store::open_task_store_local(&cas).unwrap();
+    let mut task = cas_types::Task::new("cas-live-replacement".into(), "Keep replacement's work".into());
+    task.assignee = Some(name.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let core = CasCore::with_daemon(cas.clone(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = CasService::new(core);
+    service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION),
+        serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap())
+        .await.unwrap();
+    let request = open_spawn_queue_store(&cas).unwrap().peek(10).unwrap().remove(0).id;
+    // The successor is running before the queued dead-path recycle is applied.
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let pid = pane.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+    let same_pane = daemon.app.mux.pane_process_group_id(name) == Some(pid) && alive(pid);
+    if daemon.app.mux.get(name).is_some() { daemon.app.mux.kill_worker(name, true).await.unwrap(); }
+    assert!(same_pane, "dead-path recycle stopped an unregistered live replacement");
+    assert_eq!(shutdown_row_state(&cas, request).0.as_deref(), Some("failed"));
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));
+}
+
+/// cas-35f6: both supervisor recovery routes keep the dead worker's checkout.
+#[tokio::test(flavor = "current_thread")]
+async fn same_name_spawn_recovers_dead_pane_cas_35f6() {
+    if !run_hermetic_recycle_child("same_name_spawn_recovers_dead_pane_cas_35f6") {
+        recover_dead_worker(false, cas_types::AgentStatus::Stale).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6() {
+    if !run_hermetic_recycle_child("recycle_recovers_dead_worker_with_unpushed_commits_cas_35f6") {
+        for status in [cas_types::AgentStatus::Stale, cas_types::AgentStatus::Shutdown] {
+            recover_dead_worker(true, status).await;
+        }
+    }
+}
+
+async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
+    use crate::mcp::{CasCore, tools::CasService};
+    use crate::worktree::{WorktreeConfig, WorktreeManager};
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let repo = env.home().join("project");
+    std::fs::create_dir(&repo).unwrap();
+    env.set_current_dir(&repo);
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git").current_dir(cwd).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&repo, &["init", "-qb", "main"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
+    let cas = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &cas);
+    // Concurrent test processes (nextest's own run and the whole-module child)
+    // run this fixture at once. A Stale row's liveness falls back to a host-wide
+    // CAS_AGENT_NAME scan, so a shared name lets one process's live pane make
+    // the other's dead worker look alive.
+    let name = format!("recover-worker-{}", std::process::id());
+    let name = name.as_str();
+    let branch = format!("factory/{name}-cas-beef");
+    let mut manager = WorktreeManager::new(&repo, WorktreeConfig {
+        enabled: true, base_path: cas.join("worktrees").display().to_string(),
+        branch_prefix: "factory/".into(), cleanup_on_close: false,
+        ..Default::default()
+    }).unwrap();
+    let worker = manager.create_for_worker(name).unwrap().path.clone();
+    git(&worker, &["switch", "-qc", &branch]);
+    std::fs::write(worker.join("precious"), "unpublished work").unwrap();
+    git(&worker, &["add", "precious"]);
+    git(&worker, &["commit", "-qm", "unpublished"]);
+    let tip = git(&worker, &["rev-parse", "HEAD"]);
+    assert_eq!(git(&worker, &["rev-list", "--count", "main..HEAD"]), "1");
+    let mut daemon = daemon(&cas);
+    daemon.app.set_factory_session_name_for_test(SESSION);
+    daemon.app.set_worktree_manager_for_test(manager);
+    register_idle_worker(&cas, name);
+    let agents = open_agent_store(&cas).unwrap();
+    let mut old = agents.get(&format!("agent-{name}")).unwrap();
+    old.factory_session = Some(SESSION.into());
+    old.metadata.insert("clone_path".into(), worker.display().to_string());
+    old.metadata.insert("worker_cli".into(), "codex".into());
+    old.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
+    let tasks = crate::store::open_task_store_local(&cas).unwrap();
+    let mut task = cas_types::Task::new("cas-recover".into(), "Continue unpublished work".into());
+    task.assignee = Some(name.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let pid = pane.process_group_id().unwrap();
+    old.pid = Some(pid);
+    agents.update(&old).unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    assert!(daemon.app.prepare_worker_spawn(Some(name), true, None).is_err(),
+        "a live same-name worker is never replaced by spawn");
+    // Kill only this fixture's child; consume its real PTY exit event.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, events) = daemon.app.mux.poll_batch();
+            if events.iter().any(|event| matches!(event, cas_mux::MuxEvent::PaneExited { pane_id, .. } if pane_id == name)) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("killed worker emits its exit");
+    // The crash handler retains the checkout because the worker holds work.
+    daemon.app.mark_worker_crashed(name).await;
+    old.status = status;
+    agents.update(&old).unwrap();
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex, model: Some("gpt-6.1-sol".into()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    if recycle {
+        let core = CasCore::with_daemon(cas.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap();
+        service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION), req)
+            .await.expect("supervisor can recycle a dead worker with unpublished work");
+        daemon.enqueue_spawn_requests().unwrap();
+        daemon.process_pending_spawns().await;
+        daemon.app.join_worker_worktree_cleanups();
+        daemon.process_pending_spawns().await;
+        assert!(daemon.spawn_verifications.contains_key(name), "replacement launched: {:?}", daemon.app.error_message);
+    } else {
+        // The named spawn consumer uses this same prepare/provision/finish path.
+        let prep = daemon.app.prepare_worker_spawn(Some(name), true, None).unwrap();
+        let prepared = prep.run().unwrap();
+        daemon.app.finish_worker_spawn(prepared, None, Some(spec), None)
+            .expect("same-name spawn reaps the exited pane");
+    }
+    assert_ne!(daemon.app.mux.pane_process_group_id(name), Some(pid));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !env.home().join("replacement-cwd").exists() { tokio::task::yield_now().await; }
+    }).await.expect("replacement starts in its worktree");
+    let cwd = std::fs::read_to_string(env.home().join("replacement-cwd")).unwrap();
+    assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&worker).unwrap());
+    assert_eq!(git(&worker, &["branch", "--show-current"]), branch);
+    assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));
+    daemon.app.mux.kill_worker(name, true).await.unwrap();
 }
 
 /// Keep harness discovery local to a child process, including the CAS binary
@@ -1087,9 +1422,10 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
         (
             "codex",
             format!(
-                "#!/bin/sh\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
+                "#!/bin/sh\npwd > \"$HOME/replacement-cwd\"\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
             ),
         ),
+        ("claude", format!("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--mcp-config --strict-mcp-config --effort'; exit 0; fi\nprintf '%s\\n' \"$CAS_ROOT\" > \"$CAS_ROOT/replacement-root\"\nprintf '{REPLACEMENT_STARTUP}\\n'\nexec /bin/sleep 300\n")),
         ("cas", "#!/bin/sh\nexit 0\n".into()),
     ] {
         let executable = bin.join(name);
@@ -1118,6 +1454,142 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
     );
     assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
     true
+}
+
+/// cas-b492: `factory action=restart_supervisor` replaces only the supervisor
+/// pane, through the real request file, exit event and PTYs. The worker keeps its
+/// process, row and lease. Once replaced, a plain exit still stops the factory.
+#[tokio::test(flavor = "current_thread")]
+async fn restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_factory_cas_b492() {
+    const TEST: &str = "restart_supervisor_keeps_workers_and_a_plain_exit_still_stops_the_factory_cas_b492";
+    if run_hermetic_recycle_child(TEST) {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
+    let mut daemon = daemon(&cas_dir);
+    let supervisor = daemon.app.supervisor_name().to_string();
+    let launch = cas_mux::SupervisorLaunch {
+        name: supervisor.clone(),
+        cwd: dir.path().to_path_buf(),
+        cas_root: Some(cas_dir.clone()),
+        cli: cas_mux::SupervisorCli::Claude,
+        worker_cli: cas_mux::SupervisorCli::Claude,
+        model: None,
+        effort: None,
+        teams: Some(cas_mux::TeamsSpawnConfig {
+            team_name: SESSION.into(),
+            agent_id: format!("supervisor@{SESSION}"),
+            agent_name: "supervisor".into(),
+            agent_color: "green".into(),
+            agent_type: "team-lead".into(),
+            parent_session_id: None,
+            lead_session_id: Some("first-lead".into()),
+            settings_path: None,
+        }),
+    };
+    daemon.app.mux.set_supervisor_launch(launch.clone());
+    assert!(daemon.app.mux.restart_supervisor(&[], None).unwrap().is_none());
+    let first_pid = daemon.app.mux.pane_process_group_id(&supervisor).unwrap();
+    let team = super::teams::TeamsManager::new(SESSION);
+    team.init_team_config(&[], dir.path(), &HashMap::new(), "first-lead").unwrap();
+    let team_config = team.teams_dir().join("config.json");
+    daemon.teams = Some(team);
+
+    let worker = "kept-worker";
+    register_idle_worker(&cas_dir, worker);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut registration = agents.get(&format!("agent-{worker}")).unwrap();
+    registration.factory_session = Some(SESSION.into());
+    agents.update(&registration).unwrap();
+    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas_types::Task::new("cas-kept".into(), "Survives the restart".into());
+    task.assignee = Some(worker.into());
+    task.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    agents.try_claim(&task.id, &registration.id, 1800, None).unwrap();
+    let pane = idle_worker_pane(worker, cas_mux::SupervisorCli::Codex);
+    let worker_pid = pane.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(pane);
+    let register_supervisor = |id: &str| {
+        let mut row = cas_types::Agent::new(id.into(), supervisor.clone());
+        row.role = cas_types::AgentRole::Supervisor;
+        row.factory_session = Some(SESSION.into());
+        agents.register(&row).unwrap();
+    };
+    register_supervisor("supervisor-before");
+
+    // A restart that cannot relaunch leaves the supervisor running.
+    daemon.app.mux.set_supervisor_launch(cas_mux::SupervisorLaunch {
+        cwd: dir.path().join("gone"),
+        ..launch.clone()
+    });
+    crate::factory_daemon_health::request_supervisor_restart(&cas_dir, SESSION, "supervisor-before").unwrap();
+    daemon.take_supervisor_restart_request();
+    daemon.advance_supervisor_restart().await;
+    assert_eq!(daemon.app.mux.pane_process_group_id(&supervisor), Some(first_pid));
+    assert!(alive(first_pid), "a refused restart must not stop the supervisor");
+    daemon.app.mux.set_supervisor_launch(launch);
+
+    crate::factory_daemon_health::request_supervisor_restart(&cas_dir, SESSION, "supervisor-before").unwrap();
+    daemon.take_supervisor_restart_request();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while daemon.app.mux.pane_process_group_id(&supervisor) == Some(first_pid) {
+        assert!(Instant::now() < deadline, "the supervisor pane was never replaced");
+        let (_, events) = daemon.app.mux.poll_batch();
+        for event in events {
+            daemon.handle_mux_event(event).await;
+        }
+        daemon.advance_supervisor_restart().await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let second_pid = daemon.app.mux.pane_process_group_id(&supervisor).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || !alive(first_pid)), "the old supervisor is gone");
+    assert!(alive(second_pid), "the replacement is running");
+    assert!(alive(worker_pid), "the worker's process survives the restart");
+    assert_eq!(daemon.app.mux.pane_process_group_id(worker), Some(worker_pid), "same worker pane");
+    assert!(!daemon.shutdown.load(Ordering::Relaxed), "a requested restart is no shutdown");
+    // Claude's --session-id cannot reuse a session, and it ignores its inbox
+    // unless the team config names the session it launched with.
+    let lead = daemon.app.mux.get(&supervisor).unwrap().harness_session_id().unwrap();
+    assert_ne!(lead, "first-lead");
+    let team_config: serde_json::Value = serde_json::from_slice(&std::fs::read(&team_config).unwrap()).unwrap();
+    assert_eq!(team_config["leadSessionId"], lead.as_str());
+    let prompts = open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(15), || prompts.peek_all(50).unwrap().iter().any(|row| {
+            row.target == supervisor
+                && row.prompt.starts_with(crate::ui::factory::app::SUPERVISOR_RESTART_PREFACE)
+                && row.prompt.contains(worker)
+        })),
+        "the new session is told its workers are still running"
+    );
+
+    // The successor's registration retires its predecessor, not the fleet.
+    register_supervisor("supervisor-after");
+    assert_eq!(agents.get("supervisor-before").unwrap().status, cas_types::AgentStatus::Shutdown);
+    let kept = agents.get(&registration.id).unwrap();
+    assert_eq!(kept.status, registration.status);
+    assert_eq!(kept.factory_session.as_deref(), Some(SESSION));
+    assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, registration.id);
+    assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker));
+
+    // Nothing is armed any more, so this exit is the factory's shutdown signal.
+    daemon.app.mux.get_mut(&supervisor).unwrap().kill_tree_force();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !daemon.shutdown.load(Ordering::Relaxed) {
+        assert!(Instant::now() < deadline, "a plain supervisor exit must stop the factory");
+        let (_, events) = daemon.app.mux.poll_batch();
+        for event in events {
+            daemon.handle_mux_event(event).await;
+        }
+        daemon.advance_supervisor_restart().await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(daemon.app.mux.pane_process_group_id(&supervisor), Some(second_pid), "no relaunch");
+    daemon.app.mux.kill_all();
 }
 
 /// Reproduce the lane environment inside the capped test runner: no login
@@ -1190,13 +1662,15 @@ async fn consume_queued_shutdowns(daemon: &mut FactoryDaemon) -> Vec<i64> {
     controls
 }
 
-async fn long_transcript_recycle(register_replacement: bool) {
+async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::SupervisorCli) {
     const NAME: &str = "long-history-codex";
     const OLD: &str = "OLD SESSION TRANSCRIPT: prior delivery\r\n";
     const NEW: &str = REPLACEMENT_STARTUP;
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    // Status honors CAS_ROOT; read this fixture's registry rather than temp_home's.
+    env.set("CAS_ROOT", &cas_dir);
     env.set_current_dir(dir.path());
 
     let mut daemon = daemon(&cas_dir);
@@ -1215,6 +1689,18 @@ async fn long_transcript_recycle(register_replacement: bool) {
         held.assignee = Some(NAME.into());
         held.status = cas_types::TaskStatus::InProgress;
         tasks.add(&held).unwrap();
+        let peer = "roster-peer";
+        register_idle_worker(&cas_dir, peer);
+        let mut registration = agents.get(&format!("agent-{peer}")).unwrap();
+        registration.factory_session = Some(SESSION.into());
+        agents.update(&registration).unwrap();
+        daemon.app.adopt_worker_pane_for_test(idle_worker_pane(peer, cas_mux::SupervisorCli::Codex));
+        // This is how a zero-worker boot precedes later dynamic spawns.
+        let metadata = crate::ui::factory::create_metadata(
+            SESSION, std::process::id(), daemon.app.supervisor_name(), &[], None,
+            Some(dir.path().to_str().unwrap()), None,
+        );
+        crate::ui::factory::SessionManager::new().save_metadata(&metadata).unwrap();
     }
     let old = idle_worker_pane(NAME, cas_mux::SupervisorCli::Codex);
     let old_pid = old.process_group_id().unwrap();
@@ -1228,10 +1714,13 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .contains(OLD.trim())
     );
 
+    let account = dir.path().join("selected-account");
+    std::fs::create_dir(&account).unwrap();
     let spec = cas_mux::WorkerSpec {
-        cli: cas_mux::SupervisorCli::Codex,
-        model: Some("gpt-6.1-sol".into()),
+        cli,
+        model: Some(if cli == cas_mux::SupervisorCli::Claude { "claude-opus-5-5" } else { "gpt-6.1-sol" }.into()),
         effort: Some(cas_mux::Effort::High),
+        config_dir: (cli == cas_mux::SupervisorCli::Claude).then(|| account.display().to_string()),
         ..cas_mux::WorkerSpec::builtin_default()
     };
     let request_id = open_spawn_queue_store(&cas_dir)
@@ -1246,7 +1735,8 @@ async fn long_transcript_recycle(register_replacement: bool) {
     daemon.process_pending_spawns().await;
     assert!(
         !alive(old_pid),
-        "the old process stopped before the relaunch"
+        "the old process stopped before the relaunch: {:?}",
+        shutdown_row_state(&cas_dir, request_id)
     );
     let verification = daemon.spawn_verifications.get(NAME).unwrap_or_else(|| {
         panic!(
@@ -1255,7 +1745,8 @@ async fn long_transcript_recycle(register_replacement: bool) {
         )
     });
     assert_eq!(verification.request_id, Some(request_id));
-    assert_eq!(daemon.app.harness_for(NAME), cas_mux::SupervisorCli::Codex);
+    assert_eq!(daemon.app.harness_for(NAME), cli);
+    assert_eq!(daemon.app.mux.effective_worker_spec(NAME, None), spec);
 
     // Drive the real mux output handler; the child, not the test, emits NEW.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1279,14 +1770,27 @@ async fn long_transcript_recycle(register_replacement: bool) {
     }
 
     if register_replacement {
+        if cli == cas_mux::SupervisorCli::Claude {
+            assert_eq!(std::fs::read_to_string(cas_dir.join("replacement-root")).unwrap().trim(), cas_dir.to_str().unwrap());
+        }
         let replacement_pid = daemon.app.mux.pane_process_group_id(NAME).unwrap();
         assert_ne!(replacement_pid, old_pid, "recycle started a new process");
         // The old registration is retired, but the replacement has not
         // registered. A write makes this a changed-DB director snapshot.
-        let old_registration = open_agent_store(&cas_dir)
-            .unwrap()
-            .get(&format!("agent-{NAME}"))
-            .unwrap();
+        // Under load the bounded first attempt can lose to a busy store: the row is
+        // marked stale and retirement is deferred to the store worker, which must
+        // still finish it.
+        let retirement_deadline = Instant::now() + Duration::from_secs(30);
+        let old_registration = loop {
+            let row = open_agent_store(&cas_dir)
+                .unwrap()
+                .get(&format!("agent-{NAME}"))
+                .unwrap();
+            if row.status == cas_types::AgentStatus::Shutdown || Instant::now() >= retirement_deadline {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         assert_eq!(old_registration.status, cas_types::AgentStatus::Shutdown);
         let mut held = tasks.get("cas-recycled-held").unwrap();
         held.notes = "Replacement is waiting to register".into();
@@ -1335,6 +1839,9 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .unwrap()
             .register(&replacement)
             .unwrap();
+        if cli == cas_mux::SupervisorCli::Claude {
+            crate::factory_hook_canary::record_session_start(&cas_dir, NAME, &replacement.id).unwrap();
+        }
         // A delayed store-worker callback for the retired generation must
         // also remain harmless after same-name registration.
         crate::ui::factory::app::queue_phantom_worker_teardowns(
@@ -1383,6 +1890,22 @@ async fn long_transcript_recycle(register_replacement: bool) {
             output.len() < 2_000,
             "the short new output is not padded with old history"
         );
+        // A real two-pane spawn/recycle must durably retain both names,
+        // including while the same-name replacement registers.
+        let store_worker = super::store_worker::StoreWorker::start();
+        daemon.flush_epic_focus_write(&store_worker);
+        assert!(store_worker.wait_idle(Duration::from_secs(5)));
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        let mut names: Vec<_> = session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec![NAME, "roster-peer"]);
+        let status = crate::bridge::server::session::build_status_json(&session, &cas_dir, 20).unwrap();
+        assert_eq!(
+            status.session.workers.len(), 2,
+            "Team status retains both lanes; observed={:?}, metadata={names:?}",
+            status.session.workers,
+        );
+
         // A teardown of this actual generation must still reap it and
         // release its binding; generation checks are not a blanket bypass.
         let target = daemon.app.phantom_worker_target(NAME);
@@ -1401,6 +1924,10 @@ async fn long_transcript_recycle(register_replacement: bool) {
             tasks.get("cas-recycled-held").unwrap().status,
             cas_types::TaskStatus::Open,
         );
+        daemon.flush_epic_focus_write(&store_worker);
+        assert!(store_worker.wait_idle(Duration::from_secs(5)));
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        assert_eq!(session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect::<Vec<_>>(), vec!["roster-peer"]);
     } else {
         assert_eq!(
             state.as_deref(),
@@ -1452,6 +1979,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         (false, Closed, false, true),
         (true, Closed, false, true),
         (true, AwaitingMerge, false, true),
+        (false, InProgress, false, false),
         (true, InProgress, false, false),
         (true, AwaitingMerge, true, false),
         (false, Closed, true, false),
@@ -1543,6 +2071,12 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
             runtime.app.shutdown_worker_for_recycle(name).await.unwrap();
         } else {
             runtime.app.shutdown_worker(name, false).await.unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while runtime.app.worker_worktree_cleanups_pending() {
+            runtime.app.poll_worker_worktree_cleanups();
+            assert!(Instant::now() < deadline, "target cleanup did not finish");
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(
             !target.exists(),

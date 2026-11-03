@@ -89,6 +89,7 @@ impl ConfigMeta {
     pub fn examples(&self) -> Vec<&'static str> {
         match self.key {
             "factory.write_roots" => vec!["~/Downloads,/mnt/models"],
+            "secrets.auto_delete" => vec!["off", "after_use", "1h"],
             "qa.capture.serve" => vec!["pnpm dev --port {port}"],
             "qa.capture.credentials_env" => vec!["PROJECT_QA_CREDENTIALS"],
             "qa.capture.success_url" => vec!["^https://[^/]+/dashboard"],

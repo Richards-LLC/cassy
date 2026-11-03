@@ -5978,7 +5978,7 @@ impl CasCore {
                     let note = format!("[{}] {}", now.format("%Y-%m-%d %H:%M"),
                         crate::fast_lane::merge_note(head, merge_sha, now));
                     if let Err(error) = self.open_task_store()
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| format!("{error:?}"))
                         .and_then(|store| store.append_trusted_note(task_id, &note).map_err(|error| error.to_string()))
                     {
                         tracing::warn!(%task_id, %error, "fast-lane merge record not saved; the close takes the normal QA path");

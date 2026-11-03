@@ -48,8 +48,8 @@ fn eligibility_admits_a_small_frontend_hotfix_and_names_each_refusal() {
         "apps/frontend/server/api/creators.ts is outside fast_lane.paths"
     );
     assert_eq!(
-        refused(&bug, &["apps/frontend/app/src/composables/useAuth.ts"]),
-        "apps/frontend/app/src/composables/useAuth.ts matches fast_lane.deny"
+        refused(&bug, &["apps/frontend/app/src/composables/oauth.ts"]),
+        "apps/frontend/app/src/composables/oauth.ts matches fast_lane.deny"
     );
     assert_eq!(refused(&bug, &[page, page, page, page]), "4 files exceed the 3-file cap");
     assert!(refused(&task(TaskType::Feature, &[]), &[page]).contains("plan or phase work"));
@@ -153,6 +153,9 @@ fn an_attributable_failure_opens_a_revert_pr_for_the_merge() {
     };
     run(dir.path(), &["init", "-q", "--bare", "-b", "main", "origin.git"]);
     run(dir.path(), &["clone", "-q", origin.to_str().unwrap(), "work"]);
+    run(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    run(&repo, &["config", "user.name", "QA"]);
+    run(&repo, &["config", "user.email", "qa@example.test"]);
     let page = repo.join("apps/frontend/app/src/pages/creator.vue");
     std::fs::create_dir_all(page.parent().unwrap()).unwrap();
     std::fs::write(&page, "<div class=\"grid\"/>\n").unwrap();

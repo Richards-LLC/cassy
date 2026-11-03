@@ -15,7 +15,7 @@ enabled = true
 paths = ["apps/frontend/app/src/**", "apps/frontend/locales/**", "apps/frontend/test/**", "docs/qa/journeys.yaml"]
 deny = [
   "apps/frontend/server/**", "apps/frontend/middleware/**", "apps/frontend/app/src/middleware/**",
-  "**/*auth*", "**/*auth*/**", "**/*billing*", "**/*billing*/**", "**/*stripe*", "**/*stripe*/**",
+  "**/*auth*", "**/*auth*/**", "**/*Auth*", "**/*Auth*/**", "**/*billing*", "**/*billing*/**", "**/*stripe*", "**/*stripe*/**",
   "**/*payment*", "**/*payment*/**", "**/package.json", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/nuxt.config.ts",
   "**/vercel.json", "**/.env*", ".github/**", "apps/backend/**",
 ]
@@ -38,6 +38,7 @@ Check and status names match exactly and are case-sensitive:
 - `receipt_statuses` are commit-status contexts on the merge commit, such as
   `Vercel` for the production build.
 - Workflow names are not read.
+- Path globs are case-sensitive, so list both spellings where they differ, such as `*auth*` and `*Auth*`.
 
 ## Eligibility
 

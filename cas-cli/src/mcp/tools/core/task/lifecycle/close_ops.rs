@@ -8991,7 +8991,6 @@ impl CasCore {
         // cas-38e7: epics no longer need a full-suite journey receipt; the
         // merge queue runs the journeys once.
         let mut registry_upkeep_notices = Vec::new();
-        let mut fast_lane_stage = fast_lane_gate::LaneClose::Off;
         let mut fast_lane_receipt_passed = false;
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
@@ -9051,7 +9050,7 @@ impl CasCore {
             });
             // cas-5ea7: the hotfix fast lane defers upkeep and QA evidence at
             // park and owes a post-merge receipt instead of the QA evidence gate.
-            fast_lane_stage = fast_lane_gate::classify(
+            let fast_lane_stage = fast_lane_gate::classify(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, qa_receipt,
             );

@@ -118,8 +118,8 @@ pub fn evaluate(lane: &FastLaneConfig, task: &Task, changes: &[Change]) -> Eligi
     if changes.is_empty() {
         return Eligibility::Refused("the delivery changes no files".into());
     }
-    let globs = |list: &[String]| list.iter().map(String::as_str).collect::<Vec<_>>();
-    let (allowed, denied) = (globs(&lane.paths), globs(&lane.deny));
+    let allowed: Vec<&str> = lane.paths.iter().map(String::as_str).collect();
+    let denied: Vec<&str> = lane.deny.iter().map(String::as_str).collect();
     if let Some(change) = changes
         .iter()
         .find(|change| !crate::qa_registry::matches_path(allowed.iter().copied(), &change.path))
@@ -521,7 +521,7 @@ pub fn open_revert_pr(
     let tree = scratch.path().join("tree");
     let tree_arg = tree.to_string_lossy().to_string();
     git(repo, &["worktree", "add", "--quiet", "--detach", &tree_arg, &format!("origin/{target}")], GIT_WRITE)?;
-    let result = (|| {
+    let result = (|| -> Result<String, String> {
         let parents = git(&tree, &["rev-list", "--parents", "-n", "1", merge], PROBE)?;
         let mut revert = vec!["revert", "--no-edit"];
         if parents.split_whitespace().count() > 2 {

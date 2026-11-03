@@ -495,18 +495,30 @@ fn worker_status_at(
 }
 
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
+    use crate::cli::factory::wedged;
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
     let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
         return false;
     };
-    stored.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
-        && stored.metadata.get("clone_path").is_some_and(|clone| {
-            crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
-        })
+    if stored.machine_id != Some(cas_types::Agent::get_or_generate_machine_id()) { return false; }
+    if stored.metadata.get("clone_path").is_some_and(|clone| {
+        crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
+    }) { return true; }
+    // Match worker_status's harness discovery. Trust a stored PID only while
+    // alive and, when recorded, still the same process incarnation.
+    let pid = wedged::find_worker_pid(&wedged::RealProcessTable, &stored.name)
+        .or_else(|| stored.pid.filter(|&pid| {
+            stored.pid_starttime.map_or_else(
+                || crate::mcp::daemon::pid_alive(pid),
+                |start| crate::mcp::daemon::pid_matches_fingerprint(pid, start),
+            )
+        }));
+    // An unavailable tree is not positive evidence of background work.
+    pid.is_some_and(|pid| wedged::background_processes_for(pid).is_active())
 }
 
 /// Read the current delivery, not the remembered event's task. Local build
-/// evidence comes from the registered clone's OS lane lock; CI is exact-tip.
+/// evidence comes from its OS lane lock or live harness children; CI is exact-tip.
 /// Runs with the existing external delivery job, never on the control lane.
 pub(super) fn read_worker_wait(
     event: &DirectorEvent,

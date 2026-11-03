@@ -27,6 +27,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **`cas-test-audit` skill** — A read-only procedure for auditing a project's tests: five buckets (dead, superseded, restates-implementation, duplicate, slow), per-language detector recipes with a precision check, CI-timing recipes per runner, and a ledger format. Cuts need operator approval and each names its covering test. It reports that merge-queue time is mostly the build, so a test cost list is not the route to queue speed.
 
+### Fixed — Worker activity and retirement
+
+- **Count live background work before sending idle alerts** — A worker's live
+  child now suppresses an idle delivery alert until it finishes, alongside
+  existing lane-lock checks and reminder policies.
+- **Keep shutdown terminal after late stale events** — A delayed pane-exit
+  observation preserves a retired registration's shutdown status.
+
+### Fixed — Skill validation sandbox
+
+- **Probe installed Bubblewrap before choosing it** — Hosts where Bubblewrap
+  cannot create its sandbox use the existing plain-shell fallback and warning.
+  Required sandbox isolation still fails closed.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

@@ -753,8 +753,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let quiet = now + chrono::Duration::minutes(11);
     f.app.merge_alert_retries.now = Some(quiet);
     let retries = f.app.merge_alert_retry_events_at(quiet);
-    assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
-        "after the quiet window, an idle worker must still alert without a new detector event");
+    assert!(f.app.revalidate_and_prompt_for_delivery(&retries).1.is_empty(),
+        "unchanged idle episodes never repeat after a timer or wait expires");
     // A same-SHA rerun is visible when the settled-failure backoff expires.
     let later = now + chrono::Duration::minutes(12);
     f.app.merge_alert_retries.now = Some(later);
@@ -802,7 +802,7 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.app.merge_alert_retries.now = Some(at(13));
     assert!(f.relay().is_empty(), "a no-need status quiets the identical repeat");
     message(at(7), "Blocked: need a supervisor decision on the failing check.");
-    assert_eq!(f.relay().len(), 1, "a later blocker never mutes the alert");
+    assert!(f.relay().is_empty(), "a blocker has its own wake; it does not repeat an unchanged idle episode");
 }
 
 #[cfg(target_os = "linux")]

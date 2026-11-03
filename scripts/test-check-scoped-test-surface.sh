@@ -359,11 +359,32 @@ import subprocess
 import sys
 
 repo, search_path, trace = map(Path, sys.argv[1:])
+# Model a Git regex compiler with a finite input budget. Newer host Git can
+# accept the oversized union, so a host-dependent compiler error is no oracle.
+# All accepted searches still execute real Git against the tracked fixtures.
+bounded_bin = repo / 'bounded-bin'
+bounded_bin.mkdir()
+for tool in search_path.iterdir():
+    if tool.name != 'git':
+        (bounded_bin / tool.name).symlink_to(tool.resolve())
+git = bounded_bin / 'git'
+git.write_text(f'''#!{sys.executable}
+import os, subprocess, sys
+real_git = {str((search_path / 'git').resolve())!r}
+if sys.argv[1:2] == ['grep'] and '-E' in sys.argv and '-f' in sys.argv:
+    pattern = sys.stdin.buffer.read()
+    if len(pattern) > 65536:
+        print('fixture: Git regex exceeds portable compile budget', file=sys.stderr)
+        sys.exit(2)
+    sys.exit(subprocess.run([real_git, *sys.argv[1:]], input=pattern).returncode)
+os.execv(real_git, [real_git, *sys.argv[1:]])
+''')
+git.chmod(0o755)
 paths = sorted(str(path.relative_to(repo)) for path in (repo / 'cas-cli/src').rglob('*') if path.is_file())
 assert len(paths) == 1315, len(paths)
 result = subprocess.run(
     ['bash', './scripts/check-scoped-test-surface.sh', '--resolve-targets', '--base', 'HEAD', '--paths-from-stdin', '--'],
-    cwd=repo, env=dict(os.environ, PATH=str(search_path), GIT_TRACE=str(trace)),
+    cwd=repo, env=dict(os.environ, PATH=str(bounded_bin), GIT_TRACE=str(trace)),
     input='\n'.join(paths) + '\n', capture_output=True, text=True, timeout=60,
 )
 assert result.returncode == 0, result.stdout + result.stderr

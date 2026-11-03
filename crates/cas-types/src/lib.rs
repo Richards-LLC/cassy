@@ -97,7 +97,7 @@ pub use qa_pass::{QA_PASS_WITHDRAWN_PREFIX, QaPass, QaPassState, QaVerdict};
 pub use recording::{
     Recording, RecordingAgent, RecordingEvent, RecordingEventType, RecordingQuery,
 };
-pub use rule::{OperatorRuleAuthority, Rule, RuleCategory, RuleStatus};
+pub use rule::{OperatorRuleAuthority, Rule, RuleCategory, RuleStatus, StakeholderAttribution};
 pub use scope::{Scope, ScopeFilter, ShareScope};
 pub use search_manifest::{
     SearchManifest, SearchManifestEntry, parse_search_manifest, search_manifest_shape_hint,

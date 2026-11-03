@@ -689,6 +689,21 @@ pub struct TaskRequest {
 /// Unified rule operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct RuleRequest {
+    /// Name of the stakeholder whose instruction this rule represents.
+    #[serde(default)]
+    pub stakeholder: Option<String>,
+    /// Stakeholder's words, preserved verbatim (required with attribution).
+    #[serde(default)]
+    pub stakeholder_quote: Option<String>,
+    /// Scope of that instruction, separate from the interpreted rule.
+    #[serde(default)]
+    pub stakeholder_scope: Option<String>,
+    /// Review deadline (RFC3339); required for attributed hard rules.
+    #[serde(default)]
+    pub review_after: Option<String>,
+    /// Explicit JSON snapshot from a peer's rule action=drift result.
+    #[serde(default)]
+    pub peer_snapshot: Option<String>,
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::rule_action_schema",

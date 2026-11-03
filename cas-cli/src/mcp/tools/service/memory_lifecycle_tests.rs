@@ -398,3 +398,15 @@ async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date(
     let text = shown.content.iter().filter_map(|c| c.as_text()).map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
     assert!(text.contains(words) && text.contains(scope), "{text}");
 }
+
+#[tokio::test]
+async fn stakeholder_constraint_memories_require_an_explicit_expiry() {
+    let (_dir, service, store, _queue) = service(false);
+    let mut request = json!({"action": "remember", "content": "Freeze SMS edits for this review", "tags": "stakeholder:Ben,constraint", "bypass_overlap": true, "personal": true});
+    let result = service.memory(Parameters(serde_json::from_value(request.clone()).unwrap())).await;
+    assert!(result.is_err() || result.as_ref().is_ok_and(|r| r.is_error == Some(true)), "stakeholder constraints must not become permanent memories");
+    assert!(store.list().unwrap().is_empty());
+    request["valid_until"] = json!("2100-01-01T00:00:00Z");
+    memory(&service, request).await;
+    assert!(store.list().unwrap()[0].valid_until.is_some());
+}

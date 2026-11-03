@@ -431,6 +431,8 @@ impl MarkdownRuleStore {
             auto_approve_tools: Option<String>,
             #[serde(default)]
             auto_approve_paths: Option<String>,
+            #[serde(default)]
+            stakeholder: Option<cas_types::StakeholderAttribution>,
         }
 
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
@@ -460,6 +462,7 @@ impl MarkdownRuleStore {
             team_id: None,
             share: None,
             operator_authority: None,
+            stakeholder: fm.stakeholder,
         })
     }
 
@@ -479,7 +482,7 @@ impl MarkdownRuleStore {
              surface_count: {}\n\
              tags: [{}]\n\
              paths: \"{}\"\n\
-             {}{}{}{}\
+             {}{}{}{}{}\
              ---\n\n\
              {}",
             rule.id,
@@ -507,6 +510,9 @@ impl MarkdownRuleStore {
                 .as_ref()
                 .map(|p| format!("auto_approve_paths: \"{p}\"\n"))
                 .unwrap_or_default(),
+            rule.stakeholder.as_ref().map(|attribution| serde_json::to_string(attribution)
+                .map(|json| format!("stakeholder: {json}\n"))).transpose()
+                .map_err(|e| StoreError::Parse(e.to_string()))?.unwrap_or_default(),
             rule.content
         );
 
@@ -630,6 +636,29 @@ mod tests {
         let saved = store.get(&entry.id).unwrap();
         assert_eq!(saved.valid_from, entry.valid_from);
         assert_eq!(saved.valid_until, entry.valid_until);
+    }
+
+    #[test]
+    fn stakeholder_attribution_survives_rule_store_reads_and_updates() {
+        let temp = TempDir::new().unwrap();
+        let sqlite_dir = temp.path().join("sqlite");
+        fs::create_dir(&sqlite_dir).unwrap();
+        let stores: Vec<Box<dyn RuleStore>> = vec![
+            Box::new(crate::SqliteRuleStore::open(&sqlite_dir).unwrap()),
+            Box::new(MarkdownRuleStore::open(&temp.path().join("markdown")).unwrap()),
+        ];
+        for store in stores {
+            store.init().unwrap();
+            let mut rule = Rule::new("rule-evidence".into(), "Prompt changes via PR".into());
+            store.add(&rule).unwrap();
+            assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
+            rule.stakeholder = Some(cas_types::StakeholderAttribution {
+                name: "Ben".into(), quote: "  Review PROMPT changes via PR.\nKeep shipping.  ".into(), scope: "Prompt changes only".into(),
+            });
+            store.update(&rule).unwrap();
+            assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+            assert_eq!(store.list().unwrap()[0].stakeholder, rule.stakeholder);
+        }
     }
 
     #[test]

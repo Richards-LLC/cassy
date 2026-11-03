@@ -865,6 +865,10 @@ impl CasService {
     pub(super) async fn rule_create(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::RuleCreateRequest;
         let inner_req = RuleCreateRequest {
+            stakeholder: req.stakeholder,
+            stakeholder_quote: req.stakeholder_quote,
+            stakeholder_scope: req.stakeholder_scope,
+            review_after: req.review_after,
             content: req
                 .content
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "content required"))?,
@@ -889,6 +893,10 @@ impl CasService {
     pub(super) async fn rule_update(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::RuleUpdateRequest;
         let inner_req = RuleUpdateRequest {
+            stakeholder: req.stakeholder,
+            stakeholder_quote: req.stakeholder_quote,
+            stakeholder_scope: req.stakeholder_scope,
+            review_after: req.review_after,
             id: req.id.ok_or_else(|| self.missing_id("rule", "update"))?,
             content: req.content,
             paths: req.paths,

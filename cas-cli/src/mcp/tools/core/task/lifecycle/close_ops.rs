@@ -6264,6 +6264,14 @@ impl CasCore {
             }
         }
 
+        if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
+            let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Exact receipt verification dispatch is unavailable"))?;
+            self.emit_premerge_review_handoff(task, &dispatch)?;
+        }
+
         let next = match transaction.state {
             cas_types::WorkerDeliveryState::AwaitingVerification => {
                 "A capability-bound task-verifier or registered supervisor must record the exact-task verdict."

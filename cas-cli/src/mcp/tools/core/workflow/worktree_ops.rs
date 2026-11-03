@@ -4746,7 +4746,23 @@ impl CasCore {
 
         // The existing task verifier runs on a disposable merge candidate,
         // outside the target lock. Pending/rejected reviews hold only this lane.
-        let premerge_approval = if let Some(task) = scoped_task.as_deref() {
+        // A previously published source is a receipt/reconciliation request,
+        // not another delivery review. This local hint never authorizes a
+        // mutation: the existing fresh containment check below must confirm it.
+        let deferred_contained_review = if let Some(task) = scoped_task.as_deref() {
+            let bound = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .and_then(|dispatch| dispatch.repository)
+                .is_some_and(|proof| std::path::Path::new(&proof.worktree_root).starts_with(cas_root.join("verification-candidates")));
+            let remote = format!("origin/{}", worktree.parent_branch);
+            let target = if manager.git().has_origin_remote() && manager.git().resolve_commit(&remote).is_some() {
+                remote.as_str()
+            } else { worktree.parent_branch.as_str() };
+            !bound && manager.git().is_ancestor(&worktree.branch, target)
+        } else { false };
+        let premerge_approval = if deferred_contained_review {
+            None
+        } else if let Some(task) = scoped_task.as_deref() {
             self.prepare_premerge_verification(task, &cwd, &worktree.branch, &worktree.parent_branch)?
         } else {
             None
@@ -4805,6 +4821,9 @@ impl CasCore {
                     }
                 }
                 Containment::Unverified(message) => return Ok(Self::tool_error(message)),
+                Containment::NotContained if deferred_contained_review => {
+                    return Ok(Self::tool_error("The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation."));
+                }
                 Containment::NotContained => {}
             }
         }

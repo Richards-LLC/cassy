@@ -210,7 +210,9 @@ fn make_service(cas_root: PathBuf) -> CasService {
 fn disable_system_a(cas_root: &Path) {
     std::fs::write(
         cas_root.join("config.toml"),
-        "[worktrees]\nenabled = false\n",
+        // Routing/checkout fixtures do not implicitly exercise verification.
+        // Review fixtures opt in explicitly with their own configuration.
+        "[worktrees]\nenabled = false\n[verification]\nenabled = false\n",
     )
     .unwrap();
 }
@@ -2706,6 +2708,7 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 std::fs::write(fixture.worker.join("delivery.txt"), "Changed after review\n").unwrap();
                 run_git(&["commit", "-am", "Change source after review"], &fixture.worker);
                 run_git(&["push", "origin", &fixture.branch], &fixture.worker);
+                task = tasks.get(&task.id).unwrap();
                 task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
                 tasks.update(&task).unwrap();
             }
@@ -3652,6 +3655,15 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     request.cleanup = Some(false);
     request.supervisor_override = Some(ci_override);
     request.reason = ci_override.then(|| "Fixture supervisor reviewed failing CI".into());
+    let held = service.factory(Parameters(request.clone())).await
+        .expect_err("required verification now precedes the merge");
+    assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
+    let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
+    let verdict = service.verification(Parameters(verification_req(serde_json::json!({
+        "action": "add", "task_id": task_id, "dispatch_id": prepared.id,
+        "status": "approved", "summary": "Observation-recovery candidate approved before publication",
+    })))).await.unwrap();
+    assert!(!verdict.is_error.unwrap_or(false), "{}", get_text(&verdict));
     let first = service
         .factory(Parameters(request.clone()))
         .await
@@ -3678,27 +3690,18 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         .expect("retry should reconcile the already-published merge");
     let text = get_text(&retry);
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap();
-    if !ci_override {
-        assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
-        assert_eq!(
-            dispatch
-                .as_ref()
-                .expect("recovery must dispatch verification")
-                .state,
-            cas::types::VerificationDispatchState::Pending
-        );
-        if conclusion == "neutral" {
-            assert!(tasks.get(task_id).unwrap().notes.contains("CI unconfirmed"), "{text}");
-        }
-        let self_handoffs: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(self_handoffs, 1, "the dispatch must reach its owner independently of the merge response");
-    } else {
-        assert!(!retry.is_error.unwrap_or(false), "{text}");
-        assert!(dispatch.is_none(), "override merges do not auto-close");
+    assert!(!text.contains("VERIFICATION REQUIRED"), "no post-merge review: {text}");
+    let current = dispatch.as_ref().expect("pre-merge approval remains recorded");
+    assert_eq!(current.id, prepared.id);
+    assert_eq!(current.state, cas::types::VerificationDispatchState::Resolved);
+    if !ci_override && conclusion == "neutral" {
+        assert!(tasks.get(task_id).unwrap().notes.contains("CI unconfirmed"), "{text}");
     }
+    let self_handoffs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(self_handoffs, 1, "one review before publication, including CI overrides");
     let observations: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
@@ -3744,7 +3747,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
         [], |row| row.get(0),
     ).unwrap();
-    assert_eq!(self_handoffs, i64::from(!ci_override), "a repeated merge must not duplicate the dispatch handoff");
+    assert_eq!(self_handoffs, 1, "a repeated merge must not duplicate the dispatch handoff");
     let after: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
@@ -5700,63 +5703,17 @@ async fn submit_and_verify_delivery(
             cas::types::ClaimResult::Success(_)
         ));
     }
-    let lease = agent_store
-        .get_lease(task_id)
-        .expect("delivery fixture lease lookup")
-        .expect("delivery fixture must retain its worker lease");
     let worker_service = delivery_service(cas_root, worker_id);
     let close = worker_service
         .task(Parameters(task_req(serde_json::json!({
-            "action": "close",
-            "id": task_id,
-            "reason": "worker handoff",
+            "action": "close", "id": task_id, "reason": "worker handoff",
             "completion_receipt": serde_json::to_string(receipt).unwrap(),
         }))))
-        .await
-        .expect("public task close receipt submission");
-    assert!(
-        get_text(&close).contains("DELIVERY RECEIPT REJECTED")
-            && get_text(&close).contains("current factory branch tip"),
-        "{}",
-        get_text(&close)
-    );
-
-    // Seed the state after the explicit #588 rejection so these tests retain
-    // their coverage of the supervisor's merge/reconcile path. The public
-    // receipt path cannot create this boundary until the source tip is merged.
-    let worker = agent_store.get(worker_id).expect("delivery worker");
-    let durable_receipt =
-        cas_store::build_worker_completion_receipt(receipt, &worker.name, chrono::Utc::now());
-    cas_store::create_worker_delivery_with_dispatch_for_lease(
-        cas_root,
-        &durable_receipt,
-        WorkerDeliveryState::AwaitingVerification,
-        worker_id,
-        lease.epoch,
-        supervisor_id,
-        chrono::Utc::now() + chrono::Duration::minutes(10),
-    )
-    .expect("seed delivery boundary after explicit merge-gate rejection");
-    let mut pending = open_task_store(cas_root)
-        .expect("task store")
-        .get(task_id)
-        .expect("task after receipt rejection");
-    pending.status = TaskStatus::AwaitingMerge;
-    pending.pending_verification = true;
-    pending.close_reason = Some("worker handoff".to_string());
-    pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());
-    open_task_store(cas_root)
-        .expect("task store")
-        .update(&pending)
-        .expect("project seeded delivery boundary as review-pending");
-    agent_store
-        .release_lease_if_owner_epoch(
-            task_id,
-            worker_id,
-            lease.epoch,
-            "Fixture receipt handoff after explicit merge-gate rejection",
-        )
-        .expect("release fixture lease");
+        .await.expect("public unpublished receipt submission");
+    let (_, transaction) = cas_store::get_latest_worker_delivery(cas_root, task_id)
+        .unwrap().unwrap_or_else(|| panic!("{}", get_text(&close)));
+    assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
+    assert!(agent_store.get_lease(task_id).unwrap().is_none());
     let dispatch = cas_store::get_latest_verification_dispatch(cas_root, task_id)
         .expect("verification dispatch lookup")
         .expect("receipt-bound verification dispatch");
@@ -5848,19 +5805,8 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     std::fs::write(worker_path.join("authority.rs"), "pub fn authority() {}\n").unwrap();
     run_git(&["add", "authority.rs"], &worker_path);
     run_git(&["commit", "-m", "receipt authority fixture"], &worker_path);
-    // This test exercises exact lease-session authority after receipt
-    // validation. Keep the source tip in the already-merged/published state
-    // required by the #588 decision-time ancestry and B2 reality gates.
-    run_git(
-        &[
-            "merge",
-            "--no-ff",
-            "factory/alice",
-            "-m",
-            "merge receipt authority",
-        ],
-        &repo.root,
-    );
+    // Authority is checked on an unpublished receipt, before its candidate
+    // review and before any integration target mutation.
     run_git(
         &[
             "update-ref",
@@ -6495,6 +6441,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     );
     task.status = TaskStatus::InProgress;
     task.depth = TaskDepth::Deep;
+    task.risk = vec![cas::types::TaskRisk::None];
     task.assignee = Some("alice".to_string());
     if system_a {
         task.worktree_id = Some(worktree_id.clone());
@@ -6508,28 +6455,9 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     receipt.repo_selector = "project:delivery-cleanup-fixture".into();
     submit_and_verify_delivery(&cas_root, &task.id, &worker_id, &supervisor_id, &receipt).await;
 
-    // Arm a newer exact task proof cycle after the delivery proof is approved.
-    // The post-merge internal close must surface this gate verbatim rather
-    // than discarding it and claiming that delivery completed.
-    let post_merge_dispatch = cas_store::create_verification_dispatch_bound(
-        &cas_root,
-        &task.id,
-        &supervisor_id,
-        &supervisor_id,
-        &cas_types::VerificationProofBoundary::task(),
-        chrono::Utc::now() + chrono::Duration::minutes(10),
-        false,
-    )
-    .expect("post-merge exact verification gate");
-    assert_eq!(
-        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
-            .unwrap()
-            .unwrap()
-            .id,
-        post_merge_dispatch.id,
-        "the new task proof cycle must be authoritative before merge"
-    );
-
+    let premerge_dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+        .unwrap().expect("the receipt's candidate was approved before publication");
+    assert_eq!(premerge_dispatch.state, cas::types::VerificationDispatchState::Resolved);
     // A real remote distinguishes a held close from a publication failure.
     let origin = home.path().join("origin.git");
     run_git(&["init", "--bare", origin.to_str().unwrap()], &repo.root);
@@ -6537,9 +6465,14 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         "git@github.com:org/delivery.git"], &repo.root);
     run_git(&["push", "origin", "--all"], &repo.root);
 
-    // The production merge must persist CloseReady before cleanup removes
-    // the source. The newer close gate then simulates interruption after
-    // cleanup but before Delivered.
+    // Interrupt the final close write after publication and cleanup. Recovery
+    // must consume the same pre-merge approval, with no second review.
+    let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER interrupt_delivered_close BEFORE UPDATE OF status ON tasks
+         WHEN NEW.id = '{}' AND NEW.status = 'closed'
+         BEGIN SELECT RAISE(ABORT, 'fixture interruption after cleanup'); END;", task.id
+    )).unwrap();
     let mut env = env.enter_dir(&repo.root);
     let supervisor_service = delivery_service(&cas_root, &supervisor_id);
     let mut merge = coord_req("worktree_merge");
@@ -6558,10 +6491,6 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     let gate_text = get_text(&result);
     assert!(!result.is_error.unwrap_or(false), "Git landed; only close is held: {gate_text}");
     assert!(gate_text.contains("Merge landed; close held"), "{gate_text}");
-    assert!(
-        gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
-        "worktree_merge must return the exact actionable close gate, got:\n{gate_text}"
-    );
     assert!(
         !gate_text.contains("Merged worktree"),
         "a remaining close gate must not be reported as generic merge success"
@@ -6617,20 +6546,8 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         "the post-merge close gate must leave one durable resumable state"
     );
 
-    let gate_clear = supervisor_service
-        .verification(Parameters(verification_req(serde_json::json!({
-            "action": "add",
-            "task_id": task.id,
-            "status": "approved",
-            "summary": "post-merge exact close proof approved",
-            "confidence": 1.0,
-            "dispatch_id": post_merge_dispatch.id,
-        }))))
-        .await
-        .expect("public exact post-merge gate resolution");
-    assert!(get_text(&gate_clear).contains("approved"));
+    conn.execute_batch("DROP TRIGGER interrupt_delivered_close;").unwrap();
     let mut gate_cleared_task = task_store.get(&task.id).expect("gate-cleared task");
-    gate_cleared_task.depth = TaskDepth::Light;
     if !system_a {
         // Legacy park metadata survives cleanup; the immutable receipt owns resume.
         gate_cleared_task.deliverables.parked_branch = Some(receipt.source_branch.clone());
@@ -6712,7 +6629,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             "reopen must clear the prior delivery anchor"
         );
         assert_eq!(
-            cas_store::get_verification_dispatch(&cas_root, &post_merge_dispatch.id)
+            cas_store::get_verification_dispatch(&cas_root, &premerge_dispatch.id)
                 .expect("reopened dispatch")
                 .state,
             cas_types::VerificationDispatchState::Invalidated,

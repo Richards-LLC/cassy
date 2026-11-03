@@ -395,6 +395,24 @@ impl CasCore {
         Ok(())
     }
 
+    pub(crate) fn emit_premerge_review_handoff(
+        &self,
+        task: &Task,
+        dispatch: &VerificationDispatch,
+    ) -> Result<(), McpError> {
+        let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(fail)?;
+        let location = dispatch.repository.as_ref().map(|proof| format!(
+            "Review the disposable candidate at {} (head {}). PASS continues this merge; no worker close retry or second verifier is needed.",
+            proof.worktree_root, proof.head_commit,
+        ));
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
+            &self.cas_root, queue.as_ref(), &dispatch.id, &task.id, &dispatch.owner_agent_id,
+            dispatch.deadline_at, task.assignee.as_deref().unwrap_or("worker"), location.as_deref(),
+            dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()), None,
+        ).map_err(fail)?;
+        Ok(())
+    }
+
     pub(crate) fn continue_premerge_after_verdict(
         &self,
         dispatch: &VerificationDispatch,
@@ -510,7 +528,9 @@ impl CasCore {
                 && candidate.repository == repository
                 && candidate.source_branch == source
                 && candidate.target_branch == target
-                && candidate.validate(&self.cas_root, task).is_ok()
+                && (candidate.validate(&self.cas_root, task).is_ok()
+                    || (dispatch.delivery_transaction_id.is_some()
+                        && repository_proof::verify_repository_proof(&candidate.proof).is_ok()))
             {
                 if dispatch.state == cas_types::VerificationDispatchState::Resolved
                     && let Some(verdict) =
@@ -521,6 +541,13 @@ impl CasCore {
                         dispatch_id: dispatch.id.clone(),
                         verdict_id: verdict.id,
                     }));
+                }
+                if matches!(
+                    dispatch.state,
+                    cas_types::VerificationDispatchState::Pending
+                        | cas_types::VerificationDispatchState::Claimed
+                ) {
+                    self.emit_premerge_review_handoff(task, dispatch)?;
                 }
                 return Err(fail(format!(
                     "task {} holds on dispatch {} ({:?}); finish this exact verdict before retrying the merge",
@@ -558,13 +585,7 @@ impl CasCore {
             false,
         )
         .map_err(fail)?;
-        let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(fail)?;
-        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
-            &self.cas_root, queue.as_ref(), &dispatch.id, &task.id, &owner,
-            dispatch.deadline_at, task.assignee.as_deref().unwrap_or("worker"),
-            Some("Review this disposable candidate before publication; PASS continues the merge, never a worker close retry."),
-            Some(&candidate.proof.head_commit), None,
-        ).map_err(fail)?;
+        self.emit_premerge_review_handoff(task, &dispatch)?;
         Err(fail(format!(
             "task {} requires candidate verdict on dispatch {} before merge",
             task.id, dispatch.id
@@ -626,7 +647,32 @@ impl CasCore {
         .map_err(fail)?;
         let manifest = directory.join("candidate.json");
         if manifest.exists() {
-            return serde_json::from_slice(&std::fs::read(manifest).map_err(fail)?).map_err(fail);
+            let candidate: Candidate =
+                serde_json::from_slice(&std::fs::read(manifest).map_err(fail)?).map_err(fail)?;
+            if candidate.task_id != task.id
+                || candidate.repository != repository
+                || candidate.source_branch != source
+                || candidate.source_sha != source_sha
+                || candidate.target_branch != target
+                || candidate.target_sha != target_sha
+                || candidate.context_digest != digest
+                || Path::new(&candidate.proof.worktree_root) != directory.join("checkout")
+                || candidate.proof.repository_root != repository.to_string_lossy()
+                || git(
+                    repo,
+                    &[
+                        "rev-parse",
+                        &format!("{}^{{tree}}", candidate.proof.head_commit),
+                    ],
+                )
+                .map_err(fail)?
+                    != candidate.tree
+            {
+                return Err(fail(
+                    "cached candidate identity does not match the requested proof",
+                ));
+            }
+            return Ok(candidate);
         }
         std::fs::create_dir_all(&directory).map_err(fail)?;
         let checkout = directory.join("checkout");
@@ -683,6 +729,7 @@ impl CasCore {
                 "worktree",
                 "add",
                 "--detach",
+                "--no-checkout",
                 checkout
                     .to_str()
                     .ok_or_else(|| fail("non-UTF8 candidate path"))?,
@@ -690,6 +737,9 @@ impl CasCore {
             ],
         )
         .map_err(fail)?;
+        // Materialize the candidate without invoking the project's checkout
+        // bootstrap hooks or introducing another dependency/check stage.
+        git(&checkout, &["reset", "--hard", &candidate_sha]).map_err(fail)?;
         let proof =
             repository_proof::capture_repository_proof_with_anchors(repo, &checkout, Vec::new())
                 .map_err(fail)?;

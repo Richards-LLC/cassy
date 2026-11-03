@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   replies name the operator command; operator writes still reuse one chore per
   rule, and existing chores remain visible in the project backlog.
 
+### Fixed — Project holds
+
+- **Keep parked delivery checks active during a hold** — Operator task lists
+  and startup hide parked invitations while internal ownership, re-close and
+  recovery checks retain every delivery. READY TO MERGE generation stops during
+  the hold, so lifting it creates no stale alert backlog.
+
 ### Fixed — Policy hygiene
 
 - **Expire superseded policy memories** — Explicit superseded tags and expiry

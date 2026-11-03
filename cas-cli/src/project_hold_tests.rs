@@ -11,6 +11,8 @@ fn held_project() -> (tempfile::TempDir, std::path::PathBuf) {
     tasks.add(&ready).unwrap();
     let mut parked = cas_types::Task::new("cas-hold-merge".into(), "merge hold probe".into());
     parked.status = cas_types::TaskStatus::AwaitingMerge;
+    parked.created_at = chrono::Utc::now() - chrono::Duration::days(30);
+    parked.updated_at = parked.created_at;
     tasks.add(&parked).unwrap();
     std::fs::create_dir_all(root.join("operator")).unwrap();
     std::fs::write(root.join("operator/project-hold.json"), serde_json::json!({
@@ -56,7 +58,7 @@ fn project_hold_is_first_and_hides_ready_tasks_at_session_start() {
         "{context}"
     );
     assert!(
-        !context.contains("ready hold probe") && !context.contains("## Ready Tasks"),
+        !context.contains("ready hold probe") && !context.contains("merge hold probe") && !context.contains("## Ready Tasks"),
         "{context}"
     );
     std::fs::remove_file(root.join("operator/project-hold.json")).unwrap();
@@ -82,6 +84,15 @@ async fn project_hold_suppresses_ready_and_awaiting_merge_queries_until_lifted()
         result.contains("Review the plan") && !result.contains("cas-hold-merge"),
         "{result}"
     );
+    // The unfiltered query is also an operator surface; internal store lists
+    // retain these rows, but the MCP response must never invite a held merge.
+    for query in [serde_json::json!({}), serde_json::json!({"status": "merge"})] {
+        let unfiltered = query.get("status").is_none();
+        let result = text(core.cas_task_list(Parameters(serde_json::from_value(query).unwrap())).await.unwrap());
+        assert!(!result.contains("cas-hold-merge"), "{result}");
+        assert!(result.contains("Review the plan"), "{result}");
+        assert_eq!(result.contains("cas-hold-ready"), unfiltered);
+    }
     std::fs::remove_file(root.join("operator/project-hold.json")).unwrap();
     assert!(
         text(core.cas_task_ready(Parameters(ready())).await.unwrap()).contains("cas-hold-ready")

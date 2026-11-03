@@ -8705,6 +8705,12 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
     let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+    // A project hold hides invitations, not the re-close exemption's inputs.
+    std::fs::create_dir_all(env.cas_root.join("operator")).unwrap();
+    std::fs::write(env.cas_root.join(cas_store::project_hold::STATE_FILE), serde_json::json!({
+        "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+        "history": []
+    }).to_string()).unwrap();
 
     let msg = format!(
         "MERGE DONE: factory/swift-fox merged to epic. \

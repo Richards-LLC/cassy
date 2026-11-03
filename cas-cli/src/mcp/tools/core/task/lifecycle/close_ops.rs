@@ -34068,6 +34068,39 @@ esac
         );
     }
 
+    #[test]
+    fn project_hold_preserves_same_worker_parked_anchor_fence() {
+        use cas_store::TaskStore;
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let recorded = commit_local(p, "a.rs", "feat(cas-a0a0): delivery");
+        let candidate = commit_local(p, "a2.rs", "fix(cas-a0a0): continuation");
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut task = worker_task("worker");
+        task.id = "cas-a0a0".into();
+        task.status = TaskStatus::AwaitingMerge;
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        task.deliverables.factory_branch_anchor = Some(recorded);
+        store.add(&task).unwrap();
+        assert_eq!(core.eligible_awaiting_merge_advance(&store, &task, p, "main", Some(&candidate)), Some(candidate.clone()));
+        let mut sibling = worker_task("WORKER");
+        sibling.id = "cas-b0b0".into();
+        sibling.status = TaskStatus::AwaitingMerge;
+        sibling.deliverables.factory_branch_anchor = Some(candidate.clone());
+        store.add(&sibling).unwrap();
+        assert!(core.eligible_awaiting_merge_advance(&store, &task, p, "main", Some(&candidate)).is_none());
+        std::fs::create_dir_all(root.join("operator")).unwrap();
+        std::fs::write(root.join(cas_store::project_hold::STATE_FILE), serde_json::json!({
+            "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+            "history": []
+        }).to_string()).unwrap();
+        assert!(core.eligible_awaiting_merge_advance(&store, &task, p, "main", Some(&candidate)).is_none(), "a hold cannot hide a sibling anchor and transfer its ownership");
+    }
+
     /// cas-43d2: a worker that merges its target between RED and GREEN keeps
     /// its plain-lane lineage; the target's commits are not its subjects.
     #[test]

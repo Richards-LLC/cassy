@@ -1150,9 +1150,24 @@ mod supervisor_handoff_tests {
         env.set("CAS_AGENT_NAME", "successor");
         env.set("CAS_HOOK_HARNESS", "codex");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
+        // Held startup must not surface integrated-delivery action rows;
+        // lifting restores the same recovery on the next real startup.
+        std::fs::create_dir_all(root.join("operator")).unwrap();
+        let hold = root.join(cas_store::project_hold::STATE_FILE);
+        std::fs::write(&hold, serde_json::json!({
+            "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+            "history": []
+        }).to_string()).unwrap();
+        let held = handle_session_start(&start, Some(&root)).unwrap();
+        let held = serde_json::to_value(&held).unwrap();
+        let held = held["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(!held.contains("task action=close id=cas-recover-one"), "{held}");
+        std::fs::remove_file(hold).unwrap();
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        // Ordinary handoff mail was already delivered during the held startup.
+        let context = format!("{held}\n{context}");
         for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable", "cas-override"] {
             assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");

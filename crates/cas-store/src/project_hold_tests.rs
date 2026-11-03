@@ -2,7 +2,7 @@
 use crate::{PromptQueueStore, SqlitePromptQueueStore, SqliteTaskStore, TaskStore};
 
 #[test]
-fn project_hold_filters_action_lists_and_unread_relays_without_receipting_them() {
+fn project_hold_preserves_internal_lists_and_unread_relays_without_receipting_them() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let tasks = SqliteTaskStore::open(root).unwrap();
@@ -27,13 +27,9 @@ fn project_hold_filters_action_lists_and_unread_relays_without_receipting_them()
     assert!(tasks.list_ready().unwrap().is_empty());
     task.status = cas_types::TaskStatus::AwaitingMerge;
     tasks.update(&task).unwrap();
-    assert!(
-        tasks
-            .list(Some(cas_types::TaskStatus::AwaitingMerge))
-            .unwrap()
-            .is_empty()
-    );
-    assert!(tasks.list(None).unwrap().is_empty());
+    // Internal fences and recovery must still see the parked delivery.
+    assert_eq!(tasks.list(Some(cas_types::TaskStatus::AwaitingMerge)).unwrap().len(), 1);
+    assert_eq!(tasks.list(None).unwrap().len(), 1);
     assert_eq!(
         tasks.get(&task.id).unwrap().status,
         cas_types::TaskStatus::AwaitingMerge

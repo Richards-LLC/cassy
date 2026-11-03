@@ -297,7 +297,8 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
     let agent = agents.get(id)?;
     resume(root, &agent)?;
     let queue = crate::store::open_prompt_queue_store(root)?;
-    if agent.role == AgentRole::Supervisor {
+    let held = cas_store::project_hold::is_held(root);
+    if agent.role == AgentRole::Supervisor && !held {
         let recovery = integrated_recovery(root).unwrap_or_else(|error| format!(
             "Integrated delivery recovery unavailable: {error}. The supervisor handoff is retained; inspect recovery metadata before retrying.\n"
         ));
@@ -317,9 +318,11 @@ pub(crate) fn startup_context(root: &Path, id: &str) -> anyhow::Result<String> {
             &[SOURCE],
             1,
         )?;
-    messages.extend(queue.surface_unseen_from_sources_for_recipient(
-        &agent.name, agent.factory_session.as_deref(), &[RECOVERY_SOURCE], 1,
-    )?);
+    if !held {
+        messages.extend(queue.surface_unseen_from_sources_for_recipient(
+            &agent.name, agent.factory_session.as_deref(), &[RECOVERY_SOURCE], 1,
+        )?);
+    }
     Ok(messages
         .into_iter()
         .map(|row| row.prompt)

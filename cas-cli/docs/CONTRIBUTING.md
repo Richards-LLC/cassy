@@ -4004,3 +4004,8 @@ relay rows receive no surface receipt; lifting restores visibility and normal
 admission. Ordinary mail remains readable. Unreadable hold state stops
 dispatch and merges until the operator repairs it. A hold has no automatic
 expiry, and an unheld project's staging delivery flow is unchanged.
+
+The hold filters parked rows at MCP list and startup presentation boundaries;
+internal task lists retain them for ownership fences, re-close exemptions and
+recovery checks. READY TO MERGE generation stops before caching or queueing an
+alert during the hold; lifting it alone generates no stale READY backlog.

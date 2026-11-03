@@ -1459,3 +1459,24 @@ fn unmet_phase_suppresses_cached_and_queued_merge_prompts() {
     assert!(crate::ui::factory::director::refresh_ci_merge_signal(
         &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
 }
+
+#[test]
+fn project_hold_generates_no_ready_backlog_and_next_event_alerts_once() {
+    let mut f = Fixture::new();
+    let hold = f.app.cas_dir.join(cas_store::project_hold::STATE_FILE);
+    std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+    std::fs::write(&hold, serde_json::json!({
+        "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+        "history": []
+    }).to_string()).unwrap();
+    assert!(f.relay().is_empty(), "a held event must not generate READY to enqueue");
+    assert!(f.relay().is_empty(), "repeated held events cannot accumulate a backlog");
+    std::fs::remove_file(hold).unwrap();
+    // Lifting the hold alone creates no event or queued prompt.
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&[]);
+    assert!(prompts.is_empty());
+    let prompts = f.relay();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].is_merge_ready());
+    assert!(f.relay().is_empty(), "the decision is delivered only once");
+}

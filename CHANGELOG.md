@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.100.0] - 2026-11-03
+
 ### Fixed — Supervisor response time
 
 - **Batch proof discovery and persist cleanup readiness** — Changed source

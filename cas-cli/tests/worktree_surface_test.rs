@@ -2514,7 +2514,9 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
         let handoff = handoffs.iter().find(|row| row.source == format!("verification-dispatch:{}", dispatch.id))
             .expect("durable pre-merge review handoff");
         assert_eq!(handoff.factory_session.as_deref(), Some("rebound-session"));
+        // pin: the candidate handoff must describe merge continuation rather than the removed close retry.
         assert!(handoff.prompt.contains("A PASS continues the merge"));
+        // pin: prevent the legacy post-merge retry instruction from reaching this verifier.
         assert!(!handoff.prompt.contains("queues the worker's close retry"));
 
         let prepared = tasks.get(&task.id).unwrap();

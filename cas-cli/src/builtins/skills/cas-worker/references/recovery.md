@@ -23,7 +23,8 @@ Do not re-close after the merge: its verdict closes the task, or reopens it to
 you with findings. For an epic,
 request supervisor merge rather than `gh pr create --base epic/...`.
 A squash/cherry-pick mismatch may need `commit_receipt`; transactional
-`completion_receipt` requires the source tip merged. See [close-gate.md](close-gate.md)
+`completion_receipt` accepts an unpublished source tip and binds its merge candidate
+to the same required verification before publication. See [close-gate.md](close-gate.md)
 for receipt fields. If rejected, forward the exact error and receipt identity;
 never bypass close with `status=closed` or an invented verification record.
 

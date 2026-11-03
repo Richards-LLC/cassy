@@ -200,15 +200,51 @@ fn changelog_refusal(
     {
         return None;
     }
-    let changelog_changed = changed_paths.iter().any(|path| path == "CHANGELOG.md");
+    let fragments = has_changelog_fragments_at(repo, head);
+    let changelog_changed = changed_paths
+        .iter()
+        .any(|path| if fragments { is_changelog_fragment(path) } else { path == "CHANGELOG.md" });
     if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges) {
         return None;
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let entry = if fragments {
+        format!(
+            "Add a fragment file `{CHANGELOG_FRAGMENT_DIR}/{}.md` holding a `### Added — <area>` or `### Fixed — <area>` heading and a per-delivery line such as `- **Title** — What changed.`; do not edit `CHANGELOG.md` itself, because concurrent pull requests that insert at the top of `## [Unreleased]` conflict in GitHub's merge queue. The release cut folds fragments into the version section.",
+            task.id,
+        )
+    } else {
+        "Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading.".to_string()
+    };
     Some(format!(
-        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading, then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
     ))
+}
+
+/// cas-f2be: per-delivery changelog fragments. GitHub's mergeability check
+/// and merge queue ignore the local `cas-changelog` merge driver, so two pull
+/// requests that each insert a section at the top of `## [Unreleased]`
+/// conflict there and the later one is dequeued. A project that keeps a
+/// `changelog.d/` directory takes each delivery's Unreleased entry as its own
+/// file instead; `scripts/release_changelog.py promote` folds them in.
+pub(super) const CHANGELOG_FRAGMENT_DIR: &str = "changelog.d";
+
+fn is_changelog_fragment(path: &str) -> bool {
+    path.strip_prefix("changelog.d/")
+        .is_some_and(|name| name.ends_with(".md") && !name.contains('/') && name != "README.md")
+}
+
+/// Whether `commit` tracks a `changelog.d/` directory, which switches the
+/// changelog gate from `CHANGELOG.md` edits to fragment files.
+pub(super) fn has_changelog_fragments_at(repo: &Path, commit: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", commit, "--", &format!("{CHANGELOG_FRAGMENT_DIR}/")])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty())
 }
 
 fn has_no_changelog_decision(notes: &str) -> bool {
@@ -245,7 +281,8 @@ pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
 }
 
 /// Whether one of this task's delivery segments adds or changes a titled
-/// Unreleased entry that survives at HEAD. `delivery_ranges` are the close's
+/// Unreleased entry that survives at HEAD; in a project with `changelog.d/`
+/// only fragment files count (cas-f2be). `delivery_ranges` are the close's
 /// task-attributed (base, tip) segments, which keep a same-task predecessor
 /// merge and drop target-sync and other tasks' merges (cas-2a65). Without
 /// them, only single-parent first-parent commits since the merge-base count,
@@ -265,13 +302,21 @@ fn has_titled_unreleased_delta(
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    let entries_at = |commit: &str| {
-        git(&["show", &format!("{commit}:CHANGELOG.md")])
-            .and_then(|text| titled_unreleased_entries(&text))
+    let fragments = has_changelog_fragments_at(repo, head);
+    // The Unreleased entries at `commit` in `paths`: CHANGELOG.md's section,
+    // or each fragment parsed as the body of its own Unreleased section.
+    let entries_at = |commit: &str, paths: &[String]| {
+        let mut entries = BTreeMap::new();
+        for path in paths {
+            let Some(text) = git(&["show", &format!("{commit}:{path}")]) else {
+                continue;
+            };
+            let text = if fragments { format!("## [Unreleased]\n{text}") } else { text };
+            entries.extend(titled_unreleased_entries(&text)?);
+        }
+        Some(entries)
     };
-    let Some(final_entries) = entries_at(head) else {
-        return false;
-    };
+    let changelog = vec!["CHANGELOG.md".to_string()];
     let ranges = match delivery_ranges {
         Some(ranges) => ranges.to_vec(),
         None => {
@@ -292,10 +337,19 @@ fn has_titled_unreleased_delta(
         }
     };
     ranges.iter().any(|(base, tip)| {
-        let Some(after) = entries_at(tip) else {
+        let paths = if fragments {
+            let Some(changed) = git(&["diff", "--no-renames", "--name-only", base, tip, "--", CHANGELOG_FRAGMENT_DIR])
+            else {
+                return false;
+            };
+            changed.lines().filter(|path| is_changelog_fragment(path)).map(str::to_string).collect()
+        } else {
+            changelog.clone()
+        };
+        let (Some(after), Some(final_entries)) = (entries_at(tip, &paths), entries_at(head, &paths)) else {
             return false;
         };
-        let before = entries_at(base).unwrap_or_default();
+        let before = entries_at(base, &paths).unwrap_or_default();
         after.iter().any(|(key, entry)| {
             before.get(key) != Some(entry) && final_entries.get(key) == Some(entry)
         })
@@ -901,6 +955,40 @@ mod tests {
         .unwrap();
         let extended = commit_changelog_fixture(repo.path(), "extend release note");
         assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &extended, "main", None).is_none());
+    }
+
+    /// cas-f2be: with `changelog.d/` tracked, a delivery's entry must be its
+    /// own fragment file. A direct `CHANGELOG.md` entry is refused because
+    /// GitHub's merge queue conflicts two of them at the top of the section.
+    #[test]
+    fn fragment_project_credits_only_fragment_entries() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-changelog-fixture".into(), "delivery".into());
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "### Fixed — <area>\n\n- **Title** — What changed.\n").unwrap();
+        commit_changelog_fixture(repo.path(), "keep fragments");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        std::fs::write(
+            repo.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed — Commander\n\n- **Status updates stay current** — Status follows the latest response.\n\n## [1.0.0] - 2026-01-01\n",
+        )
+        .unwrap();
+        let direct = commit_changelog_fixture(repo.path(), "direct entry");
+        let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &direct, "main", None)
+            .expect("a direct CHANGELOG entry is refused once fragments exist");
+        assert!(refusal.contains("`changelog.d/cas-changelog-fixture.md`"), "{refusal}");
+
+        std::fs::write(
+            repo.path().join("changelog.d/cas-changelog-fixture.md"),
+            "### Fixed — Commander\n\n- **Badges show versions** — Each badge names its version.\n",
+        )
+        .unwrap();
+        let fragment = commit_changelog_fixture(repo.path(), "fragment entry");
+        let changed = vec!["changelog.d/cas-changelog-fixture.md".to_string(), "hub-web/src/app.ts".to_string()];
+        let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &fragment, "main", None);
+        assert!(accepted.is_none(), "{accepted:?}");
     }
 
     /// cas-2a65: through the close's task-attributed ranges, an entry a lane

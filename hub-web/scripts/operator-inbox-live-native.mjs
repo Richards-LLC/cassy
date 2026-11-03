@@ -97,7 +97,7 @@ async function prepare() {
   state = { env, project, label: `cassy-2077-${Date.now()}`, session: "inbox-live-2077" };
   await mkdir(project); await mkdir(bin); await mkdir(join(env.HOME, ".cas"), { recursive: true });
   env.PATH = `${bin}:${env.PATH}`;
-  await writeFile(join(bin, "claude"), `#!/usr/bin/python3\nimport sys,time\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Disposable inbox test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`, { mode: 0o700 });
+  await writeFile(join(bin, "claude"), `#!/usr/bin/python3\nimport sys,time\nif '--version' in sys.argv: print('2.1.316');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Disposable inbox test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`, { mode: 0o700 });
   await run("git", ["init", "-q", project], { env });
   await cas(["init", "--yes", "--no-integrations"]);
   await writeFile(join(project, ".cas/config.toml"), `[factory.ai_enrichment]\nenabled = false\n[project]\ncanonical_id = "${profile.projectId}"\n`);

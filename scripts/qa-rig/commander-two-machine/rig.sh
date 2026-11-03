@@ -45,7 +45,7 @@ local_init() {
         cat > "$RIG/bin/claude" <<'PY'
 #!/usr/bin/env python3
 import sys, time
-if '--version' in sys.argv: print('2.1.47'); sys.exit(0)
+if '--version' in sys.argv: print('2.1.316'); sys.exit(0)
 if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config'); sys.exit(0)
 print('Claude Code commander rig supervisor\n> ', flush=True)
 while True:

@@ -3371,7 +3371,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .worker-timeline .raw-output-subject { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .worker-timeline-rows { padding-left: 0; }
 .worker-timeline-note { margin: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
-.worker-timeline-older, .worker-timeline-raw { align-self: flex-start; min-height: 40px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); cursor: pointer; }
+.worker-timeline-name { white-space: nowrap; }
+.worker-timeline-older, .worker-timeline-raw { align-self: flex-start; margin-inline-start: var(--space-2); min-height: 40px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); cursor: pointer; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .work-summary, .work-row-toggle, .work-row-line, .work-row > .work-row-toggle, .work-row > .work-row-line { min-height: var(--rail-item-min); }
   .status-timeline { min-height: 44px; min-width: 44px; }

@@ -16,6 +16,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   (`blob:`), the pairing cloud and the GitHub release check stay allowed.
   Scripts, styles and workers stay same-origin. The release deploy redeploys when only that list changes and
   verifies that the live site serves the policy before keeping the deployment.
+- **Hubs on any serve port, and no referrer** — The hosted policy admits team
+  tailnet hubs on any port (`:*`), so a hub started with a non-default
+  `--tailscale-serve-port` keeps its health check, sockets, media and visual
+  pages. Hosted Commander also sends `Referrer-Policy: no-referrer`, as
+  hub-served Commander does.
 
 ### Fixed — Commander worker timeline on a phone
 

@@ -1,7 +1,7 @@
 //! A cited rule needs source references, not a blanket citation on every edit.
 //! Workers declare causal sites; verification checks for omitted causal sites.
 use super::*;
-use crate::rule_refs::{task_context as context, task_rule_ids as cited_ids};
+use crate::rule_refs::{task_brief, task_context as context, task_rule_ids as cited_ids};
 use serde::Deserialize;
 use std::path::{Component, Path};
 
@@ -17,15 +17,31 @@ struct Site {
     anchor: String,
 }
 
+/// Every line naming the field followed by a JSON array declares sites, so a
+/// bulleted or quoted declaration is parsed rather than skipped. Text after
+/// the array (a closing backtick or prose) is ignored; a malformed array
+/// refuses with its line.
 fn declarations(text: &str) -> Result<Vec<Site>, String> {
     let mut sites = Vec::new();
     for line in text.lines() {
-        if let Some(json) = line.trim().strip_prefix(DECLARATION) {
-            let values: Vec<Site> = serde_json::from_str(json.trim()).map_err(|error| {
-                format!("{DECLARATION} needs a JSON array of rule_id, path and anchor: {error}")
-            })?;
-            sites.extend(values);
+        let Some((_, rest)) = line.split_once(DECLARATION) else {
+            continue;
+        };
+        let json = rest.trim_start();
+        if !json.starts_with('[') {
+            continue; // Prose naming the field, not a declaration.
         }
+        let values = serde_json::Deserializer::from_str(json)
+            .into_iter::<Vec<Site>>()
+            .next()
+            .unwrap_or_else(|| Ok(Vec::new()))
+            .map_err(|error| {
+                format!(
+                    "{DECLARATION} needs a JSON array of rule_id, path and anchor: {error}\nin: {}",
+                    line.trim()
+                )
+            })?;
+        sites.extend(values);
     }
     Ok(sites)
 }
@@ -72,13 +88,9 @@ fn validate(
     receipt: &str,
     rules: &[Rule],
 ) -> Result<(), String> {
-    let task_context = context(task);
     // A post-merge close keeps the worker's parked receipt if the new reason
     // has no declaration. Progress/history notes never become task scope.
-    let receipt = if receipt
-        .lines()
-        .any(|line| line.trim().starts_with(DECLARATION))
-    {
+    let receipt = if receipt.contains(DECLARATION) {
         receipt
     } else {
         task.deliverables
@@ -86,7 +98,9 @@ fn validate(
             .as_deref()
             .unwrap_or(receipt)
     };
-    let mut sites = declarations(&task_context)?;
+    // Sites are declared in the brief or a close receipt, as documented. The
+    // description can quote the syntax without declaring anything.
+    let mut sites = declarations(task_brief(task))?;
     sites.extend(declarations(receipt)?);
     let mut ids = cited_ids(task, rules);
     for site in &sites {
@@ -110,10 +124,10 @@ fn validate(
         }
     }
     for reference in &refs {
-        let rule = rules
-            .iter()
-            .find(|rule| rule.id == reference.rule_id)
-            .expect("filtered rule");
+        let Some(rule) = rules.iter().find(|rule| rule.id == reference.rule_id) else {
+            problems.push(format!("{}:{}: {} is not a stored rule", reference.path, reference.line, reference.rule_id));
+            continue;
+        };
         if !crate::rule_refs::scope_matches(rule, &reference.scope) {
             problems.push(format!(
                 "{}:{}: {} scope differs from stakeholder.scope",

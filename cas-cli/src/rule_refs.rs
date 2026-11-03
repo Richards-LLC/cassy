@@ -152,15 +152,25 @@ pub(crate) fn scope_matches(rule: &cas_types::Rule, scope: &str) -> bool {
 }
 
 pub(crate) fn task_context(task: &cas_types::Task) -> String {
-    let brief =
-        crate::ui::factory::daemon::runtime::queue_and_events::latest_spawn_brief(&task.notes)
-            .unwrap_or_default();
     format!(
-        "{}\n{}\n{}\n{}\n{brief}",
-        task.title, task.description, task.design, task.acceptance_criteria
+        "{}\n{}\n{}\n{}\n{}",
+        task.title,
+        task.description,
+        task.design,
+        task.acceptance_criteria,
+        task_brief(task)
     )
 }
 
+/// The newest supervisor brief, where supervisors declare causal sites.
+pub(crate) fn task_brief(task: &cas_types::Task) -> &str {
+    crate::ui::factory::daemon::runtime::queue_and_events::latest_spawn_brief(&task.notes)
+        .unwrap_or_default()
+}
+
+/// Stakeholder rules the task cites. A citation of a process rule (one
+/// without stakeholder provenance) explains the work; it does not make code
+/// rule-driven, so it needs no marker.
 pub(crate) fn task_rule_ids(task: &cas_types::Task, rules: &[cas_types::Rule]) -> BTreeSet<String> {
     let text = task_context(task);
     let words: BTreeSet<_> = text
@@ -168,7 +178,7 @@ pub(crate) fn task_rule_ids(task: &cas_types::Task, rules: &[cas_types::Rule]) -
         .collect();
     rules
         .iter()
-        .filter(|rule| words.contains(rule.id.as_str()))
+        .filter(|rule| rule.stakeholder.is_some() && words.contains(rule.id.as_str()))
         .map(|rule| rule.id.clone())
         .collect()
 }

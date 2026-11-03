@@ -1,6 +1,6 @@
 # Rule references in code and tests
 
-When a task or its newest supervisor brief cites an existing rule, mark each code or test site written because of that rule. Keep unrelated changes outside the rule's scope. A marker is a standalone comment immediately before the affected source line:
+When a task or its newest supervisor brief cites an existing stakeholder rule (one with stakeholder attribution), mark each code or test site written because of that rule. Citing a process rule without stakeholder attribution, such as a release-flow rule, explains the work and needs no marker. Keep unrelated changes outside the rule's scope. A marker is a standalone comment immediately before the affected source line:
 
 ```rust
 // cas-rule: <rule-id> scope: "The stakeholder's verbatim scope"
@@ -9,7 +9,7 @@ fn send_sms() {}
 
 The scope is a JSON string: quote and escape it with JSON, without paraphrasing. This business scope is distinct from the rule's project/global storage namespace. Supported single-line comment forms are `//`, `#`, `--`, `/* ... */` and `<!-- ... -->`. Several rule markers can form one adjacent block; blank lines are allowed, unrelated comments or code end that block. For Rust, place the marker after attributes and before the function or statement it governs.
 
-Declare causal sites in the brief or the worker's close reason. Each declaration occupies one line containing a JSON array:
+Declare causal sites in the newest supervisor brief or the worker's close reason. A declaration is the field name followed by a JSON array on one line; a list bullet or other text before the field, and text after the array, are allowed. A malformed array refuses close and names its line. The title, description, design and acceptance criteria can quote the syntax without declaring sites.
 
 ```text
 Rule-driven sites: [{"rule_id":"<rule-id>","path":"src/sms.rs","anchor":"fn send_sms() {}"},{"rule_id":"<rule-id>","path":"tests/sms.rs","anchor":"fn rejects_out_of_scope_send() {}"}]
@@ -17,7 +17,7 @@ Rule-driven sites: [{"rule_id":"<rule-id>","path":"src/sms.rs","anchor":"fn send
 
 Paths are repository-relative. An anchor is the exact trimmed source line and must be unique in that file. Supervisors can name sites before work starts; workers can provide the final anchors in their close receipt. A post-merge close preserves the parked worker receipt unless its new close reason supplies a new declaration. Transactional completion receipts can supply the same line in `scope_summary`.
 
-Close checks the immutable delivered Git tip before parking and before accepting a transactional receipt. Each cited existing rule needs at least one valid marker, and every declared site needs its adjacent marker. Missing, malformed or empty scope strings refuse close. When the rule serializes `stakeholder.scope`, every marker for that rule must match it exactly. Legacy rules without stakeholder attribution use the marker's explicit scope; no scope is invented. Routine progress notes and superseded spawn briefs do not add citations.
+Close checks the immutable delivered Git tip before parking and before accepting a transactional receipt. Each cited stakeholder rule and each rule named by a declared site needs at least one valid marker, and every declared site needs its adjacent marker. Missing, malformed or empty scope strings refuse close. When the rule serializes `stakeholder.scope`, every marker for that rule must match it exactly. A declared site for a rule without stakeholder attribution uses the marker's explicit scope; no scope is invented. Routine progress notes and superseded spawn briefs do not add citations.
 
 The gate cannot infer why arbitrary code was written. The verifier reads the diff and rejects rule-driven code/tests omitted from the declared sites; one marker in an unrelated function is not complete evidence. A citation's presence does not prove that the code correctly implements its rule.
 

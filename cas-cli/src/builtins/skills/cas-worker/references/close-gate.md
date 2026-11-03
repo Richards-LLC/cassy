@@ -20,7 +20,7 @@ format, follow [Changelog at park](#changelog-at-park).
 
 ## Rule-driven sites
 
-For an existing rule cited in the task or newest supervisor brief, put a
+For an existing stakeholder rule cited in the task or newest supervisor brief, put a
 `cas-rule: <id> scope: <JSON-quoted verbatim scope>` comment beside each causal
 code/test site. Declare the sites in the brief or close reason as one JSON line:
 
@@ -28,7 +28,8 @@ code/test site. Declare the sites in the brief or close reason as one JSON line:
 Rule-driven sites: [{"rule_id":"<id>","path":"src/file.rs","anchor":"<exact trimmed source line>"}]
 ```
 
-Each cited rule needs a marker; every declared anchor needs its adjacent marker.
+Each cited stakeholder rule needs a marker; a process-rule citation needs none.
+Every declared anchor needs its adjacent marker, bulleted lines included.
 When present, `stakeholder.scope` is the expected scope, exactly as recorded.
 Inspect `cas rules refs <id> --json`; the verifier checks causal changes omitted
 from the declaration. This does not require citations on unrelated edits.

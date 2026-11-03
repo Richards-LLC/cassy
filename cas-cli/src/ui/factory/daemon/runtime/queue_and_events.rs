@@ -15402,8 +15402,12 @@ mod tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
         task.description = "Apply rule-177 to the SMS send path.".into();
-        crate::store::open_rule_store(&cas_dir).unwrap()
-            .add(&cas_types::Rule::new("rule-177".into(), "Only SMS sends".into())).unwrap();
+        // cas-d8295: only a stakeholder rule's citation asks for markers.
+        let mut rule = cas_types::Rule::new("rule-177".into(), "Only SMS sends".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(), quote: "Only SMS sends".into(), scope: "Only SMS sends".into(),
+        });
+        crate::store::open_rule_store(&cas_dir).unwrap().add(&rule).unwrap();
         let at = chrono::Utc::now();
         task.notes = [
             super::spawn_brief_note("Old brief, superseded.", at),

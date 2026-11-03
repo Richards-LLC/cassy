@@ -44,7 +44,7 @@ For an approved plan's `model-boundary`, follow installed `cas-qa-craft/referenc
 
 For every cited `art-` id used as proof, run `artifact action=fetch task_id=<task-id> id=<art-id>`, then read the downloaded copy at the returned path. A citation alone does not prove its contents.
 
-Use the task's `deliverables.files_changed`, `deliverables.commit_hash` and target branch to find the delivery. In factory mode, create the managed disposable checkout described in `verifier-evidence-gate.md` → Delivery checkout, bound to the task, dispatch and head; keep durable evidence in task artifacts. Diff against the task's own delivery base, never a fixed commit count:
+Use `deliverables.files_changed`, `deliverables.commit_hash` and the target branch. In factory mode follow `verifier-evidence-gate.md` → Delivery checkout: bind the managed checkout to task/dispatch/head; keep durable evidence in task artifacts. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
@@ -131,7 +131,7 @@ Follow `verifier-evidence-gate.md` → Verdict recording for the issue template 
 - A supervisor call preserves the exact dispatch. The supervisor answers with `verification action=add` on that `dispatch_id`, `status=approved` or `rejected`, and the answer plus final verdict in `summary`; no re-dispatch is needed.
 - For an epic, add `verification_type=epic`.
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
-- Categories describe the defect, not whether it blocks; issue severity is `blocking` or `warning`, with impact rating in the problem text. Use the reference's category list.
+- Use the reference's defect categories; severity is `blocking` or `warning`, with impact in the problem.
 
 Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 

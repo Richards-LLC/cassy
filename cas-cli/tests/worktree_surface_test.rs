@@ -3887,6 +3887,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let request = |name: &str| {
         let mut request = coord_req("worktree_merge");
         request.id = Some(format!("factory/{name}"));
+        // Explicit identity also supports no-op retries after automatic close.
+        request.task_id = Some(if name == "alice" { "worker-task-1".into() } else { format!("task-{name}") });
         request.cleanup = Some(false);
         request
     };

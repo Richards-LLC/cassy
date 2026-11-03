@@ -16,6 +16,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a logged-out account or a mismatched configuration directory and retain the
   account-selection diagnostics that explain why a named login was not chosen.
 
+### Fixed — QA impact coverage
+
+- **Keep changed source files in the impact manifest** — Files remain listed as
+  unowned when semantic journey selection excludes their registry owners, so
+  daemon source changes no longer disappear from QA impact reports.
+
 ### Fixed — Detached worker completion
 
 - **Wake workers when capped background runs finish** — Detached commands now

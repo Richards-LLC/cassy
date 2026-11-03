@@ -445,12 +445,13 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
     );
     let mut catalog =
         String::from("## hub-web\n\n- **Surface-wide:** `hub-web/src/styles.css`\n\n");
-    let mut yaml = String::from(
-        "version: 1\nupdated: '2026-10-21'\nselection: legacy_catalog\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n",
+    let daemon = "cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs";
+    let mut yaml = format!(
+        "version: 1\nupdated: '2026-10-21'\nselection: legacy_catalog\nowner_groups:\n  runtime: {{description: Shared daemon, globs: ['{daemon}']}}\ninvariants:\n  INV: {{statement: Arrived, check: Read state}}\njourneys:\n",
     );
     for (id, name) in [("HUB-J1", "reply"), ("HUB-J2", "theme")] {
         catalog.push_str(&format!("### {id} · {name}\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/{name}.ts`\n- **Suite:** `hub-web/e2e/{name}.journey.ts`\n\n"));
-        yaml.push_str(&format!("  - id: {id}\n    name: Curated {name}\n    status: live\n    entry: {{url: /commander/, trigger: Open}}\n    steps: [Arrive]\n    owners: ['hub-web/src/{name}.ts', 'hub-web/src/styles.css']\n    invariants: [INV]\n    traffic: {{share_pct: null}}\n    spec: hub-web/e2e/{name}.journey.ts\n"));
+        yaml.push_str(&format!("  - id: {id}\n    name: Curated {name}\n    status: live\n    entry: {{url: /commander/, trigger: Open}}\n    steps: [Arrive]\n    owners: ['hub-web/src/{name}.ts', 'hub-web/src/styles.css']\n    owner_groups: [runtime]\n    invariants: [INV]\n    traffic: {{share_pct: null}}\n    spec: hub-web/e2e/{name}.journey.ts\n"));
         write(
             repo,
             &format!("hub-web/src/{name}.ts"),
@@ -464,6 +465,7 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
     }
     write(repo, "docs/qa/journeys.md", &catalog);
     write(repo, crate::qa_registry::DEFAULT_PATH, &yaml);
+    write(repo, daemon, "fn run_reminder_scan() {}\n");
     write(repo, "hub-web/src/leaf.ts", "export const leaf = 1;");
     write(
         repo,
@@ -481,6 +483,7 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
         "hub-web/src/styles.css",
         ".reply-card { color: red; }\n.theme-card { color: green; }\n",
     );
+    write(repo, daemon, "fn run_reminder_scan() { reconcile(); }\n");
     let head = commit(repo);
     // Both the selector and its data must come from the reviewed head.
     write(
@@ -488,7 +491,11 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
         "scripts/journeys-for-diff.py",
         "raise Exception('checkout drift')",
     );
-    for path in ["hub-web/src/styles.css", "hub-web/src/leaf.ts"] {
+    for (path, expected) in [
+        ("hub-web/src/styles.css", &["HUB-J1"][..]),
+        ("hub-web/src/leaf.ts", &["HUB-J1"][..]),
+        (daemon, &[][..]),
+    ] {
         let report = analyze(
             repo,
             &QaConfig::default(),
@@ -505,11 +512,19 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
                 .iter()
                 .map(|j| j.id.as_str())
                 .collect::<Vec<_>>(),
-            ["HUB-J1"],
+            expected,
             "{path}"
         );
-        assert_eq!(report.journeys[0].name, "Curated reply");
-        assert_eq!(report.journeys[0].invariants[0].id, "INV");
+        if let Some(journey) = report.journeys.first() {
+            assert_eq!(journey.name, "Curated reply");
+            assert_eq!(journey.invariants[0].id, "INV");
+        } else {
+            // cas-3b77: registry ownership must not hide a changed daemon
+            // file when the semantic selector excludes all of its journeys.
+            assert_eq!(report.unowned.iter().map(|file| file.file.as_str()).collect::<Vec<_>>(), [daemon]);
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["unowned"][0]["file"], daemon);
+        }
     }
 }
 

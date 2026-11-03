@@ -203,6 +203,11 @@ fn impact_for_selected_changes(
     let mut owned = BTreeSet::new();
     if let Some(registry) = registry {
         for journey in &registry.journeys {
+            // Only an emitted journey can account for a file in the manifest.
+            // Semantic selection may exclude every registry owner (cas-3b77).
+            if selected.is_some_and(|ids| !ids.contains(&journey.id)) {
+                continue;
+            }
             let mut patterns: Vec<(&str, String)> = journey
                 .owners
                 .globs()
@@ -235,7 +240,7 @@ fn impact_for_selected_changes(
                     }
                 }
             }
-            if selected.map_or(matches.is_empty(), |ids| !ids.contains(&journey.id)) {
+            if selected.is_none() && matches.is_empty() {
                 continue;
             }
             let invariants = journey

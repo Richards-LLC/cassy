@@ -1995,6 +1995,10 @@ impl CasCore {
             if new_status == TaskStatus::InProgress && task.status != TaskStatus::InProgress {
                 crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                if let Some(epic) = req.epic.as_deref().filter(|epic| !epic.trim().is_empty()) {
+                    crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, epic)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                }
             }
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));

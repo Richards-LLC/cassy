@@ -1248,7 +1248,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::DesignReviewLift { epic, reason } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
                 crate::epic_design_review::lift(root, epic, reason)?;
-                println!("Epic {epic} design review pause lifted. New starts and spawns can resume.");
+                if cli.json {
+                    println!("{}", serde_json::json!({"epic": epic, "status": "resumed"}));
+                } else {
+                    println!("Epic {epic}: design review pause lifted.\nStaffing can resume.");
+                }
                 Ok(())
             }
             FactoryCommands::ShadowReview { request } => {

@@ -28,7 +28,7 @@ struct Pause {
 impl Pause {
     fn message(&self, epic: &str) -> String {
         format!(
-            "Epic {epic} staffing paused for a design review: {} stakeholder-reported P0/P1 bugs within {} hours (trigger reports: {}). Review the design against the epic plan before staffing more fixes. Only the operator can lift this pause: cas factory design-review-lift {epic} --reason '<review outcome and why staffing can resume>'.",
+            "Epic {epic}: staffing paused for a design review against the plan.\nTrigger: {} stakeholder-reported P0/P1 bugs within {} hours: {}.\nOperator: cas factory design-review-lift {epic} --reason '<review outcome>'",
             self.count,
             self.window_hours,
             self.reports.join(", "),
@@ -373,6 +373,9 @@ mod tests {
         for id in ["report-1", "report-2", "report-3", "report-4"] {
             add_child(id, "epic-risk", 1, 0, true);
         }
+        let mut closed_report = tasks.get("report-4").unwrap();
+        closed_report.status = TaskStatus::Closed;
+        tasks.update(&closed_report).unwrap();
         // Neither an expired report, a P2 nor an internal finding is the fifth report.
         add_child("expired", "epic-risk", 49, 0, true);
         add_child("minor", "epic-risk", 0, 2, true);

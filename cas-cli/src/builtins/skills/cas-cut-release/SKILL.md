@@ -21,8 +21,8 @@ agents in scratch with `npx playwright init-agents --loop=<harness>` and review
 them against `cas-playwright-debug`'s healer guard before adopting any changes.
 
 1. Start from the epic branch only after closeout is complete: one full review,
-   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` holds the
-   release entries. `scripts/release.sh --next-version` prints the version and
+   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the
+   `changelog.d/` fragments hold the release entries. `scripts/release.sh --next-version` prints the version and
    the draft path; write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
@@ -30,8 +30,8 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
 2. Run `scripts/release.sh` in the background with a log; it stays up until
    the PR merges. It merges `main` in when the branch is behind, bumps the
-   release crates and `Cargo.lock`, promotes `[Unreleased]` to the dated
-   section, names the draft, commits `release: vX.Y.Z`, pushes, opens the PR
+   release crates and `Cargo.lock`, promotes `[Unreleased]` and the
+   fragments to the dated section (deleting the fragments), names the draft, commits `release: vX.Y.Z`, pushes, opens the PR
    and enables auto-merge. `--no-watch` stops after auto-merge. A hotfix is a
    branch from `main` released with `scripts/release.sh --hotfix` (next
    patch), through the same queue.

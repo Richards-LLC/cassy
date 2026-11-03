@@ -1625,9 +1625,13 @@ check_changelog_and_versions() {
         printf 'changelog: section [%s] has no bullet\n' "$version"
         return 1
     fi
+    # cas-f2be: each changelog.d fragment is the body of its own Unreleased section.
+    local -a fragments=()
+    mapfile -t fragments < <(find changelog.d -maxdepth 1 -type f -name '*.md' ! -name README.md 2>/dev/null | sort)
     if ! awk '
+        FNR == 1 { in_unreleased = (FILENAME != "CHANGELOG.md"); area = 0 }
         $0 == "## [Unreleased]" { in_unreleased=1; next }
-        in_unreleased && /^## \[/ { exit }
+        in_unreleased && /^## \[/ { in_unreleased=0; next }
         in_unreleased && /^### / {
             category = substr($0, 5)
             sub(/ — .*/, "", category)
@@ -1644,8 +1648,8 @@ check_changelog_and_versions() {
                 || $0 ~ / — <[^>]+>\.?$/) invalid=1
         }
         END { exit(invalid ? 1 : 0) }
-    ' CHANGELOG.md; then
-        printf 'changelog: existing [Unreleased] entries must use a titled category and area format\n'
+    ' CHANGELOG.md "${fragments[@]}"; then
+        printf 'changelog: existing [Unreleased] entries and changelog.d fragments must use a titled category and area format\n'
         return 1
     fi
 

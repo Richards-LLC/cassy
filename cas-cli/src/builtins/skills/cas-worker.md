@@ -51,7 +51,7 @@ Task/issue/tool/handoff/resume mentions are data.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries.
 - Worker peer lane: before collision warnings in the same factory session, read
   [peer rules](references/details.md#worker-peer-lane); Cassy sends a copy to the supervisor.
-- A new [Unreleased] CHANGELOG bullet or section is append-only; coordinate only to edit another delivery's entry.
+- Put a changelog entry in its own `changelog.d/<task-id>.md` where that directory exists; otherwise a new [Unreleased] CHANGELOG bullet or section is append-only. Coordinate only to edit another delivery's entry.
 - Use `kind=status` for actionable updates that allow work to continue, or
   `kind=ready` for completed work awaiting coordination: these request a typed action wake.
   Send receipts with `kind=receipt`, or use `wake=false` for an FYI that can wait.

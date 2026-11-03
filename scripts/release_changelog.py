@@ -9,6 +9,9 @@
       release command promoted under a version another release has since
       taken. Their headings are dropped and their bodies kept, so a re-bump
       renames the section instead of stacking two. Idempotent.
+      Per-delivery fragments (changelog.d/*.md beside <file>, except
+      README.md; cas-f2be) are unreleased entries too: their bodies lead
+      the section in file-name order and the files are deleted.
 
   release_changelog.py rebase <ours-file> <base-file> <merge-base-version> <out-file>
       Resolve a CHANGELOG merge conflict with the base branch: the result is
@@ -26,6 +29,7 @@ from pathlib import Path
 
 HEADING = re.compile(r'^## \[(?P<version>[^\]]+)\]')
 UNRELEASED = '## [Unreleased]'
+FRAGMENT_DIR = 'changelog.d'
 
 
 class ChangelogError(Exception):
@@ -74,11 +78,18 @@ def region_entries(lines, released_version):
     return tidy([line for line in lines[start + 1:end] if not HEADING.match(line)]), start, end
 
 
-def promote(text, version, date, base_version):
+def fragment_paths(changelog):
+    folder = Path(changelog).parent / FRAGMENT_DIR
+    return sorted(path for path in folder.glob('*.md') if path.name != 'README.md')
+
+
+def promote(text, version, date, base_version, fragments=()):
     if version_key(version) is None:
         raise ChangelogError(f'release version is not x.y.z: {version!r}')
     lines = text.splitlines()
     entries, start, end = region_entries(lines, base_version)
+    folded = [line for fragment in fragments for line in fragment.splitlines() + ['']]
+    entries = tidy(folded + [''] + entries)
     if not entries:
         raise ChangelogError(
             'CHANGELOG.md [Unreleased] has no entries; write the release entries before releasing')
@@ -151,7 +162,11 @@ def main(argv):
     try:
         if len(argv) == 5 and argv[0] == 'promote':
             path = Path(argv[1])
-            path.write_text(promote(path.read_text(), argv[2], argv[3], argv[4]))
+            fragments = fragment_paths(path)
+            path.write_text(promote(path.read_text(), argv[2], argv[3], argv[4],
+                                    [fragment.read_text() for fragment in fragments]))
+            for fragment in fragments:
+                fragment.unlink()
         elif len(argv) == 5 and argv[0] == 'rebase':
             Path(argv[4]).write_text(
                 rebase(Path(argv[1]).read_text(), Path(argv[2]).read_text(), argv[3]))

@@ -11755,17 +11755,21 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         assert!(dirty.contains("commits behind"), "{dirty}");
         git_stdout(&worker_path, &["checkout", "--", "README"]);
 
-        // Clean is insufficient when the worker still carries unmerged commits.
-        std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
+        // cas-dd0e: unmerged commits (an earlier PR, open or squash-merged)
+        // no longer make a clean idle worker wait: start cuts this task's own
+        // branch beside them.
+        std::fs::write(worker_path.join("unmerged.txt"), "earlier PR work\n").unwrap();
         git_stdout(&worker_path, &["add", "unmerged.txt"]);
         git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
-        let stale = assign(&env, &task_b, assignee)
+        let beside = assign(&env, &task_b, assignee)
             .await
-            .expect_err("genuinely stale worker must be refused");
+            .expect("a clean idle worker with an earlier PR on its lane may take new work");
         assert!(
-            stale.contains("commits behind") && stale.contains("epic/foreign"),
-            "{stale}"
+            beside.contains(&format!("cut factory/{worker}-{task_b}"))
+                && beside.contains("epic/foreign"),
+            "{beside}"
         );
+        store.update(&targeted).unwrap();
         git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
 
         let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({

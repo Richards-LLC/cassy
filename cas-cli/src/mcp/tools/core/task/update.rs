@@ -530,7 +530,9 @@ fn clean_idle_assignment_note(
         // starts on its own branch beside it, so staleness is not a reason
         // to make it wait.
         return Some(format!(
-            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch holds work              outside {target_branch}. `task start` will leave it unchanged and cut              factory/{name}-{task_id} from the target.",
+            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch holds work \
+             outside {target_branch}. `task start` will leave it unchanged and cut \
+             factory/{name}-{task_id} from the target.",
             name = worker.name,
             task_id = task.id,
         ));

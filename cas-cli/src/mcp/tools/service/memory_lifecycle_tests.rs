@@ -496,7 +496,7 @@ async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date(
             .is_empty()
     );
     let result = service.rule(Parameters(serde_json::from_value(json!({
-        "action": "create", "content": "HARD RULE: Prompt changes via PR", "stakeholder": "Ben",
+        "action": "create", "content": "HARD RULE: Prompt changes via PR", "stakeholder": "Ben", "tags": "stakeholder:Ben,testing",
         "stakeholder_quote": words, "stakeholder_scope": scope, "review_after": "2100-01-01T00:00:00Z"
     })).unwrap())).await.unwrap();
     assert_ne!(result.is_error, Some(true));
@@ -554,9 +554,16 @@ async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date(
     })).unwrap())).await.expect("explicit empty stakeholder must clear attribution");
     assert_ne!(cleared.is_error, Some(true));
     let store = service.inner.open_rule_store().unwrap();
-    assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
-    let latest: cas_types::Rule = serde_json::from_str(&store.list_versions(&rule.id).unwrap()[0].snapshot_json).unwrap();
-    assert!(latest.stakeholder.is_none(), "clear and resulting history must commit together");
+    let cleared_rule = store.get(&rule.id).unwrap();
+    assert!(cleared_rule.stakeholder.is_none());
+    // pin: Clearing attribution removes its tags while preserving unrelated tags verbatim.
+    assert_eq!(cleared_rule.tags, vec!["testing"]);
+    let latest: cas_types::Rule =
+        serde_json::from_str(&store.list_versions(&rule.id).unwrap()[0].snapshot_json).unwrap();
+    assert!(
+        latest.stakeholder.is_none(),
+        "clear and resulting history must commit together"
+    );
 }
 
 #[tokio::test]

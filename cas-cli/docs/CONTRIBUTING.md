@@ -3951,6 +3951,10 @@ content. Attributed hard rules also require a future RFC3339 `review_after`.
 `rule action=show` displays the evidence and deadline. Existing rules remain
 unattributed until someone supplies evidence; migration never guesses or backfills
 someone's words. Optional provenance travels with normal rule/cloud serialization.
+An update that omits attribution preserves the stored evidence, including older
+client writes. `rule action=update stakeholder=""` explicitly clears live
+attribution and its `stakeholder:` tags; omit quote/scope in that request.
+The clear and its resulting history snapshot commit together.
 This does not change delivery or staging policy.
 
 Tag a temporary stakeholder constraint memory `stakeholder:<name>,constraint`
@@ -3959,8 +3963,8 @@ When a decision is replaced, update the old memory's tags to include
 `superseded,superseded-by:<replacement-id>` while retaining its other tags.
 Supersession ends its validity and removes it from session context, including
 pinned memories; explicit retrieval by ID still preserves the historical words.
-Old leading `SUPERSEDED` markers are recognized too. A deadline alone remains
-sufficient for ordinary time-limited memories.
+A leading word such as `SUPERSEDED` in prose never retires a memory or a
+handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
 ## Operator project holds
 

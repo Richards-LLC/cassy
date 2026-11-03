@@ -109,6 +109,7 @@ impl SqliteRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
         operation: &str,
+        clear_stakeholder: bool,
     ) -> Result<()> {
         let timer = TraceTimer::new();
         let changed_by = changed_by
@@ -161,7 +162,8 @@ impl SqliteRuleStore {
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
                  review_after = ?9, category = ?10, priority = ?11,
                  surface_count = ?12, scope = ?13, auto_approve_tools = ?14, auto_approve_paths = ?15, team_id = ?16, share = ?17, operator_authority = ?19,
-                 origin_project = COALESCE(?20, origin_project), stakeholder = ?21
+                 origin_project = COALESCE(?20, origin_project),
+                 stakeholder = CASE WHEN ?22 THEN NULL ELSE COALESCE(?21, stakeholder) END
                  WHERE id = ?18",
                 params![
                     Self::source_ids_to_string(&rule.source_ids),
@@ -185,6 +187,7 @@ impl SqliteRuleStore {
                     rule.operator_authority.as_ref().map(|a| a.to_stored()),
                     rule.origin_project.as_ref(),
                     Self::stakeholder_json(rule)?,
+                    clear_stakeholder,
                 ],
             )?;
             if rows == 0 {
@@ -247,6 +250,7 @@ impl SqliteRuleStore {
             changed_by,
             Some(change_note.unwrap_or("tombstone delete")),
             "delete",
+            false,
         )
     }
 
@@ -324,7 +328,7 @@ impl SqliteRuleStore {
             }
             (None, None) => Some("restore previous version"),
         };
-        self.update_recorded(&restored, changed_by, note, "restore")
+        self.update_recorded(&restored, changed_by, note, "restore", false)
     }
 }
 
@@ -462,7 +466,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
-        self.update_recorded(rule, None, None, "update")
+        self.update_recorded(rule, None, None, "update", false)
     }
 
     fn update_with_metadata(
@@ -471,7 +475,18 @@ impl RuleStore for SqliteRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.update_recorded(rule, changed_by, change_note, "update")
+        self.update_recorded(rule, changed_by, change_note, "update", false)
+    }
+
+    fn update_clearing_stakeholder(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let mut cleared = rule.clone();
+        cleared.stakeholder = None;
+        self.update_recorded(&cleared, changed_by, change_note, "update", true)
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {

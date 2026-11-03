@@ -564,7 +564,23 @@ impl RuleStore for MarkdownRuleStore {
         if !path.exists() {
             return Err(StoreError::RuleNotFound(rule.id.clone()));
         }
-        self.write_rule(rule)
+        let mut updated = rule.clone();
+        if updated.stakeholder.is_none() {
+            updated.stakeholder = self.get(&rule.id)?.stakeholder;
+        }
+        self.write_rule(&updated)
+    }
+
+    fn update_clearing_stakeholder(
+        &self,
+        rule: &Rule,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        self.get(&rule.id)?;
+        let mut cleared = rule.clone();
+        cleared.stakeholder = None;
+        self.write_rule(&cleared)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
@@ -658,6 +674,12 @@ mod tests {
             store.update(&rule).unwrap();
             assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
             assert_eq!(store.list().unwrap()[0].stakeholder, rule.stakeholder);
+            let mut absent = rule.clone();
+            absent.stakeholder = None;
+            store.update(&absent).unwrap();
+            assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+            store.update_clearing_stakeholder(&absent, None, Some("explicit clear")).unwrap();
+            assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
         }
     }
 

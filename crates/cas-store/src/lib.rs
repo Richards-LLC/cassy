@@ -541,6 +541,17 @@ pub trait RuleStore: Send + Sync {
         self.update(rule)
     }
 
+    /// Explicitly clear live stakeholder evidence while recording the other update fields.
+    /// Missing evidence on an ordinary update must preserve the stored attribution.
+    fn update_clearing_stakeholder(
+        &self,
+        _rule: &Rule,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse("explicit stakeholder clearing is unavailable for this store".into()))
+    }
+
     /// Increment the number of times a rule was actually injected into
     /// context. Implementations with an atomic write path should override
     /// this method; the default preserves compatibility for lightweight

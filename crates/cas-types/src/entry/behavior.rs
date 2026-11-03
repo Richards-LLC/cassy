@@ -279,8 +279,7 @@ impl Entry {
         true
     }
 
-    /// Explicit supersession markers, including the legacy leading marker.
-    /// Mere mentions of supersession in prose do not retire a memory.
+    /// Supersession is explicit state; prose can describe the policy being replaced.
     pub fn is_superseded(&self) -> bool {
         self.tags.iter().any(|tag| {
             let tag = tag.trim();
@@ -289,12 +288,7 @@ impl Entry {
                     .get(..14)
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case("superseded-by:"))
                     && tag.get(14..).is_some_and(|id| !id.trim().is_empty())
-        }) || self
-            .content
-            .trim_start()
-            .split(|c: char| c.is_whitespace() || c == ':')
-            .next()
-            .is_some_and(|word| word.eq_ignore_ascii_case("superseded"))
+        })
     }
 
     /// Superseded memories are expired even when an older writer omitted the deadline.

@@ -689,7 +689,7 @@ pub struct TaskRequest {
 /// Unified rule operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct RuleRequest {
-    /// Attributed person; requires quote and scope.
+    /// Person; quote/scope required. Update "" clears.
     #[serde(default)]
     pub stakeholder: Option<String>,
     /// Verbatim stakeholder words.

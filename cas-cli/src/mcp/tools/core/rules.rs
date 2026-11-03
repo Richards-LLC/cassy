@@ -964,9 +964,20 @@ impl CasCore {
             || req.stakeholder_quote.is_some()
             || req.stakeholder_scope.is_some()
             || req.review_after.is_some();
+        let clear_stakeholder = req.stakeholder.as_deref() == Some("");
+        if clear_stakeholder {
+            if req.stakeholder_quote.is_some() || req.stakeholder_scope.is_some() {
+                return Err(McpError { code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("To clear attribution, omit stakeholder_quote and stakeholder_scope"), data: None });
+            }
+            rule.stakeholder = None;
+            let old_len = rule.tags.len();
+            rule.tags.retain(|tag| !tag.starts_with("stakeholder:"));
+            if rule.tags.len() != old_len { changes.push("tags"); }
+        }
         apply_stakeholder_attribution(
             &mut rule,
-            req.stakeholder,
+            if clear_stakeholder { None } else { req.stakeholder },
             req.stakeholder_quote,
             req.stakeholder_scope,
             req.review_after,
@@ -1005,8 +1016,12 @@ impl CasCore {
             rule.authorize_operator_hard_rule(&author);
         }
 
-        rule_store
-            .update_with_metadata(&rule, req.changed_by.as_deref(), req.change_note.as_deref())
+        let update = if clear_stakeholder {
+            rule_store.update_clearing_stakeholder(&rule, req.changed_by.as_deref(), req.change_note.as_deref())
+        } else {
+            rule_store.update_with_metadata(&rule, req.changed_by.as_deref(), req.change_note.as_deref())
+        };
+        update
             .map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),

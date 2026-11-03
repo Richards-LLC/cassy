@@ -100,7 +100,11 @@ fn test_temporal_validity() {
 #[test]
 fn superseded_memories_are_expired_even_without_a_deadline() {
     for (content, tags, superseded) in [
-        ("SUPERSEDED 2026-10-03: the operator raised the cap to 10 via Commander #14942 (\"Cap it at 10\") while working on prowl (macOS). Use a maximum of 10 concurrent workers.", vec![], false),
+        (
+            "SUPERSEDED 2026-10-03: the operator raised the cap to 10 via Commander #14942 (\"Cap it at 10\") while working on prowl (macOS). Use a maximum of 10 concurrent workers.",
+            vec![],
+            false,
+        ),
         ("Old gate", vec!["superseded"], true),
         ("Old gate", vec![" SUPERSEDED-BY:mem-new "], true),
         ("SUPERSEDED by the current policy", vec![], false),
@@ -112,6 +116,10 @@ fn superseded_memories_are_expired_even_without_a_deadline() {
         assert_eq!(entry.is_expired(), superseded, "{entry:?}");
         assert_eq!(entry.is_temporally_valid(), !superseded, "{entry:?}");
         entry.expire_if_superseded(Utc::now());
-        assert_eq!(entry.valid_until.is_some(), superseded, "prose must not persist retirement: {entry:?}");
+        assert_eq!(
+            entry.valid_until.is_some(),
+            superseded,
+            "prose must not persist retirement: {entry:?}"
+        );
     }
 }

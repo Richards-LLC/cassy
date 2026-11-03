@@ -890,6 +890,12 @@ pub struct Verification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 
+    /// Source of duration_ms: explicit, capability_bound_to_consumed, or
+    /// dispatch_elapsed_fallback (includes time waiting for review).
+    /// Legacy records have no timing attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_source: Option<String>,
+
     /// When the verification was created
     pub created_at: DateTime<Utc>,
 }
@@ -912,6 +918,7 @@ impl Verification {
             issues: Vec::new(),
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }
@@ -933,6 +940,7 @@ impl Verification {
             issues: Vec::new(),
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }
@@ -959,6 +967,7 @@ impl Verification {
             issues,
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }
@@ -980,6 +989,7 @@ impl Verification {
             issues: Vec::new(),
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }
@@ -1001,6 +1011,7 @@ impl Verification {
             issues: Vec::new(),
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }
@@ -1098,6 +1109,7 @@ impl Default for Verification {
             issues: Vec::new(),
             files_reviewed: Vec::new(),
             duration_ms: None,
+            duration_source: None,
             created_at: Utc::now(),
         }
     }

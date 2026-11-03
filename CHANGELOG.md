@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Verification timing
+
+- **Measure recorded verifier duration** — Verdicts now record elapsed time
+  automatically and label child runtime, caller overrides and direct dispatch
+  fallback measurements. Direct fallback includes review wait; legacy timing
+  remains unknown.
+
 ### Fixed — Commander
 
 - **Steady Most recent session marker** — Each sibling conversation reserves

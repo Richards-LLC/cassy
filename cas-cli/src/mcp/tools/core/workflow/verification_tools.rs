@@ -685,10 +685,6 @@ impl CasCore {
         if let Some(confidence) = req.confidence {
             verification.set_confidence(confidence);
         }
-        if let Some(duration_ms) = req.duration_ms {
-            verification.set_duration(duration_ms);
-        }
-
         // Set verification type if specified (default is Task)
         if let Some(vtype) = &req.verification_type {
             if vtype.trim().eq_ignore_ascii_case("epic") {
@@ -716,7 +712,8 @@ impl CasCore {
                         data: None,
                     })?
             {
-                if supervisor_verification_retry_matches(&existing, &verification) {
+                if supervisor_verification_retry_matches(&existing, &verification, req.duration_ms)
+                {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
@@ -797,6 +794,8 @@ impl CasCore {
                     data: None,
                 })?;
 
+            let mut review_bound_at = None;
+            let mut review_consumed_at = None;
             let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(
                     &tx,
@@ -825,6 +824,8 @@ impl CasCore {
                 }
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                review_bound_at = capability.bound_at;
+                review_consumed_at = capability.consumed_at;
                 verification.capability_id = Some(capability.id);
                 verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(capability.issuer_agent_id);
@@ -866,6 +867,8 @@ impl CasCore {
                 }
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                review_bound_at = capability.bound_at;
+                review_consumed_at = capability.consumed_at;
                 verification.capability_id = Some(capability.id);
                 verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(capability.issuer_agent_id);
@@ -898,6 +901,27 @@ impl CasCore {
                     data: None,
                 });
             }
+
+            // A child has durable runtime boundaries. Direct verdicts (and
+            // legacy capabilities missing a bind time) can only measure the
+            // dispatch window, including queue/review wait; label that fallback.
+            verification.created_at = review_consumed_at.unwrap_or_else(chrono::Utc::now);
+            let (started_at, source) = match (review_bound_at, review_consumed_at) {
+                (Some(bound), Some(_)) => (bound, "capability_bound_to_consumed"),
+                _ => (dispatch.requested_at, "dispatch_elapsed_fallback"),
+            };
+            let elapsed_ms =
+                u64::try_from((verification.created_at - started_at).num_milliseconds())
+                    .unwrap_or(0);
+            verification.set_duration(req.duration_ms.unwrap_or(elapsed_ms));
+            verification.duration_source = Some(
+                if req.duration_ms.is_some() {
+                    "explicit"
+                } else {
+                    source
+                }
+                .into(),
+            );
 
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -1111,7 +1135,7 @@ impl CasCore {
                     outcome,
                     task_id: Some(&req.task_id),
                     sha: None,
-                    minutes: req.duration_ms.map(|ms| ms as f64 / 60_000.0),
+                    minutes: verification.duration_ms.map(|ms| ms as f64 / 60_000.0),
                     link: None,
                     actor: Some(&caller_id),
                 },
@@ -1169,6 +1193,9 @@ impl CasCore {
 
         if let Some(duration) = verification.duration_ms {
             output.push_str(&format!("Duration: {duration}ms\n"));
+        }
+        if let Some(source) = &verification.duration_source {
+            output.push_str(&format!("Duration source: {source}\n"));
         }
 
         if !verification.files_reviewed.is_empty() {
@@ -1415,6 +1442,7 @@ fn verification_status_emoji(status: VerificationStatus) -> &'static str {
 fn supervisor_verification_retry_matches(
     existing: &Verification,
     candidate: &Verification,
+    requested_duration_ms: Option<u64>,
 ) -> bool {
     existing.task_id == candidate.task_id
         && existing.agent_id == candidate.agent_id
@@ -1427,7 +1455,9 @@ fn supervisor_verification_retry_matches(
         && existing.confidence == candidate.confidence
         && existing.summary == candidate.summary
         && existing.files_reviewed == candidate.files_reviewed
-        && existing.duration_ms == candidate.duration_ms
+        // Server-derived elapsed time changes on retry. Only an explicit
+        // caller override is part of the request's idempotency comparison.
+        && requested_duration_ms.is_none_or(|duration| existing.duration_ms == Some(duration))
         && serde_json::to_value(&existing.issues).ok()
             == serde_json::to_value(&candidate.issues).ok()
 }

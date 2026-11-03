@@ -142,6 +142,9 @@ fn validate_verification_authority_with_conn(
 /// Re-exported via `cas_store::VERIFICATION_SCHEMA` so the migration runner in
 /// `cas-cli` can bootstrap the base tables before applying ALTER migrations.
 /// See cas-bdb9 / EPIC cas-9fdb.
+pub const VERIFICATION_DURATION_SOURCE_STATEMENT: &str =
+    "ALTER TABLE verifications ADD COLUMN duration_source TEXT";
+
 pub const VERIFICATION_STATUS_DETAIL_STATEMENT: &str =
     "ALTER TABLE verifications ADD COLUMN status_detail TEXT";
 pub const VERIFICATION_STATUS_NORMALIZE_STATEMENT: &str =
@@ -164,6 +167,7 @@ CREATE TABLE IF NOT EXISTS verifications (
     summary TEXT NOT NULL DEFAULT '',
     files_reviewed TEXT NOT NULL DEFAULT '[]',
     duration_ms INTEGER,
+    duration_source TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -355,6 +359,7 @@ impl SqliteVerificationStore {
             summary: row.get(10)?,
             files_reviewed,
             duration_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+            duration_source: row.get(15)?,
             created_at,
             issues: Vec::new(), // Issues loaded separately
         })
@@ -501,7 +506,7 @@ pub fn get_verification_for_dispatch(
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at, status_detail
+                    duration_ms, created_at, status_detail, duration_source
              FROM verifications WHERE dispatch_id = ?1
              ORDER BY created_at DESC, id DESC LIMIT 1",
             params![dispatch_id],
@@ -529,8 +534,8 @@ fn insert_verification_with_conn(conn: &Connection, verification: &Verification)
     conn.execute(
         "INSERT INTO verifications
          (id, task_id, agent_id, verification_type, provenance, capability_id, dispatch_id,
-          issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at, status_detail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+          issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at, status_detail, duration_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             verification.id,
             verification.task_id,
@@ -547,6 +552,7 @@ fn insert_verification_with_conn(conn: &Connection, verification: &Verification)
             verification.duration_ms.map(|v| v as i64),
             verification.created_at.to_rfc3339(),
             verification.status.storage_detail(),
+            verification.duration_source,
         ],
     )?;
 
@@ -588,7 +594,7 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                 dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                duration_ms, created_at, status_detail FROM verifications WHERE id = ?1",
+                duration_ms, created_at, status_detail, duration_source FROM verifications WHERE id = ?1",
             params![verification.id],
             SqliteVerificationStore::parse_verification,
         )
@@ -610,7 +616,7 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
         serde_json::to_string(&verification.files_reviewed).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
         "UPDATE verifications SET status = ?2, confidence = ?3, summary = ?4,
-         files_reviewed = ?5, duration_ms = ?6, status_detail = ?7 WHERE id = ?1",
+         files_reviewed = ?5, duration_ms = ?6, status_detail = ?7, duration_source = ?8 WHERE id = ?1",
         params![
             verification.id,
             verification.status.storage_status(),
@@ -619,6 +625,7 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
             files,
             verification.duration_ms.map(|v| v as i64),
             verification.status.storage_detail(),
+            verification.duration_source,
         ],
     )?;
     save_verification_issues_with_conn(&conn, verification)
@@ -2947,7 +2954,10 @@ pub fn consume_server_verifier_handoff_with_conn(
             "verifier handoff audit consumption raced".to_string(),
         ));
     }
-    Ok(capability)
+    Ok(VerifierCapability {
+        consumed_at: Some(now),
+        ..capability
+    })
 }
 
 /// Bind an issued capability to the distinct registered child session that
@@ -3037,7 +3047,10 @@ pub fn consume_verifier_capability_with_conn(
             "verifier capability was already consumed".to_string(),
         ));
     }
-    Ok(capability)
+    Ok(VerifierCapability {
+        consumed_at: Some(consumed_at),
+        ..capability
+    })
 }
 
 impl VerificationStore for SqliteVerificationStore {
@@ -3058,6 +3071,12 @@ impl VerificationStore for SqliteVerificationStore {
                 "verifications",
                 "status_detail",
                 VERIFICATION_STATUS_DETAIL_STATEMENT,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "verifications",
+                "duration_source",
+                VERIFICATION_DURATION_SOURCE_STATEMENT,
             )?;
             // Repair pre-release rows too; released processes may keep this
             // same database open while this version rolls out.
@@ -3142,7 +3161,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at, status_detail
+                        duration_ms, created_at, status_detail, duration_source
                  FROM verifications WHERE id = ?1",
                 params![id],
                 Self::parse_verification,
@@ -3165,7 +3184,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at, status_detail
+                        duration_ms, created_at, status_detail, duration_source
                  FROM verifications WHERE id = ?1",
                 params![verification.id],
                 Self::parse_verification,
@@ -3194,7 +3213,7 @@ impl VerificationStore for SqliteVerificationStore {
              task_id = ?2, agent_id = ?3, verification_type = ?4, provenance = ?5,
              capability_id = ?6, dispatch_id = ?7, issuer_agent_id = ?8, status = ?9,
              confidence = ?10, summary = ?11, files_reviewed = ?12, duration_ms = ?13,
-             created_at = ?14, status_detail = ?15
+             created_at = ?14, status_detail = ?15, duration_source = ?16
              WHERE id = ?1",
             params![
                 verification.id,
@@ -3212,6 +3231,7 @@ impl VerificationStore for SqliteVerificationStore {
                 verification.duration_ms.map(|v| v as i64),
                 verification.created_at.to_rfc3339(),
                 verification.status.storage_detail(),
+                verification.duration_source,
             ],
         )?;
 
@@ -3244,7 +3264,7 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at, status_detail
+                    duration_ms, created_at, status_detail, duration_source
              FROM verifications WHERE task_id = ?1
              ORDER BY created_at DESC",
         )?;
@@ -3266,7 +3286,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at, status_detail
+                        duration_ms, created_at, status_detail, duration_source
                  FROM verifications WHERE task_id = ?1
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id],
@@ -3295,7 +3315,7 @@ impl VerificationStore for SqliteVerificationStore {
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                         dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                        duration_ms, created_at, status_detail
+                        duration_ms, created_at, status_detail, duration_source
                  FROM verifications WHERE task_id = ?1 AND verification_type = ?2
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id, verification_type.to_string()],
@@ -3319,7 +3339,7 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at, status_detail
+                    duration_ms, created_at, status_detail, duration_source
              FROM verifications ORDER BY created_at DESC LIMIT ?1",
         )?;
 
@@ -3339,7 +3359,7 @@ impl VerificationStore for SqliteVerificationStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
                     dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
-                    duration_ms, created_at, status_detail
+                    duration_ms, created_at, status_detail, duration_source
              FROM verifications WHERE (CASE
                  WHEN status = 'error' AND status_detail IN ('pending', 'supervisor_call') THEN status_detail
                  WHEN status IN ('approved', 'rejected', 'skipped', 'pending', 'supervisor_call') THEN status
@@ -3586,6 +3606,8 @@ mod tests {
 
         // Update with new status and issues
         verification.status = VerificationStatus::Rejected;
+        verification.set_duration(1500);
+        verification.duration_source = Some("explicit".into());
         verification.summary = "Found issues".to_string();
         verification.issues.push(VerificationIssue::new(
             "src/api.rs".to_string(),
@@ -3598,6 +3620,8 @@ mod tests {
         let retrieved = store.get("ver-test").unwrap();
         assert!(retrieved.is_rejected());
         assert_eq!(retrieved.issues.len(), 1);
+        assert_eq!(retrieved.duration_ms, Some(1500));
+        assert_eq!(retrieved.duration_source.as_deref(), Some("explicit"));
     }
 
     #[test]

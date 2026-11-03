@@ -53,6 +53,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Hosted queue precheck** - `cas release precheck <sha>` validates an exact commit on hosted CI and records its run; `--status` reports results and elapsed time. A supervisor's parked merge refused for pending CI resumes automatically on green for the authorized source, repository and target. Terminal CI evidence or a moved lane sends one notice, and pending retries expire after two hours. A landed merge preserves a held close as a follow-up. The precheck isolates Python imports, recovers uncertain dispatches without sending another run, reports JSON errors and deletes completed precheck refs only at the expected SHA.
 - **Queue archive dependencies** - hosted Rust suite builds restore a compatible main-scoped dependency cache while compiling current source. Advisory main priming fills a missing cache after queue-proof reuse; it adds no required check, and disposable queue refs do not save dependency copies.
 
+- **Epic design review** - five Bug tasks labelled `stakeholder-reported` at P0/P1 within 48 hours pause new starts and spawns on their epic. The supervisor reviews the design against the plan; the operator resumes staffing with a recorded reason. Configurable thresholds, acknowledged reports and per-epic scope keep other work and shipping available.
+
 ## Primary Journeys
 
 Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers and substantive status updates remain visible.

@@ -2568,6 +2568,24 @@ impl CasService {
             req.isolate = Some(true);
             req.task_id = ids.first().cloned();
         }
+        let staffing_tasks: Vec<&str> = req.task_ids.as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| req.task_id.as_deref().into_iter().collect());
+        if staffing_tasks.is_empty() {
+            if let Some(epic) = ctx.factory_session.as_deref()
+                .and_then(|session| std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok())
+                .and_then(|raw| serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok())
+                .and_then(|metadata| metadata.pinned_epic_id.or(metadata.epic_id))
+            {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, &epic)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        } else {
+            for task in staffing_tasks {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, task)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        }
         let provisioner_build = ctx
             .factory_session
             .as_ref()

@@ -1992,6 +1992,10 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            if new_status == TaskStatus::InProgress && task.status != TaskStatus::InProgress {
+                crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
@@ -2540,6 +2544,10 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        crate::epic_design_review::observe(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task updated, but epic design review trigger could not be evaluated: {error}")))?;
 
         if changes.contains(&"labels") {
             crate::quality_ledger::bug_labelled(

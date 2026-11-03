@@ -757,6 +757,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             }
             _ => None,
         },
+        Commands::Factory(crate::cli::factory::FactoryArgs {
+            command: Some(crate::cli::factory::FactoryCommands::DesignReviewLift { .. }), ..
+        }) => Some("Lifting an epic design review pause (`cas factory design-review-lift`)"),
         Commands::Factory(factory) if factory.command.is_none() => {
             Some("Launching a factory (`cas factory`)")
         }

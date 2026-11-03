@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Epic governance
+
+- **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

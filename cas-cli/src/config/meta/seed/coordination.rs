@@ -4,6 +4,12 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [
+        ("factory.design_review_bug_threshold", "Epic Design Review Bug Threshold",
+         "Pause starts and spawns on an epic after this many stakeholder-reported P0/P1 Bug tasks within design_review_window_hours; the operator lifts the pause with a reason.",
+         ConfigType::Int, "5", Constraint::Range(1, 1000)),
+        ("factory.design_review_window_hours", "Epic Design Review Window",
+         "Rolling window in hours, measured from report task creation. Only Bug tasks labelled stakeholder-reported with P0/P1 count, including closed reports.",
+         ConfigType::Int, "48", Constraint::Range(1, 8760)),
         ("factory.slot_id", "Cloud Supervisor Slot",
          "Stable Cloud reader slot override. Empty derives the slot from machine id, canonical project id, supervisor role and factory session. Use an override to retain a slot across different factory sessions or machines; sharing an override intentionally supersedes the earlier registration.",
          ConfigType::String, "", Constraint::None),

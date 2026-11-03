@@ -728,6 +728,13 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Operator: resume an epic after reviewing its design against the plan.
+    DesignReviewLift {
+        epic: String,
+        /// Review outcome and why staffing can resume.
+        #[arg(long)]
+        reason: String,
+    },
     /// Internal JSON parity for the advisory verification shadow action.
     #[command(hide = true)]
     ShadowReview {
@@ -1238,6 +1245,12 @@ pub enum FactoryGcCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::DesignReviewLift { epic, reason } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))?;
+                crate::epic_design_review::lift(root, epic, reason)?;
+                println!("Epic {epic} design review pause lifted. New starts and spawns can resume.");
+                Ok(())
+            }
             FactoryCommands::ShadowReview { request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("shadow review requires a Cassy project"))?;
                 if std::fs::metadata(request)?.len() > 512 * 1024 {

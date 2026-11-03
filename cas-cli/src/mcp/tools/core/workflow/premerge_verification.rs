@@ -363,11 +363,15 @@ impl Approval {
                 // A local promotion can precede a rejected push. Until fresh
                 // containment proves publication, it must still match today's
                 // plan/evidence and source before another push is authorized.
+                // A cleaned-up source ref may be absent; the immutable candidate
+                // still binds its source commit. An existing ref may not advance.
                 if context_digest(root, task)? != self.candidate.context_digest
                     || git(
                         &self.candidate.repository,
-                        &["rev-parse", &self.candidate.source_branch],
-                    )? != self.candidate.source_sha
+                        &["rev-parse", "--verify", &self.candidate.source_branch],
+                    )
+                    .ok()
+                    .is_some_and(|source| source != self.candidate.source_sha)
                 {
                     return Err(
                         "unpublished promotion changed; review the current candidate".into(),

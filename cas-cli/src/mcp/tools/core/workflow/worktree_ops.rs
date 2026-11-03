@@ -5502,6 +5502,16 @@ impl CasCore {
             }
         };
 
+        // A reconciled/local-only delivery skipped the Git-merge branch's
+        // freshness check above. Revalidate it under the same target lock before
+        // its publication attempt too; this does not dispatch another review.
+        if reconciled_delivery && let Some(approval) = premerge_approval.as_ref() {
+            let current = self.open_task_store()?.get(&approval.candidate.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            approval.validate_for_merge(&cas_root, &current)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        }
+
         // cas-5ee0 (GH #137): the merge receipt must tell the truth about push
         // state. Filled in by the transactional branch below (which has to
         // publish *before* its internal close runs, or that close measures a

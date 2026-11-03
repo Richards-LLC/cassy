@@ -4023,7 +4023,7 @@ mod tests {
             while read -r command; do
                 case "$command" in
                     start)
-                        (exec -a cargo "$BASH" --noprofile --norc -c 'printf "working\n"; read -r _') <&0 &
+                        (exec -a cargo /bin/bash --noprofile --norc -c 'printf "working\n"; read -r _') <&0 &
                         job=$!
                         wait "$job" || :
                         job=
@@ -4037,8 +4037,8 @@ mod tests {
         let mut harness = Harness(Command::new("/bin/bash")
             .arg0("codex")
             .args(["--noprofile", "--norc", "-c", r#"
-                "$BASH" --noprofile --norc -c \
-                    'exec -a /vendor/bin/codex-code-mode-host "$BASH" --noprofile --norc -c "$1"' \
+                /bin/bash --noprofile --norc -c \
+                    'exec -a /vendor/bin/codex-code-mode-host /bin/bash --noprofile --norc -c "$1"' \
                     fixture "$1" <&0 &
                 wait "$!"
             "#, "fixture", host])

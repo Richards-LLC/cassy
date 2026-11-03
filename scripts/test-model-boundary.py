@@ -74,17 +74,18 @@ class ModelBoundary(unittest.TestCase):
                          ("model/intent.rs", 6, "regex"), ("model/intent.rs", 7, "exact_string_assertion")])
 
     def test_existing_collection_additions_and_moves_into_boundary_are_visible(self):
-        self.plan("plan.md", {"model_owned_paths": ["model/**"]})
+        self.plan("plan.md", {"model_owned_paths": ["model/**", "*never.py"]})
         self.write("model/members.py", 'WORDS = [\n    "old",\n]\n')
         self.write("outside.py", 'WORDS = ["yes", "no"]\n')
         base = self.commit()
         self.write("model/members.py", 'WORDS = [\n    "old",\n    "new",\n]\n')
         self.git("mv", "outside.py", "model/moved.py")
+        self.write(":(glob)never.py", 'WORDS = ["yes", "no"]\n')
         self.commit()
         status, report = self.run_check(base, "plan.md")
         self.assertEqual(status, 1, report)
         self.assertEqual([(s["file"], s["line"]) for s in report["findings"]],
-                         [("model/members.py", 3), ("model/moved.py", 1)])
+                         [(":(glob)never.py", 1), ("model/members.py", 3), ("model/moved.py", 1)])
 
     def test_malformed_declared_boundary_cannot_silently_disable_review(self):
         for boundary in [{"model_owned_paths": "model/**"}, {"model_owned_paths": ["../other"]},

@@ -27790,6 +27790,50 @@ mod merge_state_gate_tests {
         (response.is_error, text)
     }
 
+    #[tokio::test]
+    async fn close_requires_every_declared_rule_site_before_park_cas_4f87() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        let root = fixture.dir.path();
+        let rules = crate::store::open_rule_store(&root.join(".cas")).unwrap();
+        rules.init().unwrap();
+        rules.add(&Rule::new("rule-177".into(), "Only the SMS send path".into())).unwrap();
+        let declarations = concat!(
+            "Rule-driven sites: [",
+            "{\"rule_id\":\"rule-177\",\"path\":\"delivery.rs\",\"anchor\":\"fn send() {}\"},",
+            "{\"rule_id\":\"rule-177\",\"path\":\"delivery_test.rs\",\"anchor\":\"fn test_send() {}\"}]"
+        );
+        let marker = "// cas-rule: rule-177 scope: \"Only the SMS send path\"\n";
+        for marked in 0..=2 {
+            std::fs::write(root.join("delivery.rs"), format!("{}fn send() {{}}\n", if marked > 0 { marker } else { "" })).unwrap();
+            std::fs::write(root.join("delivery_test.rs"), format!("{}fn test_send() {{}}\n", if marked > 1 { marker } else { "" })).unwrap();
+            git(root, &["add", "delivery.rs", "delivery_test.rs"]);
+            git(root, &["commit", "-q", "-m", "fix(cas-anchor): rule-driven sites"]);
+            git(root, &["push", "-q", "origin", &fixture.branch]);
+            let mut task = fixture.store.get(&fixture.task_id).unwrap();
+            task.description = "Apply rule-177 to the SMS path; rule-1770 is not this rule.".into();
+            task.notes = if marked < 2 {
+                format!("[2026-11-03 12:00] 📌 SPAWN BRIEF Apply rule-177.\n{declarations}")
+            } else { String::new() };
+            fixture.store.update(&task).unwrap();
+            // The worker can declare symbols in its receipt instead of the brief.
+            let reason = if marked == 2 { format!("ready\n{declarations}") } else { "ready".into() };
+            let response = fixture.service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"close", "id":fixture.task_id, "reason":reason,
+            })).unwrap())).await.unwrap();
+            let text = response.content.iter().filter_map(|item| match &item.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            }).collect::<Vec<_>>().join("\n");
+            if marked < 2 {
+                assert!(text.contains("RULE REFERENCES REQUIRED"), "unmarked sites must refuse before park: {text}");
+                assert!(text.contains("delivery_test.rs"), "every declared site must be named: {text}");
+                assert_ne!(fixture.store.get(&fixture.task_id).unwrap().status, TaskStatus::AwaitingMerge);
+            } else {
+                assert!(!text.contains("RULE REFERENCES REQUIRED"), "valid markers must pass: {text}");
+                assert!(text.contains("MERGE REQUIRED"), "the normal merge gate must still run: {text}");
+            }
+        }
+    }
+
     // cas-44e93 AC1: cas-e460 closed with a local-only child of its pushed
     // tip checked out and parked that commit, which origin never had.
     #[tokio::test]

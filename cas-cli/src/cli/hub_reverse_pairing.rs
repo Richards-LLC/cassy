@@ -771,60 +771,6 @@ fn parse_override_scopes(scopes: Option<&[String]>) -> Result<Option<BTreeSet<Sc
 
 const RELAY_INVITATION_CONTRACT: &str = "exactly two fragment keys (`pair` and `hub`), a 32-byte base64url `pair` secret, a `hub` value of at most 128 bytes, root path `/`, and no query";
 
-fn validate_relay_invitation_url(invitation_url: &str) -> Result<()> {
-    let parsed = Url::parse(invitation_url).context("invalid relay invitation URL")?;
-    anyhow::ensure!(
-        parsed.host_str().is_some()
-            && parsed.username().is_empty()
-            && parsed.password().is_none()
-            && parsed.path() == "/"
-            && parsed.query().is_none(),
-        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-    );
-    let fragment = parsed
-        .fragment()
-        .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
-    let fields = fragment.split('&').collect::<Vec<_>>();
-    anyhow::ensure!(
-        fields.len() == 2,
-        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-    );
-
-    let mut pair = None;
-    let mut hub = None;
-    for field in fields {
-        let (key, value) = field
-            .split_once('=')
-            .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
-        anyhow::ensure!(
-            !value.is_empty(),
-            "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-        );
-        match key {
-            "pair" => anyhow::ensure!(
-                pair.replace(value).is_none(),
-                "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-            ),
-            "hub" => anyhow::ensure!(
-                hub.replace(value).is_none(),
-                "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-            ),
-            _ => anyhow::bail!("relay invitation URL must use {RELAY_INVITATION_CONTRACT}"),
-        }
-    }
-
-    let pair = pair.context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
-    let hub = hub.context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
-    let pair = URL_SAFE_NO_PAD
-        .decode(pair)
-        .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
-    anyhow::ensure!(
-        pair.len() == 32 && hub.len() <= 128,
-        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
-    );
-    Ok(())
-}
-
 fn relay_error(error: ureq::Error) -> anyhow::Error {
     let (status, code, description) = relay_error_parts(error);
     relay_error_from_parts(status, &code, &description)
@@ -1664,24 +1610,14 @@ mod tests {
         assert!(invitation_url.contains("#pair="), "{invitation_url}");
         assert!(invitation_url.contains("&hub="), "{invitation_url}");
         assert_eq!(invitation_url.matches('&').count(), 1, "{invitation_url}");
-        validate_relay_invitation_url(&invitation_url).unwrap();
-
-        let pair = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-        for invalid in [
-            format!("https://commander.example/#pair={pair}&hub=machine&scopes=read"),
-            format!("https://commander.example/#pair=short&hub=machine"),
-            format!("https://commander.example/path#pair={pair}&hub=machine"),
-            format!("https://commander.example/?query=1#pair={pair}&hub=machine"),
-            format!(
-                "https://commander.example/#pair={pair}&hub={}",
-                "h".repeat(129)
-            ),
-        ] {
-            assert!(
-                validate_relay_invitation_url(&invalid).is_err(),
-                "{invalid}"
-            );
-        }
+        let parsed = Url::parse(&invitation_url).unwrap();
+        assert_eq!(parsed.path(), "/");
+        assert!(parsed.query().is_none());
+        let fields: std::collections::BTreeMap<_, _> =
+            url::form_urlencoded::parse(parsed.fragment().unwrap().as_bytes()).collect();
+        assert_eq!(fields.keys().map(|key| key.as_ref()).collect::<Vec<_>>(), ["hub", "pair"]);
+        assert_eq!(URL_SAFE_NO_PAD.decode(fields["pair"].as_bytes()).unwrap().len(), 32);
+        assert_eq!(fields["hub"], MachineIdentityStore::new(paths.root()).load_or_create().unwrap().id);
     }
 
     #[test]

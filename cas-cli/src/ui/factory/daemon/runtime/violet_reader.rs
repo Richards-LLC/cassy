@@ -235,11 +235,10 @@ pub(crate) struct ReaderIo<'a> {
 
 /// The reader's in-memory state for one daemon process.
 pub(crate) struct VioletReader {
-    default_session: String,
+    /// This reader claims for one registration in one local factory session.
+    session: String,
     /// The don't-type-twice guard: every delivery typed by this process.
     typed: HashSet<String>,
-    /// delivery.id → local session (cas-c186 binds; default otherwise).
-    sessions: HashMap<String, String>,
     /// Set when Cloud says this registration is superseded; no more claims.
     pub(crate) stopped: Option<NamedRefusal>,
     registration_id: Option<String>,
@@ -253,11 +252,10 @@ pub(crate) struct VioletReader {
 }
 
 impl VioletReader {
-    pub(crate) fn new(default_session: impl Into<String>) -> Self {
+    pub(crate) fn new(session: impl Into<String>) -> Self {
         Self {
-            default_session: default_session.into(),
+            session: session.into(),
             typed: HashSet::new(),
-            sessions: HashMap::new(),
             stopped: None,
             registration_id: None,
             recovered_for: None,
@@ -265,14 +263,6 @@ impl VioletReader {
             activations: None,
             activation_read_this_tick: false,
         }
-    }
-
-    pub(crate) fn bind_session(&mut self, delivery_id: &str, session: &str) {
-        self.sessions.insert(delivery_id.to_string(), session.to_string());
-    }
-
-    pub(crate) fn session_for(&self, delivery_id: &str) -> &str {
-        self.sessions.get(delivery_id).map_or(self.default_session.as_str(), String::as_str)
     }
 
     /// True once Cloud has answered for a managed binding (a completed claim or
@@ -528,7 +518,7 @@ impl VioletReader {
             Some("resume") => self.walk(port, actor, delivery, io, now),
             Some("recovery_notice") => {
                 self.typed.insert(delivery.id.clone());
-                io.typer.notice_into(self.session_for(&delivery.id), delivery)?;
+                io.typer.notice_into(&self.session, delivery)?;
                 receipt(port, actor, delivery, "consumed", now).map(|()| Walked::Typed)
             }
             mode => Err(NamedRefusal::new("invalid_response", format!("unknown recovery mode {mode:?}"))),
@@ -557,7 +547,7 @@ impl VioletReader {
         }
         receipt(port, actor, delivery, "dispatch_uncertain", now)?;
         self.typed.insert(delivery.id.clone());
-        io.typer.type_into(self.session_for(&delivery.id), delivery, &text)?;
+        io.typer.type_into(&self.session, delivery, &text)?;
         receipt(port, actor, delivery, "consumed", now).map(|()| Walked::Typed)
     }
 

@@ -385,16 +385,6 @@ fn summarize(limit: &AccountLimit) -> Option<String> {
     summarize_windows(&report_windows(limit))
 }
 
-/// Shared registry capacity for several accounts at once. Duplicate Codex
-/// folders use their newest snapshot; unfinished work is left out at deadline.
-pub(crate) fn usage_summaries(
-    provider: crate::accounts::Provider,
-    accounts: Vec<(String, std::path::PathBuf)>,
-    deadline: std::time::Duration,
-) -> std::collections::HashMap<String, String> {
-    crate::account_registry::picker_usage_summaries(provider, accounts, deadline)
-}
-
 fn collect_exa() -> AccountLimit {
     if std::env::var_os("EXA_API_KEY").is_none() {
         return unavailable("exa", "exa", "auth-needed", "EXA_API_KEY is not configured");
@@ -730,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn native_claude_snapshot_reaches_limits_and_picker_without_authentication() {
+    fn native_claude_snapshot_reaches_limits_without_authentication() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(".claude-fixture");
         fs::create_dir(&dir).unwrap();

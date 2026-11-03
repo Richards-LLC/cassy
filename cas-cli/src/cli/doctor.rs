@@ -186,18 +186,6 @@ impl PhaseRecorder {
     fn phases(&self) -> &[Phase] {
         &self.phases
     }
-
-    /// Phases worth naming, slowest first.
-    fn slowest(&self, threshold: Duration, limit: usize) -> Vec<&Phase> {
-        let mut phases: Vec<&Phase> = self
-            .phases
-            .iter()
-            .filter(|phase| phase.duration >= threshold)
-            .collect();
-        phases.sort_by(|a, b| b.duration.cmp(&a.duration));
-        phases.truncate(limit);
-        phases
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -56,7 +56,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        task_store.get(&req.id).map_err(|e| McpError {
+        let task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
@@ -99,6 +99,29 @@ impl CasCore {
         })?;
 
         let outcome_kind = req.note_type.to_ascii_lowercase();
+        if matches!(outcome_kind.as_str(), "model_eval_target" | "model_eval_receipt") {
+            if outcome_kind == "model_eval_target" {
+                self.resolve_live_supervisor_authority().map_err(|error| Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("MODEL EVAL TARGET REJECTED: only a live registered supervisor declares eval bars ({error:?})"),
+                ))?;
+            } else if self.resolve_live_supervisor_authority().is_err() {
+                let agents = self.open_agent_store()?;
+                let caller = agents.get(&self.get_agent_id()?)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                if !super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &caller) {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "MODEL EVAL RECEIPT REJECTED: only the task assignee or a live registered supervisor may record model evaluation proof"));
+                }
+            }
+            let verdict = crate::model_eval::record_note(task_store.as_ref(), &req.id, &outcome_kind, &req.note)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+            if let Err(error) = self.record_task_note_activity(&req.id, &outcome_kind, &req.note, None) {
+                tracing::warn!(%error, "could not record model evaluation activity");
+            }
+            return Ok(Self::success(format!("Added {outcome_kind} note to task {}: {verdict}", req.id)));
+        }
         if matches!(outcome_kind.as_str(), "outcome_target" | "outcome_receipt") {
             self.resolve_live_supervisor_authority().map_err(|error| Self::error(
                 ErrorCode::INVALID_PARAMS,

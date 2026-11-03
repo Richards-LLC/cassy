@@ -29,6 +29,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
 
+### Fixed — Shared stakeholder asks
+
+- **Name the supervisor who owns an ask** — MCP task creation and staffing check
+  the source before changing local work. Slack threads reuse existing claims;
+  GitHub issue and pull-request aliases share an advisory source claim across
+  independent task cards. Conflicts name the owner, task and source. A deliberate
+  second GitHub task needs a recorded supervisor reason; source claims release
+  when the work ends, even while that supervisor stays online.
+
 ### Fixed — Verification
 
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could
@@ -73,6 +82,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Phase dependency gates
 
 - **Sequential phase work stays free** — A dependency between a phase's children no longer holds those children against their own phase's unmet outcome. External prerequisite phases keep their measured gates.
+
+### Added — Model evaluation proof
+
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
 
 ## [3.100.0] - 2026-11-03
 

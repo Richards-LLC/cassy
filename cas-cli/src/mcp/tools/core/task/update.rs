@@ -1777,6 +1777,19 @@ impl CasCore {
 
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
+        let _source_admission = if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty())
+            || changes.contains(&"external_ref")
+        {
+            let admission = self.task_source_admission_for(&task,
+                supervisor_override.then_some(proof_scope_fix_reason.unwrap_or(""))).await?;
+            if !admission.notice.is_empty() { warnings.push(admission.notice.clone()); }
+            if let Some(grant) = &admission.override_grant {
+                task.deliverables.source_claim_override = Some(grant.clone());
+                task.notes.push_str(&admission.notice);
+                changes.push("source_claim_override");
+            }
+            Some(admission)
+        } else { None };
         let mut assignee_override_audit = None;
 
         if let Some(ref assignee_raw) = req.assignee {

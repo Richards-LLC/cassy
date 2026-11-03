@@ -1679,6 +1679,13 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
+        let source_admission = if execution_note.as_deref() == Some("no-code") {
+            super::source_claim::SourceAdmission::default()
+        } else {
+            self.task_source_admission(external_ref.as_deref(), &id,
+                supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?
+        };
+        if source_admission.override_grant.is_some() { task_notes.push_str(&source_admission.notice); }
         let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1708,6 +1715,7 @@ impl CasCore {
             branch: None,
             deliverables: crate::types::TaskDeliverables {
                 work_target,
+                source_claim_override: source_admission.override_grant.clone(),
                 ..Default::default()
             },
             team_id: None,
@@ -1723,6 +1731,7 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
+        if !source_admission.notice.is_empty() { assignee_warnings.push(source_admission.notice.clone()); }
         let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
@@ -3004,6 +3013,8 @@ impl CasCore {
         ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
+        let source_admission = self.task_source_admission_for(&task, None).await?;
+        peer_notes.push_str(&source_admission.notice);
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
@@ -5503,6 +5514,66 @@ mod related_recall_response_tests {
         assert!(terms.contains(&"checkout") && terms.contains(&"release"), "{query}");
         for filler in ["the", "you", "see", "next", "before"] {
             assert!(!terms.contains(&filler), "{filler} in {query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stakeholder_source_create_names_the_slack_claim_owner_cas_12c1() {
+        use crate::coordination::external_work::{CONTRACT_SCHEMA, SqliteRequestJournal};
+        use crate::types::{Agent, AgentRole};
+        let _env = TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let beta = Agent::new_with_role("reg-supervisor-beta-07".into(), "beta".into(), AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&beta).unwrap();
+        core.set_agent_id_for_testing(beta.id.clone());
+        crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy").unwrap();
+        let source = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        let contract: serde_json::Value = serde_json::from_str(include_str!("../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
+        // pin: the coordination v1 fixture names its cross-machine ownership refusal case.
+        let mut held = contract["cases"].as_array().unwrap().iter().find(|case| case["name"] == "held by a peer").unwrap()["response"]["payload"].clone();
+        let owner = held["receipt"]["visible_owner"]["label"].as_str().unwrap().to_owned();
+        held["receipt"]["expires_at"] = serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
+        let journal = SqliteRequestJournal::open(temp.path()).unwrap();
+        let request = "00000002-2222-4222-8222-000000000002";
+        journal.prepare(request, "claim", &serde_json::json!({
+            "schema":CONTRACT_SCHEMA,"project_id":"github.com/richards-llc/cassy",
+            "external_ref":source,"actor":{"registration_id":beta.id},
+        })).unwrap();
+        journal.record_result(request, &held, None).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut synced = crate::types::Task::new("cas-synced".into(), "Already synchronized task".into());
+        synced.external_ref = Some(source.into());
+        tasks.add(&synced).unwrap();
+        for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+            let mut actor = beta.clone();
+            actor.role = role;
+            core.open_agent_store().unwrap().update(&actor).unwrap();
+            for entry in ["create", "assign", "start", "claim", "transfer"] {
+                // A supervisor can start epics; ordinary execution remains worker-only.
+                synced.task_type = if role == AgentRole::Supervisor && entry == "start" {
+                    crate::types::TaskType::Epic
+                } else { crate::types::TaskType::Task };
+                tasks.update(&synced).unwrap();
+                let result = match entry {
+                    "create" => {
+                        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
+                        req.external_ref = Some(source.into());
+                        core.cas_task_create(Parameters(req)).await
+                    }
+                    "assign" => core.cas_task_update(Parameters(serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(serde_json::json!({"id":synced.id,"assignee":"new-worker"})).unwrap())).await,
+                    "start" => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
+                    "claim" => core.cas_task_claim(Parameters(crate::mcp::tools::TaskClaimRequest {task_id:synced.id.clone(),duration_secs:600,reason:None})).await,
+                    _ => core.cas_task_transfer(Parameters(serde_json::from_value::<crate::mcp::tools::TaskTransferRequest>(serde_json::json!({"task_id":synced.id,"to_agent":"new-worker"})).unwrap())).await,
+                };
+                let response = result.map(text).unwrap_or_else(|error| error.message.to_string());
+                assert!(response.contains(&owner), "{role}/{entry}: {response}");
+                // pin: the ownership warning must identify the caller's source.
+                assert!(response.contains(source), "{role}/{entry}: {response}");
+                assert_eq!(tasks.list(None).unwrap().len(), 1);
+                assert_eq!(tasks.get(&synced.id).unwrap().status, crate::types::TaskStatus::Open);
+                assert!(tasks.get(&synced.id).unwrap().assignee.is_none());
+            }
         }
     }
 

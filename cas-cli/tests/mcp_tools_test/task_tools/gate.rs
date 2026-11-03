@@ -1400,6 +1400,16 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
         .current_dir(repo).status().unwrap().success(), "fixture delivery must remain unmerged");
 }
 
+fn eval_receipt_artifact(dir: &std::path::Path, thresholds: serde_json::Value, measurements: serde_json::Value) -> serde_json::Value {
+    let stem = uuid::Uuid::new_v4().to_string();
+    let path = dir.join(format!("eval-{stem}.json"));
+    let log = dir.join(format!("eval-{stem}.log"));
+    std::fs::write(&log, "reader evaluation completed\n").unwrap();
+    std::fs::write(&path, serde_json::json!({"dataset":"reader-44", "model":"provider/model", "command":"reader-eval --dataset reader-44",
+        "run_log":log,"thresholds":thresholds,"measurements":measurements}).to_string()).unwrap();
+    serde_json::json!({"measurements":measurements,"receipt":path})
+}
+
 /// A measured phase gates only its dependants, including their children.
 #[tokio::test]
 async fn phase_outcome_refuses_dependent_start_and_close() {
@@ -1429,7 +1439,7 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     }
     for (kind, note) in [
         ("outcome_target", serde_json::json!({"stability": {"min":95.0}, "p95_seconds":{"max":1.0}})),
-        ("outcome_receipt", serde_json::json!({"measurements":{"stability":72.7,"p95_seconds":1.48},"receipt":"artifact:reader-eval"})),
+        ("outcome_receipt", eval_receipt_artifact(temp.path(), serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":72.7,"p95_seconds":1.48}))),
     ] {
         let result = unified_task(&service, serde_json::json!({
             "action":"notes", "id":"phase-reader", "note_type":kind,"notes":note.to_string(),
@@ -1468,8 +1478,46 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     assert!(independent.contains("Started task"), "{independent}");
     set_test_agent_role(&root, AgentRole::Supervisor);
     unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
-        "notes":serde_json::json!({"measurements":{"stability":99.0,"p95_seconds":0.9},"receipt":"artifact:reader-rerun"}).to_string()})).await;
+        "notes":eval_receipt_artifact(temp.path(), serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":99,"p95_seconds":0.9})).to_string()})).await;
     set_test_agent_role(&root, AgentRole::Worker);
     let started = unified_task(&service, serde_json::json!({"action":"start","id":"dependent"})).await;
     assert!(started.contains("Started task"), "{started}");
+}
+
+#[tokio::test]
+async fn model_eval_close_requires_passing_receipt() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    std::fs::write(root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+    let store = open_task_store(&root).unwrap();
+    let service = CasService::new(core, None);
+    for id in ["cas-model-eval", "cas-no-eval"] {
+        let mut task = cas::types::Task::new(id.into(), id.into());
+        task.status = TaskStatus::InProgress;
+        task.depth = cas::types::TaskDepth::Light;
+        task.assignee = Some(format!("test-session-{}", std::process::id()));
+        store.add(&task).unwrap();
+    }
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    let target = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
+        "note_type":"model_eval_target","notes":serde_json::json!({"dataset":"reader-44", "thresholds":{"accuracy_percent":{"min":95}}}).to_string()})).await;
+    assert!(target.contains("Added"), "{target}");
+    set_test_agent_role(&root, AgentRole::Worker);
+    for measured in [80.3, 86.4, 87.9] {
+        let receipt = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
+            "note_type":"model_eval_receipt","notes":eval_receipt_artifact(temp.path(), serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":measured})).to_string()})).await;
+        assert!(receipt.contains("Added"), "{receipt}");
+        let refused = unified_task(&service, serde_json::json!({"action":"close","id":"cas-model-eval"})).await;
+        assert!(refused.contains("MODEL EVAL UNMET") && refused.contains("95") && refused.contains(&measured.to_string()), "{refused}");
+        assert_eq!(store.get("cas-model-eval").unwrap().status, TaskStatus::InProgress);
+        assert!(store.get("cas-model-eval").unwrap().notes.contains("MODEL_EVAL_MISS"));
+    }
+    unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval","note_type":"model_eval_receipt",
+        "notes":eval_receipt_artifact(temp.path(), serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":96})).to_string()})).await;
+    for id in ["cas-model-eval", "cas-no-eval"] {
+        let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
+        assert!(closed.contains("Closed task"), "{id}: {closed}");
+        assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed);
+    }
 }

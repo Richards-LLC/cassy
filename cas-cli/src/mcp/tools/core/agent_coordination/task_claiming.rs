@@ -26,6 +26,8 @@ impl CasCore {
             ));
         }
 
+        let source_admission = self.task_source_admission_for(&task, None).await?;
+
         // cas-a0d2: adopt an unattributed row into this project. Unlike
         // `start`, claim has no later write of its own, so persist the
         // adoption here or the next ownership check would ask again.
@@ -283,6 +285,7 @@ impl CasCore {
             }
             None => String::new(),
         };
+        let peer_note = format!("{}{peer_note}", source_admission.notice);
         let prefer_start_hint = match prefer_start_hint {
             Some(hint) => Some(format!("{hint}{peer_note}")),
             None if peer_note.is_empty() => None,
@@ -1070,6 +1073,8 @@ impl CasCore {
             ));
         }
 
+        let source_admission = self.task_source_admission_for(&task, None).await?;
+
         // Set when the task had no active lease at all (e.g. a Blocked task
         // whose lease lapsed). The assignee, or a supervisor with
         // supervisor_override, may still hand it on (cas-6cfe7, GH #987).
@@ -1333,6 +1338,7 @@ impl CasCore {
             "\nBranch adopted on {} at {} in the receiver's registered worktree.",
             adoption.branch, adoption.tip,
         )).unwrap_or_default();
+        let adoption_note = format!("{adoption_note}{}", source_admission.notice);
 
         Ok(Self::success(format!(
             "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",

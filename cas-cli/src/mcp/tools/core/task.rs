@@ -9,6 +9,7 @@ mod proposals;
 mod query;
 mod rebind;
 pub(crate) mod repo_context;
+pub(crate) mod source_claim;
 mod update;
 
 /// Caller text appended to the task timeline cannot forge the marker lines

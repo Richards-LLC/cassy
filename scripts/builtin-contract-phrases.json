@@ -4465,6 +4465,10 @@
         {
           "text": "PLAN-FIT:",
           "reason": "The verifier summary exposes this named plan-conformance verdict to the supervisor; card criteria alone cannot approve a narrowed delivery (cas-9e74)."
+        },
+        {
+          "text": "MODEL-BOUNDARY:",
+          "reason": "The verifier emits this named optional boundary verdict for the supervisor; this pins a report label, not an expected model reply (cas-1f48)."
         }
       ],
       "absent": [

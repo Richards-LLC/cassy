@@ -47,6 +47,51 @@
         "eval-receipt.json": "{\"dataset\":\"reader-v1\",\"examples\":100,\"correct\":87,\"accuracy_percent\":87,\"plan_target_percent\":95,\"command\":\"python eval_reader.py --dataset reader-v1\",\"exit_code\":0}"
       },
       "proof": {"receipt": "eval-receipt.json", "command": "python eval_reader.py --dataset reader-v1", "exit_code": 0, "accuracy_percent": 87, "plan_target_percent": 95}
+    },
+    {
+      "id": "model-owned-keywords",
+      "dependencies": [
+        {
+          "type": "ParentChild",
+          "parent": "meaning-epic"
+        }
+      ],
+      "task": {
+        "id": "meaning-reader",
+        "description": "Implement the reader slice in docs/meaning-plan.md.",
+        "acceptance_criteria": "A reply can continue the workflow; record reader proof.",
+        "close_reason": "PASS: replies yes, continue and approved continue the workflow; reader test passed."
+      },
+      "epic": {
+        "id": "meaning-epic",
+        "description": "Build the reader under docs/meaning-plan.md, Reader boundary.",
+        "acceptance_criteria": "The model interprets the operator reply.",
+        "decision_notes": []
+      },
+      "plan_documents": {
+        "docs/meaning-plan.md": "# Reader boundary\nThis delivery owns the reader. The model interprets operator meaning; deterministic code may validate protocol state and permissions. No exception authorizes keyword matching.\n\n```model-boundary\n{\"model_owned_paths\":[\"reader.py\"],\"model_owned_concerns\":[\"Interpret operator assent\"]}\n```\n"
+      },
+      "delivery_files": {
+        "reader.py": "REPLIES = [\"yes\", \"continue\", \"approved\"]\ndef read(message):\n    return message.lower() in REPLIES\n"
+      },
+      "proof": {
+        "command": "pytest test_reader.py",
+        "exit_code": 0,
+        "passed": 1,
+        "model_boundary_probe": {
+          "base": "approved-base",
+          "head": "delivery-head",
+          "status": "rejected",
+          "findings": [
+            {
+              "file": "reader.py",
+              "line": 1,
+              "kind": "literal_collection"
+            }
+          ],
+          "allowed": []
+        }
+      }
     }
   ]
 }

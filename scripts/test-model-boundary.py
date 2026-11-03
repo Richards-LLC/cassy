@@ -35,8 +35,9 @@ class ModelBoundary(unittest.TestCase):
         return self.git("rev-parse", "HEAD")
 
     def run_check(self, base, plan):
+        source = ["--plan-file", str(self.repo / plan)] if plan == "allowed.md" else ["--plan", plan]
         result = subprocess.run(["python3", str(HELPER), "--repo", str(self.repo), "--base", base,
-                                 "--plan", plan], text=True, capture_output=True)
+                                 *source], text=True, capture_output=True)
         return result.returncode, json.loads(result.stdout)
 
     def test_added_sites_respect_approved_boundary_without_changing_unscoped_deliveries(self):

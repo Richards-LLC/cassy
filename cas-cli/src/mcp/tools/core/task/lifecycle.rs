@@ -5498,6 +5498,7 @@ mod related_recall_response_tests {
     #[tokio::test]
     async fn stakeholder_source_create_names_the_slack_claim_owner_cas_12c1() {
         use crate::coordination::external_work::{CONTRACT_SCHEMA, SqliteRequestJournal};
+        use crate::types::{Agent, AgentRole};
         let _env = TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

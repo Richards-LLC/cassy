@@ -911,6 +911,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -1632,6 +1636,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
@@ -2359,6 +2367,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/SKILL.md", content: include_str!("builtins/skills/cas-test-audit/SKILL.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
+    BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -5333,6 +5345,12 @@ This is the body content."#;
             let why = get("skills/cas-why/SKILL.md");
             assert_eq!(why, WHY, "{label} cas-why drifted");
             assert!(is_managed_by_cas(why), "{label} cas-why is unmanaged");
+            // cas-3b9f: the test audit skill ships its SKILL.md and every
+            // reference it links, in every harness.
+            for file in ["SKILL.md", "references/detectors.md", "references/ci-timing.md", "references/ledger.md"] {
+                get(&format!("skills/cas-test-audit/{file}"));
+            }
+            assert!(is_managed_by_cas(get("skills/cas-test-audit/SKILL.md")));
         }
     }
 

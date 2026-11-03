@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Test hygiene
+
+- **`cas-test-audit` skill** — A read-only procedure for auditing a project's tests: five buckets (dead, superseded, restates-implementation, duplicate, slow), per-language detector recipes with a precision check, CI-timing recipes per runner, and a ledger format. Cuts need operator approval and each names its covering test. It reports that merge-queue time is mostly the build, so a test cost list is not the route to queue speed.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

@@ -6247,16 +6247,21 @@ fn is_duration_word(word: &str) -> bool {
     !digits.is_empty() && digits.parse::<f64>().is_ok()
 }
 
-/// The textual catch-all: the command names the write-roots key with a
-/// standalone `set`, or a grant command, and runs anything that is not a
-/// read-only command.
+/// The textual catch-all: the command applies `set` to the write-roots key,
+/// or names a grant command, and runs anything that is not a read-only
+/// command. `set` must precede the key, separated only by spaces, quotes,
+/// commas or option words, as in shell text and interpreter argv lists. An
+/// unrelated `set` elsewhere, such as Python's `set(...)` beside a read-only
+/// string that mentions the key, does not name the policy (cas-b181).
 fn operator_policy_command_textual(command: &str) -> bool {
-    static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let set_word = SET_WORD.get_or_init(|| {
-        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)")
-            .expect("valid set pattern")
+    static SET_KEY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let set_key = SET_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:^|[^A-Za-z0-9_.\-])set(?:[\s'",]+-[^\s'",]*)*[\s'",]+factory\.write_roots"#,
+        )
+        .expect("valid set-key pattern")
     });
-    let names_policy = (command.contains("factory.write_roots") && set_word.is_match(command))
+    let names_policy = set_key.is_match(command)
         || command.contains("grant-write")
         || command.contains("revoke-write");
     if !names_policy {
@@ -9407,6 +9412,7 @@ EOF
             "bash -lc \"eval 'cas config set factory.write_roots /x'\"",
             "python3 -c 'import subprocess; subprocess.run([\"cas\", \"config\", \"set\", \"factory.write_roots\", \"/x\"])'",
             "perl -e 'system(\"cas config set factory.write_roots /x\")'",
+            "perl -e 'system(\"cas config set --quiet factory.write_roots /x\")'",
             "python3 - <<'EOF'\nimport os\nos.system('cas config set factory.write_roots /x')\nEOF",
             "echo 'cas config set factory.write_roots /x' | sh",
             "node -e 'require(\"child_process\").execSync(\"cas config grant-write --task t --path /x --reason r\")'",

@@ -603,7 +603,7 @@ fn agent_ancestor(command_line: &str) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or(program);
     match name {
-        "claude" | "codex" => true,
+        "claude" | "codex" | "grok" | "opencode" => true,
         "cas" => matches!(words.next(), Some("serve" | "factory")),
         "node" | "bun" | "deno" => command_line.contains("claude-code") || command_line.contains("@openai/codex"),
         _ => command_line.contains("/codex/") && command_line.contains("codex"),

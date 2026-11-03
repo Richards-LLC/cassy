@@ -139,6 +139,7 @@ mod tests {
                 ("", "codex", "", true),
                 ("", "claude", "", true),
                 ("", "grok", "", true),
+                ("", "opencode", "", true),
                 ("", "bash", "0::/user.slice/cas-worker-example", true),
                 ("", "bash", "", false),
             ] {

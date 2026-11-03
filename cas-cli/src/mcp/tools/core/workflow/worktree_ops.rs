@@ -5367,7 +5367,7 @@ impl CasCore {
             if let Some(approval) = premerge_approval.as_ref() {
                 let current = self.open_task_store()?.get(&approval.candidate.task_id)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-                approval.candidate.validate(&cas_root, &current)
+                approval.validate_for_merge(&cas_root, &current)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
             }
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())

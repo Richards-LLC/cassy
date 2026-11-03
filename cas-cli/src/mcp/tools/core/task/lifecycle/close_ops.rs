@@ -9743,6 +9743,14 @@ impl CasCore {
                 };
                 let mut superseded_approved_verdict_id = None;
 
+                if let Some(dispatch) = typed_dispatch.as_ref()
+                    && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && let Ok(Some(verdict)) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    && verdict.status == VerificationStatus::Approved
+                {
+                    self.verify_premerge_promotion(&task, dispatch, &verdict.id)?;
+                }
+
                 // Revalidate repository-bound legacy proof even after a verdict
                 // was recorded. This prevents an approval from authorizing file
                 // or Git changes made after the verifier finished. Invalidation

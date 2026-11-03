@@ -184,6 +184,89 @@ impl Candidate {
 }
 
 impl Approval {
+    fn promotion(&self) -> Result<Option<Promotion>, String> {
+        let path = self.candidate.directory()?.join("promotion.json");
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let record: Promotion =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let candidate = &self.candidate;
+        if record.dispatch_id != self.dispatch_id
+            || record.verdict_id != self.verdict_id
+            || record.source_sha != candidate.source_sha
+            || record.target_sha != candidate.target_sha
+            || record.candidate_tree != candidate.tree
+            || git(
+                &candidate.repository,
+                &["rev-parse", &format!("{}^{{tree}}", record.landed_sha)],
+            )? != candidate.tree
+        {
+            return Err("candidate promotion does not match the approved proof".into());
+        }
+        git(
+            &candidate.repository,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &record.landed_sha,
+                &candidate.target_branch,
+            ],
+        )?;
+        Ok(Some(record))
+    }
+
+    /// Reconcile an interrupted publication against the reviewed base and tree.
+    fn reconcile_promotion(&self) -> Result<bool, String> {
+        if self.promotion()?.is_some() {
+            return Ok(true);
+        }
+        let candidate = &self.candidate;
+        let commits = git(
+            &candidate.repository,
+            &[
+                "rev-list",
+                "--first-parent",
+                "--max-count=256",
+                &format!("{}..{}", candidate.target_sha, candidate.target_branch),
+            ],
+        )?;
+        for landed in commits.lines() {
+            let first_parent = git(
+                &candidate.repository,
+                &["rev-parse", &format!("{landed}^1")],
+            )?;
+            if (first_parent == candidate.target_sha || landed == candidate.source_sha)
+                && git(
+                    &candidate.repository,
+                    &["rev-parse", &format!("{landed}^{{tree}}")],
+                )? == candidate.tree
+            {
+                self.promote(landed)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn validate_for_merge(&self, root: &Path, task: &Task) -> Result<(), String> {
+        if let Some(record) = self.promotion()? {
+            if git(
+                &self.candidate.repository,
+                &["rev-parse", &self.candidate.target_branch],
+            )? == record.landed_sha
+                && task.deliverables.factory_branch_anchor.as_deref()
+                    == Some(self.candidate.source_sha.as_str())
+            {
+                return repository_proof::verify_repository_proof(&self.candidate.proof)
+                    .map_err(|error| error.to_string());
+            }
+        }
+        self.candidate.validate(root, task)
+    }
+
     pub(crate) fn promote(&self, landed: &str) -> Result<(), String> {
         let candidate = &self.candidate;
         if git(
@@ -197,7 +280,7 @@ impl Approval {
         }
         git(
             &candidate.repository,
-            &["merge-base", "--is-ancestor", &candidate.source_sha, landed],
+            &["merge-base", "--is-ancestor", &candidate.target_sha, landed],
         )?;
         let record = Promotion {
             dispatch_id: self.dispatch_id.clone(),
@@ -236,6 +319,34 @@ impl Approval {
 }
 
 impl CasCore {
+    /// Close consumes the original approval through its immutable landed mapping.
+    pub(crate) fn verify_premerge_promotion(
+        &self,
+        task: &Task,
+        dispatch: &VerificationDispatch,
+        verdict_id: &str,
+    ) -> Result<(), McpError> {
+        let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
+        else {
+            return Ok(());
+        };
+        if task.deliverables.factory_branch_anchor.as_deref() != Some(candidate.source_sha.as_str())
+        {
+            return Err(fail("landed candidate does not match this task delivery"));
+        }
+        let approval = Approval {
+            candidate,
+            dispatch_id: dispatch.id.clone(),
+            verdict_id: verdict_id.into(),
+        };
+        if !approval.reconcile_promotion().map_err(fail)? {
+            return Err(fail(
+                "candidate has no matching landed mapping; close cannot dispatch another verifier",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn continue_premerge_after_verdict(
         &self,
         dispatch: &VerificationDispatch,
@@ -303,6 +414,22 @@ impl CasCore {
         {
             return Ok(None);
         }
+        if !recorded
+            && !crate::rapid_response::verification_sampled(&task.id)
+            && crate::rapid_response::active_for_task_at(&self.cas_root, task, None).is_some_and(
+                |window| {
+                    crate::rapid_response::record_skip(
+                        &self.cas_root,
+                        &window,
+                        &task.id,
+                        "verification",
+                        "pre-merge verification not sampled (one task in four runs it)",
+                    )
+                },
+            )
+        {
+            return Ok(None);
+        }
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
@@ -310,6 +437,24 @@ impl CasCore {
         {
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
+            if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                && candidate.source_branch == source
+                && candidate.target_branch == target
+                && task.deliverables.factory_branch_anchor.as_deref()
+                    == Some(candidate.source_sha.as_str())
+                && let Some(verdict) = verdict
+                    .as_ref()
+                    .filter(|verdict| verdict.status == VerificationStatus::Approved)
+            {
+                let approval = Approval {
+                    candidate: candidate.clone(),
+                    dispatch_id: dispatch.id.clone(),
+                    verdict_id: verdict.id.clone(),
+                };
+                if approval.reconcile_promotion().map_err(fail)? {
+                    return Ok(Some(approval));
+                }
+            }
             if candidate.context_digest == digest
                 && candidate.source_branch == source
                 && candidate.target_branch == target
@@ -336,6 +481,12 @@ impl CasCore {
             )
             .map_err(fail)?;
         }
+        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
+            &self.cas_root,
+            task,
+            true,
+        )
+        .map_err(fail)?;
         let candidate = self.build_verification_candidate(task, repo, source, target, digest)?;
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;

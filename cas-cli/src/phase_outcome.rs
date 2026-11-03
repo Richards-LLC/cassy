@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Bar {
+pub(crate) struct Bar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,21 +22,21 @@ struct Bar {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Receipt {
-    measurements: BTreeMap<String, f64>,
-    receipt: String,
+pub(crate) struct Receipt {
+    pub(crate) measurements: BTreeMap<String, f64>,
+    pub(crate) receipt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Outcome {
-    target: BTreeMap<String, Bar>,
+pub(crate) struct Outcome {
+    pub(crate) target: BTreeMap<String, Bar>,
     #[serde(default)]
-    evidence: Option<Receipt>,
+    pub(crate) evidence: Option<Receipt>,
 }
 
 impl Outcome {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             !self.target.is_empty(),
             "outcome target needs at least one metric"
@@ -85,7 +85,7 @@ impl Outcome {
         Ok(())
     }
 
-    fn misses(&self) -> Vec<String> {
+    pub(crate) fn misses(&self) -> Vec<String> {
         self.target
             .iter()
             .filter_map(|(metric, bar)| {
@@ -278,6 +278,11 @@ pub(crate) fn refusal(
             continue;
         }
         let task = store.get(&id)?;
+        if (prerequisite || (include_self && id == origin))
+            && let Some(reason) = crate::model_eval::refusal(&task)?
+        {
+            misses.push(reason);
+        }
         if (prerequisite || (include_self && id == origin))
             && let Some(outcome) = read(&task)?
             && !overridden(root, &task)

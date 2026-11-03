@@ -1965,6 +1965,34 @@ require a new decision. Agent and supervisor shell contexts cannot issue it.
 A subsequent passing receipt releases the outcome hold. Other close, CI and QA
 gates still apply.
 
+## Model evaluation close proof
+
+A model-backed task or phase can declare an evaluation bar. A registered
+supervisor records `task action=notes note_type=model_eval_target` with:
+
+```json
+{"dataset":"reader-44-v1","thresholds":{"accuracy_percent":{"min":95}}}
+```
+
+The assignee or a registered supervisor records `note_type=model_eval_receipt`:
+
+```json
+{"dataset":"reader-44-v1","model":"provider/model","run_log":"/absolute/path/to/evaluation.log","measurements":{"accuracy_percent":87.9}}
+```
+
+The dataset must match the immutable target, every threshold needs a measured
+value, and the model id must be non-empty. The run log must be a readable,
+non-empty file at an absolute path; keep it under the task artifacts directory.
+Cassy binds the receipt to its contents and rejects a log changed after recording.
+The evaluation runner supplies measurements; recording proof does not run a model.
+
+A below-bar evaluation is saved as `MODEL_EVAL_MISS`. Close refuses and names
+the bar and measured values. Missing proof also refuses. A passing receipt is
+saved as `MODEL_EVAL_PASS` and permits ordinary close checks to continue. An
+operator phase exception cannot waive a model-evaluation miss. Phase evaluation
+misses also hold dependent work through the existing outcome graph. Tasks with
+no declared evaluation bar retain their existing close behavior.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

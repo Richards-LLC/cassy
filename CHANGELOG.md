@@ -22,6 +22,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
 
+### Added — Model evaluation proof
+
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts name the model, measured values and a bound run log; misses remain open and close explains the failed bar.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

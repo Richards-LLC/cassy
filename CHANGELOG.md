@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **Steady Most recent session marker** — Each sibling conversation reserves
+  the badge's space, so moving it never shifts a row. Activity in the same
+  minute shares a stable ranking instead of flashing on every output frame.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

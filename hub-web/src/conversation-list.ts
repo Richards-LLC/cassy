@@ -98,9 +98,16 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const anyActivity = group.some((member) => member.activityAt !== undefined);
     const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
     const ordered = [...group].sort((a, b) => rank(b) - rank(a));
+    // cas-6faf: the visible time calls a whole minute "now". Treat activity
+    // in that minute as a tie, resolved by stable identity, so alternating
+    // output frames cannot shuttle the marker between siblings. Start times
+    // keep their exact ordering when no activity has been observed.
+    const recent = anyActivity ? [...group].sort((a, b) =>
+      Math.floor(rank(b) / 60_000) - Math.floor(rank(a) / 60_000) || a.key.localeCompare(b.key),
+    )[0] : ordered[0];
     // cas-5d2c: the same noun as the footer's "3 conversations".
     const label = `${rowProjectName(row) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
-    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && rank(member) !== -Infinity } }));
+    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));
   }
   return out;
 }
@@ -274,14 +281,15 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // monogram and accent alone do not name it. A long machine name ellipsises
   // inside the title column (its title attribute carries it whole) instead of
   // running under the time stamp (cas-1ca1). The codename sits beneath.
-  // cas-55a4: among one project's sessions, the most recently active one says so.
-  const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
+  // cas-6faf: every sibling reserves the same badge slot, including its wrap
+  // onto another line. Inactive slots occupy space but have no spoken name.
+  const mark = row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
   const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
   const version = rowVersion(row);
   const badge = version ? `<span class="supervisor-version${version.update ? " update-available" : ""}" title="${escapeHtml(version.description)}">${escapeHtml(version.version)}${version.update ? ' <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span>' : ""}</span>` : "";
   // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${badge}${mark}</span>` : `${mark}${badge}`}${account}</span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename"><span class="conversation-supervisor-name">${escapeHtml(row.supervisor)}</span>${badge}${mark}</span>` : `${mark}${badge}`}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${emojiMarkup(preview)}</span>`
     + marks

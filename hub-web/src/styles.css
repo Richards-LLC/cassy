@@ -2987,6 +2987,8 @@ button.chip:disabled { cursor: default; }
 .conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
 .conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
 .conversation-row.grouped { padding-left: var(--space-3); }
+.conversation-session-slot { display: inline-flex; flex: none; }
+.conversation-session-slot[aria-hidden="true"] { visibility: hidden; }
 .conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
 .conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
 .conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -6px 14px var(--space-1) 73px; font-size: var(--fs-xs); color: var(--ink-mid); }

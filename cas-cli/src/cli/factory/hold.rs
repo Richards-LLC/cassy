@@ -8,7 +8,7 @@ use clap::Subcommand;
 
 use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum HoldCommand {
     /// Stop project dispatch and merges (operator only)
     Set {

@@ -7784,6 +7784,19 @@ echo SMOKE_DONE
     }
 
     #[test]
+    fn supervisor_contract_holds_missed_plan_targets_and_keeps_independent_work_shipping() {
+        // pin: audit finding 4; every launched supervisor must receive the
+        // same merge boundary, including after Codex drops loaded skill text.
+        for harness in ["claude", "codex", "grok", "opencode"] {
+            let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
+            assert!(
+                surface.contains("A delivery whose phase misses its plan's measured target does not merge: hold the work that depends on it, keep shipping everything else, and ask the operator."),
+                "{harness} must hold missed plan targets without stopping independent deliveries"
+            );
+        }
+    }
+
+    #[test]
     fn supervisor_epic_status_instructions_include_required_id() {
         // pin: factory_epic_status rejects calls without the epic id.
         for (harness, tool_prefix) in [

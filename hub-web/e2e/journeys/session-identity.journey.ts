@@ -1,4 +1,5 @@
 import { test, expect, journeyPart } from "./journey";
+import { mkdir } from "node:fs/promises";
 import { journeyDay, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
@@ -194,6 +195,43 @@ const atlas = (): Machine => ({
 
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
+
+// cas-6faf: the same keyed rows must keep their geometry when recency moves.
+test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journeyPart, async ({ page, journey }) => {
+  const machine = atlas();
+  machine.sessions = machine.sessions.slice(0, 2);
+  const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
+  await journey.open();
+  await showConversationList(page);
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const rows = list.locator(".conversation-row");
+  const row = (codename: string) => rows.filter({ hasText: codename });
+  const rects = () => rows.evaluateAll(nodes => nodes.map(node => {
+    const { x, y, width, height } = node.getBoundingClientRect();
+    return { key: node.getAttribute("data-key"), x, y, width, height };
+  }));
+  const capture = process.env.SESSION_RECENCY_CAPTURE_DIR;
+  if (capture) await mkdir(capture, { recursive: true });
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    // Put the marker back on Puma before measuring the same two rows.
+    machine.sessions[0]!.last_activity_at = journeyStamp(-120_000);
+    machine.sessions[1]!.last_activity_at = journeyStamp(-60_000);
+    await hub.announceCatalog("atlas");
+    await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
+    const before = await rects();
+    if (capture) await page.screenshot({ path: `${capture}/initial-${width}.png` });
+    machine.sessions[0]!.last_activity_at = journeyStamp();
+    await hub.announceCatalog("atlas");
+    await expect(row("noble-cheetah-84")).toHaveAttribute("data-most-recent", "true");
+    if (capture) await page.screenshot({ path: `${capture}/moved-${width}.png` });
+    await journey.stage(`Recency moves, every row stays in place at ${width}px`, async () => {
+      expect(await rects()).toEqual(before);
+      await expect(row("noble-cheetah-84")).toHaveAccessibleName(/most recent/i);
+      await expect(row("calm-puma-34")).not.toHaveAccessibleName(/most recent/i);
+    });
+  }
+});
 
 test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) => {
   const hub = await journey.hub({

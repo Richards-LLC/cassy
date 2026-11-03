@@ -10,14 +10,14 @@ beforeAll(() => {
 afterEach(() => { document.body.innerHTML = ""; vi.restoreAllMocks(); });
 const settle = async () => {
   await vi.waitFor(() => {
-    expect(document.querySelector('.accounts-machine-body [role="status"]')).toBeNull();
+    expect(document.querySelector('.accounts-machine-body > [role="status"]')).toBeNull();
     expect(document.querySelector(".accounts-notice")?.textContent).not.toBe("Changing account…");
   });
 };
 function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
   const host: AccountsHost = {
     machines: () => [{ id: "linux", label: "Soundwave", scopes: manage ? ["machine-read", "factory-manage"] : ["machine-read"] }],
-    list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
+    checkUsage: vi.fn(), list: vi.fn(list), change: vi.fn(async () => {}), changed: vi.fn(), copy: vi.fn(async () => {}), returnFocus: vi.fn(),
   };
   const sheet = new AccountsSheet(host); sheet.open();
   return { sheet, host };

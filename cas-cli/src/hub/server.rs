@@ -204,6 +204,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             post(account_enrollment::<R>).options(preflight::<R>),
         )
         .route("/v1/accounts", get(account_routes::list::<R>).options(preflight::<R>))
+        .route("/v1/accounts/usage", get(account_routes::check_usage::<R>).options(preflight::<R>))
         .route("/v1/accounts/operations", post(account_routes::operate::<R>).options(preflight::<R>))
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route(

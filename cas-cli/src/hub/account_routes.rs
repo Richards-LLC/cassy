@@ -122,3 +122,35 @@ pub(super) async fn operate<R: SessionReadModel>(
     };
     with_cors(response, &headers)
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UsageQuery { account: String }
+
+/// Machine-read only: no login probe, account mutation or model invocation.
+pub(super) async fn check_usage<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Query(query): Query<UsageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, HubAction::MachineRead, Scope::MachineRead, &headers, "GET", "/v1/accounts/usage") {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().context("home unavailable")?;
+        for provider in crate::accounts::Provider::ALL {
+            // Resolve an alias from discovery; never turn browser input into a path.
+            let accounts = crate::account_registry::discover_with(provider, &home, false, |_, _| crate::account_registry::LoginState::Unknown)?;
+            if let Some(account) = accounts.into_iter().find(|account| format!("{}:{}", provider.name(), account.name) == query.account) {
+                return Ok::<_, anyhow::Error>(Some(crate::cli::limits::check_account_usage(provider, &account.folder)));
+            }
+        }
+        Ok(None)
+    }).await;
+    let response = match result {
+        Ok(Ok(Some(usage))) => Json(usage).into_response(),
+        Ok(Ok(None)) => launch_error(StatusCode::NOT_FOUND, "account_missing", "Account not found on this machine. Refresh accounts and try again."),
+        _ => launch_error(StatusCode::SERVICE_UNAVAILABLE, "usage_unavailable", "Could not read this account's native usage snapshot. Try again."),
+    };
+    with_cors(response, &headers)
+}

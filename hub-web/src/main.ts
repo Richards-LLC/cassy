@@ -1293,6 +1293,7 @@ const launchSheet = new LaunchSheet({
   currentMachineId: () => selectedMachineId,
   origin: location.origin,
   projects: (machineId, signal) => launchConnection(machineId).projects(signal),
+  checkUsage: (machineId, account, signal) => launchConnection(machineId).checkAccountUsage(account, signal),
   profiles: (machineId, signal, target) => launchConnection(machineId).launchProfiles(signal, target),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
@@ -1314,6 +1315,7 @@ let accountsSheet: Promise<import("./accounts-panel").AccountsSheet> | undefined
 function openAccounts(): void {
   accountsSheet ??= import("./accounts-panel").then(({ AccountsSheet }) => new AccountsSheet({
     machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
+    checkUsage: (machineId, account, signal) => launchConnection(machineId).checkAccountUsage(account, signal),
     list: (machineId, signal) => launchConnection(machineId).accounts(signal),
     change: (machineId, change) => launchConnection(machineId).changeAccount(change),
     changed: machineId => launchSheet.accountsChanged(machineId),

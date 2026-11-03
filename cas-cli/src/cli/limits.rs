@@ -297,6 +297,34 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
     usage
 }
 
+/// An on-demand read of the exact native sources used by `cas limits`.
+/// Checked time never replaces the harness's observation time.
+#[derive(Serialize)]
+pub(crate) struct CheckedAccountUsage {
+    checked_at: DateTime<Utc>,
+    observed_at: Option<DateTime<Utc>>,
+    source: String,
+    windows: Vec<crate::account_registry::UsageWindow>,
+    reason: Option<String>,
+}
+
+pub(crate) fn check_account_usage(provider: crate::accounts::Provider, dir: &Path) -> CheckedAccountUsage {
+    let (limit, observed_at) = match provider {
+        crate::accounts::Provider::Claude => collect_claude_snapshot("account", dir),
+        crate::accounts::Provider::Codex => collect_codex_snapshot("account", dir),
+    };
+    let checked_at = Utc::now();
+    let windows = report_windows(&limit);
+    let reason = limit.detail.or_else(|| {
+        if observed_at.is_some_and(|at| checked_at.signed_duration_since(at).num_seconds() > CLAUDE_SNAPSHOT_MAX_AGE) {
+            Some("Snapshot is stale. Open a session on this account to refresh.".into())
+        } else if windows.len() < 2 || windows.iter().any(|window| window.used_percent.is_none()) {
+            Some("Some usage windows are missing or have reset. Open a session on this account to refresh.".into())
+        } else { None }
+    });
+    CheckedAccountUsage { checked_at, observed_at, source: limit.source, windows, reason }
+}
+
 /// Keep observation age next to capacity rather than implying a live probe.
 pub(crate) fn observation_label(observed_at: Option<DateTime<Utc>>) -> String {
     observation_label_at(observed_at, Utc::now())

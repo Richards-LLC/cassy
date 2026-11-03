@@ -244,6 +244,10 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+  HUB-J25-PHONE-TIMELINE-TEXT:
+    statement: 'In a worker timeline, the worker''s name in the terminal note reads on one line and the raw-output button''s edge meets the note''s text, at 1280 and 390 px.'
+    check: 'Run the HUB-J25 worker timeline parts in whole-picture.journey.ts; the open stage measures the name''s line count and the button-to-text offset.'
+    bug: {task: cas-c74f}
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
       follow one worker's live timeline from Tasks & progress, without a terminal
@@ -261,6 +265,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  phone-worker-timeline-note:
+    title: The phone worker timeline keeps the worker's name whole and its raw-output button on the note's text edge
+    tasks: [cas-c74f]
+    invariants: [HUB-J25-PHONE-TIMELINE-TEXT]
+    journeys: [HUB-J25]
   real-launch-teardown:
     title: Real disposable launch teardown waits for the daemon and its children and retains state after deletion failure
     tasks: [cas-bb86]
@@ -2037,6 +2046,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-J25-PHONE-TIMELINE-TEXT
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

@@ -308,6 +308,7 @@ mod tests {
             cas_types::AgentRole::Worker,
         );
         worker.factory_session = Some("run-session".into());
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         worker
             .metadata
             .insert("clone_path".into(), repo.display().to_string());

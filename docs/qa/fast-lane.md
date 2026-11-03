@@ -75,7 +75,11 @@ path.
 
 ## The post-merge receipt
 
-`worktree_merge` records `FAST LANE MERGE head=<sha> merge=<sha> at=<time>`.
+`worktree_merge` records `FAST_LANE_PROOF: merge head=<sha> merge=<sha> at=<time>`.
+Lane state (merge, rerun, revert, follow-up) lives only on reserved
+`FAST_LANE_PROOF:` lines. Caller notes cannot contain them and the task store
+neutralizes them in any untrusted write, so only Cassy can put a delivery on
+the receipt path.
 Cassy's close after the merge then requires:
 
 1. every `receipt_checks` check run to be green on the merge commit;
@@ -96,6 +100,9 @@ On failure:
   (`git revert -m 1 <merge>`) and returns the task to its worker. The
   supervisor merges the revert once its merge checks pass and tells the
   operator.
+- **The first parent's result is unknown.** This covers a parent that never
+  ran the check, such as a new receipt workflow, and one GitHub cannot read.
+  It counts as caused by the hotfix: the revert PR opens and the task returns.
 - **The check also failed on the first parent.** The failure predates the
   hotfix. Cassy files one follow-up task and does not revert.
 - **A receipt status fails**, for example the Vercel build. Production keeps

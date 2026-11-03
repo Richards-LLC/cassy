@@ -17,7 +17,7 @@ If `verification action=add` returns a message starting `Verifier handoff reject
 
 ## Step 0: Evidence first for demos and measurable claims
 
-Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement`, or it is an epic and **any child** (closed children included; enumerate them with `task action=dep_list id=<epic-id>`) has one, apply the evidence gate before you read the close reason. The gate is `references/verifier-evidence-gate.md` in the installed `cas-qa-craft` skill (for example `skills/cas-qa-craft/references/verifier-evidence-gate.md` under `.claude/` or `.grok/`). It holds the ledger REJECT table, capture judgments, the epic walk prerequisites, and the NOT EXERCISED policy: `NOT EXERCISED` rows go to the supervisor as a `SUPERVISOR CALL`, never a silent approve or reject. Apply the same gate's `Measurable claims` section, with or without a demo, when an acceptance criterion states a measurable claim (performance, size, count). If the gate file cannot be found, record `status=error` with a summary naming the missing file and stop.
+Before the close reason, read `task action=show id=<task-id>` and apply installed `cas-qa-craft/references/verifier-evidence-gate.md` for any demo (including any closed epic child, found via `task action=dep_list id=<epic-id>`) or measurable criterion/plan target. Follow its ledger REJECT table, captures and epic-walk prerequisites; `NOT EXERCISED` requires a `SUPERVISOR CALL`, never silent approval/rejection. Missing reference: record `status=error`, name it and stop.
 
 ## Phase 1: Completeness
 
@@ -27,18 +27,14 @@ Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in th
 
 ### Step 2: Compare the delivery with the plan
 
-Run `task action=dep_list id=<task-id>` to discover ParentChild dependencies. Read each parent epic with `task action=show id=<epic-id> full=true`, including its acceptance criteria, design and decision notes. Read the relevant sections of any plan document named by the task or epic, fetching cited artifacts and reading their contents. Follow intermediate parents to the epic when necessary. A task card and its close reason are not substitutes for the plan.
+Follow `cas-qa-craft/references/verifier-evidence-gate.md` → Plan conformance: discover parents with `task action=dep_list id=<task-id>`, read their epics/plans, map assigned obligations/targets to proof and apply Step 0's measurable gate. Cards/tests cannot replace the plan. Honor assigned slices and cited authorized revisions, never unilateral scope reductions.
 
-Identify the fields, behaviours and measurable targets that the plan assigns to this delivery or phase. Map each obligation to implementation and proof in the delivery found in Step 3; finalize this check after reading the changed files. Name each missing field or behaviour individually, with its plan section and delivery evidence. Compare every applicable plan target with the actual result, including targets recorded in delivered evidence even when the card only asks to run or report a measurement. Apply Step 0's measurable-claims evidence gate to these targets too. Passing tests or completing the card does not prove the plan's outcome.
+Report `PLAN-FIT:` with source/evidence mapping:
 
-Respect the planned division of work: a child implementing its assigned slice need not implement the entire epic. Cite the plan section or authoritative scope decision assigning other obligations elsewhere. A worker's narrower card, follow-up, renamed field, or lowered threshold is not an approved plan revision. If an authorized operator decision revised the plan, cite that decision and check against the revised obligations; never silently accept a scope reduction.
-
-Record one explicit `PLAN-FIT:` line in the verdict summary:
-
-- **VERIFIED**: every applicable planned obligation is implemented and proven; cite the plan sections and evidence, including a receipt for each measurable target.
-- **NOT VERIFIED**: the delivery or card is narrower than its assigned plan scope, a planned field or behaviour is omitted, or an applicable plan target was missed. Set `status=rejected`, name every omission or missed target as blocking, and include a supervisor decision question: restore the planned scope/outcome, or obtain an authorized plan revision? Do not broaden the worker's assignment yourself. An owner, follow-up or non-blocking label does not excuse a known plan miss.
-- **INCONCLUSIVE**: the referenced plan cannot be read, the assigned slice is ambiguous, or outcome evidence is unavailable. State the missing source or proof and ask the supervisor to resolve it; use `status=supervisor_call` only if no known rejection condition applies. Never approve by assuming plan fit.
-- **NOT APPLICABLE**: no parent epic, referenced plan or applicable plan target exists after checking dependencies and evidence. State that reason; do not invent a plan.
+- **VERIFIED**: all assigned obligations implemented/proven, with measurable-target receipts.
+- **NOT VERIFIED**: reject each omission/missed target as blocking; ask the supervisor to restore the outcome or authorize revision. Owners/follow-ups cannot excuse misses; do not broaden scope.
+- **INCONCLUSIVE**: name unreadable plans, ambiguous scope or missing outcome proof and ask the supervisor; `status=supervisor_call` only without a rejection condition. Never assume plan fit.
+- **NOT APPLICABLE**: dependencies/evidence show no applicable parent, plan or target; explain why.
 
 #### Optional model-owned boundary
 
@@ -48,13 +44,7 @@ For an approved plan's `model-boundary`, follow installed `cas-qa-craft/referenc
 
 For every cited `art-` id used as proof, run `artifact action=fetch task_id=<task-id> id=<art-id>`, then read the downloaded copy at the returned path. A citation alone does not prove its contents.
 
-The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, inspect the delivery in a managed disposable checkout:
-
-```bash
-cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
-```
-
-The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. Its location and cleanup are in `skills/cas-qa-craft/references/verifier-evidence-gate.md`, under Scratch checkout lifetime. Diff against the task's own delivery base, never a fixed commit count:
+Use the task's `deliverables.files_changed`, `deliverables.commit_hash` and target branch to find the delivery. In factory mode, create the managed disposable checkout described in `verifier-evidence-gate.md` → Delivery checkout, bound to the task, dispatch and head; keep durable evidence in task artifacts. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
@@ -69,11 +59,7 @@ Before running a candidate `serve` or any stateful command, isolate it in a disp
 
 Run `rule action=list` for the project rules. Read each changed file completely.
 
-For a task or brief citing an existing stakeholder rule, compare the causal code/test sites
-with its `Rule-driven sites:` declaration and `cas rules refs <id> --json`.
-Reject omitted rule-driven sites or missing adjacent `cas-rule:` markers; a
-marker on an unrelated function does not cover them. Check the verbatim scope
-against `stakeholder.scope` when present, without expanding it to unrelated work.
+**Rule-reference:** follow `verifier-evidence-gate.md` → Rule-reference procedure for stakeholder rules: reject omitted `Rule-driven sites:` or missing adjacent `cas-rule:` markers; unrelated markers do not count. Verify verbatim `stakeholder.scope`; never expand it to unrelated work.
 
 In the changed code, reject:
 
@@ -132,11 +118,7 @@ Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line
 
 ## Recording the verdict
 
-One template; set `status`, `summary`, `confidence` and `issues` for the outcome:
-
-```text
-verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict>\n\nBlocking:\n- <file:line: what must be done>\n\nImprovements (non-blocking):\n- <file:line: suggestion>" issues='[{"file":"src/file","line":42,"severity":"blocking","category":"stub","code":"<snippet>","problem":"<what is missing>","suggestion":"<exact fix>"}]'
-```
+Follow `verifier-evidence-gate.md` → Verdict recording for the issue template and categories. Record exactly one `verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict, Blocking, Improvements (non-blocking)>" issues='<JSON issues>'`.
 
 - After the overall verdict line, `summary` lists the `PLAN-FIT:` verdict from Step 2 with its source/evidence mapping, then one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
 - **Reject plan misses**: `PLAN-FIT: NOT VERIFIED` is blocking even when every card criterion is VERIFIED. Include the missing fields/behaviours or the target, observed value and receipt, plus the supervisor decision question. A known miss cannot become a `supervisor_call` or a non-blocking follow-up.
@@ -149,21 +131,20 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 - A supervisor call preserves the exact dispatch. The supervisor answers with `verification action=add` on that `dispatch_id`, `status=approved` or `rejected`, and the answer plus final verdict in `summary`; no re-dispatch is needed.
 - For an epic, add `verification_type=epic`.
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
-- Categories describe the defect, not whether it blocks: `correctness`, `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`, `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`. Issue severity stays `blocking` or `warning`; put the impact rating in the problem text.
+- Categories describe the defect, not whether it blocks; issue severity is `blocking` or `warning`, with impact rating in the problem text. Use the reference's category list.
 
 Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 
 ## Epic verification
 
-When `task_type=epic`, use `verification_type=epic` and check, in order:
+For `task_type=epic`, set `verification_type=epic`; follow `verifier-evidence-gate.md` → Epic verification, in order:
 
-0. **Child-demo evidence first:** the evidence gate in Step 0 when any child has a demo statement.
-1. **All subtasks closed:** every child from `task action=dep_list id=<epic-id>` is `closed`; otherwise reject.
-2. **No open blockers.**
-3. **Plan outcome:** apply Step 2 to the assembled epic's full planned scope and measurable acceptance targets, with receipts for actual outcomes. Closed children and passing checks do not prove those outcomes. A missed target or omitted planned behaviour is `PLAN-FIT: NOT VERIFIED` and rejects, even if every child's card passed. Follow-ups cannot excuse an unmet obligation of this epic.
-4. **Close reason covers the whole epic**, not only the last child. Follow-ups that belong to future epics are fine only when they do not defer an obligation of this epic's plan.
-5. **Verify on the epic branch**, not a worker worktree.
-6. **Stranded-branch gate:** a clean review does not override the merge-state gate. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target. A `stranded_branch_override` is valid only when the close response authorizes it for a live registered supervisor who records the inspection narrative.
-7. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic. Treat an unassigned, stale, or mismatched owner as a blocking authority failure.
+0. Apply Step 0 to any child demo before the close reason.
+1. Reject open ParentChild subtasks or blockers.
+2. Reject omitted plan obligations/missed targets as `PLAN-FIT: NOT VERIFIED`; closed children, passing tests and follow-ups cannot excuse them.
+3. Require a whole-epic close reason; future-epic follow-ups cannot defer its obligations.
+4. Review on the epic branch, never a worker worktree.
+5. **Stranded-branch gate:** reject child commits outside the integration target unless close authorizes `stranded_branch_override` for a live registered supervisor with inspection narrative.
+6. **Epic verification owner gate:** if `epic_verification_owner` is set, reject absent/stale/mismatched authority; only that live registered supervisor can close.
 
-The close reason may come from the verification prompt, the epic's latest note, or its close-reason field.
+Find the close reason in the prompt, latest epic note or close-reason field.

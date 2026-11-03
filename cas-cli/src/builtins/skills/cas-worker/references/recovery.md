@@ -35,6 +35,10 @@ changing history. If a task branch has a recorded parked delivery anchor, merge
 the target into it; never rebase it. On other reused checkouts where rebasing is
 allowed, checkpoint before `git rebase <target>`.
 
+A fresh task whose checkout still holds an earlier PR (open, or squash-merged
+so its commits never reach the target) starts on `factory/<name>-<task>` from
+the target. Push that branch for its own PR; leave the earlier branch alone.
+
 ### Returned delivery with a queued successor
 
 When the supervisor returns delivery A while queued successor B is running:

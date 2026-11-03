@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Concurrent hotfix PRs
+
+- **Start new work beside an earlier PR** — A worker whose branch still holds
+  an earlier PR, open or squash-merged, now starts a fresh task on its own
+  `factory/<worker>-<task>` branch from the target instead of refusing, and
+  assignment no longer calls that worker stale. Each hotfix gets its own PR
+  at once; resumed tasks still refuse work they cannot claim, and workers
+  still cannot push other workers' branches.
+
 ### Fixed — Commander supervisor answers
 
 - **Mirror the supervisor's answer, not its progress line** — When a Claude

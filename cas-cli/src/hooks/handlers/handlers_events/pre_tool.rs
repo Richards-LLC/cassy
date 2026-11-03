@@ -6247,16 +6247,21 @@ fn is_duration_word(word: &str) -> bool {
     !digits.is_empty() && digits.parse::<f64>().is_ok()
 }
 
-/// The textual catch-all: the command names the write-roots key with a
-/// standalone `set`, or a grant command, and runs anything that is not a
-/// read-only command.
+/// The textual catch-all: the command applies `set` to the write-roots key,
+/// or names a grant command, and runs anything that is not a read-only
+/// command. `set` must precede the key, separated only by spaces, quotes,
+/// commas or option words, as in shell text and interpreter argv lists. An
+/// unrelated `set` elsewhere, such as Python's `set(...)` beside a read-only
+/// string that mentions the key, does not name the policy (cas-b181).
 fn operator_policy_command_textual(command: &str) -> bool {
-    static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let set_word = SET_WORD.get_or_init(|| {
-        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)")
-            .expect("valid set pattern")
+    static SET_KEY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let set_key = SET_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:^|[^A-Za-z0-9_.\-])set(?:[\s'",]+-[^\s'",]*)*[\s'",]+factory\.write_roots"#,
+        )
+        .expect("valid set-key pattern")
     });
-    let names_policy = (command.contains("factory.write_roots") && set_word.is_match(command))
+    let names_policy = set_key.is_match(command)
         || command.contains("grant-write")
         || command.contains("revoke-write");
     if !names_policy {
@@ -9370,6 +9375,14 @@ EOF
     /// read-only commands that merely mention them stay allowed.
     #[test]
     fn gh_1182_agent_shell_cannot_run_wrapped_operator_policy_commands() {
+        let env = TestEnvGuard::temp_home();
+        let policy_denial = |command: &str| {
+            let output = handle_pre_tool_use(&bash_input(command, env.home()), None).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let hook = &value["hookSpecificOutput"];
+            (hook["permissionDecision"] == "deny")
+                .then(|| hook["permissionDecisionReason"].as_str().unwrap().to_owned())
+        };
         for command in [
             "timeout 30 env -i PATH=/usr/bin HOME=/home/u /abs/path/cas config set factory.write_roots \"~/Downloads\"",
             "timeout 30 cas config set factory.write_roots /etc",
@@ -9399,11 +9412,12 @@ EOF
             "bash -lc \"eval 'cas config set factory.write_roots /x'\"",
             "python3 -c 'import subprocess; subprocess.run([\"cas\", \"config\", \"set\", \"factory.write_roots\", \"/x\"])'",
             "perl -e 'system(\"cas config set factory.write_roots /x\")'",
+            "perl -e 'system(\"cas config set --quiet factory.write_roots /x\")'",
             "python3 - <<'EOF'\nimport os\nos.system('cas config set factory.write_roots /x')\nEOF",
             "echo 'cas config set factory.write_roots /x' | sh",
             "node -e 'require(\"child_process\").execSync(\"cas config grant-write --task t --path /x --reason r\")'",
         ] {
-            let denial = operator_policy_command_denial(command)
+            let denial = policy_denial(command)
                 .unwrap_or_else(|| panic!("{command} must be refused"));
             assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
         }
@@ -9419,8 +9433,9 @@ EOF
             "cas config set factory.note_max_chars 1800",
             "cat CHANGELOG.md | grep -n 'set factory.write_roots'",
             "python3 -c 'print(1)'",
+            "python3 - <<'PY'\nfrom pathlib import Path\ntext = Path('draft.md').read_text().replace('factory.write_roots', 'write_roots')\nprint(set(text.split()))\nPY",
         ] {
-            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+            assert_eq!(policy_denial(allowed), None, "{allowed}");
         }
     }
 

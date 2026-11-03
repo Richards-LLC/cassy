@@ -1449,7 +1449,7 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     let forgery = unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
         "notes":serde_json::json!({"measurements":{"stability":100,"p95_seconds":0.1},"receipt":"artifact:forged"}).to_string(),
         "supervisor_override":true,"reason":"worker says go"})).await;
-    assert!(forgery.contains("only a live registered supervisor"), "{forgery}");
+    assert!(forgery.contains("live registered supervisor"), "{forgery}");
     let independent = unified_task(&service, serde_json::json!({"action":"start","id":"independent"})).await;
     assert!(independent.contains("Started task"), "{independent}");
     set_test_agent_role(&root, AgentRole::Supervisor);

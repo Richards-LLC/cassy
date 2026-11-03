@@ -5531,6 +5531,11 @@ mod related_recall_response_tests {
             actor.role = role;
             core.open_agent_store().unwrap().update(&actor).unwrap();
             for entry in ["create", "assign", "start"] {
+                // A supervisor can start epics; ordinary execution remains worker-only.
+                synced.task_type = if role == AgentRole::Supervisor && entry == "start" {
+                    crate::types::TaskType::Epic
+                } else { crate::types::TaskType::Task };
+                tasks.update(&synced).unwrap();
                 let result = match entry {
                     "create" => {
                         let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");

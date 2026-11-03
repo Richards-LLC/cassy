@@ -517,6 +517,7 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
             beta.put_task("cas-other", TaskType::Task);
             let tasks = open_task_store(&beta.cas_dir).unwrap();
             let mut task = tasks.get("cas-other").unwrap();
+            if role == AgentRole::Supervisor && entry == "start" { task.task_type = TaskType::Epic; }
             task.external_ref = Some(source.into());
             tasks.update(&task).unwrap();
             let response = match entry {

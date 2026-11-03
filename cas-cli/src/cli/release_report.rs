@@ -3903,6 +3903,19 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             titles,
             vec!["Typing during cleanup", "Loaded-proof receipts", "Peer ownership board"]
         );
+
+        // cas-3388: published 3.84.0 ends with Upgrade notes, which instruct
+        // readers about changes already counted above them.
+        let section = parse_changelog_section(include_str!("../../../CHANGELOG.md"), "3.84.0")
+            .expect("published 3.84.0 section");
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for change in changelog_changes(&section.body) {
+            *kinds.entry(change.kind).or_default() += 1;
+        }
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            vec![("Added".into(), 8), ("Changed".into(), 3), ("Fixed".into(), 2)]
+        );
     }
 
     #[test]

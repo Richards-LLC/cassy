@@ -8,13 +8,23 @@ use std::time::{Duration, Instant};
 // The factory's Claude conformance baseline also meets the current model's
 // minimum. Reject older clients before opening a pane that cannot take a turn.
 const MIN_VERSION: [u64; 3] = [2, 1, 280];
-const MIN_VERSION_TEXT: &str = "2.1.280";
+pub const MIN_CLAUDE_VERSION: &str = "2.1.280";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ClaudeBinaryError {
+    #[error("Cannot launch Claude Code: no executable found. Install Claude Code and retry.")]
+    Missing,
+    #[error("{detail}")]
+    Incompatible { detail: String },
+    #[error("{detail}")]
+    Unprobeable { detail: String },
+}
 
 /// Prefer the native installer's active link, then its newest installed version,
 /// then PATH. Probe the executable itself, never trust a version filename.
 /// Explicit inputs keep service and child environments consistent and testable.
-pub fn resolve_claude_binary(home: &Path, paths: &[PathBuf]) -> Result<PathBuf, String> {
+pub fn resolve_claude_binary(home: &Path, paths: &[PathBuf]) -> Result<PathBuf, ClaudeBinaryError> {
     let mut candidates = vec![home.join(".local/bin/claude")];
     let mut versions: Vec<_> = std::fs::read_dir(home.join(".local/share/claude/versions"))
         .into_iter()
@@ -32,9 +42,20 @@ pub fn resolve_claude_binary(home: &Path, paths: &[PathBuf]) -> Result<PathBuf, 
     );
     let mut tried = std::collections::HashSet::new();
     let mut failures = Vec::new();
+    let mut incompatible = false;
     for candidate in candidates {
         if !candidate.is_file() {
             continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !candidate
+                .metadata()
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            {
+                continue;
+            }
         }
         let identity = candidate
             .canonicalize()
@@ -44,28 +65,37 @@ pub fn resolve_claude_binary(home: &Path, paths: &[PathBuf]) -> Result<PathBuf, 
         }
         match probe_version(&candidate, home, paths) {
             Ok(found) if found >= MIN_VERSION => return Ok(candidate),
-            Ok(found) => failures.push(format!(
-                "{} is {}.{}.{}",
-                candidate.display(),
-                found[0],
-                found[1],
-                found[2]
-            )),
+            Ok(found) => {
+                incompatible = true;
+                failures.push(format!(
+                    "{} is {}.{}.{}",
+                    candidate.display(),
+                    found[0],
+                    found[1],
+                    found[2]
+                ));
+            }
             Err(reason) => failures.push(format!("{}: {reason}", candidate.display())),
         }
     }
-    let detail = if failures.is_empty() {
-        "no executable found".into()
+    if failures.is_empty() {
+        return Err(ClaudeBinaryError::Missing);
+    }
+    let failures = failures.join("; ");
+    let detail = format!(
+        "Cannot launch Claude Code: version {MIN_CLAUDE_VERSION} or newer is required; {failures}. Update the native Claude installation and retry."
+    );
+    Err(if incompatible {
+        ClaudeBinaryError::Incompatible { detail }
     } else {
-        failures.join("; ")
-    };
-    Err(format!(
-        "Cannot launch Claude Code: version {MIN_VERSION_TEXT} or newer is required; {detail}. Update the native Claude installation and retry."
-    ))
+        ClaudeBinaryError::Unprobeable { detail }
+    })
 }
 
-pub(crate) fn current_claude_binary() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Cannot launch Claude Code: HOME is unavailable")?;
+pub(crate) fn current_claude_binary() -> Result<PathBuf, ClaudeBinaryError> {
+    let home = dirs::home_dir().ok_or_else(|| ClaudeBinaryError::Unprobeable {
+        detail: "Cannot launch Claude Code: HOME is unavailable".into(),
+    })?;
     let paths: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default();

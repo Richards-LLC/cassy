@@ -10,6 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — Commander supervisor startup
 
 - **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
+- **Keep Claude readiness fixes visible** — Hub status names missing, outdated
+  and unverifiable Claude clients with their own install, update or repair
+  action. Missing clients keep the existing doctor and account-picker state.
 
 ### Fixed — QA impact coverage
 

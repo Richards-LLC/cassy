@@ -25,6 +25,10 @@ pub enum LaunchError {
     NotLoggedIn { cli: &'static str, profile: String },
     #[error("{cli} launch environment could not be resolved: {detail}")]
     ProbeFailed { cli: &'static str, detail: String },
+    #[error("{detail}")]
+    IncompatibleBinary { minimum_version: &'static str, detail: String },
+    #[error("{detail}")]
+    UnprobeableBinary { detail: String },
 }
 
 /// `profile` is the same optional name accepted by `cas claude` / `cas codex`.
@@ -689,8 +693,14 @@ fn provider_path(executable: &Path, candidates: &[PathBuf]) -> Vec<PathBuf> {
 
 fn launch_executable(name: &'static str, home: &Path, paths: &[PathBuf]) -> Result<PathBuf, LaunchError> {
     if name == "claude" {
-        return cas_pty::resolve_claude_binary(home, paths)
-            .map_err(|detail| LaunchError::ProbeFailed { cli: name, detail });
+        return cas_pty::resolve_claude_binary(home, paths).map_err(|error| match error {
+            cas_pty::ClaudeBinaryError::Missing => LaunchError::MissingBinary { cli: name },
+            cas_pty::ClaudeBinaryError::Incompatible { detail } => LaunchError::IncompatibleBinary {
+                minimum_version: cas_pty::MIN_CLAUDE_VERSION,
+                detail,
+            },
+            cas_pty::ClaudeBinaryError::Unprobeable { detail } => LaunchError::UnprobeableBinary { detail },
+        });
     }
     find_executable(name, paths).ok_or(LaunchError::MissingBinary { cli: name })
 }
@@ -790,6 +800,8 @@ mod tests {
         let home = env.home().to_path_buf();
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
+        env.set("CAS_TEST_HUB_PATH_ONLY", "1");
+        env.set("PATH", &bin);
         env.remove("CLAUDE_CONFIG_DIR");
         env.remove("CODEX_HOME");
         for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {
@@ -888,6 +900,7 @@ mod tests {
             .args(["--exact", &format!("{module}::launch_catalog_recommends_without_opening_provider_credentials"), "--nocapture"])
             .current_dir(&home).env("HOME", &home).env("XDG_CONFIG_HOME", home.join(".config"))
             .env("SHELL", &shell).env("PATH", path).env("CAS_TEST_CATALOG_AUDIT_CHILD", "1")
+            .env("CAS_TEST_HUB_PATH_ONLY", "1")
             .env_remove("CAS_ROOT").env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
             .output().unwrap();
         let mut events = [0u8; 4096];

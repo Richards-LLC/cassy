@@ -2746,7 +2746,8 @@ impl Pty {
                 .ok_or_else(|| Error::pty("Cannot launch Claude Code: HOME is unavailable"))?;
             let paths: Vec<_> = environment.get("PATH")
                 .map(|path| std::env::split_paths(path).collect()).unwrap_or_default();
-            let binary = crate::resolve_claude_binary(&home, &paths).map_err(Error::pty)?;
+            let binary = crate::resolve_claude_binary(&home, &paths)
+                .map_err(|error| Error::pty(error.to_string()))?;
             Some(binary.to_string_lossy().into_owned())
         } else { None };
         let worker_startup_prompt_file = config.materialize_worker_startup_brief()?;

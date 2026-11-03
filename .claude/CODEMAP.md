@@ -61,7 +61,7 @@
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
 - `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` - checkout-grouped cleanup intents, persisted readiness and immutable retirement snapshots.
 - `crates/cas-pty/src/pty.rs` - private startup-brief files, verified Claude launch paths, harness argv construction and owned PTY lifetimes.
-- `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection and bounded minimum-version probes shared by the hub and PTY.
+- `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection, typed missing/version/probe failures and bounded minimum-version checks shared by the hub and PTY.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, verification expiry sweeps and shutdown cleanup.

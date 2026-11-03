@@ -43,7 +43,7 @@
 //! ```
 
 mod claude_binary;
-pub use claude_binary::resolve_claude_binary;
+pub use claude_binary::{ClaudeBinaryError, MIN_CLAUDE_VERSION, resolve_claude_binary};
 pub mod claude_trust;
 mod codex_hook_warning;
 pub mod codex_trust;

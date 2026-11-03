@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Supervisor response time
+
+- **Batch proof discovery and persist cleanup readiness** — Changed source
+  paths share bounded Git searches, and builtin paths share one literal search.
+  Dead-worker cleanup records its readiness on disk and stages one intent per
+  shared checkout, preserving frozen task facts across partial staging retries.
+
 ### Fixed — Queued-run watchdog
 
 - **Surface uncancellable queued runs** — Was: A sweep stayed green when every

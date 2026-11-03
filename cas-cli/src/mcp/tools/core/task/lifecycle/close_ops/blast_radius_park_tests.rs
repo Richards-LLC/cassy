@@ -1110,7 +1110,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let reverted = cassy.close_green_merged_delivery(ID).await.receipt(ID);
     assert!(reverted.contains("FAST LANE REVERT") && reverted.contains("unknown or unreadable"), "{reverted}");
     let returned = f.task();
-    assert_eq!(returned.status, TaskStatus::Open, "the hotfix returns to its worker");
+    assert_eq!(returned.status, TaskStatus::Open, "the hotfix returns to its worker: {reverted}");
     assert!(returned.notes.contains("FAST_LANE_PROOF: revert merge="), "{}", returned.notes);
     git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
 }

@@ -54,6 +54,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   history rows are left unchanged; the first edit or delete after an upgrade
   captures any missing live state as a new baseline version before the change.
 
+### Fixed — Phase dependency gates
+
+- **Sequential phase work stays free** — A dependency between a phase's children no longer holds those children against their own phase's unmet outcome. External prerequisite phases keep their measured gates.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

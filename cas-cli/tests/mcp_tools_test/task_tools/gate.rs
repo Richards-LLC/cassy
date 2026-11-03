@@ -1410,14 +1410,18 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     let service = CasService::new(core.clone(), None);
     set_test_agent_role(&root, AgentRole::Supervisor);
     for (id, kind) in [("phase-reader", TaskType::Epic), ("phase-next", TaskType::Epic),
-                       ("dependent", TaskType::Task), ("independent", TaskType::Task)] {
+                       ("dependent", TaskType::Task), ("independent", TaskType::Task),
+                       ("reader-prep", TaskType::Task), ("reader-sibling", TaskType::Task)] {
         let mut task = cas::types::Task::new(id.into(), id.into());
         task.task_type = kind;
         task.depth = cas::types::TaskDepth::Light;
         store.add(&task).unwrap();
     }
     for (from, to, kind) in [("phase-next", "phase-reader", cas::types::DependencyType::Blocks),
-                             ("dependent", "phase-next", cas::types::DependencyType::ParentChild)] {
+                             ("dependent", "phase-next", cas::types::DependencyType::ParentChild),
+                             ("reader-prep", "phase-reader", cas::types::DependencyType::ParentChild),
+                             ("reader-sibling", "phase-reader", cas::types::DependencyType::ParentChild),
+                             ("reader-sibling", "reader-prep", cas::types::DependencyType::Blocks)] {
         store.add_dependency(&cas::types::Dependency {
             from_id: from.into(), to_id: to.into(), dep_type: kind,
             created_at: chrono::Utc::now(), created_by: None,
@@ -1436,6 +1440,16 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
         true, Some("supervisor wants to ship")).await.expect_err("a supervisor merge override cannot accept a phase miss");
     assert!(merge.message.contains("OUTCOME UNMET"), "{}", merge.message);
     set_test_agent_role(&root, AgentRole::Worker);
+    // The phase is still below its bar, but its sequential implementation
+    // children must be able to ship the work that will satisfy that bar.
+    for id in ["reader-prep", "reader-sibling"] {
+        let started = unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+        assert!(started.contains("Started task"), "own-phase child {id}: {started}");
+    }
+    for id in ["reader-prep", "reader-sibling"] {
+        let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
+        assert!(closed.contains("Closed task"), "own-phase child {id}: {closed}");
+    }
     for action in ["start", "close"] {
         let refused = unified_task(&service, serde_json::json!({"action":action,"id":"dependent"})).await;
         assert!(refused.contains("OUTCOME UNMET"), "{action}: {refused}");

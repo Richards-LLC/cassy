@@ -126,6 +126,35 @@ impl SqliteRuleStore {
         // its resulting snapshot must stay inside that same transaction.
         let result = (|| -> Result<()> {
             let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
+            // Legacy updates recorded their pre-state, leaving the current live
+            // state absent from history. Preserve it before the first new write
+            // without rewriting any existing versions.
+            let current = Self::get_on(&tx, &rule.id)?;
+            let latest: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT content, status FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1",
+                    params![rule.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if latest.as_ref().is_none_or(|(content, status)| {
+                content != &current.content || status != &current.status.to_string()
+            }) {
+                let snapshot_json = serde_json::to_string(&current).map_err(|error| {
+                    StoreError::Parse(format!("failed to serialize rule history: {error}"))
+                })?;
+                Self::insert_version(
+                    &tx,
+                    &rule.id,
+                    &snapshot_json,
+                    &current.content,
+                    current.status,
+                    &changed_by,
+                    &changed_at,
+                    "pre-upgrade live state",
+                    "baseline",
+                )?;
+            }
             let rows = tx.execute(
                 "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,

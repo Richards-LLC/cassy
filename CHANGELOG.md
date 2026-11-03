@@ -13,7 +13,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the previous wording. → Now: each new lifecycle version records the persisted
   result in the same transaction. Restoring without a version selects the previous
   lifecycle state, so deleting then restoring still reactivates the rule. Existing
-  history rows are left unchanged.
+  history rows are left unchanged; the first edit or delete after an upgrade
+  captures any missing live state as a new baseline version before the change.
 
 ## [3.100.0] - 2026-11-03
 

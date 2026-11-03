@@ -35,7 +35,7 @@ pub struct RuleVersion {
     pub changed_at: DateTime<Utc>,
     pub change_note: String,
     /// Lifecycle operation that produced this snapshot (`create`, `update`,
-    /// `delete`, or `restore`).
+    /// `delete`, `restore`, or a legacy live-state `baseline`).
     pub operation: String,
     pub snapshot_json: String,
 }

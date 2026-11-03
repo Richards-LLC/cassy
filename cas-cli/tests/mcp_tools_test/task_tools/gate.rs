@@ -165,7 +165,10 @@ async fn test_first_to_no_code_methodology_repair_cas_1b74() {
 
 async fn unified_task(service: &CasService, request: serde_json::Value) -> String {
     let request: cas_mcp::TaskRequest = serde_json::from_value(request).unwrap();
-    extract_text(service.task(Parameters(request)).await.unwrap())
+    match service.task(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    }
 }
 
 #[tokio::test]
@@ -1395,4 +1398,78 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
     assert_eq!(git(repo, &["rev-parse", &format!("origin/{target}")]), base);
     assert!(!Command::new("git").args(["merge-base", "--is-ancestor", &delivered, &format!("origin/{target}")])
         .current_dir(repo).status().unwrap().success(), "fixture delivery must remain unmerged");
+}
+
+/// A measured phase gates only its dependants, including their children.
+#[tokio::test]
+async fn phase_outcome_refuses_dependent_start_and_close() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    let store = open_task_store(&root).unwrap();
+    let service = CasService::new(core.clone(), None);
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    for (id, kind) in [("phase-reader", TaskType::Epic), ("phase-next", TaskType::Epic),
+                       ("dependent", TaskType::Task), ("independent", TaskType::Task),
+                       ("reader-prep", TaskType::Task), ("reader-sibling", TaskType::Task)] {
+        let mut task = cas::types::Task::new(id.into(), id.into());
+        task.task_type = kind;
+        task.depth = cas::types::TaskDepth::Light;
+        store.add(&task).unwrap();
+    }
+    for (from, to, kind) in [("phase-next", "phase-reader", cas::types::DependencyType::Blocks),
+                             ("dependent", "phase-next", cas::types::DependencyType::ParentChild),
+                             ("reader-prep", "phase-reader", cas::types::DependencyType::ParentChild),
+                             ("reader-sibling", "phase-reader", cas::types::DependencyType::ParentChild),
+                             ("reader-sibling", "reader-prep", cas::types::DependencyType::Blocks)] {
+        store.add_dependency(&cas::types::Dependency {
+            from_id: from.into(), to_id: to.into(), dep_type: kind,
+            created_at: chrono::Utc::now(), created_by: None,
+        }).unwrap();
+    }
+    for (kind, note) in [
+        ("outcome_target", serde_json::json!({"stability": {"min":95.0}, "p95_seconds":{"max":1.0}})),
+        ("outcome_receipt", serde_json::json!({"measurements":{"stability":72.7,"p95_seconds":1.48},"receipt":"artifact:reader-eval"})),
+    ] {
+        let result = unified_task(&service, serde_json::json!({
+            "action":"notes", "id":"phase-reader", "note_type":kind,"notes":note.to_string(),
+        })).await;
+        assert!(result.contains("Added"), "{result}");
+    }
+    let merge = core.worktree_merge("unused-worker", true, Some("dependent"), true, Some(false),
+        true, Some("supervisor wants to ship")).await.expect_err("a supervisor merge override cannot accept a phase miss");
+    assert!(merge.message.contains("OUTCOME UNMET"), "{}", merge.message);
+    set_test_agent_role(&root, AgentRole::Worker);
+    // The phase is still below its bar, but its sequential implementation
+    // children must be able to ship the work that will satisfy that bar.
+    for id in ["reader-prep", "reader-sibling"] {
+        let started = unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+        assert!(started.contains("Started task"), "own-phase child {id}: {started}");
+    }
+    for id in ["reader-prep", "reader-sibling"] {
+        let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
+        assert!(closed.contains("Closed task"), "own-phase child {id}: {closed}");
+    }
+    for action in ["start", "close"] {
+        let refused = unified_task(&service, serde_json::json!({"action":action,"id":"dependent"})).await;
+        assert!(refused.contains("OUTCOME UNMET"), "{action}: {refused}");
+        assert!(refused.contains("95") && refused.contains("72.7") && refused.contains("phase-reader"), "{refused}");
+        assert_eq!(store.get("dependent").unwrap().status, TaskStatus::Open);
+    }
+    for status in ["in_progress", "closed", "awaiting_merge"] {
+        let refused = unified_task(&service, serde_json::json!({"action":"update","id":"dependent","status":status})).await;
+        assert!(refused.contains("OUTCOME UNMET"), "update {status}: {refused}");
+    }
+    let forgery = unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
+        "notes":serde_json::json!({"measurements":{"stability":100,"p95_seconds":0.1},"receipt":"artifact:forged"}).to_string(),
+        "supervisor_override":true,"reason":"worker says go"})).await;
+    assert!(forgery.contains("live registered supervisor"), "{forgery}");
+    let independent = unified_task(&service, serde_json::json!({"action":"start","id":"independent"})).await;
+    assert!(independent.contains("Started task"), "{independent}");
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
+        "notes":serde_json::json!({"measurements":{"stability":99.0,"p95_seconds":0.9},"receipt":"artifact:reader-rerun"}).to_string()})).await;
+    set_test_agent_role(&root, AgentRole::Worker);
+    let started = unified_task(&service, serde_json::json!({"action":"start","id":"dependent"})).await;
+    assert!(started.contains("Started task"), "{started}");
 }

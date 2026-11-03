@@ -1,7 +1,7 @@
 //! Preserve verbatim stakeholder provenance; old rules remain unattributed.
 use crate::migration::{Migration, Subsystem};
 pub const MIGRATION: Migration = Migration {
-    id: 293,
+    id: 294,
     name: "rules_stakeholder",
     subsystem: Subsystem::Rules,
     description: "Add nullable stakeholder attribution to rules without backfilling old rows",

@@ -1932,6 +1932,78 @@ intent. Missing CI and transport failures retain it without merging; daemon
 restarts resume the persisted intent. In-progress and unparked tasks never arm
 an automatic retry.
 
+## Epic design-review staffing pause
+
+A report counts when its task type is `bug`, priority is P0 or P1, and its
+labels include exactly `stakeholder-reported`. Use that label only for a defect
+reported by a customer, operator, or other stakeholder; internal review findings
+do not count unless a stakeholder also reported the defect. Report time is the
+task's `created_at`, so adding the label later does not reset its age. Closed
+reports count too. Reports belong to each ancestor epic through parent-child
+links; unrelated epics and non-epic tasks remain available.
+
+`factory.design_review_bug_threshold` defaults to 5 (range 1–1000), and
+`factory.design_review_window_hours` defaults to 48 (range 1–8760). The window
+includes reports created exactly at its lower boundary and excludes future dates.
+Task creation, updates and parent linking evaluate the trigger; start and spawn
+admission also evaluate it for imported reports. A pause persists across restarts
+and beyond the window until the operator lifts it. Active work, delivery, merges
+and shipping to staging continue normally.
+
+The supervisor receives one durable prompt per pause asking for a design review
+against the epic plan. Start refusals identify the epic and the trigger reports.
+After reviewing the design, the operator runs from their own terminal:
+
+```sh
+cas factory design-review-lift <epic> --reason 'Review outcome and why staffing can resume'
+```
+
+The non-empty reason is recorded on the epic. The lift acknowledges reports
+created through the lift time; a fresh threshold of newer reports can pause the
+epic again. Agent contexts, including supervisors, cannot lift a pause. Lifts
+live under `.cas/operator/epic-design-review-lifts.json`; pause state lives in
+`.cas/epic-design-reviews.json`, with serialized atomic writes. This policy is
+per epic and independent of any project hold.
+
+## Measured phase outcomes
+
+A supervisor declares an immutable numeric target on an existing epic, phase
+sub-epic or `gate` task with `task action=notes note_type=outcome_target`.
+The JSON note maps metric names (including units) to `min`/`max` (inclusive)
+or `gt`/`lt` (strict) bounds, for example:
+
+```json
+{"stability_percent":{"min":95},"p95_seconds":{"lt":1}}
+```
+
+Record the evaluation with `note_type=outcome_receipt`:
+
+```json
+{"measurements":{"stability_percent":72.7,"p95_seconds":1.48},"receipt":"artifact:reader-evaluation"}
+```
+
+The measurements must name every target metric and include a non-empty receipt
+reference. The supervisor records the measured result; this action does not run
+an evaluator. A missing or failed receipt holds the phase's `blocks` and
+`requires_start` dependants, including children of dependent phases, at start,
+close and merge. The refusal names the target and measurement. Closed phase
+status does not stand in for a passing result. Its own implementation children
+and independent work can continue. A sibling dependency does not evaluate the
+shared phase's own target: a task's own ancestor chain stays outside the outcome
+hold, while external prerequisite phases still gate it. Ordinary open blockers
+retain their existing parallel-preparation policy.
+
+Phase outcome notes compare supplied measurements and require a non-empty
+receipt reference. Evaluator artifact, dataset and model validation belongs to
+the separate model-eval receipt gate; a phase note alone does not validate them.
+
+Only the operator, from their own terminal, can accept a miss:
+`cas qa outcome-override <phase-id> --reason '<why>'`. This writes a decision
+note and binds the exception to the exact target and receipt; changed measurements
+require a new decision. Agent and supervisor shell contexts cannot issue it.
+A subsequent passing receipt releases the outcome hold. Other close, CI and QA
+gates still apply.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
@@ -3132,6 +3204,17 @@ runtime.
 
 ### Editing supervisor or worker guidance: the SessionStart budget is a hard constraint
 
+SessionStart also checks Slack channels and thread links named in its current
+handoff. `hooks/handoff_updates.rs` inserts newer human posts above that handoff,
+using Violet's author names without treating those labels as operator authority.
+A thread reference includes a channel read so newer sibling posts are visible.
+The lookup has a four-second outer deadline (including Cloud memory lookup),
+three seconds for Violet setup and reads, at most six reads of 50 messages,
+and at most ten excerpts in a 1,800-byte section. Known additional posts have
+a `+N more` line. Bot/app posts and configured Violet bot IDs are excluded.
+Empty results add no section; service failures, partial reads and read caps
+leave a one-line couldn't-check notice. This check adds no Slack writes.
+
 `cas-supervisor.md` and `cas-worker.md` are not ordinary docs. Their bodies are
 injected verbatim into the SessionStart `additionalContext`, which has a **9 216 B
 aggregate budget** (`hooks::handlers::session_budget`). Role guidance is
@@ -3837,3 +3920,23 @@ Supersession ends its validity and removes it from session context, including
 pinned memories; explicit retrieval by ID still preserves the historical words.
 Old leading `SUPERSEDED` markers are recognized too. A deadline alone remains
 sufficient for ordinary time-limited memories.
+
+## Operator project holds
+
+Use `cas factory hold set --reason "<reason>"` from your own interactive
+terminal to stop project dispatch and merges. The state is local to the
+project's shared `.cas/operator/project-hold.json`, protected by the existing
+operator write policy. It records the operator, reason and time, and retains
+both set and lift decisions. Agents cannot change it through MCP or the CLI.
+
+`cas factory hold status` shows the current hold.
+`cas --json factory hold status` returns `active` and the complete `history`.
+Lift it with `cas factory hold lift --reason "<reason>"`.
+
+While held, startup leads with the hold, ready and awaiting-merge lists hide
+action invitations, merge requests and stalled-supervisor relays are withheld,
+and spawning and merging refuse even with force or override flags. Unread
+relay rows receive no surface receipt; lifting restores visibility and normal
+admission. Ordinary mail remains readable. Unreadable hold state stops
+dispatch and merges until the operator repairs it. A hold has no automatic
+expiry, and an unheld project's staging delivery flow is unchanged.

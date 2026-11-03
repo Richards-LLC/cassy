@@ -413,6 +413,16 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.design_review_bug_threshold" | "factory.design_review_window_hours" => {
+                let number: u32 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer for {key}: {value}")))?;
+                let maximum = if key == "factory.design_review_bug_threshold" { 1000 } else { 8760 };
+                if !(1..=maximum).contains(&number) {
+                    return Err(MemError::Parse(format!("{key} must be between 1 and {maximum}")));
+                }
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                if key == "factory.design_review_bug_threshold" { factory.design_review_bug_threshold = number; }
+                else { factory.design_review_window_hours = number; }
+            }
             "factory.supervisor_message_debounce_secs" => {
                 let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_debounce_secs: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_debounce_secs = number;

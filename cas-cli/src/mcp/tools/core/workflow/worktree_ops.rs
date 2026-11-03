@@ -4226,6 +4226,9 @@ impl CasCore {
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         if let Some(message) = reason
             .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
         {
@@ -4339,6 +4342,13 @@ impl CasCore {
                     data: None,
                 });
             }
+        }
+
+        if let Some(task_id) = task_id {
+            let tasks = crate::store::open_task_store(&cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
 
         // cas-9c34: the supervisor is acting on this task's merge request,

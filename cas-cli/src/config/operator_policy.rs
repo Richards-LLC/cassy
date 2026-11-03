@@ -603,7 +603,7 @@ fn agent_ancestor(command_line: &str) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or(program);
     match name {
-        "claude" | "codex" => true,
+        "claude" | "codex" | "grok" | "opencode" => true,
         "cas" => matches!(words.next(), Some("serve" | "factory")),
         "node" | "bun" | "deno" => command_line.contains("claude-code") || command_line.contains("@openai/codex"),
         _ => command_line.contains("/codex/") && command_line.contains("codex"),
@@ -757,6 +757,14 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             }
             _ => None,
         },
+        Commands::Factory(crate::cli::factory::FactoryArgs {
+            command: Some(crate::cli::factory::FactoryCommands::DesignReviewLift { .. }), ..
+        }) => Some("Lifting an epic design review pause (`cas factory design-review-lift`)"),
+        Commands::Factory(crate::cli::factory::FactoryArgs {
+            command: Some(crate::cli::factory::FactoryCommands::Hold { command }), ..
+        }) if !matches!(command, crate::cli::factory::hold::HoldCommand::Status) => {
+            Some("Setting or lifting a project hold (`cas factory hold`)")
+        }
         Commands::Factory(factory) if factory.command.is_none() => {
             Some("Launching a factory (`cas factory`)")
         }
@@ -764,6 +772,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
             _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
         },
+        Commands::Qa(crate::cli::qa::QaCommand::OutcomeOverride { .. }) => {
+            Some("Overriding a measured phase outcome (`cas qa outcome-override`)")
+        }
         Commands::Qa(crate::cli::qa::QaCommand::AuthorOverride { .. }) => {
             Some("Overriding the independent QA author rule (`cas qa author-override`)")
         }
@@ -1114,6 +1125,10 @@ mod tests {
             "qa rapid-response disable cas-ep1c",
             "qa rapid-response review-migration cas-de11 --note checked",
             "qa author-override cas-de11 --note accepted",
+            "factory design-review-lift epic-risk --reason reviewed",
+            "factory hold set --reason review",
+            "factory hold lift --reason approved",
+            "qa outcome-override cas-phase --reason accepted",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),
@@ -1123,6 +1138,7 @@ mod tests {
         for line in [
             "hub status",
             "factory status",
+            "factory hold status",
             "task list",
             "hub",
             "config get factory.write_roots",

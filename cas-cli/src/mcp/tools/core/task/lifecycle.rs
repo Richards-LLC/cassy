@@ -1797,6 +1797,9 @@ impl CasCore {
                 }
             })?;
 
+        crate::epic_design_review::observe(&self.cas_root, &id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
@@ -2119,6 +2122,9 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Ok(Self::success(hold));
+        }
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to ready ones
@@ -2432,6 +2438,8 @@ impl CasCore {
             task.notes = fresh.notes;
         }
 
+        crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &req.id, false)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
@@ -2494,6 +2502,9 @@ impl CasCore {
                 format!("{}\n\n{}", task.notes, audit)
             };
         }
+
+        crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &req.id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         // The caller or validated queue principal owns this execution lease.
         let agent_store = self.open_agent_store()?;

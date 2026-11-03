@@ -1992,6 +1992,21 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            if new_status == TaskStatus::InProgress && task.status != TaskStatus::InProgress {
+                crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                if let Some(epic) = req.epic.as_deref().filter(|epic| !epic.trim().is_empty()) {
+                    crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, epic)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                }
+            }
+            if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                && new_status != task.status
+            {
+                crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                    new_status != TaskStatus::InProgress)
+                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            }
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
@@ -2535,11 +2550,24 @@ impl CasCore {
         };
         // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
         // pushed below matches the persisted row.
+        // Parent/dependency edits above can change which phase this transition
+        // depends on. Re-evaluate against the final graph before persisting status.
+        if let Some((_, status)) = lifecycle_status_change
+            && matches!(status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+        {
+            crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                status != TaskStatus::InProgress)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        crate::epic_design_review::observe(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task updated, but epic design review trigger could not be evaluated: {error}")))?;
 
         if changes.contains(&"labels") {
             crate::quality_ledger::bug_labelled(

@@ -44,6 +44,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
+pub(crate) mod epic_design_review;
 pub mod extraction;
 mod light_lane;
 #[doc(hidden)]
@@ -114,6 +115,7 @@ pub mod qa_traffic;
 /// cas-e8d1 (GH #1233): open work the record says is done.
 pub(crate) mod backlog_hygiene;
 pub mod qa_author_override;
+pub(crate) mod phase_outcome;
 pub(crate) mod qa_batch;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
@@ -512,3 +514,6 @@ pub use types::{
     Agent, ChangeType, CommitLink, Entry, EntryType, Event, FileChange, Prompt, Rule, RuleStatus,
     Session, SessionOutcome, Skill, Spec, Task, TaskStatus, Verification, Worktree, WorktreeStatus,
 };
+
+#[cfg(test)]
+mod project_hold_tests;

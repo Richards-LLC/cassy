@@ -207,6 +207,9 @@ fn enqueue_worker_attention_relay_for_episode(
         operator_page_episode,
     } = event
     {
+        if cas_store::project_hold::is_held(cas_dir) {
+            return WorkerAttentionRelayOutcome::NotApplicable;
+        }
         if let Some(episode) = operator_page_episode {
             page_operator_for_idle_supervisor(cas_dir, next_step, *episode);
         }
@@ -1798,6 +1801,19 @@ mod worker_attention_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "ready-work-blocker-test");
+        let hold_path = cas_dir.join(cas_store::project_hold::STATE_FILE);
+        std::fs::create_dir_all(hold_path.parent().unwrap()).unwrap();
+        std::fs::write(&hold_path, r#"{"active":{"reason":"Review plan","operator":"fixture","set_at":"2026-11-03T14:00:00Z"},"history":[]}"#).unwrap();
+        let held = enqueue_worker_attention_relay(&cas_dir,
+            &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step: crate::ui::factory::director::SupervisorActionableState::AssignReadyWork {
+                    task_ids: vec!["cas-ready".into()], idle_workers: vec!["calm-owl".into()],
+                }, occurrence: "held-episode".into(), actionable_idle_secs: 600,
+                operator_page_episode: Some(chrono::Utc::now()),
+            });
+        assert!(matches!(held, WorkerAttentionRelayOutcome::NotApplicable));
+        assert!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().is_empty());
+        std::fs::remove_file(hold_path).unwrap();
         let outcome = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::SupervisorStalled {

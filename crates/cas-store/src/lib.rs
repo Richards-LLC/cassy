@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
+pub mod project_hold;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
@@ -564,14 +565,14 @@ pub trait RuleStore: Send + Sync {
         self.delete(id)
     }
 
-    /// List prior rule states, newest first.
+    /// List recorded rule states, newest first (including the latest mutation).
     fn list_versions(&self, _id: &str) -> Result<Vec<RuleVersion>> {
         Err(StoreError::Parse(
             "rule version history is unavailable for this store".to_string(),
         ))
     }
 
-    /// Restore a prior rule state, or the latest prior state when version is None.
+    /// Restore a recorded rule state, or the previous lifecycle version when None.
     fn restore_version(
         &self,
         _id: &str,
@@ -1175,3 +1176,6 @@ pub trait EntityStore: Send + Sync {
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(test)]
+mod project_hold_tests;

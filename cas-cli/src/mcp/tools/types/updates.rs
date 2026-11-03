@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EntryUpdateRequest {
+    /// Expiry timestamp, including when correcting an older stakeholder constraint.
+    #[serde(default)]
+    pub valid_until: Option<String>,
     /// Entry ID to update
     #[schemars(description = "ID of the entry to update")]
     pub id: String,

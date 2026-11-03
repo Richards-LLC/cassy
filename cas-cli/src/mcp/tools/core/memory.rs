@@ -31,6 +31,32 @@ pub(super) fn record_memory_access(entry: &mut Entry, promote_on_access: bool) -
     should_promote
 }
 
+fn validate_stakeholder_constraint(entry: &Entry) -> Result<(), McpError> {
+    let tags: Vec<_> = entry
+        .tags
+        .iter()
+        .map(|tag| tag.trim().to_ascii_lowercase())
+        .collect();
+    let attributed = tags.iter().any(|tag| tag.starts_with("stakeholder:"));
+    let constraint = tags.iter().any(|tag| tag == "constraint");
+    let explicit_constraint = tags
+        .iter()
+        .any(|tag| tag.starts_with("stakeholder-constraint:"));
+    if (attributed && constraint || explicit_constraint)
+        && !entry.is_superseded()
+        && !entry.valid_until.is_some_and(|until| until > Utc::now())
+    {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Stakeholder constraint memories require an explicit future valid_until (RFC3339); superseded constraints remain historical",
+            ),
+            data: None,
+        });
+    }
+    Ok(())
+}
+
 /// Best-effort extraction of an English `until <date>` deadline from memory
 /// prose. Explicit `valid_until` input always wins; this only gives otherwise
 /// prose-only expiry a machine-readable representation.
@@ -539,14 +565,18 @@ impl CasCore {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .ok()
         });
-        let valid_until = req
-            .valid_until
-            .and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .ok()
-            })
-            .or_else(|| derive_valid_until(&req.content));
+        let explicit_valid_until = req.valid_until.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        });
+        validate_stakeholder_constraint(&Entry {
+            tags: tags.clone(),
+            content: req.content.clone(),
+            valid_until: explicit_valid_until,
+            ..Default::default()
+        })?;
+        let valid_until = explicit_valid_until.or_else(|| derive_valid_until(&req.content));
 
         // ====================================================================
         // Pre-insert overlap detection (cas-4721)
@@ -1332,6 +1362,20 @@ impl CasCore {
             entry.importance = importance.clamp(0.0, 1.0);
             changes.push("importance");
         }
+
+        if let Some(timestamp) = req.valid_until {
+            entry.valid_until = Some(
+                chrono::DateTime::parse_from_rfc3339(&timestamp)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("valid_until must be an RFC3339 timestamp"),
+                        data: None,
+                    })?
+                    .with_timezone(&Utc),
+            );
+            changes.push("valid_until");
+        }
+        validate_stakeholder_constraint(&entry)?;
 
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));

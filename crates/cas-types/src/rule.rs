@@ -692,7 +692,9 @@ mod stakeholder_tests {
     fn stakeholder_verbatim_evidence_survives_cloud_wire_round_trip() {
         let mut rule = Rule::new("attributed".into(), "Prompt changes via PR".into());
         rule.stakeholder = Some(StakeholderAttribution {
-            name: "Ben".into(), quote: "  Review PROMPT changes via PR.\nKeep shipping.  ".into(), scope: "Prompt changes; staging delivery remains immediate".into(),
+            name: "Ben".into(),
+            quote: "  Review PROMPT changes via PR.\nKeep shipping.  ".into(),
+            scope: "Prompt changes; staging delivery remains immediate".into(),
         });
         let wire = serde_json::to_string(&rule).unwrap();
         let decoded: Rule = serde_json::from_str(&wire).unwrap();

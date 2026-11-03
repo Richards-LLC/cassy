@@ -12,28 +12,57 @@ fn apply_stakeholder_attribution(
     scope: Option<String>,
     review_after: Option<String>,
 ) -> Result<(), McpError> {
-    let invalid = |message| McpError { code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None };
-    let tagged_name = rule.tags.iter().find_map(|tag| tag.strip_prefix("stakeholder:")).map(str::to_owned);
+    let invalid = |message| McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(message),
+        data: None,
+    };
+    let tagged_name = rule
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("stakeholder:"))
+        .map(str::to_owned);
     let has_input = name.is_some() || quote.is_some() || scope.is_some() || tagged_name.is_some();
     if has_input {
         let old = rule.stakeholder.take();
         let attribution = cas_types::StakeholderAttribution {
-            name: name.or(tagged_name).or_else(|| old.as_ref().map(|s| s.name.clone())).unwrap_or_default(),
-            quote: quote.or_else(|| old.as_ref().map(|s| s.quote.clone())).unwrap_or_default(),
-            scope: scope.or_else(|| old.as_ref().map(|s| s.scope.clone())).unwrap_or_default(),
+            name: name
+                .or(tagged_name)
+                .or_else(|| old.as_ref().map(|s| s.name.clone()))
+                .unwrap_or_default(),
+            quote: quote
+                .or_else(|| old.as_ref().map(|s| s.quote.clone()))
+                .unwrap_or_default(),
+            scope: scope
+                .or_else(|| old.as_ref().map(|s| s.scope.clone()))
+                .unwrap_or_default(),
         };
-        if attribution.name.trim().is_empty() || attribution.quote.trim().is_empty() || attribution.scope.trim().is_empty() {
-            return Err(invalid("Stakeholder attribution requires stakeholder, stakeholder_quote (verbatim words), and stakeholder_scope"));
+        if attribution.name.trim().is_empty()
+            || attribution.quote.trim().is_empty()
+            || attribution.scope.trim().is_empty()
+        {
+            return Err(invalid(
+                "Stakeholder attribution requires stakeholder, stakeholder_quote (verbatim words), and stakeholder_scope",
+            ));
         }
         rule.stakeholder = Some(attribution);
     }
     if let Some(timestamp) = review_after {
-        rule.review_after = Some(chrono::DateTime::parse_from_rfc3339(&timestamp)
-            .map_err(|_| invalid("review_after must be an RFC3339 timestamp"))?.with_timezone(&chrono::Utc));
+        rule.review_after = Some(
+            chrono::DateTime::parse_from_rfc3339(&timestamp)
+                .map_err(|_| invalid("review_after must be an RFC3339 timestamp"))?
+                .with_timezone(&chrono::Utc),
+        );
     }
-    if rule.stakeholder.is_some() && rule.looks_like_hard_rule()
-        && !rule.review_after.is_some_and(|deadline| deadline > chrono::Utc::now()) {
-        return Err(invalid("Stakeholder-attributed hard rules require a future review_after"));
+    if rule.stakeholder.is_some()
+        && rule.looks_like_hard_rule()
+        && !rule
+            .review_after
+            .is_some_and(|deadline| deadline > chrono::Utc::now())
+    {
+        return Err(invalid(
+            "Stakeholder-attributed hard rules require a future review_after",
+        ));
     }
     Ok(())
 }
@@ -68,13 +97,10 @@ pub(crate) fn render_pending_encode_chores(tasks: &[Task]) -> String {
         .filter(|task| {
             !task.is_terminal()
                 && task.task_type == TaskType::Chore
-                && task
-                    .external_ref
-                    .as_deref()
-                    .is_some_and(|reference| {
-                        reference.starts_with("rule-encode:")
-                            || reference.starts_with("rule-candidate:")
-                    })
+                && task.external_ref.as_deref().is_some_and(|reference| {
+                    reference.starts_with("rule-encode:")
+                        || reference.starts_with("rule-candidate:")
+                })
         })
         .collect();
     if pending.is_empty() {
@@ -505,7 +531,15 @@ impl CasCore {
 
         let mut output = output;
         if let Some(attribution) = &rule.stakeholder {
-            output.push_str(&format!("\n\nStakeholder: {}\nVerbatim words:\n{}\nScope:\n{}\nReview after: {}", attribution.name, attribution.quote, attribution.scope, rule.review_after.map(|d| d.to_rfc3339()).unwrap_or_else(|| "not set".into())));
+            output.push_str(&format!(
+                "\n\nStakeholder: {}\nVerbatim words:\n{}\nScope:\n{}\nReview after: {}",
+                attribution.name,
+                attribution.quote,
+                attribution.scope,
+                rule.review_after
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_else(|| "not set".into())
+            ));
         }
         Ok(Self::success(output))
     }
@@ -602,7 +636,13 @@ impl CasCore {
             stakeholder: None,
         };
 
-        apply_stakeholder_attribution(&mut rule, req.stakeholder, req.stakeholder_quote, req.stakeholder_scope, req.review_after)?;
+        apply_stakeholder_attribution(
+            &mut rule,
+            req.stakeholder,
+            req.stakeholder_quote,
+            req.stakeholder_scope,
+            req.review_after,
+        )?;
 
         // cas-5372 (GH #990): only the operator or a registered supervisor
         // can make a hard rule take effect before promotion. Anyone else's
@@ -920,10 +960,20 @@ impl CasCore {
             changes.push("auto_approve_paths");
         }
 
-        let attribution_changed = req.stakeholder.is_some() || req.stakeholder_quote.is_some()
-            || req.stakeholder_scope.is_some() || req.review_after.is_some();
-        apply_stakeholder_attribution(&mut rule, req.stakeholder, req.stakeholder_quote, req.stakeholder_scope, req.review_after)?;
-        if attribution_changed { changes.push("stakeholder provenance"); }
+        let attribution_changed = req.stakeholder.is_some()
+            || req.stakeholder_quote.is_some()
+            || req.stakeholder_scope.is_some()
+            || req.review_after.is_some();
+        apply_stakeholder_attribution(
+            &mut rule,
+            req.stakeholder,
+            req.stakeholder_quote,
+            req.stakeholder_scope,
+            req.review_after,
+        )?;
+        if attribution_changed {
+            changes.push("stakeholder provenance");
+        }
 
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
@@ -1308,7 +1358,10 @@ mod tests {
 
     fn update_rule(id: &str, tags: Option<&str>, sources: Option<&str>) -> RuleUpdateRequest {
         RuleUpdateRequest {
-            stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
+            stakeholder: None,
+            stakeholder_quote: None,
+            stakeholder_scope: None,
+            review_after: None,
             id: id.to_owned(),
             content: None,
             paths: None,
@@ -1326,7 +1379,10 @@ mod tests {
         for mechanism in ["lint", "test", "hook", "gate", "type"] {
             let (_temp, core) = isolated_core();
             core.cas_rule_create(Parameters(RuleCreateRequest {
-                stakeholder: None, stakeholder_quote: None, stakeholder_scope: None, review_after: None,
+                stakeholder: None,
+                stakeholder_quote: None,
+                stakeholder_scope: None,
+                review_after: None,
                 scope: "project".into(),
                 content: "Parser failures must be caught by the grammar check".into(),
                 paths: None,

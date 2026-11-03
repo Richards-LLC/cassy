@@ -6,5 +6,7 @@ pub const MIGRATION: Migration = Migration {
     subsystem: Subsystem::Rules,
     description: "Add nullable stakeholder attribution to rules without backfilling old rows",
     up: &["ALTER TABLE rules ADD COLUMN stakeholder TEXT"],
-    detect: Some("SELECT EXISTS (SELECT 1 FROM pragma_table_info('rules') WHERE name = 'stakeholder')"),
+    detect: Some(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('rules') WHERE name = 'stakeholder')",
+    ),
 };

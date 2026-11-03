@@ -285,10 +285,16 @@ impl Entry {
         self.tags.iter().any(|tag| {
             let tag = tag.trim();
             tag.eq_ignore_ascii_case("superseded")
-                || tag.get(..14).is_some_and(|prefix| prefix.eq_ignore_ascii_case("superseded-by:"))
+                || tag
+                    .get(..14)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("superseded-by:"))
                     && tag.get(14..).is_some_and(|id| !id.trim().is_empty())
-        }) || self.content.trim_start().split(|c: char| c.is_whitespace() || c == ':')
-            .next().is_some_and(|word| word.eq_ignore_ascii_case("superseded"))
+        }) || self
+            .content
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == ':')
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("superseded"))
     }
 
     /// Superseded memories are expired even when an older writer omitted the deadline.

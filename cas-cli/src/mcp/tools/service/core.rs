@@ -65,6 +65,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::EntryUpdateRequest;
         let inner_req = EntryUpdateRequest {
+            valid_until: req.valid_until,
             id: req.id.ok_or_else(|| self.missing_id("memory", "update"))?,
             content: req.content,
             tags: req.tags,

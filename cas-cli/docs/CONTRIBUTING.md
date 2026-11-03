@@ -2034,9 +2034,21 @@ count as proof.
 
 The dataset and thresholds must match the immutable target, and the receipt's
 measurements must match the artifact. The artifact names a model and evaluation
-command, plus a readable, non-empty run log at an absolute path. Cassy binds both
-files by content and rejects either changing after recording. The evaluation
-runner supplies measurements; recording proof does not execute the command.
+command, plus a readable run log at an absolute path. Both files must resolve
+inside the owning task's project-scoped artifacts directory; checkout files,
+other tasks' files and symlinks escaping that directory are refused. The evaluator
+must emit exactly one machine-readable result line in its run log:
+
+```text
+MODEL_EVAL_RESULT {"measurements":{"accuracy_percent":87.9}}
+```
+
+Every receipt metric must match that result's value. Missing, ambiguous or
+mismatched results are refused as `MODEL_EVAL_UNBACKED`, naming the unsupported
+metric and claimed value. A JSON artifact claiming 96 beside a logged 80.3 cannot
+pass. Cassy binds both files by content and rejects either changing after
+recording. Missing prerequisite files ask to re-record the receipt. The evaluation
+runner supplies the result line; recording proof does not execute the command.
 
 A below-bar evaluation is saved as `MODEL_EVAL_MISS`. Close refuses and names
 the bar and measured values. Missing proof also refuses. A passing receipt is

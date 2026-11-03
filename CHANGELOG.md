@@ -14,6 +14,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   report `PLAN-FIT`, name each omission or missed target, reject known misses
   and request a supervisor decision about scope or an authorized plan revision.
 
+### Fixed — Factory plan outcomes
+
+- **Keep missed plan targets out of merges** — Supervisor instructions now require the plan's measured target, hold only dependent work when it is missed, and keep independent deliveries shipping. Briefs carry the plan section and metric through worker close; characterization protects only behaviour the plan keeps.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

@@ -162,7 +162,7 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
     if env "${run_env[@]}" FAKE_GH_FAILURE="$failure" "$queued_script" >"$output" 2>&1; then result=0; else result=$?; fi
     text="$(<"$output")"; log="$(<"$tmp/gh.log")"
     expected_result=0
-    case "$failure" in cancel|ghost|cancel-unknown) expected_result=1 ;; esac
+    case "$failure" in cancel-unknown) expected_result=1 ;; esac
     if (( result == expected_result )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $failure expected exit=$expected_result, got $result" >&2; fi
     if [[ "$failure" == status ]]; then warning=status; else warning=cancel; fi
     expect_text "$text" "warning: $warning failed" "$failure failure names call and run"
@@ -180,7 +180,8 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
         ghost|cancel-unknown)
             expect_text "$text" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure reports zero accepted requests and both unresolved runs"
             expect_text "$(<"$tmp/summary")" 'cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure persists the failed sweep result in the Actions summary"
-            expect_text "$text" '::error::unresolved stale queued run=101' "$failure surfaces the persistent run"
+            expect_text "$text" '::warning::unresolved stale queued run=101' "$failure surfaces the persistent run without repeated failure annotations"
+            expect_text "$(<"$tmp/summary")" 'https://github.com/example/repo/actions/runs/101' "$failure keeps individual unresolved runs visible in the summary"
             expect_count "$log" 'actions/runs/101/cancel' 1 "$failure never retries a rejected cancellation"
             ;;
         cancel-race)
@@ -188,6 +189,14 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
             expect_absent "$text" '::error::' 'completion race does not emit a failure annotation'
             ;;
     esac
+    if [[ "$failure" == ghost ]]; then
+        if env "${run_env[@]}" FAKE_GH_FAILURE=ghost "$queued_script" >"$output" 2>&1; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1)); echo 'FAIL persistent ghosts must not fail every scheduled sweep' >&2
+        fi
+        expect_text "$(<"$output")" 'unresolved=2' 'repeated sweep still reports unresolved ghosts'
+    fi
 done
 rm -f "$tmp/state"/cancel-rejected-*
 

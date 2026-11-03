@@ -386,6 +386,10 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         for field in ('cache-key', 'shared-key'):
             self.assertTrue(consumer['with'][field])
             self.assertEqual(consumer['with'][field], producer['with'][field])
+        self.assertEqual(producer['with'].get('cache-on-failure'), 'false',
+                         'cancelled or timed-out priming must not freeze a partial exact cache')
+        self.assertEqual(cache['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
+        self.assertEqual(action['inputs']['cache-on-failure']['default'], 'true')
         self.assertEqual(archive['env'], prime['env'], 'cache lookup must see the actual archive profile')
         for name in ('CARGO_PROFILE_DEV_DEBUG','CARGO_PROFILE_TEST_DEBUG'):
             self.assertEqual(archive['env'][name],'0')

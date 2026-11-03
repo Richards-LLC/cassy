@@ -1890,6 +1890,15 @@ fn is_cas_sidecar(command: &str, pid: u32) -> bool {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
+    // Match executable identity, not an argument or the truncated kernel comm.
+    // Keep walking descendants: the host's actual tool jobs still count.
+    if raw.split(|byte| *byte == 0).next().is_some_and(|arg0| {
+        Path::new(std::str::from_utf8(arg0).unwrap_or_default())
+            .file_name()
+            .is_some_and(|name| name == "codex-code-mode-host")
+    }) {
+        return true;
+    }
     if (command == "cas" || command.starts_with("cas-"))
         && raw.split(|byte| *byte == 0).any(|part| part == b"serve")
     {
@@ -3994,6 +4003,62 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn codex_host_tree_is_idle_except_for_owned_work() {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+
+        struct Harness(Child);
+        impl Drop for Harness {
+            fn drop(&mut self) {
+                // EOF lets the host reap its job and the harness reap the host.
+                drop(self.0.stdin.take());
+                let _ = self.0.wait();
+            }
+        }
+        let host = r#"
+            job=
+            trap 'if [[ -n "$job" ]]; then kill "$job"; wait "$job" || :; fi' EXIT
+            printf 'idle\n'
+            while read -r command; do
+                case "$command" in
+                    start)
+                        (exec -a cargo /bin/bash --noprofile --norc -c 'printf "working\n"; read -r _') <&0 &
+                        job=$!
+                        wait "$job" || :
+                        job=
+                        printf 'idle\n'
+                        ;;
+                esac
+            done
+        "#;
+        // A dedicated Codex root owns a persistent host; tool jobs belong below
+        // that host. No reliance on other tests leaving this process child-free.
+        let mut harness = Harness(Command::new("/bin/bash")
+            .arg0("codex")
+            .args(["--noprofile", "--norc", "-c", r#"
+                /bin/bash --noprofile --norc -c \
+                    'exec -a /vendor/bin/codex-code-mode-host /bin/bash --noprofile --norc -c "$1"' \
+                    fixture "$1" <&0 &
+                wait "$!"
+            "#, "fixture", host])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+        let mut output = BufReader::new(harness.0.stdout.take().unwrap());
+        for (command, expected, active) in [("", "idle", false), ("start", "working", true), ("stop", "idle", false)] {
+            if !command.is_empty() {
+                writeln!(harness.0.stdin.as_mut().unwrap(), "{command}").unwrap();
+            }
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), expected);
+            let observed = background_processes_for(harness.0.id());
+            assert!(matches!(observed, BackgroundProcessState::Available(_)), "{observed:?}");
+            assert_eq!(has_active_work(false, &observed), active, "{expected}: {observed:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn known_mcp_sidecars_do_not_count_as_worker_background_jobs() {
         assert!(is_known_sidecar_commandline(
             "npm",
@@ -4007,6 +4072,8 @@ mod tests {
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
         for (command, raw) in [
             ("cargo", b"cargo\0test\0".as_slice()),
+            ("cargo", b"cargo\0test\0codex-code-mode-host\0".as_slice()),
+            ("node", b"node\0codex-code-mode-host.js\0".as_slice()),
             ("cargo-nextest", b"cargo-nextest\0nextest\0run\0".as_slice()),
             ("node", b"node\0node_modules/playwright/cli.js\0test\0".as_slice()),
             ("node", b"node\0node_modules/vite/bin/vite.js\0".as_slice()),

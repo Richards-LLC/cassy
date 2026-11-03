@@ -315,14 +315,24 @@ pub(crate) fn check_account_usage(provider: crate::accounts::Provider, dir: &Pat
     };
     let checked_at = Utc::now();
     let windows = report_windows(&limit);
-    let reason = limit.detail.or_else(|| {
+    let reason = limit.detail.map(|detail| {
+        if detail.contains("account changed") {
+            "The account changed since its native snapshot. Open a session on this account to refresh.".into()
+        } else {
+            "No usable native usage snapshot for this account. Open a session on this account to refresh.".into()
+        }
+    }).or_else(|| {
         if observed_at.is_some_and(|at| checked_at.signed_duration_since(at).num_seconds() > CLAUDE_SNAPSHOT_MAX_AGE) {
             Some("Snapshot is stale. Open a session on this account to refresh.".into())
         } else if windows.len() < 2 || windows.iter().any(|window| window.used_percent.is_none()) {
             Some("Some usage windows are missing or have reset. Open a session on this account to refresh.".into())
         } else { None }
     });
-    CheckedAccountUsage { checked_at, observed_at, source: limit.source, windows, reason }
+    let source = match provider {
+        crate::accounts::Provider::Claude => "Claude Code statusline snapshot",
+        crate::accounts::Provider::Codex => "Codex session snapshot",
+    }.into();
+    CheckedAccountUsage { checked_at, observed_at, source, windows, reason }
 }
 
 /// Keep observation age next to capacity rather than implying a live probe.

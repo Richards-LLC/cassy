@@ -140,7 +140,7 @@ async fn account_usage_check_rereads_native_limits_without_switching_or_a_model_
         assert_eq!(status, StatusCode::OK, "{missing}");
         assert!(missing["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
         for used in [23, 48] {
-            let now = chrono::Utc::now();
+            let now = chrono::Utc::now() - chrono::Duration::hours(if used == 48 { 1 } else { 0 });
             if provider == "claude" {
                 std::fs::write(folder.join(".cas-claude-usage.json"), json!({"identity":null,"observed_at":now,"windows":[{"name":"5h","used_percent":used,"reset_at":"2050-11-03T20:00:00Z","spend_dollars":null},{"name":"weekly","used_percent":44,"reset_at":"2050-11-08T16:57:00Z","spend_dollars":null}]}).to_string()).unwrap();
             } else {
@@ -148,7 +148,8 @@ async fn account_usage_check_rereads_native_limits_without_switching_or_a_model_
             }
             let (status, usage) = fixture.call("GET", &path, None).await;
             assert_eq!(status, StatusCode::OK, "{usage}");
-            assert_eq!(usage["windows"][0]["used_percent"], used);
+            assert_eq!(usage["windows"][0]["used_percent"].as_f64(), Some(used as f64));
+            if used == 48 { assert!(usage["reason"].as_str().unwrap().contains("stale")); }
             assert_eq!(usage["windows"].as_array().unwrap().len(), 2);
             assert!(usage["checked_at"].is_string() && usage["observed_at"].is_string());
             assert!(!usage.to_string().contains(home.to_str().unwrap()));
@@ -156,5 +157,7 @@ async fn account_usage_check_rereads_native_limits_without_switching_or_a_model_
     }
     let (status, _) = fixture.call("GET", "/v1/accounts/usage?account=claude%3A..%2Fsecret", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let denied = ops_fixture(Default::default());
+    assert_eq!(denied.call("GET", "/v1/accounts/usage?account=claude%3Aspare", None).await.0, StatusCode::FORBIDDEN);
     assert!(!home.join(".cas/config.toml").exists(), "checking never changes the default account");
 }

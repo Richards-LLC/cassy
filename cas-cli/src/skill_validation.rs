@@ -11,10 +11,12 @@ use crate::types::Skill;
 /// Keeping this bound short prevents a create/update request from holding the
 /// MCP server on an unavailable dependency.
 pub(crate) const VALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const BUBBLEWRAP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_VALIDATION_OUTPUT_BYTES: usize = 8 * 1024;
 
 /// User-visible notice attached to successful and failed degraded probes.
-pub(crate) const NETWORK_ISOLATION_WARNING: &str = "WARNING: network isolation is unavailable; bubblewrap was not found, so validation ran in degraded plain-shell mode";
+pub(crate) const NETWORK_ISOLATION_WARNING: &str = "WARNING: network isolation is unavailable; bubblewrap is missing or could not create a network namespace, so validation ran in degraded plain-shell mode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidationReport {
@@ -31,9 +33,9 @@ enum ValidationMode {
 /// Run a skill's optional validation script before it is persisted.
 ///
 /// The probe runs from a fresh temporary directory with a scrubbed environment
-/// (only PATH is retained for executable lookup). On Linux, bubblewrap adds a
-/// network namespace with no routes. Hosts without bubblewrap use a plain-shell
-/// fallback by default and receive an explicit warning; `require_sandbox` can
+/// (only PATH is retained for executable lookup). On Linux, usable bubblewrap
+/// adds a network namespace with no routes. Hosts without usable bubblewrap
+/// use a plain-shell fallback by default and receive an explicit warning; `require_sandbox` can
 /// fail closed instead. This keeps relative writes out of the project and
 /// avoids leaking CAS credentials. Validation scripts must be local,
 /// deterministic availability checks that do not require network access.
@@ -63,7 +65,9 @@ fn select_validation_mode(
     bubblewrap: Option<PathBuf>,
 ) -> Result<ValidationMode, String> {
     #[cfg(target_os = "linux")]
-    if let Some(bubblewrap) = bubblewrap {
+    if let Some(bubblewrap) = bubblewrap
+        && probe_bubblewrap(&bubblewrap)
+    {
         return Ok(ValidationMode::Bubblewrap(bubblewrap));
     }
 
@@ -75,6 +79,27 @@ fn select_validation_mode(
     }
 
     Ok(ValidationMode::Plain)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_bubblewrap(bubblewrap: &Path) -> bool {
+    let Ok(cwd) = tempfile::tempdir() else {
+        return false;
+    };
+    let mode = ValidationMode::Bubblewrap(bubblewrap.to_path_buf());
+    let Ok(mut command) = validation_command("true", cwd.path(), &mode) else {
+        return false;
+    };
+    command.current_dir(cwd.path()).env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    run_command(
+        &mut command,
+        Deadline::after(BUBBLEWRAP_PROBE_TIMEOUT),
+        BUBBLEWRAP_PROBE_TIMEOUT,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn validate_skill_with_mode(
@@ -269,13 +294,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn unusable_bubblewrap_falls_back_only_when_policy_allows() {
+        let bin = tempfile::tempdir().unwrap();
+        let bubblewrap = bin.path().join("bwrap");
+        crate::test_paths::warm_stub(&bubblewrap, "#!/bin/sh\nexit 1\n");
+
+        let skill = skill_with_script("true");
+        let mode = select_validation_mode(false, Some(bubblewrap.clone())).unwrap();
+        let report = validate_skill_with_mode(&skill, mode)
+            .expect("installed but unusable bubblewrap must allow the default fallback");
+        assert_eq!(report.warning.as_deref(), Some(NETWORK_ISOLATION_WARNING));
+        let error = select_validation_mode(true, Some(bubblewrap))
+            .expect_err("required sandbox must fail closed before executing validation");
+        assert!(error.contains("require_sandbox"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn probe_has_no_network_by_default() {
-        if find_executable("bwrap").is_none() {
+        let mode = select_validation_mode(false, find_executable("bwrap")).unwrap();
+        if matches!(mode, ValidationMode::Plain) {
             return;
         }
-        let result = validate_skill(&skill_with_script(
-            "test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1",
-        ));
+        let result = validate_skill_with_mode(
+            &skill_with_script("test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1"),
+            mode,
+        );
         assert!(result.is_ok(), "probe had a network route: {result:?}");
     }
 

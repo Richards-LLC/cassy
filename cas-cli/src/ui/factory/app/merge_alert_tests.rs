@@ -805,6 +805,49 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "a later blocker never mutes the alert");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn background_child_suppresses_idle_until_it_finishes() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, Command, Stdio};
+
+    // Closing stdin releases both reads, kills and reaps only this fixture's
+    // child, and lets the fake pane exit even if an assertion panics.
+    struct Pane(Child);
+    impl Drop for Pane {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.ci(Some("failure"));
+    let mut pane = Pane(Command::new("sh")
+        .args(["-c", "sleep 60 & child=$!; printf 'ready\\n'; read -r finish; kill \"$child\"; wait \"$child\" 2>/dev/null || :; printf 'idle\\n'; read -r finish"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+    let mut output = BufReader::new(pane.0.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = agents.get("merge-w").unwrap();
+    worker.pid = Some(pane.0.id());
+    worker.pid_starttime = crate::mcp::daemon::read_pid_starttime(pane.0.id());
+    agents.update(&worker).unwrap();
+
+    let events = [f.event.clone()];
+    let inputs = f.app.delivery_request(&events).read(None);
+    assert!(inputs.worker_waits["merge-w"].waiting, "the worker's live child counts as pending work");
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, inputs).1.is_empty());
+
+    writeln!(pane.0.stdin.as_mut().unwrap()).unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "idle\n");
+    assert_eq!(f.relay().len(), 1, "child completion restores the idle alert");
+}
+
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
 #[test]
 fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {

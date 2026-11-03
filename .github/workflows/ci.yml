@@ -866,10 +866,13 @@ jobs:
           sccache rustc -vV
           sccache --show-stats
 
+      # The full default-feature archive compiles this same tree. Keep the
+      # check when reusing a full-gate receipt instead of building that archive.
       - name: Check
         if: >-
           ${{ !cancelled()
-          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true' }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas

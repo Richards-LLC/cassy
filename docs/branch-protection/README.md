@@ -178,6 +178,10 @@ enqueue, so the 15-minute `check_response_timeout_minutes` is unaffected.
 | `cargo check -p cas`, portable ISA audit test, `cargo build -p cas --no-default-features` | **run** | Cheap (72 s on 3.47.0); the no-MCP-proxy build has no full-gate row |
 | Installer fixtures, trust-boundary checks, toolchain setup | run | Unchanged, seconds |
 
+On a normal validation run, the full default-feature suite archive compiles
+the same tree, so preflight skips `cargo check -p cas`. The separate
+no-default-features build and its terminal-restoration consumer still run.
+
 The suite shards and doctests are skipped. The full gate's `nextest`,
 `workspace-tests` and `doctests` rows proved them on this tree.
 

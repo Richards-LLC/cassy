@@ -198,6 +198,38 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         actual_archive, _ = policy.role(changed, 'Build full suite archive', source)
         self.assertGreater(actual_disable, actual_archive)
 
+    def test_preflight_default_check_runs_only_without_the_archive_build(self):
+        jobs = self.ci()['jobs']
+        preflight = jobs['fast-validation-preflight']
+        archive = jobs['fast-validation-suite-build']
+        check = next(s for s in preflight['steps'] if s.get('run') == 'cargo check -p cas')
+        build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
+        self.assertNotIn('--no-default-features', shlex.split(build['run']))
+        portable = next(s for s in preflight['steps'] if s.get('run') == 'cargo build -p cas --no-default-features')
+        consumer = next(s for s in preflight['steps'] if 'export CAS_TEST_BINARY=' in s.get('run', ''))
+        context = {'github.event_name': 'merge_group',
+                   'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
+                   'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                   'steps.classify-diff.outputs.rust-unaffected': 'false'}
+        for reuse, unaffected, expected_check, expected_archive, expected_portable in [
+            ('', 'false', False, True, True),
+            ('full-gate', 'false', True, False, True),
+            ('', 'true', False, False, False),
+        ]:
+            with self.subTest(reuse=reuse, unaffected=unaffected):
+                case = {**context,
+                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        'steps.classify-diff.outputs.rust-unaffected': unaffected}
+                # These functions are GitHub job status, not routing inputs.
+                selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
+                    step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
+                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(archive, build), expected_archive)
+                self.assertEqual(selected(preflight, portable), expected_portable)
+                self.assertEqual(selected(preflight, consumer), expected_portable)
+
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
         factory_cancel = "${{ startsWith(github.ref, 'refs/heads/factory/') }}"

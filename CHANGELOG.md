@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander messages to the supervisor
+
+- **An erased pane draft no longer holds Commander messages** — Typing in the
+  supervisor pane and then erasing it with Backspace now counts as an empty
+  composer, so an operator's Commander message reaches an idle supervisor at
+  once instead of waiting for the next typed prompt (one measured case: 107 s).
+- **A held message says why** — While a real unsent pane draft holds a
+  Commander message, Commander labels it "Held: your pane draft is unsent" and
+  the supervisor pane border shows that a Commander message is waiting.
+- **Send order across Commander and the pane** — When a typed pane prompt
+  starts the turn, Commander messages sent before it are named as earlier and
+  listed oldest first, so they are answered first.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

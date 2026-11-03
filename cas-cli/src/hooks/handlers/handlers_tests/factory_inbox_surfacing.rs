@@ -1982,3 +1982,58 @@ fn cas_bf890_operator_message_leads_ordinary_rows_with_its_label() {
     assert!(context.find(spoof_body).expect("spoof still delivered") > op_at, "{context}");
     assert!(!context.contains("[digest]"), "no digest row without notices: {context}");
 }
+
+/// cas-062b: Daniel's Commander message reached the supervisor only with his
+/// newer pane prompt, which was answered first. The turn-start block names
+/// the operator rows sent before the typed prompt, in send order.
+#[test]
+fn cas_062b_commander_messages_sent_before_a_typed_prompt_come_first() {
+    let mut env = TestEnvGuard::temp_home();
+    supervisor_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let first = "ok slide two still shit, the link doesnt show that, why?";
+    let second = "and check the other slides";
+    let ids: Vec<i64> = [first, second]
+        .into_iter()
+        .map(|body| {
+            store
+                .enqueue_with_session("commander:Daniel@Chrome-Soundwave", "supervisor", body, SESSION)
+                .unwrap()
+        })
+        .collect();
+    {
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        for id in &ids {
+            conn.execute(
+                "UPDATE prompt_queue SET origin_kind = 'paired_device', origin_agent_id = 'device-1' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        // A later send can carry a higher priority; send order still wins.
+        conn.execute("UPDATE prompt_queue SET priority = 0 WHERE id = ?1", rusqlite::params![ids[1]])
+            .unwrap();
+    }
+    let mut typed = input("supervisor");
+    typed.user_prompt = Some("you arent reading my cloud messages".into());
+    let context = context_of(&handle_user_prompt_submit(&typed, Some(temp.path())).unwrap());
+    let note = format!("[send order] The operator sent message #{}, #{} below", ids[0], ids[1]);
+    assert!(context.contains(&note), "{context}");
+    assert!(context.find(first).unwrap() < context.find(second).unwrap(), "{context}");
+
+    // A CAS-delivered turn is not a typed prompt and makes no ordering claim.
+    let late = store
+        .enqueue_with_session("commander:Daniel@Chrome-Soundwave", "supervisor", "third", SESSION)
+        .unwrap();
+    rusqlite::Connection::open(temp.path().join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET origin_kind = 'paired_device', origin_agent_id = 'device-1' WHERE id = ?1",
+            rusqlite::params![late],
+        )
+        .unwrap();
+    typed.user_prompt = Some(format!("CAS wake: message {late} from supervisor is in your inbox"));
+    let context = context_of(&handle_user_prompt_submit(&typed, Some(temp.path())).unwrap());
+    assert!(context.contains("third") && !context.contains("[send order]"), "{context}");
+}

@@ -218,6 +218,10 @@ pub struct ConversationHistoryMessage {
     /// acknowledged: durably queued; delivered: actual recipient transport proof.
     /// Older daemons used sending for accepted-but-unconsumed rows.
     pub state: String,
+    /// cas-062b: why an acknowledged turn is held on the machine; today only
+    /// behind the operator's own unsent pane draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_hold: Option<String>,
     pub stamped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<i64>,
@@ -1615,6 +1619,7 @@ mod tests {
                 target: "supervisor".into(),
                 text: "status?".into(),
                 state: "acknowledged".into(),
+                pane_hold: None,
                 stamped: true,
                 reply_to: None,
                 device_id: "phone-7".into(),

@@ -163,6 +163,9 @@ export interface ConversationHistoryMessage {
   text: string;
   /** acknowledged = durable queue acceptance; delivered = actual supervisor transport proof. */
   state: "sending" | "acknowledged" | "delivered";
+  /** Why an acknowledged turn is held on the machine, e.g. behind the
+   * operator's own unsent pane draft (cas-062b). Absent on older daemons. */
+  pane_hold?: string;
   stamped: boolean;
   reply_to?: number;
   device_id: string;

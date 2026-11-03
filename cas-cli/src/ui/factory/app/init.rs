@@ -356,6 +356,7 @@ impl FactoryApp {
             mc_activity_area: Rect::default(),
             full_pane_hyperlinks: new_hyperlink_map(),
             compact_pane_hyperlinks: new_hyperlink_map(),
+            operator_draft_hold: false,
         };
 
         queue_supervisor_intro_prompt(
@@ -551,6 +552,7 @@ impl FactoryApp {
             mc_activity_area: Rect::default(),
             full_pane_hyperlinks: new_hyperlink_map(),
             compact_pane_hyperlinks: new_hyperlink_map(),
+            operator_draft_hold: false,
         };
 
         queue_supervisor_intro_prompt(
@@ -813,6 +815,7 @@ impl FactoryApp {
             mc_activity_area: Rect::default(),
             full_pane_hyperlinks: new_hyperlink_map(),
             compact_pane_hyperlinks: new_hyperlink_map(),
+            operator_draft_hold: false,
         }
     }
 }

@@ -21,13 +21,14 @@ pub fn execute(command: &RulesCommands, cli: &Cli) -> anyhow::Result<()> {
     if !root.status.success() {
         bail!("Rule references need a Git repository. Run from its checkout.");
     }
-    let root = std::path::PathBuf::from(String::from_utf8(root.stdout)?.trim_end());
+    let root = String::from_utf8(root.stdout)?;
+    let root = std::path::PathBuf::from(root.strip_suffix('\n').unwrap_or(&root));
     let sites = crate::rule_refs::scan(&root, None, &BTreeSet::from([rule_id.clone()]))?;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&sites)?);
     } else {
         println!("{} rule reference(s)", sites.len());
-        println!("Use --json for complete paths and scopes.");
+        println!("Use --full or --json for complete paths and scopes.");
         for site in sites {
             let text = format!(
                 "{}:{}  {}",

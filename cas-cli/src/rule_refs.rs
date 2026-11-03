@@ -61,6 +61,11 @@ pub(crate) fn scan(
     let mut command = Command::new("git");
     command.current_dir(repo).args([
         "grep",
+        "--no-color",
+        "--no-column",
+        "--no-heading",
+        "--no-break",
+        "-H",
         "--fixed-strings",
         "--no-textconv",
         "--no-recurse-submodules",

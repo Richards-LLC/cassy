@@ -34,6 +34,9 @@ fn rule_refs_lists_tracked_sites_and_reports_malformed_markers_cas_4f87() {
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     };
     git(&["init", "-q"]);
+    git(&["config", "color.grep", "always"]);
+    git(&["config", "grep.column", "true"]);
+    git(&["config", "grep.heading", "true"]);
     std::fs::create_dir(root.join("src")).unwrap();
     let scope = "Only Ben's SMS flow; preserve \"drafts\".";
     let marker = format!("// cas-rule: rule-177 scope: {}", serde_json::to_string(scope).unwrap());

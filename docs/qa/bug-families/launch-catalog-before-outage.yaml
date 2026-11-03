@@ -1,0 +1,4 @@
+title: Launch outage fixture waits for its first conversation catalog before taking the machine offline
+tasks: [cas-3dce]
+invariants: [HUB-J13-GOAL]
+journeys: [HUB-J13]

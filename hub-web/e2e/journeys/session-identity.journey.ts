@@ -208,27 +208,27 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
   const row = (codename: string) => rows.filter({ hasText: codename });
   const rects = () => rows.evaluateAll(nodes => nodes.map(node => {
     const { x, y, width, height } = node.getBoundingClientRect();
-    return { key: node.getAttribute("data-key"), x, y, width, height };
+    return { key: node.getAttribute("data-thread-key"), x, y, width, height };
   }));
   const capture = process.env.SESSION_RECENCY_CAPTURE_DIR;
   if (capture) await mkdir(capture, { recursive: true });
   for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
-    // Put the marker back on Puma before measuring the same two rows.
-    machine.sessions[0]!.last_activity_at = journeyStamp(-120_000);
-    machine.sessions[1]!.last_activity_at = journeyStamp(-60_000);
-    await hub.announceCatalog("atlas");
-    await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
+    await expect(rows).toHaveCount(2);
+    const currentKey = await rows.filter({ has: page.locator(".conversation-session-mark") }).getAttribute("data-thread-key");
+    const next = machine.sessions.find(session => `atlas:${session.name}` !== currentKey)!;
+    const nextRow = row(next.supervisor!);
+    const previousRow = rows.filter({ hasText: machine.sessions.find(session => `atlas:${session.name}` === currentKey)!.supervisor! });
     const before = await rects();
     if (capture) await page.screenshot({ path: `${capture}/initial-${width}.png` });
-    machine.sessions[0]!.last_activity_at = journeyStamp();
+    next.last_activity_at = journeyStamp();
     await hub.announceCatalog("atlas");
-    await expect(row("noble-cheetah-84")).toHaveAttribute("data-most-recent", "true");
+    await expect(nextRow).toHaveAttribute("data-most-recent", "true");
     if (capture) await page.screenshot({ path: `${capture}/moved-${width}.png` });
     await journey.stage(`Recency moves, every row stays in place at ${width}px`, async () => {
       expect(await rects()).toEqual(before);
-      await expect(row("noble-cheetah-84")).toHaveAccessibleName(/most recent/i);
-      await expect(row("calm-puma-34")).not.toHaveAccessibleName(/most recent/i);
+      await expect(nextRow).toHaveAccessibleName(/most recent/i);
+      await expect(previousRow).not.toHaveAccessibleName(/most recent/i);
     });
   }
 });

@@ -54,6 +54,7 @@
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, brand resolution, HTML/PDF finalization and immutable captures.
 - `cas-cli/src/builtins/` - canonical skills, agents, job definitions, harness catalogs and reference-history manifest.
+- `fixtures/verification-plan-fit/` - verifier prompt replays for narrowed reader scope and missed plan targets.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing, detector recipes and CI-timing evidence.
 
 ## Factory runtime and terminals

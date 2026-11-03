@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Verification
+
+- **Compare deliveries with the epic's plan** — Was: a narrower task card could
+  pass while planned fields or outcome targets were missed. → Now: verifiers
+  report `PLAN-FIT`, name each omission or missed target, reject known misses
+  and request a supervisor decision about scope or an authorized plan revision.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

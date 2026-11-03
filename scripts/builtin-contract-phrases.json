@@ -4425,6 +4425,10 @@
         {
           "text": "reproduced silent failure of this task's own behaviour",
           "reason": "GH1341: realistic silent failure is a separate rejection condition regardless of its assigned impact rating."
+        },
+        {
+          "text": "PLAN-FIT:",
+          "reason": "The verifier summary exposes this named plan-conformance verdict to the supervisor; card criteria alone cannot approve a narrowed delivery (cas-9e74)."
         }
       ],
       "absent": [

@@ -216,13 +216,14 @@ fn targets(body: &str) -> Vec<Target> {
         }
     }
     for id in IDS
-        .get_or_init(|| Regex::new(r"\b[CG][A-Z0-9]{7,30}\b").unwrap())
+        .get_or_init(|| Regex::new(r"\b[CG][A-Z0-9]{8,11}\b").unwrap())
         .find_iter(body)
+        .filter(|id| id.as_str().bytes().any(|byte| byte.is_ascii_digit()))
     {
         add(id.as_str().into(), None);
     }
     for name in NAMES
-        .get_or_init(|| Regex::new(r"(?:^|[\s`(<])#([a-z0-9][a-z0-9_-]{1,79})").unwrap())
+        .get_or_init(|| Regex::new(r"(?:^|[\s`(<])#([a-z][a-z0-9_-]{1,79})").unwrap())
         .captures_iter(body)
     {
         add(name[1].into(), None);

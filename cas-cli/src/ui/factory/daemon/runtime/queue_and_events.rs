@@ -8113,6 +8113,9 @@ impl FactoryDaemon {
                 } else {
                     "composer protected: input readiness changed during delivery; rechecking"
                 };
+                if detail == COMPOSER_HOLD_DETAIL {
+                    self.note_operator_draft_hold(&queued, &pane_target);
+                }
                 self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
@@ -8754,6 +8757,16 @@ impl FactoryDaemon {
         );
         self.gate_activity_recorded_at
             .insert(target.to_string(), Instant::now());
+    }
+
+    /// cas-062b: show the operator, outside the composer, that his own
+    /// unsubmitted supervisor-pane draft is holding a Commander message.
+    fn note_operator_draft_hold(&mut self, queued: &cas_store::QueuedPrompt, pane_target: &str) {
+        if pane_target == self.app.supervisor_name()
+            && self.wake_sender_for(queued.origin.as_ref()) == WakeSender::Operator
+        {
+            self.app.operator_draft_hold = true;
+        }
     }
 
     /// Re-offer a parked inline or composer-held row when the pane becomes input-ready
@@ -10549,12 +10562,8 @@ impl FactoryDaemon {
                     } else {
                         wake_decision.status_detail()
                     };
-                    // cas-062b: show the operator, outside the composer, that
-                    // his own draft is holding a Commander message.
-                    if pane_state.composer_dirty && wake_sender == WakeSender::Operator
-                        && pane_target == self.app.supervisor_name()
-                    {
-                        self.app.operator_draft_hold = true;
+                    if pane_state.composer_dirty {
+                        self.note_operator_draft_hold(&queued, &pane_target);
                     }
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,

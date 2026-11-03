@@ -1242,6 +1242,26 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "fast_lane.enabled" | "fast_lane.paths" | "fast_lane.deny" | "fast_lane.max_files"
+            | "fast_lane.max_lines" | "fast_lane.merge_checks" | "fast_lane.receipt_checks"
+            | "fast_lane.receipt_statuses" | "fast_lane.receipt_window_mins" => {
+                let lane = self.fast_lane.get_or_insert_with(Default::default);
+                let list = || value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+                let count = || value.trim().parse::<usize>().ok().filter(|count| *count > 0)
+                    .ok_or_else(|| MemError::Parse(format!("Expected a positive integer for {key}")));
+                match key {
+                    "fast_lane.enabled" => lane.enabled = value.trim().parse()
+                        .map_err(|_| MemError::Parse("Expected true or false for fast_lane.enabled".into()))?,
+                    "fast_lane.paths" => lane.paths = list(),
+                    "fast_lane.deny" => lane.deny = list(),
+                    "fast_lane.max_files" => lane.max_files = count()?,
+                    "fast_lane.max_lines" => lane.max_lines = count()?,
+                    "fast_lane.merge_checks" => lane.merge_checks = list(),
+                    "fast_lane.receipt_checks" => lane.receipt_checks = list(),
+                    "fast_lane.receipt_statuses" => lane.receipt_statuses = list(),
+                    _ => lane.receipt_window_mins = count()? as u32,
+                }
+            }
             // Release section
             "release.claude_account_allowlist" => {
                 let release = self.release.get_or_insert_with(ReleaseConfig::default);

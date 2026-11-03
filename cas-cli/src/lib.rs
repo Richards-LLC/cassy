@@ -45,6 +45,7 @@ pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
+pub mod fast_lane;
 mod light_lane;
 #[doc(hidden)]
 pub use light_lane::run_detached_worker;

@@ -21,8 +21,6 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
    Successful start accepts the assignment; no prose ACK. Follow task criteria,
    depth, execution note and project instructions.
-   When the task cites a rule, mark causal code/tests with its id and verbatim
-   scope; declare Rule-driven sites in the brief or close receipt (see close-gate).
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 3. Load the current phase's references below. Add milestones with
    `task action=notes note_type=progress`.

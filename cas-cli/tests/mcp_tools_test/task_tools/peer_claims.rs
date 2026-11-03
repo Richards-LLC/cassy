@@ -503,7 +503,7 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
     let create = |title: &str, source: &str| -> TaskCreateRequest {
         serde_json::from_value(serde_json::json!({
             "title":title,"description":"Trace the observed failure and fix it.",
-            "task_type":"task","priority":2,"external_ref":source,
+            "task_type":"task","priority":2,"risk":"concurrency","external_ref":source,
         })).unwrap()
     };
     alpha.core.cas_task_create(Parameters(create("Repair callback dispatch", "https://github.com/Acme/Widget/issues/42"))).await.unwrap();

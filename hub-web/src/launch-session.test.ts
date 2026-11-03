@@ -124,6 +124,7 @@ function sheet(options: {
     currentMachineId: () => options.machines[0]?.id,
     origin: "https://hub.example",
     projects: async () => options.catalog ?? { projects: [], browse_roots: [] },
+    checkUsage: async () => { throw new Error("No snapshot yet"); },
     profiles: async (_machine, _signal, target?: LaunchTarget) => typeof options.profiles === "function" ? options.profiles(target) : options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
@@ -377,6 +378,16 @@ const ACCOUNTS: LaunchProfiles = {
 };
 
 describe("accounts (cas-9666)", () => {
+  it("checks an unselected account without selecting it or starting a session", async () => {
+    const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS });
+    s.open(); await flush();
+    const selected = () => dialog().querySelector<HTMLInputElement>('input[name="launch-account"]:checked')?.value;
+    expect(selected()).toBe("main");
+    dialog().querySelector<HTMLButtonElement>('[aria-label="Check usage for claude:support@petrastella.io"]')!.click();
+    await vi.waitFor(() => expect(dialog().textContent).toContain("No snapshot yet"));
+    expect(selected()).toBe("main"); expect(calls.launches).toEqual([]);
+  });
+
   it("refreshes the selected project's recommendation and ignores an older project's late response", async () => {
     const recommended = structuredClone(ACCOUNTS);
     recommended.claude!.profiles[1]!.recommendation = "Project threshold leaves 41% headroom";
@@ -566,6 +577,7 @@ describe("New session and a machine's connection (cas-0e14 F30)", () => {
       currentMachineId: () => current ?? machines[0]?.id,
       origin: "https://hub.example",
       projects: async (machineId) => { loads.push(machineId); return { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] }; },
+      checkUsage: async () => { throw new Error("No snapshot yet"); },
       profiles: async () => ({}),
       browse: async () => { throw new Error("unused"); },
       launch: async () => ({ ok: true, session: "x", attached: false }),

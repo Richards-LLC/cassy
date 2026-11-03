@@ -11,11 +11,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
 
+### Fixed — Detached worker completion
+
+- **Wake workers when capped background runs finish** — Detached commands now
+  record their exit and log path and deliver one completion message to the
+  owning worker, with daemon retry recovery. Live runs and candidate builds
+  suppress idle alerts; unchanged idle episodes no longer wake the supervisor
+  repeatedly, and a completed run's alert states its exit.
+
+### Fixed — Verification timing
+
+- **Measure recorded verifier duration** — Verdicts now record elapsed time
+  automatically and label child runtime, caller overrides and direct dispatch
+  fallback measurements. Direct fallback includes review wait; legacy timing
+  remains unknown.
+
 ### Fixed — Commander
 
 - **Steady Most recent session marker** — Each sibling conversation reserves
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
+
+### Added — Commander account usage
+
+- **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.
 
 ## [3.100.0] - 2026-11-03
 

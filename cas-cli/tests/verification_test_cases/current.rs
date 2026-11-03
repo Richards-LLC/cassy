@@ -194,6 +194,7 @@ async fn verification_add_and_reads_preserve_all_statuses_issues_and_metadata() 
         assert_eq!(persisted.status, status);
         assert_eq!(persisted.confidence, Some(0.95));
         assert_eq!(persisted.duration_ms, Some(1500));
+        assert_eq!(persisted.duration_source.as_deref(), Some("explicit"));
         assert_eq!(persisted.issues.len(), 2);
         assert_eq!(persisted.files_reviewed, ["src/main.rs", "src/lib.rs"]);
         let shown = text(
@@ -407,6 +408,24 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             child_id
         };
         let question_caller = fixture.as_agent(&caller);
+        // Model queue wait separately from child review time without sleeping.
+        let dispatched_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let started_at = if mode == "supervisor" {
+            dispatched_at
+        } else {
+            dispatched_at + chrono::Duration::seconds(40)
+        };
+        let conn = rusqlite::Connection::open(fixture.root.join("cas.db")).unwrap();
+        conn.execute(
+            "UPDATE verification_dispatches SET requested_at = ?2 WHERE id = ?1",
+            rusqlite::params![dispatch.id, dispatched_at.to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE verification_capabilities SET bound_at = ?2 WHERE dispatch_id = ?1",
+            rusqlite::params![dispatch.id, started_at.to_rfc3339()],
+        )
+        .unwrap();
         let question = "Does the recorded scope split cover the unexercised Accounts row?";
         text(question_caller.verification(json!({
             "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
@@ -416,6 +435,37 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
         let call = history.get_latest_for_task(&task_id).unwrap().unwrap();
         assert_eq!(call.status.to_string(), "supervisor_call");
         assert_eq!(call.summary, question);
+        let timing_source = if mode == "supervisor" {
+            "dispatch_elapsed_fallback"
+        } else {
+            "capability_bound_to_consumed"
+        };
+        assert_eq!(call.duration_source.as_deref(), Some(timing_source));
+        assert_eq!(call.capability_id.is_none(), mode == "supervisor");
+        assert_eq!(
+            call.duration_ms,
+            Some((call.created_at - started_at).num_milliseconds() as u64),
+            "{mode}: omitted duration must use the persisted review start, excluding child queue wait"
+        );
+        if mode != "supervisor" {
+            let (bound_at, consumed_at): (String, String) = conn
+                .query_row(
+                    "SELECT bound_at, consumed_at FROM verification_capabilities WHERE dispatch_id = ?1",
+                    [&dispatch.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(bound_at, started_at.to_rfc3339());
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&consumed_at).unwrap() >= started_at,
+                "{mode}: consumed authority must retain both timing boundaries"
+            );
+            assert_eq!(
+                call.created_at,
+                chrono::DateTime::parse_from_rfc3339(&consumed_at).unwrap(),
+                "child duration ends at the persisted consume time"
+            );
+        }
         let shown = text(
             question_caller
                 .verification(json!({"action":"show", "id":call.id}))
@@ -426,6 +476,7 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             shown.contains(question) && shown.contains(&dispatch.id),
             "question stays attached to the proof: {shown}"
         );
+        assert!(shown.contains(&format!("Duration source: {timing_source}")));
         assert!(
             open_task_store_local(&fixture.root)
                 .unwrap()
@@ -494,6 +545,26 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             .unwrap()
             .unwrap();
         assert_eq!(verdict.status.to_string(), final_status);
+        assert_eq!(
+            verdict.duration_source.as_deref(),
+            Some("dispatch_elapsed_fallback")
+        );
+        assert!(verdict.capability_id.is_none());
+        assert_eq!(
+            verdict.duration_ms,
+            Some((verdict.created_at - dispatched_at).num_milliseconds() as u64),
+            "direct answers use dispatch elapsed time and preserve it on retry"
+        );
+        assert!(
+            cas_store::quality_events_between(&fixture.root, None, None)
+                .unwrap()
+                .iter()
+                .any(|event| event.task_id.as_deref() == Some(task_id.as_str())
+                    && matches!(&event.payload, cas_store::QualityPayload::CheckRun {
+                        minutes: Some(minutes), ..
+                    } if *minutes == verdict.duration_ms.unwrap() as f64 / 60_000.0)),
+            "automatic duration must reach the verifier measurement ledger"
+        );
         assert!(
             !open_task_store_local(&fixture.root)
                 .unwrap()
@@ -501,12 +572,12 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
                 .unwrap()
                 .pending_verification
         );
+        let resolved = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
         assert_eq!(
-            cas_store::get_verification_dispatch(&fixture.root, &dispatch.id)
-                .unwrap()
-                .state,
+            resolved.state,
             cas::types::VerificationDispatchState::Resolved
         );
+        assert!(resolved.resolved_at.unwrap() >= verdict.created_at);
         assert!(
             supervisor
                 .verification(json!({

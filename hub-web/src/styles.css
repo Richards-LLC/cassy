@@ -3573,3 +3573,14 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-version { display: inline-flex; align-items: baseline; gap: var(--space-1); margin-inline-start: var(--space-1); padding-inline: var(--space-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); white-space: nowrap; }
 .supervisor-version.update-available { color: var(--state-warn); border-color: currentColor; }
 @media (forced-colors: active) { .supervisor-version { color: CanvasText; border-color: CanvasText; } }
+
+/* Explicit native account rechecks use the existing quiet action/evidence roles. */
+.account-usage-check { display: grid; justify-items: start; gap: var(--space-2); margin-block: var(--space-2); min-width: 0; }
+.account-usage-check button { min-height: var(--rail-item-min); padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--color-action); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.account-usage-check button:disabled { color: var(--ink-mid); cursor: wait; }
+.account-usage-check button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--space-1); }
+.account-usage-result { color: var(--ink-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.account-usage-result p { margin: 0; }
+.launch-account-entry { min-width: 0; }
+.launch-account-entry > .account-usage-check { margin-inline: var(--space-3); }
+@media print { .account-usage-check button { display: none; } }

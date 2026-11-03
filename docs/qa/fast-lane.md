@@ -22,7 +22,7 @@ deny = [
 max_files = 10
 max_lines = 300
 merge_checks = ["PR gate"]
-receipt_checks = ["Hermetic e2e", "Frontend fresh build"]
+receipt_checks = ["Post-merge receipt"]
 receipt_statuses = ["Vercel"]
 receipt_window_mins = 30
 ```
@@ -38,6 +38,10 @@ Check and status names match exactly and are case-sensitive:
 - `receipt_statuses` are commit-status contexts on the merge commit, such as
   `Vercel` for the production build.
 - Workflow names are not read.
+- One summary job that succeeds only when its jobs succeed (pulse-card's
+  `Post-merge receipt` over `build / Frontend fresh build` and
+  `e2e / Hermetic end-to-end tests`) is enough: rerun and revert act on its
+  Actions run.
 - Path globs are case-sensitive, so list both spellings where they differ, such as `*auth*` and `*Auth*`.
 
 ## Eligibility

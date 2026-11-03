@@ -7,6 +7,73 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.100.0] - 2026-11-03
+
+### Fixed — Supervisor response time
+
+- **Batch proof discovery and persist cleanup readiness** — Changed source
+  paths share bounded Git searches, and builtin paths share one literal search.
+  Dead-worker cleanup records its readiness on disk and stages one intent per
+  shared checkout, preserving frozen task facts across partial staging retries.
+
+### Fixed — macOS worker liveness
+
+- **Detect owned background jobs on macOS** — Was: Worker child-process evidence was unavailable on Mac. → Now: Native process discovery reports live descendants and their ages, excludes persistent MCP sidecars, and keeps missing process evidence explicit.
+
+### Fixed — Queued-run watchdog
+
+- **Surface uncancellable queued runs** — Was: A sweep stayed green when every
+  cancellation failed. → Now: The watchdog finishes the sweep, rechecks rejected
+  cancellations and fails if those runs remain queued or unreadable. Logs and
+  the Actions summary separate accepted requests from verified reclamation;
+  completion races and dry runs keep their safe behavior.
+
+### Changed — Runtime test coverage
+
+- **Remove unused runtime scaffolding** — Violet deliveries use their reader's
+  owner session; unused per-delivery overrides, delivery-PR parsing, relay URL
+  validation, planned-presence silence and duplicate reporting helpers have
+  been removed. Native Claude capacity checks now name their actual limits
+  and account-choice coverage.
+
+### Added — Test hygiene
+
+- **`cas-test-audit` skill** — A read-only procedure for auditing a project's tests: five buckets (dead, superseded, restates-implementation, duplicate, slow), per-language detector recipes with a precision check, CI-timing recipes per runner, and a ledger format. Cuts need operator approval and each names its covering test. It reports that merge-queue time is mostly the build, so a test cost list is not the route to queue speed.
+
+### Fixed — Worker activity and retirement
+
+- **Count live background work before sending idle alerts** — A worker's live
+  child now suppresses an idle delivery alert until it finishes, alongside
+  existing lane-lock checks and reminder policies.
+- **Keep shutdown terminal after late stale events** — A delayed pane-exit
+  observation preserves a retired registration's shutdown status.
+
+### Fixed — Skill validation sandbox
+
+- **Probe installed Bubblewrap before choosing it** — Hosts where Bubblewrap
+  cannot create its sandbox use the existing plain-shell fallback and warning.
+  Required sandbox isolation still fails closed.
+
+### Fixed — Queue archive dependency cache
+
+- **Hosted queue archives can reuse main-scoped dependencies** — A missing
+  compatible cache now triggers advisory priming from main after queue-tree
+  reuse, using the archive's actual compiler/profile key. Queue runs restore
+  dependencies without saving disposable queue-ref copies, and still build
+  their current source on every cache hit or miss. Priming adds no required
+  check and runs outside the validation dependency chain.
+
+### Fixed — Worker activity and CI maintenance
+
+- **Keep idle Codex workers visible** — Persistent Codex code hosts no longer
+  count as background jobs; work launched below them still does.
+- **Save only completed archive priming** — Cancelled or timed-out advisory
+  cache producers leave no partial exact cache that would skip future priming.
+- **Report queued ghosts without repeated failures** — Runs that reject
+  cancellation and remain queued emit warnings and individual summary links.
+  Unreadable rejected runs still fail; accepted requests remain distinct from
+  verified reclamation.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

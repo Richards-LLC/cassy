@@ -108,3 +108,31 @@ that receipt, the queue runs the journeys as before.
   park refuses a tip without it wherever the fast rows ship. Tonight a version
   literal (cas-7aa5) and, earlier, cas-ca55's literal each cost a CI round;
   locally the same rows take about a minute.
+
+## Archive dependency cache maintenance
+
+The hosted suite archive and advisory main cache producer share the explicit
+`fast-validation-suite-build` cache identity. Their profile is defined once in
+`ci.yml`, visible during cache lookup and compilation: dev/test debug info is
+zero and stripping removes debug info. The cache action retains compiler,
+Cargo manifest/lock, toolchain and configuration fingerprints. It caches
+compatible dependencies; queue runs still compile the current workspace and
+execute the existing suite. A cache hit is never a test receipt.
+
+After a main push reuses successful queue validation, the advisory producer
+restores that same dependency key. An exact hit skips only the priming compile;
+a partial hit, miss or absent hit output performs the normal archive build to
+seed main's cache. It does not run the suite or upload another archive. The
+producer is outside the required validation dependency graph, can fail without
+failing validation, and stops after twenty minutes. It is disabled when the
+queue uses the isolated self-hosted route. A normal main validation can also
+save this key; hosted queue, tag, scheduled and manual runs restore without
+saving it to their own refs.
+
+The measured pre-change sample had eight cache misses in twelve queue runs.
+The latest cold archive job took 13.87 minutes, including 12.37 minutes in its
+build step. These are baseline measurements from the queue speed plan
+`art-1b84b905`, not a measured saving from cache priming. Completion evidence
+must name a real main-scoped cache entry and a later queue log restoring its
+key; until a version containing this change reaches main, that final
+cross-ref restoration remains unmeasured.

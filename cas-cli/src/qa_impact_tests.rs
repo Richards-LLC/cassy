@@ -532,11 +532,16 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             "clone",
             "--quiet",
             "--shared",
+            "--no-checkout",
             ".",
             snapshot.path().to_str().unwrap(),
         ],
     );
     let root = snapshot.path();
+    // Only the catalog and registry need working files. Keep the full index
+    // for registry validation; both selectors read other inputs from Git HEAD.
+    git(root, &["sparse-checkout", "set", "--no-cone", "/docs/qa/"]);
+    git(root, &["checkout", "--quiet", "HEAD"]);
     let catalog = std::fs::read_to_string(root.join("docs/qa/journeys.md")).unwrap();
     let (_, template) = catalog.rsplit_once("\n### ").unwrap();
     let template_id = template.split(" · ").next().unwrap();
@@ -578,6 +583,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         serde_json::from_str(include_str!("../tests/fixtures/commander-merge-diffs.json")).unwrap();
     let mut selected_source_merges = 0;
     let mut selected_added_journey = false;
+    let mut selections = std::collections::BTreeMap::new();
     for diff in fixture["diffs"].as_array().unwrap() {
         // Replay real merge path sets against the migrated catalog at this head.
         // Original revisions are provenance, not a dependency on deep CI history.
@@ -588,16 +594,21 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             .iter()
             .map(|path| path.as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
-        let legacy =
-            crate::qa_evidence::journeys::journeys_for_paths_at(root, &head, &files).unwrap();
-        let report = analyze(
-            root,
-            &QaConfig::default(),
-            &files.iter().map(Change::modified).collect::<Vec<_>>(),
-            None,
-            Some(&head),
-        )
-        .unwrap();
+        // Reuse the independent oracle/report pair for duplicate inputs at
+        // this immutable head, while keeping every historical merge assertion.
+        let (legacy, report) = selections.entry(files.clone()).or_insert_with(|| {
+            let legacy =
+                crate::qa_evidence::journeys::journeys_for_paths_at(root, &head, &files).unwrap();
+            let report = analyze(
+                root,
+                &QaConfig::default(),
+                &files.iter().map(Change::modified).collect::<Vec<_>>(),
+                None,
+                Some(&head),
+            )
+            .unwrap();
+            (legacy, report)
+        });
         assert_eq!(report.source, "registry");
         assert!(report.registry.valid);
         let ids = report
@@ -613,7 +624,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         {
             selected_source_merges += 1;
         }
-        assert_eq!(ids, legacy, "merge {}", diff["head"]);
+        assert_eq!(ids, *legacy, "merge {}", diff["head"]);
     }
     assert!(
         selected_source_merges > 0,

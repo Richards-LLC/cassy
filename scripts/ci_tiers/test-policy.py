@@ -198,6 +198,38 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         actual_archive, _ = policy.role(changed, 'Build full suite archive', source)
         self.assertGreater(actual_disable, actual_archive)
 
+    def test_preflight_default_check_runs_only_without_the_archive_build(self):
+        jobs = self.ci()['jobs']
+        preflight = jobs['fast-validation-preflight']
+        archive = jobs['fast-validation-suite-build']
+        check = next(s for s in preflight['steps'] if s.get('run') == 'cargo check -p cas')
+        build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
+        self.assertNotIn('--no-default-features', shlex.split(build['run']))
+        portable = next(s for s in preflight['steps'] if s.get('run') == 'cargo build -p cas --no-default-features')
+        consumer = next(s for s in preflight['steps'] if 'export CAS_TEST_BINARY=' in s.get('run', ''))
+        context = {'github.event_name': 'merge_group',
+                   'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
+                   'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                   'steps.classify-diff.outputs.rust-unaffected': 'false'}
+        for reuse, unaffected, expected_check, expected_archive, expected_portable in [
+            ('', 'false', False, True, True),
+            ('full-gate', 'false', True, False, True),
+            ('', 'true', False, False, False),
+        ]:
+            with self.subTest(reuse=reuse, unaffected=unaffected):
+                case = {**context,
+                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        'steps.classify-diff.outputs.rust-unaffected': unaffected}
+                # These functions are GitHub job status, not routing inputs.
+                selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
+                    step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
+                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(archive, build), expected_archive)
+                self.assertEqual(selected(preflight, portable), expected_portable)
+                self.assertEqual(selected(preflight, consumer), expected_portable)
+
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
         factory_cancel = "${{ startsWith(github.ref, 'refs/heads/factory/') }}"
@@ -340,6 +372,102 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         self.assertTrue(self.gh_expr(job['if'], context))
         for step in job['steps']:
             self.assertTrue(self.gh_expr(step.get('if', 'true'), context), step.get('name', step.get('uses')))
+
+    def test_archive_main_cache_priming_preserves_validation_and_trusted_writes(self):
+        jobs = self.ci()['jobs']
+        archive = jobs['fast-validation-suite-build']
+        prime = jobs['fast-validation-suite-cache']
+        setup = lambda job: next(step for step in job['steps']
+            if step.get('uses') == './.github/actions/setup-rust-linux')
+        consumer, producer = setup(archive), setup(prime)
+        action = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        cache = next(step for step in action['runs']['steps']
+                     if step.get('uses') == 'Swatinem/rust-cache@v2')
+        for field in ('cache-key', 'shared-key'):
+            self.assertTrue(consumer['with'][field])
+            self.assertEqual(consumer['with'][field], producer['with'][field])
+        self.assertEqual(producer['with'].get('cache-on-failure'), 'false',
+                         'cancelled or timed-out priming must not freeze a partial exact cache')
+        self.assertEqual(cache['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
+        self.assertEqual(action['inputs']['cache-on-failure']['default'], 'true')
+        self.assertEqual(archive['env'], prime['env'], 'cache lookup must see the actual archive profile')
+        for name in ('CARGO_PROFILE_DEV_DEBUG','CARGO_PROFILE_TEST_DEBUG'):
+            self.assertEqual(archive['env'][name],'0')
+        self.assertTrue(prime['continue-on-error'], 'cache maintenance cannot fail a required validation')
+        build = next(step for step in archive['steps'] if step.get('name') == 'Build full suite archive')
+        seed = next(step for step in prime['steps'] if step.get('name') == 'Prime full suite archive dependencies')
+        self.assertEqual(build['run'], seed['run'])
+        calls = self.root / 'cargo.calls'
+        bin_dir = self.root / 'cache-bin';bin_dir.mkdir()
+        cargo = bin_dir / 'cargo'
+        cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit "${CARGO_STATUS:-0}"\n')
+        cargo.chmod(0o755)
+        cases = [
+            ('push', 'refs/heads/main', 'merge-queue', 'false', True, False, True),
+            ('push', 'refs/heads/main', '', 'true', False, True, True),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', '', 'true', False, True, False),
+            ('workflow_dispatch', 'refs/heads/train', '', 'true', False, True, False),
+            ('schedule', 'refs/heads/main', '', 'true', False, True, False),
+            ('push', 'refs/tags/v1', '', 'true', False, True, False),
+            ('push', 'refs/heads/factory/x', '', 'true', False, False, False),
+        ]
+        for event, ref, reuse, run, primes, validates, writes in cases:
+            for hit in ('true', 'false', '', 'unexpected'):
+                with self.subTest(event=event, ref=ref, hit=hit):
+                    context = {'github.event_name':event, 'github.ref':ref,
+                        'github.repository':'Richards-LLC/cassy',
+                        'github.event.repository.fork':False,
+                        'needs.ci-diff.outputs.class':'rust-touched',
+                        'needs.ci-diff.outputs.rust-unaffected':'false',
+                        'steps.classify-diff.outputs.rust-unaffected':'false',
+                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':run,
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source':reuse,
+                        'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                        'steps.rust-setup.outputs.cache-hit':hit}
+                    self.assertEqual(self.gh_value(action['outputs']['cache-hit']['value'],
+                        {f'steps.{cache["id"]}.outputs.cache-hit':hit}),hit)
+                    self.assertEqual(self.gh_expr(prime['if'],context),primes)
+                    self.assertEqual(self.gh_expr(archive['if'],context),validates)
+                    self.assertTrue(self.gh_expr(build['if'],context), 'queue cache hits still compile current source')
+                    self.assertEqual(self.gh_expr(seed['if'],context),hit != 'true')
+                    for caller in (consumer, producer):
+                        save = self.gh_value(caller['with']['cache-save-if'],context)
+                        inputs = {f'inputs.{name}':info.get('default','') for name,info in action['inputs'].items()}
+                        inputs.update({'inputs.cache-key':caller['with']['cache-key'],
+                                       'inputs.shared-key':caller['with']['shared-key'],
+                                       'inputs.cache-save-if':str(save).lower()})
+                        self.assertEqual(self.gh_expr(cache['with']['save-if'],inputs),writes)
+                        for field in ('key','shared-key'):
+                            source = 'cache-key' if field == 'key' else field
+                            self.assertEqual(self.gh_value(cache['with'][field],inputs),caller['with'][source])
+                        self.assertEqual(self.gh_value(cache['with']['cache-targets'],inputs),'true',
+                                         'read-only consumers must still restore target dependencies')
+                    if primes and self.gh_expr(seed['if'],context):
+                        calls.write_text('')
+                        result = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
+                                                           'CALLS':str(calls)})
+                        self.assertEqual(result.returncode,0,result.stderr)
+                        self.assertEqual(calls.read_text().splitlines(),[
+                            'nextest archive --workspace --archive-file fast-validation-suite.tar.zst'])
+        # Cache maintenance must not sit in the transitive graph of required contexts.
+        def dependencies(name):
+            needs = jobs[name].get('needs', [])
+            if isinstance(needs,str): needs = [needs]
+            return set(needs).union(*(dependencies(parent) for parent in needs))
+        for name in ('fast-validation','macos-check'):
+            self.assertNotIn('fast-validation-suite-cache',dependencies(name))
+        docs = {**context,'github.event_name':'push','github.ref':'refs/heads/main',
+                'needs.fast-validation-main-push-dedupe.outputs.reuse-source':'merge-queue',
+                'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'false',
+                'needs.ci-diff.outputs.class':'docs-only'}
+        self.assertFalse(self.gh_expr(prime['if'],docs))
+        self.assertFalse(self.gh_expr(prime['if'],{**docs,
+            'needs.ci-diff.outputs.class':'rust-touched',
+            'vars.CASSY_MERGE_QUEUE_SELF_HOSTED':'enabled'}))
+        calls.write_text('')
+        failed = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
+                                           'CALLS':str(calls),'CARGO_STATUS':'17'})
+        self.assertEqual(failed.returncode,17, 'a compile failure cannot become a claimed prime')
 
     def test_macos_check_only_warms_missing_main_cache_after_queue_proof(self):
         job = self.ci()['jobs']['macos-check']

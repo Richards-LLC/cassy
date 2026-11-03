@@ -534,9 +534,9 @@ impl SqliteAgentStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             drop(stmt);
 
-            // Mark agent as stale (was: dead)
+            // A late pane-exit event must not reverse recycle's shutdown.
             tx.execute(
-                "UPDATE agents SET status = 'stale' WHERE id = ?",
+                "UPDATE agents SET status = 'stale' WHERE id = ? AND status <> 'shutdown'",
                 params![id],
             )?;
 

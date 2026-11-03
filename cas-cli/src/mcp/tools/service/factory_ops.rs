@@ -20210,6 +20210,9 @@ effort = "high"
         agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
         let spec = worker_spec_from_agent(&agent);
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        // cas-24f3: the Claude account came from the same foreign
+        // registration; Codex has no hooks.json there, so the launch refused.
+        assert_eq!(spec.config_dir, None, "a Codex relaunch must not use a Claude account");
         cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
             .expect("the repaired Codex recipe relaunches");
     }

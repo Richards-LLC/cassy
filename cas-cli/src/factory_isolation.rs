@@ -291,6 +291,14 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> 
     )
 }
 
+/// Render the worktree-binding section of `coordination my_context` for the
+/// directory this session is bound to, resolving HEAD at that directory.
+pub fn render_worker_binding_at(worker_name: &str, is_worker: bool, path: Option<&Path>) -> String {
+    let branch = path.and_then(branch_at);
+    let location = path.map(|path| path.display().to_string());
+    render_worker_binding(worker_name, is_worker, location.as_deref(), branch.as_deref())
+}
+
 /// Render the worktree-binding section of `coordination my_context`.
 ///
 /// `clone_path` is the directory the harness was launched in

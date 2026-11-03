@@ -851,10 +851,6 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap()
         .unwrap_or_else(|| panic!("candidate dispatch missing: {preflight:?}"));
 
-    env.set("CAS_AGENT_ROLE", "worker");
-    call(&f.worker, serde_json::json!({"action": "update", "id": ID, "status": "blocked"})).await;
-    assert_eq!(f.task().status, TaskStatus::Blocked);
-    env.set("CAS_AGENT_ROLE", "supervisor");
     f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
         "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
         "status": "approved", "summary": "gear turns", "confidence": 1.0,
@@ -863,10 +859,16 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
     git(repo, &["push", "-q", "origin", "main"]);
     let merge = git(repo, &["rev-parse", "HEAD"]);
-    tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
+    assert!(tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap());
+    env.set("CAS_AGENT_ROLE", "worker");
+    call(&f.worker, serde_json::json!({"action": "update", "id": ID, "status": "blocked"})).await;
+    assert_eq!(f.task().status, TaskStatus::Blocked);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
     // The same approval does not waive fresh receipt-scope checks at close.
     std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
-    let first = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    // Publication continues the same verdict close, including its hold restoration.
+    let first = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await.receipt(ID);
     // pin: preserve the worker receipt-scope refusal after the review moved before publication.
     assert!(first.contains("narrower than its delivery diff"), "{first}");
     let held = f.task();
@@ -880,7 +882,6 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
 
     // With the worker's receipts back, the recorded verdict closes it.
     record();
-    let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
     let closed = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
     assert!(
         matches!(closed, super::super::merge_close::CassyMergeClose::Closed { .. }),

@@ -12,7 +12,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 ## Personas
 
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.
-- **Supervisor agent** - plans epics, assigns one task at a time to workers, merges pushed deliveries once CI is green, and coordinates with supervisors on other projects or machines.
+- **Supervisor agent** - plans epics, assigns one task at a time to workers, merges pushed deliveries once CI is green and the plan target is met, and coordinates with supervisors on other projects or machines.
 - **Worker agent** - executes one assigned task in its own worktree, runs the targeted tests, and pushes a committed result for review.
 - **QA reviewer** - walks the journeys a delivery touches on the real build and records an approve or reject verdict in a QA ledger.
 

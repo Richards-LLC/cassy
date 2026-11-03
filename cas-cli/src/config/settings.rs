@@ -889,6 +889,13 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 
+    /// Stakeholder P0/P1 reports on one epic that latch a design-review staffing pause.
+    #[serde(default = "default_design_review_bug_threshold")]
+    pub design_review_bug_threshold: u32,
+    /// Rolling report window for the epic design-review trigger.
+    #[serde(default = "default_design_review_window_hours")]
+    pub design_review_window_hours: u32,
+
     /// Seconds to collect directed supervisor messages into one submitted turn.
     #[serde(default = "default_supervisor_message_debounce_secs")]
     pub supervisor_message_debounce_secs: u64,
@@ -1221,6 +1228,9 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
     14
 }
 
+fn default_design_review_bug_threshold() -> u32 { 5 }
+fn default_design_review_window_hours() -> u32 { 48 }
+
 fn default_supervisor_message_debounce_secs() -> u64 { 20 }
 
 fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
@@ -1301,6 +1311,8 @@ impl Default for FactoryConfig {
             artifacts_root: None,
             scratch_root: None,
             commander_mirror_enabled: true,
+            design_review_bug_threshold: default_design_review_bug_threshold(),
+            design_review_window_hours: default_design_review_window_hours(),
             write_roots: Vec::new(),
             supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
             supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),

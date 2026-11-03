@@ -729,6 +729,13 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Operator: resume an epic after reviewing its design against the plan.
+    DesignReviewLift {
+        epic: String,
+        /// Review outcome and why staffing can resume.
+        #[arg(long)]
+        reason: String,
+    },
     /// Inspect or change the operator's project hold
     Hold {
         #[command(subcommand)]
@@ -1244,6 +1251,23 @@ pub enum FactoryGcCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::DesignReviewLift { epic, reason } => {
+                let lifted = cas_root.ok_or_else(|| anyhow::anyhow!("No Cassy project; run cas init first"))
+                    .and_then(|root| crate::epic_design_review::lift(root, epic, reason));
+                if let Err(error) = lifted {
+                    if cli.json {
+                        println!("{}", serde_json::json!({"status": "error", "message": crate::cli::json_error_message(&error)}));
+                        return Err(crate::cli::JsonReportedFailure(error).into());
+                    }
+                    return Err(error);
+                }
+                if cli.json {
+                    println!("{}", serde_json::json!({"epic": epic, "status": "resumed"}));
+                } else {
+                    println!("Epic {epic}: design review pause lifted.\nStaffing can resume.");
+                }
+                Ok(())
+            }
             FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
             FactoryCommands::ShadowReview { request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("shadow review requires a Cassy project"))?;
@@ -2588,6 +2612,26 @@ fn check_factory_launch(
 mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
+
+    #[test]
+    fn design_review_lift_refusal_keeps_the_requested_output_contract() {
+        use clap::Parser;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        for json in [false, true] {
+            let cli = Cli::try_parse_from(if json { vec!["cas", "--json"] } else { vec!["cas"] }).unwrap();
+            let args = FactoryArgs { command: Some(FactoryCommands::DesignReviewLift {
+                epic: "cas-fixture".into(), reason: "fixture QA".into(),
+            }), ..Default::default() };
+            let error = execute(&args, &cli, Some(&root)).unwrap_err();
+            assert!(error.to_string().contains("operator-only"), "{error}");
+            assert_eq!(error.downcast_ref::<crate::cli::JsonReportedFailure>().is_some(), json,
+                "JSON refusals must emit a single document and suppress a second stdout report");
+            assert!(!root.join("operator/epic-design-review-lifts.json").exists());
+        }
+    }
+
 
     #[cfg(unix)]
     #[test]

@@ -1259,7 +1259,10 @@ async fn cas_062b_commander_send_waits_only_for_a_live_pane_draft() {
             settle_injected_writes(&mut daemon).await;
             tokio::task::yield_now().await;
         }
-    }).await.expect("the pane shows the hold");
+    }).await.unwrap_or_else(|_| {
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        panic!("the pane shows the hold: {:?}", queue.message_delivery_report(id).unwrap())
+    });
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_none(),
         "a live draft is never typed over");

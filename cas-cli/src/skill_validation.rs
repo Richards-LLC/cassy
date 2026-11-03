@@ -270,18 +270,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn unusable_bubblewrap_falls_back_only_when_policy_allows() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let bin = tempfile::tempdir().unwrap();
-        crate::test_paths::warm_stub(&bin.path().join("bwrap"), "#!/bin/sh\nexit 1\n");
-        let mut paths = vec![bin.path().to_path_buf()];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        env.set("PATH", std::env::join_paths(paths).unwrap());
+        let bubblewrap = bin.path().join("bwrap");
+        crate::test_paths::warm_stub(&bubblewrap, "#!/bin/sh\nexit 1\n");
 
         let skill = skill_with_script("true");
-        let report = validate_skill_with_policy(&skill, false)
+        let mode = select_validation_mode(false, Some(bubblewrap.clone())).unwrap();
+        let report = validate_skill_with_mode(&skill, mode)
             .expect("installed but unusable bubblewrap must allow the default fallback");
         assert_eq!(report.warning.as_deref(), Some(NETWORK_ISOLATION_WARNING));
-        let error = validate_skill_with_policy(&skill, true)
+        let error = select_validation_mode(true, Some(bubblewrap))
             .expect_err("required sandbox must fail closed before executing validation");
         assert!(error.contains("require_sandbox"), "{error}");
     }

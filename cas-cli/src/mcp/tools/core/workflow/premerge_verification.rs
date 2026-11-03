@@ -360,6 +360,19 @@ impl Approval {
                 && task.deliverables.factory_branch_anchor.as_deref()
                     == Some(self.candidate.source_sha.as_str())
             {
+                // A local promotion can precede a rejected push. Until fresh
+                // containment proves publication, it must still match today's
+                // plan/evidence and source before another push is authorized.
+                if context_digest(root, task)? != self.candidate.context_digest
+                    || git(
+                        &self.candidate.repository,
+                        &["rev-parse", &self.candidate.source_branch],
+                    )? != self.candidate.source_sha
+                {
+                    return Err(
+                        "unpublished promotion changed; review the current candidate".into(),
+                    );
+                }
                 return repository_proof::verify_repository_proof(&self.candidate.proof)
                     .map_err(|error| error.to_string());
             }
@@ -554,7 +567,16 @@ impl CasCore {
                     verdict_id: verdict.id.clone(),
                 };
                 if approval.reconcile_promotion().map_err(fail)? {
-                    return Ok(Some(approval));
+                    let published = approval.promotion().map_err(fail)?.is_some_and(|record| {
+                        task.deliverables.green_merge_commit.as_deref()
+                            == Some(record.landed_sha.as_str())
+                    });
+                    // Only the existing published-merge fact freezes the
+                    // original review context. A local merge whose push failed
+                    // must obtain a fresh review after material context drift.
+                    if published || candidate.context_digest == digest {
+                        return Ok(Some(approval));
+                    }
                 }
             }
             if candidate.context_digest == digest

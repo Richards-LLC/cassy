@@ -448,6 +448,56 @@ fn test_rule_history_and_tombstone_delete() {
 }
 
 #[test]
+fn test_rule_legacy_history_preserves_live_state_before_update() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let rule = Rule::new("rule-legacy-history".into(), "original wording".into());
+    store.add(&rule).unwrap();
+
+    // Before cas-c487, an update saved the pre-update snapshot again, leaving
+    // the post-update live wording absent from every version.
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute(
+        "INSERT INTO rule_versions
+         (rule_id, version, snapshot_json, content, status, changed_by, changed_at, change_note, operation)
+         SELECT rule_id, 2, snapshot_json, content, status, changed_by, changed_at, 'legacy edit', 'update'
+         FROM rule_versions WHERE rule_id = ?1 AND version = 1",
+        [&rule.id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE rules SET content = 'pre-upgrade live wording' WHERE id = ?1",
+        [&rule.id],
+    )
+    .unwrap();
+    let legacy = store.list_versions(&rule.id).unwrap();
+    let before = store.get(&rule.id).unwrap();
+
+    let mut updated = before.clone();
+    updated.content = "new wording".into();
+    store
+        .update_with_metadata(&updated, Some("reviewer"), Some("new edit"))
+        .unwrap();
+
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions[0].content, "new wording");
+    assert_eq!(versions[1].operation, "baseline");
+    assert_eq!(versions[1].change_note, "pre-upgrade live state");
+    let baseline: Rule = serde_json::from_str(&versions[1].snapshot_json).unwrap();
+    assert_eq!(baseline.content, before.content);
+    assert_eq!(baseline.status, before.status);
+    assert_eq!(versions.len(), 4);
+    for (preserved, original) in versions[2..].iter().zip(&legacy) {
+        assert_eq!(preserved.version, original.version);
+        assert_eq!(preserved.snapshot_json, original.snapshot_json);
+        assert_eq!(preserved.change_note, original.change_note);
+    }
+    store.restore_version(&rule.id, None, None, None).unwrap();
+    assert_eq!(store.get(&rule.id).unwrap().content, before.content);
+}
+
+#[test]
 fn test_rule_delete_then_restore_latest_lifecycle_state() {
     let temp = TempDir::new().unwrap();
     let store = SqliteRuleStore::open(temp.path()).unwrap();

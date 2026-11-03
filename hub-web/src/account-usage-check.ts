@@ -8,6 +8,13 @@ export interface CheckedAccountUsage {
 export type CheckAccountUsage = (machine: string, account: string, signal: AbortSignal) => Promise<CheckedAccountUsage>;
 type CheckState = { pending?: boolean; result?: CheckedAccountUsage; error?: string };
 
+function usageFailure(error: unknown): string {
+  if (typeof error === "object" && error !== null && "status" in error && error.status === 429) return "Usage check is rate-limited. Try again shortly.";
+  if (!(error instanceof Error)) return "Could not check usage. Try again.";
+  const detail = (error as { detail?: unknown }).detail;
+  return typeof detail === "string" ? detail : error.message;
+}
+
 /** One owner for explicit checks in either sheet; never changes account selection. */
 export class AccountUsageChecks {
   private states = new Map<string, CheckState>();
@@ -51,11 +58,14 @@ export class AccountUsageChecks {
       this.states.set(key, { result }); this.completed();
     } catch (error) {
       if (signal.aborted) return;
-      this.states.set(key, { result: old?.result, error: error instanceof Error ? (typeof (error as { detail?: unknown }).detail === "string" ? (error as Error & { detail: string }).detail : error.message) : "Could not check usage. Try again." });
+      this.states.set(key, { result: old?.result, error: usageFailure(error) });
     }
     this.paint(machine, account);
     for (const holder of this.root()?.querySelectorAll<HTMLElement>("[data-usage-machine]") ?? []) {
-      if (holder.dataset.usageMachine === machine && holder.dataset.usageAccount === account) holder.querySelector<HTMLButtonElement>("button")?.focus();
+      if (holder.dataset.usageMachine === machine && holder.dataset.usageAccount === account) {
+        holder.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+        holder.querySelector<HTMLElement>(".account-usage-result")?.scrollIntoView?.({ block: "center", behavior: "instant" });
+      }
     }
   }
 }

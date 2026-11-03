@@ -157,7 +157,7 @@ async fn account_usage_check_rereads_native_limits_without_switching_or_a_model_
     }
     let (status, _) = fixture.call("GET", "/v1/accounts/usage?account=claude%3A..%2Fsecret", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let denied = ops_fixture(Default::default());
+    let denied = ops_fixture([Scope::SessionRead].into());
     assert_eq!(denied.call("GET", "/v1/accounts/usage?account=claude%3Aspare", None).await.0, StatusCode::FORBIDDEN);
     assert!(!home.join(".cas/config.toml").exists(), "checking never changes the default account");
 }

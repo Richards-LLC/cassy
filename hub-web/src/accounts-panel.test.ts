@@ -158,7 +158,7 @@ it.each(["claude", "codex"] as const)("rechecks %s usage without management or s
   expect(document.body.textContent).toContain("weekly 44% used");
   expect(document.body.textContent).toContain("Snapshot is stale");
   expect(host.change).not.toHaveBeenCalled(); expect(host.changed).not.toHaveBeenCalled();
-  check.mockRejectedValueOnce(new Error("Lookup rate limited; try again.")); button().click();
-  await vi.waitFor(() => expect(document.body.textContent).toContain("Lookup rate limited; try again."));
+  check.mockRejectedValueOnce(Object.assign(new Error("GET usage failed (429)"), { status: 429 })); button().click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Usage check is rate-limited. Try again shortly."));
   expect(button().disabled).toBe(false);
 });

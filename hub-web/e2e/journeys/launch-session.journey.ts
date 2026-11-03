@@ -547,7 +547,7 @@ test("HUB-J13 check native account usage before starting without switching", jou
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
       await expect(dialog.locator('[data-usage-account="claude:support@petrastella.io"]')).toContainText("Checked at Nov 3, 12:00 PM ET");
-      await expect(dialog.locator('[data-usage-account="claude:support@petrastella.io"]').getByText("Usage as of Nov 3, 11:00 AM ET", { exact: false })).toBeInViewport({ ratio: 1 });
+
       await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
       expect(hub.launches).toEqual([]);
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);

@@ -1058,6 +1058,8 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let bare = git(repo, &["config", "--get", "remote.origin.url"]);
     git(repo, &["config", &format!("url.{bare}.insteadOf"), "https://github.com/acme/cas.git"]);
     git(repo, &["config", "remote.origin.url", "https://github.com/acme/cas.git"]);
+    git(repo, &["config", "user.name", "CAS Test"]);
+    git(repo, &["config", "user.email", "cas@example.test"]);
     tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
     let now = chrono::Utc::now();
     tasks.append_trusted_note(
@@ -1108,7 +1110,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 
     let reverted = cassy.close_green_merged_delivery(ID).await.receipt(ID);
-    assert!(reverted.contains("FAST LANE REVERT") && reverted.contains("unknown or unreadable"), "{reverted}");
+    assert!(reverted.contains("Revert PR: https://github.com/acme/cas/pull/9") && reverted.contains("unknown or unreadable"), "{reverted}");
     let returned = f.task();
     assert_eq!(returned.status, TaskStatus::Open, "the hotfix returns to its worker: {reverted}");
     assert!(returned.notes.contains("FAST_LANE_PROOF: revert merge="), "{}", returned.notes);

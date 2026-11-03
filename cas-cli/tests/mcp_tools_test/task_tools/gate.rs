@@ -1504,6 +1504,7 @@ async fn model_eval_close_requires_passing_receipt() {
         let refused = unified_task(&service, serde_json::json!({"action":"close","id":"cas-model-eval"})).await;
         assert!(refused.contains("MODEL EVAL UNMET") && refused.contains("95") && refused.contains(&measured.to_string()), "{refused}");
         assert_eq!(store.get("cas-model-eval").unwrap().status, TaskStatus::InProgress);
+        assert!(store.get("cas-model-eval").unwrap().notes.contains("MODEL_EVAL_MISS"));
     }
     unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval","note_type":"model_eval_receipt",
         "notes":serde_json::json!({"dataset":"reader-44","model":"provider/model","run_log":run_log,

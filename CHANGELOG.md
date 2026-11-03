@@ -58,6 +58,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Sequential phase work stays free** — A dependency between a phase's children no longer holds those children against their own phase's unmet outcome. External prerequisite phases keep their measured gates.
 
+### Added — Model evaluation proof
+
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts name the model, measured values and a bound run log; misses remain open and close explains the failed bar.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

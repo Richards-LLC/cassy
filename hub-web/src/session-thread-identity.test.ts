@@ -192,7 +192,21 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(rows.map((item) => item.group?.active ?? null)).toEqual([true, false, false, null]);
     expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 conversations on Atlas" });
     expect(conversationRowMarkup(rows[0]!)).toContain('<span class="conversation-session-mark">Most recent</span>');
-    expect(conversationRowMarkup(rows[1]!)).not.toContain("Most recent");
+    const inactive = new DOMParser().parseFromString(conversationRowMarkup(rows[1]!), "text/html");
+    expect(inactive.querySelector('.conversation-session-slot[aria-hidden="true"]')?.textContent).toBe("Most recent");
+  });
+
+  it("keeps Most recent steady during alternating output in one activity minute (cas-6faf)", () => {
+    const minute = 120_000;
+    const active = (a: number, b: number) => groupConversationRows([
+      row("calm-puma-34", a), row("wild-shark-68", b),
+    ]).find(item => item.group?.active)?.session;
+    expect(active(minute + 2_000, minute + 1_000)).toBe("calm-puma-34");
+    expect(active(minute + 2_000, minute + 3_000)).toBe("calm-puma-34");
+    expect(active(minute + 4_000, minute + 3_000)).toBe("calm-puma-34");
+    expect(active(minute + 4_000, minute + 5_000)).toBe("calm-puma-34");
+    // Activity in a later minute can move the marker; the old leader is never stuck.
+    expect(active(minute + 4_000, minute + 61_000)).toBe("wild-shark-68");
   });
 
   it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {

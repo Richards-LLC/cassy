@@ -11,6 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
 
+### Fixed — Commander
+
+- **Steady Most recent session marker** — Each sibling conversation reserves
+  the badge's space, so moving it never shifts a row. Activity in the same
+  minute shares a stable ranking instead of flashing on every output frame.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

@@ -16,6 +16,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   interpreter argument lists; real configuration changes and grant commands
   stay refused.
 
+### Fixed — Worker isolation check
+
+- **Accept a detached QA worktree** — Was: `coordination my_context` called an
+  independent QA worker's own linked worktree, detached at its bound commit, a
+  shared trunk and asked for a respawn. → Now: a detached HEAD in a dedicated
+  linked worktree reports an OK binding; the shared checkout, detached or on
+  trunk, and plain directories inside it still raise the misbinding alarm.
+
 ### Security — Hosted Commander
 
 - **Content-Security-Policy on hub.petrastella.io** — Hosted Commander now

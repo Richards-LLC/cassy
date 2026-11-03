@@ -6726,17 +6726,10 @@ impl CasService {
             .ok()
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
-        let branch = bound_path
-            .as_deref()
-            .and_then(crate::factory_isolation::branch_at);
-        output.push_str(&crate::factory_isolation::render_worker_binding(
+        output.push_str(&crate::factory_isolation::render_worker_binding_at(
             &agent.name,
             agent.role == AgentRole::Worker,
-            bound_path
-                .as_deref()
-                .map(|path| path.display().to_string())
-                .as_deref(),
-            branch.as_deref(),
+            bound_path.as_deref(),
         ));
 
         // Current task(s)

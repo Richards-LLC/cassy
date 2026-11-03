@@ -490,6 +490,29 @@ fn hostname() -> String {
     Agent::get_or_generate_machine_id()
 }
 
+/// Two independently created cards still share the stakeholder source claim.
+#[tokio::test]
+async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let beta = machine(&cloud.url, PROJECT, "beta-sup");
+    cloud.live(&alpha, "alpha-sup");
+    cloud.live(&beta, "beta-sup");
+    let create = |title: &str, source: &str| -> TaskCreateRequest {
+        serde_json::from_value(serde_json::json!({
+            "title":title,"description":"Trace the observed failure and fix it.",
+            "task_type":"task","priority":2,"external_ref":source,
+        })).unwrap()
+    };
+    alpha.core.cas_task_create(Parameters(create("Repair callback dispatch", "https://github.com/Acme/Widget/issues/42"))).await.unwrap();
+    let response = beta.core.cas_task_create(Parameters(create("Correct stale scheduler routing", "https://github.com/acme/widget/pull/42/files?view=all#discussion"))).await
+        .map(extract_text).unwrap_or_else(|error| error.message.to_string());
+    assert!(response.contains("alpha-sup"), "different task IDs must retain the ask's existing owner: {response}");
+    assert!(response.contains("42"), "the source must remain identifiable: {response}");
+}
+
 /// Acceptance: B's start of a task A holds is refused with A's identity; once
 /// A releases it, B starts it. The claim key is scoped to the repository.
 #[tokio::test]

@@ -5495,6 +5495,35 @@ mod related_recall_response_tests {
         }
     }
 
+    #[tokio::test]
+    async fn stakeholder_source_create_names_the_slack_claim_owner_cas_12c1() {
+        use crate::coordination::external_work::{CONTRACT_SCHEMA, SqliteRequestJournal};
+        let _env = TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let beta = Agent::new_with_role("reg-supervisor-beta-07".into(), "beta".into(), AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&beta).unwrap();
+        core.set_agent_id_for_testing(beta.id.clone());
+        crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy").unwrap();
+        let source = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        let contract: serde_json::Value = serde_json::from_str(include_str!("../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
+        let mut held = contract["cases"].as_array().unwrap().iter().find(|case| case["name"] == "held by a peer").unwrap()["response"]["payload"].clone();
+        held["receipt"]["expires_at"] = serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
+        let journal = SqliteRequestJournal::open(temp.path()).unwrap();
+        let request = "00000002-2222-4222-8222-000000000002";
+        journal.prepare(request, "claim", &serde_json::json!({
+            "schema":CONTRACT_SCHEMA,"project_id":"github.com/richards-llc/cassy",
+            "external_ref":source,"actor":{"registration_id":beta.id},
+        })).unwrap();
+        journal.record_result(request, &held, None).unwrap();
+        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
+        req.external_ref = Some(source.into());
+        let response = core.cas_task_create(Parameters(req)).await
+            .map(text).unwrap_or_else(|error| error.message.to_string());
+        assert!(response.contains("alpha (laptop)"), "a second supervisor must see the real ask owner: {response}");
+        assert!(response.contains(source), "the ownership response must identify the ask: {response}");
+    }
+
     /// cas-dd56 item 1: a task whose title names its issue records it as
     /// external_ref; prose mentions only produce a hint.
     #[tokio::test]

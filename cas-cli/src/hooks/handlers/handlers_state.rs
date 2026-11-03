@@ -1166,6 +1166,8 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        // Ordinary handoff mail was already delivered during the held startup.
+        let context = format!("{held}\n{context}");
         for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable", "cas-override"] {
             assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");

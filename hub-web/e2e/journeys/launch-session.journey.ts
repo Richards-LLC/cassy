@@ -302,6 +302,9 @@ test("HUB-J13 New session says a reconnecting machine is reconnecting, then load
   await journey.stage("The machine drops while I am about to start a session", async () => {
     await journey.open();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    // The shell control appears before the first catalog. Start this outage
+    // only once the conversation it must retain is actually present.
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible({ timeout: 20_000 });
     await hub.down("atlas", { sockets: "close" });
     await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Last known", { timeout: 20_000 });
   });

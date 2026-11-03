@@ -365,6 +365,7 @@ async fn rule_drift_reports_generated_and_peer_status_without_mutating_policy() 
     for finding in ["rule-177", "generated", "rule-183", "rule-192", "proven", "retired", "cloud", "soundwave"] {
         assert!(report.contains(finding), "missing {finding}: {report}");
     }
+    // pin: A report-only check must preserve the stale generated file byte for byte.
     assert_eq!(std::fs::read_to_string(&generated).unwrap(), "Stale broad gate");
     assert!(rules.list().unwrap().iter().all(|r| r.status == RuleStatus::Proven));
     assert!(result.structured_content.is_some(), "the local snapshot must be exportable for a peer check");

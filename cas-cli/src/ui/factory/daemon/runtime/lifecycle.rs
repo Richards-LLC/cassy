@@ -3081,14 +3081,18 @@ mod worker_attention_tests {
 
     #[test]
     fn cas_160f_unregistered_or_sessionless_worker_cannot_wake_ambient_supervisor() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "local-watcher")]);
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "local-watcher")]);
         for sessionless in [false, true] {
             let temp = tempfile::TempDir::new().unwrap();
             let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
             register_supervisor(&cas_dir, "local-watcher");
             if sessionless {
+                env.remove("CAS_FACTORY_SESSION");
                 let worker = Agent::new_with_role("worker-id".into(), "foreign-worker".into(), AgentRole::Worker);
-                crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+                let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+                agents.register(&worker).unwrap();
+                assert!(agents.get("worker-id").unwrap().factory_session.is_none());
+                env.set("CAS_FACTORY_SESSION", "local-watcher");
             }
             let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
             tasks.add(&cas_types::Task::new("cas-foreign".into(), "Synced delivery".into())).unwrap();

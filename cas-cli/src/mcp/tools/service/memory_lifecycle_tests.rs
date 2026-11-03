@@ -549,6 +549,14 @@ async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date(
         .unwrap();
     assert_eq!(updated.stakeholder.as_ref().unwrap().quote, changed_quote);
     assert_eq!(updated.stakeholder.as_ref().unwrap().scope, scope);
+    let cleared = service.rule(Parameters(serde_json::from_value(json!({
+        "action": "update", "id": rule.id, "stakeholder": "", "change_note": "Explicitly clear attribution"
+    })).unwrap())).await.expect("explicit empty stakeholder must clear attribution");
+    assert_ne!(cleared.is_error, Some(true));
+    let store = service.inner.open_rule_store().unwrap();
+    assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
+    let latest: cas_types::Rule = serde_json::from_str(&store.list_versions(&rule.id).unwrap()[0].snapshot_json).unwrap();
+    assert!(latest.stakeholder.is_none(), "clear and resulting history must commit together");
 }
 
 #[tokio::test]

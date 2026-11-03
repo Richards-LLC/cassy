@@ -802,3 +802,26 @@ fn test_signals_outcome_summary() {
     assert_eq!(abandoned.1, 1); // count
     assert!((abandoned.2 - 33.33).abs() < 0.1); // ~33.33%
 }
+
+#[test]
+fn rule_update_without_stakeholder_preserves_recorded_provenance() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let mut rule = Rule::new("rule-provenance-preservation".into(), "Review prompts via PR".into());
+    rule.stakeholder = Some(cas_types::StakeholderAttribution {
+        name: "Ben".into(), quote: "  Review prompts via PR.  ".into(), scope: "Prompt review only".into(),
+    });
+    store.add(&rule).unwrap();
+    let mut old_wire = serde_json::to_value(&rule).unwrap();
+    old_wire.as_object_mut().unwrap().remove("stakeholder");
+    let mut legacy_update: Rule = serde_json::from_value(old_wire).unwrap();
+    legacy_update.content = "Updated instruction with original source evidence".into();
+    store.update(&legacy_update).unwrap();
+    assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+    legacy_update.helpful_count += 1;
+    store.update_with_metadata(&legacy_update, Some("older-client"), Some("feedback update")).unwrap();
+    assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+    let latest: Rule = serde_json::from_str(&store.list_versions(&rule.id).unwrap()[0].snapshot_json).unwrap();
+    assert_eq!(latest.stakeholder, rule.stakeholder, "history must match preserved live evidence");
+}

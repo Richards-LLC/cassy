@@ -2605,7 +2605,7 @@ impl CasService {
         provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         self.factory_spawn_workers_in_with_name_source(ctx, req, provisioner_build,
-            || crate::orchestration::names::generate_unique(1).remove(0)).await
+            &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
     }
 
     async fn factory_spawn_workers_in_with_name_source(
@@ -2613,7 +2613,7 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
         provisioner_build: Option<&str>,
-        mut next_name: impl FnMut() -> String + Send,
+        next_name: &mut (dyn FnMut() -> String + Send),
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
@@ -3096,7 +3096,7 @@ impl CasService {
             let requested = if worker_names.is_empty() {
                 specs.iter().map(|spec| spec.name.clone()).collect()
             } else { worker_names.iter().cloned().map(Some).collect() };
-            worker_names = spawn_names::allocate(self.inner.cas_root.clone(), req.task_id.clone(), requested, &mut next_name)
+            worker_names = spawn_names::allocate(self.inner.cas_root.clone(), req.task_id.clone(), requested, next_name)
                 .await.map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         }
 
@@ -13315,7 +13315,7 @@ mod spawn_lifecycle_tests {
         let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
         let mut candidates = [local, remote, fresh].into_iter();
         service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
-            || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
+            &mut || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
         let queue = crate::store::open_spawn_queue_store(&root).unwrap();
         let queued = queue.peek(10).unwrap();
         let selected = &queued[0].worker_names[0];
@@ -13326,7 +13326,7 @@ mod spawn_lifecycle_tests {
             .expect("the queued generated identity must provision on a fresh branch");
         assert_eq!(selected, fresh);
         let explicit = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some(local)), None,
-            || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
+            &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
         assert!(explicit.message.contains(&format!("factory/{local}")), "{explicit}");
         assert_eq!(queue.peek(10).unwrap().len(), 1, "explicit refusal creates no second queue row");
     }

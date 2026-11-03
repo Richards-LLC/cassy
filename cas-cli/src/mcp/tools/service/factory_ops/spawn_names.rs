@@ -71,7 +71,7 @@ pub(super) async fn allocate(
     root: PathBuf,
     task_id: Option<String>,
     requested: Vec<Option<String>>,
-    next_name: &mut (impl FnMut() -> String + Send),
+    next_name: &mut (dyn FnMut() -> String + Send),
 ) -> Result<Vec<String>, String> {
     let mut reserved = tokio::task::spawn_blocking(move || reserved(&root, task_id.as_deref()))
         .await

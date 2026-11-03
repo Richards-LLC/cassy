@@ -294,6 +294,7 @@ impl CasService {
             });
         }
         let finding_epic = finding_origin.as_ref().and(req.epic.clone());
+        if target_project.is_none() && req.execution_note.as_deref() != Some("no-code") { self.refresh_task_source(req.external_ref.as_deref()).await?; }
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -475,6 +476,7 @@ impl CasService {
             if req.id.as_ref().is_some_and(|id| ids.first() != Some(id)) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, "id must match the first task_ids entry; omit id to clear the queue"));
             }
+            self.refresh_task_sources(ids).await?;
             return self.inner.configure_worker_task_queue(worker, Some(ids.clone()), req.expected_generation)
                 .await.map(Self::success);
         }
@@ -488,6 +490,18 @@ impl CasService {
         let target_repo = req.target_repo.clone();
         let target_branch = req.target_branch.clone();
         let state_patch = req.state_patch.clone();
+        let no_code_source = req.execution_note.as_deref() == Some("no-code")
+            || req.execution_note.is_none() && req.id.as_ref().and_then(|id| self.inner.open_task_store().ok()?.get(id).ok())
+                .is_some_and(|task| task.execution_note.as_deref() == Some("no-code"));
+        if !no_code_source && (req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty()) || req.external_ref.is_some()) {
+            if let Some(source) = req.external_ref.as_deref()
+                && req.id.as_deref().is_none_or(|id| crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_none())
+            {
+                self.refresh_task_source(Some(source)).await?;
+            } else if let Some(id) = req.id.as_ref() {
+                self.refresh_task_sources(std::slice::from_ref(id)).await?;
+            }
+        }
         let inner_req = TaskUpdateRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "update"))?,
             title: req.title,
@@ -529,6 +543,7 @@ impl CasService {
 
     pub(super) async fn task_start(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskStartRequest;
+        if let Some(id) = req.id.as_ref() { self.refresh_task_sources(std::slice::from_ref(id)).await?; }
         let inner_req = TaskStartRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "start"))?,
             brief: req.brief.or(req.full.map(|full| !full)),
@@ -773,6 +788,7 @@ impl CasService {
 
     pub(super) async fn task_claim(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskClaimRequest;
+        if let Some(id) = req.id.as_ref() { self.refresh_task_sources(std::slice::from_ref(id)).await?; }
         let inner_req = TaskClaimRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "claim"))?,
             duration_secs: req.duration_secs.unwrap_or(600),
@@ -801,6 +817,7 @@ impl CasService {
 
     pub(super) async fn task_transfer(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskTransferRequest;
+        if let Some(id) = req.id.as_ref() { self.refresh_task_sources(std::slice::from_ref(id)).await?; }
         let inner_req = TaskTransferRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "transfer"))?,
             to_agent: req.to_agent.ok_or_else(|| {

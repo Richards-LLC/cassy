@@ -17,6 +17,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
 
+### Fixed — Shared stakeholder asks
+
+- **Name the supervisor who owns an ask** — MCP task creation and staffing check
+  the source before changing local work. Slack threads reuse existing claims;
+  GitHub issue and pull-request aliases share an advisory source claim across
+  independent task cards. Conflicts name the owner, task and source. A deliberate
+  second GitHub task needs a recorded supervisor reason; source claims release
+  when the work ends, even while that supervisor stays online.
+
 ### Fixed — Verification
 
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could

@@ -169,6 +169,9 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         terminal_qa_related = test == TERMINAL_QA_TEST and any(
             path.startswith("scripts/terminal-qa") or path == TERMINAL_QA_BUILTIN for path in changed
         )
+        boundary_related = test == "scripts/test-model-boundary.py" and (
+            "cas-cli/src/builtins/skills/cas-qa-craft/scripts/model-boundary.py" in changed
+        )
         provisioned_related = test in PROVISIONED_INPUTS and any(
             fnmatchcase(path, pattern) for path in changed
             for pattern in (*PROVISIONED_INPUTS[test], *COHORT_INPUTS))
@@ -176,7 +179,7 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         # outside scripts/ must not select an unrelated suite.
         stem_related = test not in PROVISIONED_INPUTS and any(
             path.startswith("scripts/") and stem(path) in {subject, stem(test)} for path in changed)
-        if test in changed or stem_related or provisioned_related or terminal_qa_related:
+        if test in changed or stem_related or provisioned_related or terminal_qa_related or boundary_related:
             selected.append((test, command))
     return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
 

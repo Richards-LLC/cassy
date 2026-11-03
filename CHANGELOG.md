@@ -42,6 +42,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Run-backed measurements** — Evaluation receipts now require matching machine-readable measurements in the run log. Both proof files stay inside the owning task artifacts directory, and missing prerequisite evidence explains how to re-record it.
 
+### Added — Model-owned plan boundaries
+
+- **Reserve meaning for the model in a plan** — An optional plan boundary now
+  flags added literal collections, regexes and exact-string assertions in
+  reserved areas. The verifier names blocking interpretation code and checks
+  approved exceptions; plans without a boundary keep their current behavior.
+
 ### Fixed — Worker startup guidance
 
 - **Preserve worker scope and startup headroom** — Restored the protected task,

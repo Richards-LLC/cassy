@@ -39,6 +39,16 @@ Record one explicit `PLAN-FIT:` line in the verdict summary:
 - **INCONCLUSIVE**: the referenced plan cannot be read, the assigned slice is ambiguous, or outcome evidence is unavailable. State the missing source or proof and ask the supervisor to resolve it; use `status=supervisor_call` only if no known rejection condition applies. Never approve by assuming plan fit.
 - **NOT APPLICABLE**: no parent epic, referenced plan or applicable plan target exists after checking dependencies and evidence. State that reason; do not invent a plan.
 
+#### Optional model-owned boundary
+
+Read any `model-boundary` JSON block in the approved epic description or referenced plan. Its `model_owned_paths` and `model_owned_concerns` reserve interpretation for the model; `model_boundary_exceptions` name permitted constructs with a plan reason. The format and diff helper are in the installed `cas-qa-craft/references/model-boundary.md`. No declaration means no additional boundary check.
+
+After binding the task's actual delivery base and head in Step 3, run the installed `cas-qa-craft/scripts/model-boundary.py` with `--repo <review checkout> --base <delivery base> --head <bound head> --plan <repository-relative plan>`. The helper reads tracked plan metadata from the base. For an approved epic description or fetched plan artifact, preserve its boundary in the task artifacts and pass that file with `--plan-file <approved source>` instead. Apply every applicable approved boundary; a child delivery cannot weaken its own plan or invent an exception. When already merged, use the recorded delivery base, not HEAD as both sides of the comparison. Missing helper or invalid declared metadata is an error naming the missing input, never a clear result.
+
+The helper names added literal collections, regexes and exact-string assertions. These are diff signals, not an intent classifier: read each site and its surrounding code against the declared concerns. State, validation and permissions can be legitimate deterministic work; a quoted collection alone does not prove a violation. For new code that interprets meaning in a model-owned area, reject unless the approved plan explicitly allows it. Record each offending file:line and construct as a blocking issue, cite the boundary and any reviewed exception, and set `PLAN-FIT: NOT VERIFIED`; passing tests do not waive the boundary. A justified false positive must name the deterministic purpose and plan evidence, not silently disappear.
+
+Include `MODEL-BOUNDARY: VERIFIED|NOT VERIFIED|INCONCLUSIVE|NOT APPLICABLE` and the site/plan mapping in the verdict. Exit 1 means blocking candidates require judgment; exit 2 means the check could not run. Exit 0 does not replace reading the diff: the deliberately small syntax heuristic can miss aliases, dynamically built lists and unsupported languages. Never infer meaning from a vocabulary, tune the heuristic to expected replies, or approve solely because it found nothing.
+
 ### Step 3: Find the delivery
 
 For every cited `art-` id used as proof, run `artifact action=fetch task_id=<task-id> id=<art-id>`, then read the downloaded copy at the returned path. A citation alone does not prove its contents.

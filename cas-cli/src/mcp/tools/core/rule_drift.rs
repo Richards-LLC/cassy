@@ -33,7 +33,9 @@ impl CasCore {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let invalid = |message| Self::error(ErrorCode::INVALID_PARAMS, message);
         let failure = |error: String| Self::error(ErrorCode::INTERNAL_ERROR, error);
-        let config = self.load_config();
+        // A drift report reads current source settings, rather than the server's cached view.
+        let config = crate::config::Config::load(&self.cas_root)
+            .map_err(|e| failure(format!("Cannot read policy configuration: {e}")))?;
         let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
         let target = project_root.join(&config.sync.target);
         let syncer = Syncer::new(target.clone(), config.sync.min_helpful);

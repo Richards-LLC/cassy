@@ -449,6 +449,18 @@ async fn rule_drift_reports_generated_and_peer_status_without_mutating_policy() 
         rejected.is_err(),
         "a different project's policy must not be compared as a peer"
     );
+    std::fs::write(dir.path().join(".cas/config.toml"), "[project]\ncanonical_id='policy-fixture'\n[cloud]\nauto_sync=true\npull_on_start=true\ninterval_secs=60\n").unwrap();
+    let fresh = service
+        .rule(Parameters(
+            serde_json::from_value(json!({"action": "drift"})).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh.structured_content.unwrap()["snapshot"]["cloud"]["auto_sync"],
+        true,
+        "the check must read current source config even when the MCP server cached older settings"
+    );
 }
 
 #[tokio::test]

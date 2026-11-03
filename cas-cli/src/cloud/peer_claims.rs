@@ -64,6 +64,37 @@ pub const META_FOCUS_CLAIM: &str = "cloud_focus_epic";
 /// Source claims acquired while creating or staffing stakeholder asks.
 pub const META_SOURCE_CLAIMS: &str = "cloud_source_claims";
 
+/// GitHub issues and PRs share one numeric namespace, including their subpages.
+/// Other external refs (including no-code proof artifacts) are not ask claims.
+pub(crate) fn github_source_key(source: &str) -> Option<String> {
+    let url = url::Url::parse(source.trim()).ok()?;
+    if url.scheme() != "https" || url.host_str()? != "github.com" || !url.username().is_empty() {
+        return None;
+    }
+    let parts = url.path_segments()?.collect::<Vec<_>>();
+    if parts.len() < 4 || !matches!(parts[2], "issues" | "pull") {
+        return None;
+    }
+    let number = parts[3].parse::<u64>().ok().filter(|number| *number > 0)?;
+    if parts[0].is_empty() || parts[1].is_empty() {
+        return None;
+    }
+    let identity = format!(
+        "github.com/{}/{}/{number}",
+        parts[0].to_ascii_lowercase(),
+        parts[1].to_ascii_lowercase()
+    );
+    let digest = Sha256::digest(identity.as_bytes());
+    Some(format!(
+        "ask-{}",
+        digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 /// Serialize concurrent source additions using the existing local claim fence.
 pub(crate) fn remember_source_claim(root: &Path, agent_id: &str, key: &str) -> Result<(), String> {
     let _fence = lock_task_claim_release(root, &format!("source-owner-{agent_id}")).map_err(|error| error.to_string())?;
@@ -77,6 +108,25 @@ pub(crate) fn remember_source_claim(root: &Path, agent_id: &str, key: &str) -> R
         agents.update(&agent).map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn forget_source_claim(root: &Path, agent_id: &str, key: &str) -> Result<(), String> {
+    let _fence = lock_task_claim_release(root, &format!("source-owner-{agent_id}")).map_err(|error| error.to_string())?;
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?;
+    let mut agent = agents.get(agent_id).map_err(|error| error.to_string())?;
+    let mut keys: Vec<String> = agent.metadata.get(META_SOURCE_CLAIMS)
+        .and_then(|value| serde_json::from_str(value).ok()).unwrap_or_default();
+    keys.retain(|known| known != key);
+    agent.metadata.insert(META_SOURCE_CLAIMS.into(), serde_json::to_string(&keys).map_err(|error| error.to_string())?);
+    agents.update(&agent).map_err(|error| error.to_string())
+}
+
+/// An unreadable local task store cannot authorize release of a source claim.
+fn active_source_task(root: &Path, key: &str) -> Result<Option<crate::types::Task>, String> {
+    let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    Ok(tasks.list(None).map_err(|error| error.to_string())?.into_iter().find(|task| {
+        !task.is_terminal() && task.external_ref.as_deref().and_then(github_source_key).as_deref() == Some(key)
+    }))
 }
 
 /// One request's bounded allowance of cloud round trips (cas-0078). Each
@@ -1108,6 +1158,23 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     crate::cloud::file_leases::release_pending(&claims, cas_root);
     release_pending_task_claims(&claims, cas_root);
     for (task_id, lease_backed) in targets {
+        // Acquisition, local task publication, renewal and terminal release
+        // share the existing per-claim fence. Never revive a closed ask from a
+        // heartbeat snapshot taken before its close committed.
+        let mut source_task = None;
+        let _source_fence = if task_id.starts_with("ask-") {
+            let Ok(fence) = lock_task_claim_release(cas_root, &task_id) else { report.failed += 1; continue; };
+            match active_source_task(cas_root, &task_id) {
+                Ok(Some(task)) => source_task = Some(task),
+                Ok(None) => {
+                    if claims.release_own(&task_id, agent_id).is_ok() { let _ = forget_source_claim(cas_root, agent_id, &task_id); }
+                    else { report.failed += 1; }
+                    continue;
+                }
+                Err(_) => { report.failed += 1; continue; }
+            }
+            Some(fence)
+        } else { None };
         match claims.renew(&task_id, agent_id, duration) {
             Ok(()) => {
                 report.renewed += 1;
@@ -1118,7 +1185,8 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             }
         }
         let kind = kind_of(&task_id);
-        let mut answer = claims.acquire(&task_id, kind, agent_id, &name, duration, &is_local);
+        let holder_name = source_task.as_ref().map(|task| format!("{name} (task {})", task.id)).unwrap_or_else(|| name.clone());
+        let mut answer = claims.acquire(&task_id, kind, agent_id, &holder_name, duration, &is_local);
         // This agent's local lease already won, so the claim belongs here.
         if lease_backed && let Acquire::LocalHolder(from) = &answer {
             answer = claims.take_from_local(&task_id, kind, from, agent_id, &name, duration);
@@ -1318,7 +1386,7 @@ pub(crate) struct TaskClaimFence {
     _file: std::fs::File,
 }
 
-fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<TaskClaimFence> {
+pub(crate) fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<TaskClaimFence> {
     lock_task_claim_release_with(cas_root, task_id, |_| {})
 }
 
@@ -1416,7 +1484,12 @@ pub(crate) fn release_task_claim_in_background_with(
 ) -> Option<std::thread::JoinHandle<()>> {
     let claims = claims?;
     let now = Utc::now().timestamp();
-    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now))?;
+    let source = crate::store::open_task_store(cas_root).ok().and_then(|tasks| tasks.get(task_id).ok())
+        .and_then(|task| task.external_ref.as_deref().and_then(github_source_key));
+    update_pending_claim_releases(cas_root, |pending| {
+        if let Some(source) = source { pending.insert(source, now); }
+        pending.insert(task_id.to_string(), now)
+    })?;
     let cas_root = cas_root.to_path_buf();
     std::thread::Builder::new()
         .name("cas-claim-release".into())
@@ -1469,7 +1542,8 @@ fn release_pending_task_claims_with(
             continue;
         }
         let restarted = agents.get_lease(&task_id).ok().flatten()
-            .is_some_and(|lease| lease.is_valid());
+            .is_some_and(|lease| lease.is_valid())
+            || task_id.starts_with("ask-") && !matches!(active_source_task(cas_root, &task_id), Ok(None));
         let done = restarted || expired || {
             let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
             match budgeted.release_local(&task_id, &is_local) {

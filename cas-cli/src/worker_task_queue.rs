@@ -151,6 +151,8 @@ impl CasCore {
         let mut queue = queues.get(session, &worker.name).map_err(error)?;
         let changed = task_ids.is_some();
         let mut source_notices = String::new();
+        let mut source_admissions = Vec::new();
+        let mut checked_sources = std::collections::HashSet::new();
         if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             ensure_owned_queue_checkout(&worker)?;
         }
@@ -169,7 +171,11 @@ impl CasCore {
                     ));
                 }
                 let task = tasks.get(id).map_err(error)?;
-                source_notices.push_str(&self.task_source_notice_for(&task).await?);
+                if let Some(key) = task.external_ref.as_deref().and_then(crate::cloud::peer_claims::github_source_key)
+                    && !checked_sources.insert(key) { continue; }
+                let admission = self.task_source_admission_for(&task, None).await?;
+                source_notices.push_str(&admission.notice);
+                source_admissions.push(admission);
             }
             if queue.current_task.is_none() {
                 queue.current_task = tasks
@@ -209,6 +215,7 @@ impl CasCore {
                     matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
                 })
         });
+        drop(source_admissions);
         drop(start_fence);
         drop(lock);
         if changed && idle {

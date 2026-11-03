@@ -63,6 +63,16 @@ single-child epics distort epic reporting, so this is the preferred path.
 
 ### Brief fields: no spawn without them
 
+For a stakeholder ask, pass its Slack thread permalink or GitHub issue/PR URL
+as `external_ref` when creating the task, and keep it when assigning or spawning.
+MCP creation and staffing refuse a source held by a peer and name its owner;
+coordinate before duplicating that work. An intentional second GitHub task
+requires a live supervisor's `supervisor_override=true reason="<agreement>"`
+on create or assignment; its decision stays with that task. Slack uses the
+existing claim/status/handoff authority. Binding epic splits retain their own
+delegation and takeover rules. Ownership messages that require action use
+`kind=status`, because `kind=receipt` waits quietly until the peer's next turn.
+
 Before you spawn onto a task or assign it, its task record must carry four
 fields. A missing field means no spawn: fill it with `task action=update`
 first. A worker cannot recover a goal or a proof method the brief never named.

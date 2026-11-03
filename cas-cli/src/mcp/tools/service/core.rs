@@ -785,6 +785,7 @@ impl CasService {
 
     pub(super) async fn task_claim(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskClaimRequest;
+        if let Some(id) = req.id.as_ref() { self.refresh_task_sources(std::slice::from_ref(id)).await?; }
         let inner_req = TaskClaimRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "claim"))?,
             duration_secs: req.duration_secs.unwrap_or(600),
@@ -813,6 +814,7 @@ impl CasService {
 
     pub(super) async fn task_transfer(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskTransferRequest;
+        if let Some(id) = req.id.as_ref() { self.refresh_task_sources(std::slice::from_ref(id)).await?; }
         let inner_req = TaskTransferRequest {
             task_id: req.id.ok_or_else(|| self.missing_id("task", "transfer"))?,
             to_agent: req.to_agent.ok_or_else(|| {

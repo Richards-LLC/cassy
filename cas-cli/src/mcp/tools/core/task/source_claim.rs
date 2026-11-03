@@ -1,39 +1,25 @@
 //! Stakeholder-source ownership uses the existing Slack and advisory task claims.
+use crate::cloud::peer_claims::github_source_key;
 use crate::cloud::peer_claims::{Acquire, ClaimKind, PeerBudget, PeerClaims};
 use crate::mcp::CasCore;
 use crate::types::AgentRole;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
-use sha2::{Digest, Sha256};
 
-/// GitHub issues and PRs share one numeric namespace, including their subpages.
-/// Other external refs (including no-code proof artifacts) are not ask claims.
-pub(crate) fn github_source_key(source: &str) -> Option<String> {
-    let url = url::Url::parse(source.trim()).ok()?;
-    if url.scheme() != "https" || url.host_str()? != "github.com" || !url.username().is_empty() {
-        return None;
+#[derive(Default)]
+pub(crate) struct SourceAdmission {
+    pub notice: String,
+    pub override_grant: Option<cas_types::SourceClaimOverride>,
+    // Retained through local publication, like the existing task-start fence.
+    _fence: Option<crate::cloud::peer_claims::TaskClaimFence>,
+}
+
+impl From<String> for SourceAdmission {
+    fn from(notice: String) -> Self {
+        Self {
+            notice,
+            ..Default::default()
+        }
     }
-    let parts = url.path_segments()?.collect::<Vec<_>>();
-    if parts.len() < 4 || !matches!(parts[2], "issues" | "pull") {
-        return None;
-    }
-    let number = parts[3].parse::<u64>().ok().filter(|number| *number > 0)?;
-    if parts[0].is_empty() || parts[1].is_empty() {
-        return None;
-    }
-    let identity = format!(
-        "github.com/{}/{}/{number}",
-        parts[0].to_ascii_lowercase(),
-        parts[1].to_ascii_lowercase()
-    );
-    let digest = Sha256::digest(identity.as_bytes());
-    Some(format!(
-        "ask-{}",
-        digest
-            .iter()
-            .take(16)
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
 }
 
 /// The existing split gates decide delegation and reasoned takeover. Source
@@ -64,17 +50,35 @@ pub(crate) fn is_slack_source(source: &str) -> bool {
 }
 
 impl CasCore {
-    pub(crate) async fn task_source_notice_for(
+    pub(crate) async fn task_source_admission_for(
         &self,
         task: &crate::types::Task,
-    ) -> Result<String, McpError> {
+        override_reason: Option<&str>,
+    ) -> Result<SourceAdmission, McpError> {
         if let Some(split) = source_split(&self.cas_root, &task.id) {
             return Ok(format!(
                 "\nSource ownership: task {} is governed by epic split {split}; its delegation and takeover gates apply.",
                 task.id
-            ));
+            ).into());
         }
-        self.task_source_notice(task.external_ref.as_deref()).await
+        if let Some(grant) = task.deliverables.source_claim_override.as_ref()
+            && task
+                .external_ref
+                .as_deref()
+                .and_then(github_source_key)
+                .as_deref()
+                == Some(grant.source_key.as_str())
+            && !grant.supervisor_id.is_empty()
+            && !grant.reason.trim().is_empty()
+        {
+            return Ok(format!(
+                "\nSource override authorized by {} for task {}: {}",
+                grant.supervisor_id, task.id, grant.reason
+            )
+            .into());
+        }
+        self.task_source_admission(task.external_ref.as_deref(), &task.id, override_reason)
+            .await
     }
     /// A worker acts under its registered supervisor's source claim. This does
     /// not authorize Slack mutations: that service still authenticates its caller.
@@ -107,19 +111,21 @@ impl CasCore {
 
     /// Refuse a known competing owner before local task or staffing writes.
     /// Missing advisory infrastructure is visible, and never grants Slack authority.
-    pub(crate) async fn task_source_notice(
+    pub(crate) async fn task_source_admission(
         &self,
         source: Option<&str>,
-    ) -> Result<String, McpError> {
+        task_id: &str,
+        override_reason: Option<&str>,
+    ) -> Result<SourceAdmission, McpError> {
         let Some(source) =
             source.filter(|source| is_slack_source(source) || github_source_key(source).is_some())
         else {
-            return Ok(String::new());
+            return Ok(SourceAdmission::default());
         };
         let unchecked = |why: &str| {
-            format!(
+            SourceAdmission::from(format!(
                 "\n⚠️ SOURCE OWNERSHIP NOT CHECKED — {source}: {why}. Coordinate with the peer supervisor before staffing this ask."
-            )
+            ))
         };
         let Some(actor) = self.source_claim_actor() else {
             return Ok(unchecked("no registered source owner"));
@@ -135,7 +141,7 @@ impl CasCore {
             if let Some(receipt) = receipt {
                 let owner = &receipt["visible_owner"];
                 if owner["registration_id"].as_str() == Some(actor.id.as_str()) {
-                    return Ok(String::new());
+                    return Ok(SourceAdmission::default());
                 }
                 let label = owner["label"]
                     .as_str()
@@ -160,14 +166,17 @@ impl CasCore {
             .open_agent_store()
             .map(|agents| crate::cloud::peer_claims::local_agent_ids(agents.as_ref()))?;
         let root = self.cas_root.clone();
+        let source_key = key.clone();
+        let task_name = task_id.to_string();
         let budget = PeerBudget::default();
-        let answer = budget
+        let (answer, fence) = budget
             .run(move || {
-                let answer = claims.with_budget(budget).acquire(
+                let (answer, fence, _) = claims.with_budget(budget).acquire_for_local_lease(
+                    &root,
                     &key,
                     ClaimKind::Task,
                     &actor.id,
-                    &actor.name,
+                    &format!("{} (task {task_name})", actor.name),
                     crate::cloud::peer_claims::lease_duration_secs(&root),
                     &|id| local.contains(id),
                 );
@@ -177,26 +186,66 @@ impl CasCore {
                     if let Err(error) =
                         crate::cloud::peer_claims::remember_source_claim(&root, &actor.id, &key)
                     {
-                        return Acquire::Unavailable(format!(
-                            "source claim acquired but heartbeat registration failed: {error}"
-                        ));
+                        return (
+                            Acquire::Unavailable(format!(
+                                "source claim acquired but heartbeat registration failed: {error}"
+                            )),
+                            fence,
+                        );
                     }
                 }
-                answer
+                (answer, fence)
             })
             .await
-            .unwrap_or_else(Acquire::Unavailable);
+            .unwrap_or_else(|why| (Acquire::Unavailable(why), None));
         match answer {
-            Acquire::Claimed | Acquire::LocalHolder(_) => Ok(String::new()),
-            Acquire::PeerHolds(hold) => Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                format!(
-                    "SOURCE HELD BY A PEER — {source} is owned by {} until {}. Coordinate with {} before creating or staffing this ask.",
+            Acquire::Claimed | Acquire::LocalHolder(_) => Ok(SourceAdmission {
+                _fence: fence,
+                ..Default::default()
+            }),
+            Acquire::PeerHolds(hold) => {
+                let conflict = format!(
+                    "SOURCE HELD BY A PEER — {source} is owned by {} until {}",
                     hold.describe(),
-                    hold.until(),
-                    hold.name()
-                ),
-            )),
+                    hold.until()
+                );
+                if let Some(reason) = override_reason {
+                    let supervisor = self.resolve_live_supervisor_authority().map_err(|error| {
+                        Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            format!(
+                                "Source override requires a live registered supervisor: {error:?}"
+                            ),
+                        )
+                    })?;
+                    let reason = reason.trim();
+                    if reason.is_empty() {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            "Source override requires a non-empty reason.",
+                        ));
+                    }
+                    let notice = format!(
+                        "\nDECISION: SOURCE CLAIM OVERRIDE — task {task_id}; {conflict}; authorized by {}. Reason: {reason}",
+                        supervisor.id
+                    );
+                    return Ok(SourceAdmission {
+                        notice,
+                        override_grant: Some(cas_types::SourceClaimOverride {
+                            source_key,
+                            supervisor_id: supervisor.id,
+                            reason: reason.to_string(),
+                        }),
+                        _fence: fence,
+                    });
+                }
+                Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "{conflict}. Coordinate with that owner. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
+                    ),
+                ))
+            }
             Acquire::StalePeer(hold) => Ok(unchecked(&format!(
                 "stale source claim for {}; retry the ownership check",
                 hold.describe()

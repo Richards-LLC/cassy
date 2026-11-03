@@ -207,7 +207,7 @@ fn cli_claim_then_claim_status_reuses_the_journaled_receipt() {
 #[tokio::test]
 async fn task_create_acquires_slack_source_and_refuses_foreign_owner_cas_12c1() {
     use rmcp::handler::server::wrapper::Parameters;
-    let _env = support::TestEnvGuard::temp_home();
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let contract: Value = serde_json::from_str(include_str!("fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
     for acquired in [true, false] {
         let sandbox = CasSandbox::new();
@@ -229,7 +229,7 @@ async fn task_create_acquires_slack_source_and_refuses_foreign_owner_cas_12c1() 
         proxy.set_policy(Arc::new(cmcp_core::ExternalToolAllowlistPolicy::new([
             cmcp_core::ExternalToolRoute::new("violet", "violet_read")
         ]))).await;
-        let core = cas::mcp::CasCore::with_daemon(sandbox.cas_root(), None, None);
+        let core = cas::mcp::CasCore::with_daemon(sandbox.cas_root().to_path_buf(), None, None);
         core.set_agent_id_for_testing(actor.into());
         let service = cas::mcp::CasService::new(core, Some(Arc::new(proxy)));
         let source = "https://richards-llc.slack.com/archives/C0B44GUKDK2/p1792161452497159";

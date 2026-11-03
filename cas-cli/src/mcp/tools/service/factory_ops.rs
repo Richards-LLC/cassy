@@ -2851,9 +2851,15 @@ impl CasService {
         let mut peer_notice = String::new();
         let source_ids = req.task_ids.clone().unwrap_or_else(|| req.task_id.iter().cloned().collect());
         self.refresh_task_sources(&source_ids).await?;
+        let mut source_admissions = Vec::new();
+        let mut checked_sources = std::collections::HashSet::new();
         for id in &source_ids {
             let task = task_store.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
-            peer_notice.push_str(&self.inner.task_source_notice_for(&task).await?);
+            if let Some(key) = task.external_ref.as_deref().and_then(crate::cloud::peer_claims::github_source_key)
+                && !checked_sources.insert(key) { continue; }
+            let admission = self.inner.task_source_admission_for(&task, None).await?;
+            peer_notice.push_str(&admission.notice);
+            source_admissions.push(admission);
         }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {

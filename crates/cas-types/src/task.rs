@@ -575,6 +575,14 @@ impl MergeCiAdmission {
 }
 
 /// Deliverables and durable lifecycle evidence for a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceClaimOverride {
+    pub source_key: String,
+    pub supervisor_id: String,
+    pub reason: String,
+}
+
+/// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
     /// Sync-safe origin for an unpublished lane; no host-local checkout path.
@@ -583,6 +591,9 @@ pub struct TaskDeliverables {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_takeover: Option<SplitTakeoverAuthorization>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_claim_override: Option<SourceClaimOverride>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_batch: Option<IntegrationBatchEvidence>,
@@ -742,6 +753,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     split_takeover: Option<SplitTakeoverAuthorization>,
     #[serde(default)]
+    source_claim_override: Option<SourceClaimOverride>,
+    #[serde(default)]
     integration_batch: Option<IntegrationBatchEvidence>,
     #[serde(default)]
     work_target: Option<WorkTarget>,
@@ -794,6 +807,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
         Self {
             epic_branch_origin: value.epic_branch_origin,
             split_takeover: value.split_takeover,
+            source_claim_override: value.source_claim_override,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
             work_target_cleared: value.work_target_cleared,

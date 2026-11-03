@@ -1679,7 +1679,9 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
-        let source_notice = self.task_source_notice(external_ref.as_deref()).await?;
+        let source_admission = self.task_source_admission(external_ref.as_deref(), &id,
+            supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?;
+        if source_admission.override_grant.is_some() { task_notes.push_str(&source_admission.notice); }
         let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1709,6 +1711,7 @@ impl CasCore {
             branch: None,
             deliverables: crate::types::TaskDeliverables {
                 work_target,
+                source_claim_override: source_admission.override_grant.clone(),
                 ..Default::default()
             },
             team_id: None,
@@ -1724,7 +1727,7 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
-        if !source_notice.is_empty() { assignee_warnings.push(source_notice); }
+        if !source_admission.notice.is_empty() { assignee_warnings.push(source_admission.notice.clone()); }
         let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
@@ -2995,7 +2998,8 @@ impl CasCore {
         ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
-        peer_notes.push_str(&self.task_source_notice_for(&task).await?);
+        let source_admission = self.task_source_admission_for(&task, None).await?;
+        peer_notes.push_str(&source_admission.notice);
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
@@ -5530,7 +5534,7 @@ mod related_recall_response_tests {
             let mut actor = beta.clone();
             actor.role = role;
             core.open_agent_store().unwrap().update(&actor).unwrap();
-            for entry in ["create", "assign", "start"] {
+            for entry in ["create", "assign", "start", "claim", "transfer"] {
                 // A supervisor can start epics; ordinary execution remains worker-only.
                 synced.task_type = if role == AgentRole::Supervisor && entry == "start" {
                     crate::types::TaskType::Epic
@@ -5543,7 +5547,9 @@ mod related_recall_response_tests {
                         core.cas_task_create(Parameters(req)).await
                     }
                     "assign" => core.cas_task_update(Parameters(serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(serde_json::json!({"id":synced.id,"assignee":"new-worker"})).unwrap())).await,
-                    _ => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
+                    "start" => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
+                    "claim" => core.cas_task_claim(Parameters(crate::mcp::tools::TaskClaimRequest {task_id:synced.id.clone(),duration_secs:600,reason:None})).await,
+                    _ => core.cas_task_transfer(Parameters(serde_json::from_value::<crate::mcp::tools::TaskTransferRequest>(serde_json::json!({"task_id":synced.id,"to_agent":"new-worker"})).unwrap())).await,
                 };
                 let response = result.map(text).unwrap_or_else(|error| error.message.to_string());
                 assert!(response.contains(&owner), "{role}/{entry}: {response}");

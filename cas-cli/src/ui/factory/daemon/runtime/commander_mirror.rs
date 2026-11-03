@@ -296,10 +296,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     }
                 }
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
-                    && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
-                        // Synthetic API failures end with stop_sequence and can
-                        // omit turn_duration. They still owe the operator a reply.
-                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
+                    && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true))
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
@@ -1307,8 +1304,9 @@ mod tests {
 
     #[test]
     fn claude_api_error_reaches_commander_in_one_scan_cas_d8e0() {
-        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (temp, root, queue) = terminal_session(vec![]);
+        env.set("CLAUDE_CONFIG_DIR", temp.path().join("account"));
         let store = SqliteAgentStore::open(&root).unwrap();
         let mut agent = store.get("supervisor-id").unwrap();
         agent.cc_session_id = Some("failed-turn".into());

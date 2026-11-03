@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker startup guidance
+
+- **Preserve worker scope and startup headroom** — Restored the protected task,
+  scope and layer-boundary instructions while retaining plan-metric receipts;
+  shorter startup prose keeps the worker guidance within its byte budget.
+
 ### Fixed — Verification
 
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could

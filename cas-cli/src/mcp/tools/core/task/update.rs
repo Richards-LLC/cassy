@@ -1993,7 +1993,7 @@ impl CasCore {
                     data: None,
                 })?;
             if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
-                && !task.is_terminal()
+                && new_status != task.status
             {
                 crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
                     new_status != TaskStatus::InProgress)
@@ -2542,6 +2542,15 @@ impl CasCore {
         };
         // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
         // pushed below matches the persisted row.
+        // Parent/dependency edits above can change which phase this transition
+        // depends on. Re-evaluate against the final graph before persisting status.
+        if let Some((_, status)) = lifecycle_status_change
+            && matches!(status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+        {
+            crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                status != TaskStatus::InProgress)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),

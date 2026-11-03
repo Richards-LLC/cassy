@@ -13,7 +13,7 @@ struct Reserved {
 fn reserved(root: &Path, task_id: Option<&str>) -> Result<Reserved, String> {
     use cas_store::SpawnQueueStore;
     let session_repo = crate::worktree::GitOperations::detect_repo_root(root)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("spawn refused: cannot inspect factory branch names in {}: {error}. Git and a valid repository are required for isolated workers; no worker was queued.", root.display()))?;
     let repo = crate::ui::factory::spawn_worktree_repo_root(root, &session_repo, task_id)?;
     let mut command = Command::new("git");
     command.current_dir(&repo).args([

@@ -440,6 +440,15 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
 
     let account = home.path().join(".codex");
     if matches!(state, IsolatedCodexState::Available) {
+        // Isolated spawns now inspect real refs before queueing. Expose only
+        // Git alongside the synthetic Codex binary, never the host PATH.
+        let git = std::env::split_paths(&std::env::var_os("PATH").expect("parent PATH"))
+            .map(|directory| directory.join("git"))
+            .find(|path| path.is_file()).expect("Git is required by factory fixtures");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(git, bin_dir.join("git")).expect("fixture Git link");
+        #[cfg(not(unix))]
+        std::fs::copy(git, bin_dir.join("git")).expect("fixture Git copy");
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
@@ -1717,6 +1726,7 @@ fn test_spawn_workers_isolate_flag() {
 async fn test_spawn_workers_isolate_flag_in_isolated_child() {
     let env =
         factory_env_in_isolated_codex_child("test_spawn_workers_isolate_flag_in_isolated_child");
+    init_sync_repo(&env, "fixture-unused-worker");
     env.create_epic("Test Epic");
 
     let mut req = factory_req("spawn_workers");
@@ -1766,6 +1776,7 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
         "test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_child",
     );
     let task_store = env.task_store();
+    init_sync_repo(&env, "fixture-unused-worker");
 
     // The exact reported sequence: an epic existed, was completed, and closed.
     let epic_id = env.create_epic("Finished Epic");
@@ -2433,8 +2444,10 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
         .factory_request(Parameters(req))
         .await
         .expect_err("logged-out default must refuse before enqueue");
+    // pin: retain the real auth and account-selection causes alongside remedies.
     for detail in [
-        "default Codex home is absent or logged out",
+        "is logged out",
+        "no eligible account",
         "Pass config_dir",
         "project worker config_dir",
         registered.to_str().unwrap(),
@@ -2517,6 +2530,7 @@ async fn test_spawn_workers_worker_llm_config_reaches_queue_and_receipt_in_isola
     let env = factory_env_in_isolated_codex_child(
         "test_spawn_workers_worker_llm_config_reaches_queue_and_receipt_in_isolated_child",
     );
+    init_sync_repo(&env, "fixture-unused-worker");
     env.create_epic("Worker defaults Epic");
     std::fs::write(
         env.cas_root.join("config.toml"),

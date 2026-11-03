@@ -1313,14 +1313,20 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
     let cas = crate::store::init_cas_dir(&repo).unwrap();
     env.set("CAS_ROOT", &cas);
-    let name = "recover-worker";
+    // Concurrent test processes (nextest's own run and the whole-module child)
+    // run this fixture at once. A Stale row's liveness falls back to a host-wide
+    // CAS_AGENT_NAME scan, so a shared name lets one process's live pane make
+    // the other's dead worker look alive.
+    let name = format!("recover-worker-{}", std::process::id());
+    let name = name.as_str();
+    let branch = format!("factory/{name}-cas-beef");
     let mut manager = WorktreeManager::new(&repo, WorktreeConfig {
         enabled: true, base_path: cas.join("worktrees").display().to_string(),
         branch_prefix: "factory/".into(), cleanup_on_close: false,
         ..Default::default()
     }).unwrap();
     let worker = manager.create_for_worker(name).unwrap().path.clone();
-    git(&worker, &["switch", "-qc", "factory/recover-worker-cas-beef"]);
+    git(&worker, &["switch", "-qc", &branch]);
     std::fs::write(worker.join("precious"), "unpublished work").unwrap();
     git(&worker, &["add", "precious"]);
     git(&worker, &["commit", "-qm", "unpublished"]);
@@ -1394,7 +1400,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     }).await.expect("replacement starts in its worktree");
     let cwd = std::fs::read_to_string(env.home().join("replacement-cwd")).unwrap();
     assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&worker).unwrap());
-    assert_eq!(git(&worker, &["branch", "--show-current"]), "factory/recover-worker-cas-beef");
+    assert_eq!(git(&worker, &["branch", "--show-current"]), branch);
     assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);
     assert_eq!(std::fs::read_to_string(worker.join("precious")).unwrap(), "unpublished work");
     assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(name));

@@ -2119,6 +2119,9 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Ok(Self::success(hold));
+        }
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to ready ones

@@ -3807,3 +3807,23 @@ admission job on factory and epic pushes and PRs, including direct release
 edits. It was removed from the late `test-ci-tiers` queue recipe. Its independent
 boundary self-tests remain there; merge-group admission does not repeat the
 content scan.
+
+## Operator project holds
+
+Use `cas factory hold set --reason "<reason>"` from your own interactive
+terminal to stop project dispatch and merges. The state is local to the
+project's shared `.cas/operator/project-hold.json`, protected by the existing
+operator write policy. It records the operator, reason and time, and retains
+both set and lift decisions. Agents cannot change it through MCP or the CLI.
+
+`cas factory hold status` shows the current hold.
+`cas --json factory hold status` returns `active` and the complete `history`.
+Lift it with `cas factory hold lift --reason "<reason>"`.
+
+While held, startup leads with the hold, ready and awaiting-merge lists hide
+action invitations, merge requests and stalled-supervisor relays are withheld,
+and spawning and merging refuse even with force or override flags. Unread
+relay rows receive no surface receipt; lifting restores visibility and normal
+admission. Ordinary mail remains readable. Unreadable hold state stops
+dispatch and merges until the operator repairs it. A hold has no automatic
+expiry, and an unheld project's staging delivery flow is unchanged.

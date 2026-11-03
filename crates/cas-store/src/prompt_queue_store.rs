@@ -10448,6 +10448,9 @@ impl SqlitePromptQueueStore {
             } else {
                 ""
             };
+            let project_hold_sql = if crate::project_hold::held_on_connection(&conn) {
+                crate::project_hold::inbox_exclusion_sql()
+            } else { String::new() };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
@@ -10553,6 +10556,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10600,6 +10604,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10642,6 +10647,11 @@ impl SqlitePromptQueueStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
             let mut prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            // A hold is a temporary policy wait, not evidence of surfacing.
+            // Filter before receipts, budget accounting or acknowledgement.
+            if crate::project_hold::held_on_connection(&tx) {
+                prompts.retain(|row| !crate::project_hold::is_action_relay(&row.prompt));
+            }
             if named_read {
                 for prompt in &mut prompts {
                     Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;

@@ -757,6 +757,11 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             }
             _ => None,
         },
+        Commands::Factory(crate::cli::factory::FactoryArgs {
+            command: Some(crate::cli::factory::FactoryCommands::Hold { command }), ..
+        }) if !matches!(command, crate::cli::factory::hold::HoldCommand::Status) => {
+            Some("Setting or lifting a project hold (`cas factory hold`)")
+        }
         Commands::Factory(factory) if factory.command.is_none() => {
             Some("Launching a factory (`cas factory`)")
         }
@@ -1125,6 +1130,7 @@ mod tests {
         for line in [
             "hub status",
             "factory status",
+            "factory hold status",
             "task list",
             "hub",
             "config get factory.write_roots",

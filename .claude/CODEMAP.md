@@ -78,6 +78,8 @@
 - `cas-cli/src/factory_ci_retry.rs` - exact-SHA merge retries, terminal CI notices, expiry and corrupt-intent quarantine.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs` - capped proof admission, builder guards and durable capacity waits.
 
+- `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task visibility and action-relay admission.
+
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.

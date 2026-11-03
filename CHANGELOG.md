@@ -31,6 +31,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
 
+### Fixed — Rule version history
+
+- **Snapshot the rule saved by each change** — Was: an update's version stored
+  the previous wording. → Now: each new lifecycle version records the persisted
+  result in the same transaction. Restoring without a version selects the previous
+  lifecycle state, so deleting then restoring still reactivates the rule. Existing
+  history rows are left unchanged; the first edit or delete after an upgrade
+  captures any missing live state as a new baseline version before the change.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

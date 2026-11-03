@@ -564,14 +564,14 @@ pub trait RuleStore: Send + Sync {
         self.delete(id)
     }
 
-    /// List prior rule states, newest first.
+    /// List recorded rule states, newest first (including the latest mutation).
     fn list_versions(&self, _id: &str) -> Result<Vec<RuleVersion>> {
         Err(StoreError::Parse(
             "rule version history is unavailable for this store".to_string(),
         ))
     }
 
-    /// Restore a prior rule state, or the latest prior state when version is None.
+    /// Restore a recorded rule state, or the previous lifecycle version when None.
     fn restore_version(
         &self,
         _id: &str,

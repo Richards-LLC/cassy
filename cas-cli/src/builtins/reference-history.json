@@ -2871,6 +2871,18 @@
       "9abe002f7581e5b09d90391b00135d6614738d53b8009e339a0fbf44ab9cf722",
       "da39f807a8b38e5beb42c81412403e14fb7ca17f687b41fd6e9be1ecacc78187"
     ],
+    "skills/cas-test-audit/SKILL.md": [
+      "0dce056bb5ccedc1f50e210d065040187ec0d49b013351f860ecbb86531b1ea2"
+    ],
+    "skills/cas-test-audit/references/ci-timing.md": [
+      "702ca37ea92106833c2cd5cc3b87a0ddba2b671067a91a269ddd64ab59f20501"
+    ],
+    "skills/cas-test-audit/references/detectors.md": [
+      "43b1f66f234eba5ab7e5b33fc0471c5dd33026815761d7c7ec6a8a5b36a681e2"
+    ],
+    "skills/cas-test-audit/references/ledger.md": [
+      "4e63d3eea21fd1b794e81a7ea22ad43e4d4458a8649e498a3efe675f0dd7574b"
+    ],
     "skills/cas-to-questionnaire/SKILL.md": [
       "1232c0f5c1629f9e8f362dc1fbec6b62f3e7bdc66e6f47c37e2a6340edb39449",
       "12e099f68a226deca4f5ad3d8667707cfead7f7ef3885cc875b4abc449f51736",

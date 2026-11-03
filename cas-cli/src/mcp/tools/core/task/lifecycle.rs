@@ -179,6 +179,23 @@ fn publish_parked_delivery_branch(
     )
 }
 
+/// cas-2bdf: the first target ref (local, then `origin/<target>`) that the
+/// parked tip cannot merge into, with its conflicting paths. A missing ref or
+/// a failed preflight is not evidence of a conflict.
+fn parked_tip_target_conflicts(
+    repo: &std::path::Path,
+    target_branch: &str,
+    tip: &str,
+) -> Option<(String, Vec<String>)> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    [target_branch.to_string(), format!("refs/remotes/origin/{target_branch}")]
+        .into_iter()
+        .find_map(|target| {
+            let paths = git.preflight_merge_conflicts(&target, tip).ok()?;
+            (!paths.is_empty()).then_some((target, paths))
+        })
+}
+
 /// cas-ff6c: starting a task on another task's `factory/<worker>-<task>`
 /// branch reset and reused that delivery ref (cas-8001), which broke
 /// worktree_merge and close attribution. Refuse and name the exact cut.
@@ -2478,7 +2495,27 @@ impl CasCore {
         // task remains worker-complete and must stay parked for the supervisor.
         let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
         if resuming_awaiting_merge {
-            if !task.deliverables.merge_conflicted {
+            // cas-2bdf: only a close retry set the flag, so a merge-queue
+            // conflict dequeue or a moved target left the owner refused until
+            // the supervisor ran request_changes. Measure the parked tip
+            // against the target now; a clean tip still stays parked.
+            let live_conflict = (!task.deliverables.merge_conflicted)
+                .then(|| declared_repo_context.as_ref())
+                .flatten()
+                .and_then(|context| {
+                    let tip = task.deliverables.factory_branch_anchor.as_deref()
+                        .or(task.deliverables.parked_branch.as_deref())?;
+                    parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
+                });
+            if let Some((target_ref, paths)) = live_conflict.as_ref() {
+                task.notes = format!(
+                    "{}{}[{}] ✅ DECISION parked tip conflicts with {target_ref} in {}; owner resumes for a conflict-only repair (cas-2bdf). Merge the target into the branch rather than rebasing: prior test receipts stay valid when the resolution touches only CHANGELOG.md or generated hub-web/dist files",
+                    task.notes,
+                    if task.notes.is_empty() { "" } else { "\n\n" },
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    paths.join(", "),
+                );
+            } else if !task.deliverables.merge_conflicted {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
@@ -2488,10 +2525,11 @@ impl CasCore {
                          declines the delivery, or requires an amendment after merging — \
                          they must first run \
                          `{tool_prefix}task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
-                         a worker cannot self-reject or start a clean parked delivery. If \
-                         that merge fails with a genuine \
-                         git conflict, Cassy marks the parked task conflicted and its assigned \
-                         worker can then start task {} to resolve it.",
+                         a worker cannot self-reject or start a clean parked delivery. When \
+                         the parked tip genuinely conflicts with the current target (a \
+                         merge-queue conflict dequeue or a moved target), its assigned worker \
+                         can start task {} to resolve it; Cassy measures the local target and \
+                         origin/<target>, so `git fetch origin <target>` first if that ref is stale.",
                         req.id,
                         req.id,
                         tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")

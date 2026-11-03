@@ -11301,7 +11301,8 @@ impl CasCore {
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             let passing_tests = delivered_tip.as_deref().map(|head| {
-                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head))
+                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)
+                    .with_target(&resolved_parent_branch))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {

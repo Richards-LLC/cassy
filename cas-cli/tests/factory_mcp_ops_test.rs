@@ -10726,6 +10726,55 @@ async fn test_5054_clean_awaiting_merge_still_refuses_start() {
     assert_eq!(after.status, TaskStatus::AwaitingMerge);
 }
 
+/// cas-2bdf: a merge-queue conflict dequeue never set `merge_conflicted`, so
+/// the owner's start was refused until the supervisor ran request_changes.
+/// Start now measures the parked tip against the moved target; a clean park
+/// still stays parked for review.
+#[tokio::test]
+async fn owner_resumes_parked_delivery_once_target_conflicts_cas_2bdf() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("swift-fox");
+    let worktree = init_sync_repo(&env, "swift-fox");
+    let project = env.cas_root.parent().unwrap().to_path_buf();
+    std::fs::write(env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"conflict-project\"\n[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+    let mut worker = Agent::new("swift-fox".to_string(), "swift-fox".to_string());
+    worker.role = AgentRole::Worker;
+    worker.metadata.insert("clone_path".to_string(), worktree.display().to_string());
+    env.agent_store().register(&worker).expect("register worker");
+
+    std::fs::write(worktree.join("README"), "delivery\n").unwrap();
+    git_stdout(&worktree, &["commit", "-qam", "delivery"]);
+    let mut task = Task::new("cas-2bdf".into(), "Parked delivery".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("swift-fox".into());
+    task.risk = vec![cas_types::TaskRisk::None];
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:conflict-project".into(),
+        target_branch: "main".into(),
+    });
+    task.deliverables.factory_branch_anchor = Some(git_stdout(&worktree, &["rev-parse", "HEAD"]));
+    task.deliverables.parked_branch = Some("factory/swift-fox".into());
+    env.task_store().add(&task).unwrap();
+    let start = || env.service.inner.cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+        id: task.id.clone(),
+    }));
+
+    let clean = start().await.expect_err("a clean park stays parked for review").to_string();
+    assert!(clean.contains("request_changes"), "{clean}");
+    assert_eq!(env.task_store().get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+
+    std::fs::write(project.join("README"), "target moved\n").unwrap();
+    git_stdout(&project, &["commit", "-qam", "target moved"]);
+    let resumed = start().await;
+    let after = env.task_store().get(&task.id).unwrap();
+    assert_eq!(after.status, TaskStatus::InProgress, "{resumed:?}\n{}", after.notes);
+    assert!(after.notes.contains("conflicts with main in README"), "{}", after.notes);
+}
+
 /// AC1 (self-dispatch guard preserved): starting an `awaiting_merge` task must
 /// still be refused for a DIFFERENT worker than the recorded assignee — the
 /// fix permits the *assigned* worker to resume, not free-for-all self-dispatch.

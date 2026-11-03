@@ -124,7 +124,7 @@ pub(super) fn park_refusals(
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
+    let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes
     // one cannot be judged yet; running its tests may already cover the module.

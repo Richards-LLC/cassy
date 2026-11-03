@@ -1242,11 +1242,16 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
         if !previously_queued.contains(&pr.number) && failed_run_id.is_none() && !arm_vanished {
             continue;
         }
-        // A prior observed queue membership starts a fresh episode even when
-        // GitHub still lists the previous red run. This re-arms an admin
-        // dequeue/auto-merge disarm after a requeue; a restart without that
-        // in-memory observation instead keys directly to the failed run.
-        let occurrence = if previously_queued.contains(&pr.number) {
+        // Use the same snapshot identity on the observed exit and on later
+        // polls/restarts. Keying one path by queue-exit and the other by run
+        // delivered the same failure twice. The PR update retains distinct
+        // later queue exits even when GitHub still lists an older red run.
+        let occurrence = if arm_vanished
+            && failed_run_id.is_none()
+            && !previously_queued.contains(&pr.number)
+        {
+            format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
+        } else {
             format!(
                 "queue-exit:{}:{}",
                 pr.updated_at,
@@ -1254,12 +1259,6 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
                     .map(|run_id| format!("merge-group-run:{run_id}"))
                     .unwrap_or_else(|| "no-failed-run".to_string())
             )
-        } else if arm_vanished {
-            format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
-        } else {
-            failed_run_id
-                .map(|run_id| format!("merge-group-run:{run_id}"))
-                .expect("failed run required without an observed queue membership")
         };
         poll.ejections.push(MergeQueueEjection {
             task_id: task_id.clone(),
@@ -2360,7 +2359,7 @@ mod tests {
         .unwrap();
         assert_eq!(first.ejections.len(), 1);
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
-        assert_eq!(first.ejections[0].occurrence, "merge-group-run:901");
+        assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z:merge-group-run:901");
 
         let observed_exit = collect_merge_queue_ejections(
             &ejected, std::slice::from_ref(&delivery), &BTreeSet::from([556]),

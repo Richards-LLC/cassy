@@ -644,15 +644,38 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
+    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let factory_session = if worker.is_empty() {
+        std::env::var("CAS_FACTORY_SESSION").ok()
+    } else {
+        // Tasks replicate between machines; agent registrations do not. A
+        // foreign worker missing here belongs to its own daemon, never the
+        // watcher process's ambient supervisor. Retain retired registrations
+        // so the existing dead-owner successor/operator recovery still works.
+        let Ok(agents) = agent_store.list(None) else {
+            return WorkerAttentionRelayOutcome::Pending;
+        };
+        let session = agents
+            .into_iter()
+            .filter(|agent| {
+                agent.role == cas_types::AgentRole::Worker
+                    && (agent.id == worker || agent.name == worker)
+            })
+            .max_by_key(|agent| (agent.id == worker, agent.registered_at))
+            .and_then(|agent| agent.factory_session)
+            .filter(|session| !session.trim().is_empty());
+        let Some(session) = session else {
+            return WorkerAttentionRelayOutcome::Pending;
+        };
+        Some(session)
+    };
     crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
         task_id: task_id.into(), pr_number, failed_run_id,
         occurrence: occurrence.into(), failing_job: failing_job.map(str::to_string),
     }, chrono::Utc::now());
 
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let kind = if worker.is_empty() {
         "Epic PR"

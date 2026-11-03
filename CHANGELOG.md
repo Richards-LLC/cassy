@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Merge queue notifications
+
+- **Route ejections to the delivery owner once** — Merge queue ejections use the
+  worker's recorded factory session for supervisor and worker notices. Watchers
+  leave deliveries from another machine to their owning daemon, and repeated
+  snapshots keep the same occurrence after a poll or restart.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

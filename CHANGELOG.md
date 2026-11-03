@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Queued-run watchdog
+
+- **Surface uncancellable queued runs** — Was: A sweep stayed green when every
+  cancellation failed. → Now: The watchdog finishes the sweep, rechecks rejected
+  cancellations and fails if those runs remain queued or unreadable. Logs and
+  the Actions summary separate accepted requests from verified reclamation;
+  completion races and dry runs keep their safe behavior.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

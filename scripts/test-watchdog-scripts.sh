@@ -103,7 +103,7 @@ printf '%s\n' "$1" >>"${FAKE_SLEEP_LOG:?}"
 EOF_SLEEP
 chmod +x "$tmp/bin/sleep"
 
-run_env=(GITHUB_REPOSITORY=example/repo CASSY_NOW_EPOCH=2000 FAKE_GH_LOG="$tmp/gh.log" FAKE_GH_STATE="$tmp/state" FAKE_SLEEP_LOG="$tmp/sleep.log" PATH="$tmp/bin:$PATH")
+run_env=(GITHUB_REPOSITORY=example/repo CASSY_NOW_EPOCH=2000 GITHUB_STEP_SUMMARY="$tmp/summary" FAKE_GH_LOG="$tmp/gh.log" FAKE_GH_STATE="$tmp/state" FAKE_SLEEP_LOG="$tmp/sleep.log" PATH="$tmp/bin:$PATH")
 mkdir -p "$tmp/state"
 merge_output="$tmp/merge-output"
 if env "${run_env[@]}" "$merge_script" >"$merge_output" 2>&1; then
@@ -152,9 +152,11 @@ else
     fail=$((fail + 1))
 fi
 
-# Per-run permission errors must not prevent later eligible runs being swept.
+# Finish the sweep despite per-run failures, then distinguish unresolved
+# rejections from a harmless completion race in its exit status and summary.
 for failure in status cancel ghost cancel-race cancel-unknown; do
     : >"$tmp/gh.log"
+    : >"$tmp/summary"
     rm -f "$tmp/state"/cancel-rejected-*
     output="$tmp/$failure-error-output"
     if env "${run_env[@]}" FAKE_GH_FAILURE="$failure" "$queued_script" >"$output" 2>&1; then result=0; else result=$?; fi
@@ -177,6 +179,7 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
     case "$failure" in
         ghost|cancel-unknown)
             expect_text "$text" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure reports zero accepted requests and both unresolved runs"
+            expect_text "$(<"$tmp/summary")" 'cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure persists the failed sweep result in the Actions summary"
             expect_text "$text" '::error::unresolved stale queued run=101' "$failure surfaces the persistent run"
             expect_count "$log" 'actions/runs/101/cancel' 1 "$failure never retries a rejected cancellation"
             ;;
@@ -203,9 +206,11 @@ expect_absent "$list_log" 'actions/runs/101' 'failed list performs no per-run ca
 
 for script in "$merge_script" "$queued_script"; do
     dry_output="$tmp/$(basename "$script").dry-output"
+    : >"$tmp/gh.log"
     if env "${run_env[@]}" CASSY_WATCHDOG_DRY_RUN=true "$script" >"$dry_output" 2>&1; then
         if [[ "$script" == "$merge_script" ]]; then run_id=201; else run_id=101; fi
         expect_text "$(<"$dry_output")" "dry-run would cancel run=$run_id" "$(basename "$script") dry-run reports without posting"
+        expect_absent "$(<"$tmp/gh.log")" '--method POST' "$(basename "$script") dry-run sends no cancellation"
         if [[ "$script" == "$queued_script" ]]; then
             expect_text "$(<"$dry_output")" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=2' 'dry-run does not claim accepted cancellations'
         fi

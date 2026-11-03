@@ -2689,8 +2689,8 @@ async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_
 #[tokio::test]
 async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
     let mut env = test_env();
-    for change in ["source", "target", "epic plan", "evidence", "manifest", "unpublished promotion"] {
-        if change == "unpublished promotion" && !cfg!(unix) { continue; }
+    for change in ["source", "target", "epic plan", "evidence", "manifest", "unpublished promotion", "unpublished cleanup"] {
+        if change.starts_with("unpublished") && !cfg!(unix) { continue; }
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2743,19 +2743,26 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                     "# Changed evidence\n\nbuild: {}\nscope: fixture\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=0; NOT EXERCISED=1; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | Evidence changed | Re-review | Changed after approval | NOT EXERCISED: fixture | fixture | - | - |\n",
                     fixture.tip)).unwrap();
             }
-            "unpublished promotion" => {
+            "unpublished promotion" | "unpublished cleanup" => {
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
+                    run_git(&["checkout", "epic/rebound"], &fixture.repo.root);
+                    std::fs::write(fixture.repo.root.join("README.md"), "Unrelated operator edit\n").unwrap();
                     let target_before_push = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
                     let hook = fixture.repo.root.join(".git/hooks/pre-push");
                     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
                     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-                    let failed = fixture.service.factory(Parameters(merge.clone())).await.unwrap();
+                    let mut attempt = merge.clone();
+                    attempt.cleanup = Some(change == "unpublished cleanup");
+                    let failed = fixture.service.factory(Parameters(attempt)).await.unwrap();
                     // pin: a rejected push must leave the publication explicitly unconfirmed.
                     assert!(get_text(&failed).contains("NOT PUSHED"), "{}", get_text(&failed));
                     std::fs::remove_file(hook).unwrap();
                     assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
                         target_before_push, "a rejected reviewed push cannot leave this delivery in the shared target for another lane to publish");
+                    assert_eq!(std::fs::read_to_string(fixture.repo.root.join("README.md")).unwrap(), "Unrelated operator edit\n");
+                    assert!(fixture.worker.exists(), "source cleanup must wait for confirmed publication");
+                    assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
                     let mut epic = tasks.get("epic-rebound").unwrap();
                     epic.design = "The plan changed after the local merge, before publication.".into();
                     tasks.update(&epic).unwrap();

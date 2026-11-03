@@ -259,14 +259,28 @@ impl Candidate {
     pub(crate) fn validate(&self, root: &Path, task: &Task) -> Result<(), String> {
         if context_digest(root, task)? != self.context_digest
             || git(&self.repository, &["rev-parse", &self.source_branch])? != self.source_sha
-            || git(&self.repository, &["rev-parse", &self.target_branch])? != self.target_sha
         {
             return Err(
-                "source, target, plan, policy or evidence changed; review the new candidate".into(),
+                "source, plan, policy or evidence changed; review the new candidate".into(),
             );
         }
         repository_proof::verify_repository_proof(&self.proof)
             .map_err(|error| error.to_string())?;
+        let target = git(&self.repository, &["rev-parse", &self.target_branch])?;
+        if target != self.target_sha {
+            // An interrupted attempt may have made exactly our reviewed local
+            // merge, without publishing. It is not a new target base or verdict.
+            let parent = git(&self.repository, &["rev-parse", &format!("{target}^1")])?;
+            if (parent != self.target_sha && target != self.source_sha)
+                || git(
+                    &self.repository,
+                    &["rev-parse", &format!("{target}^{{tree}}")],
+                )? != self.tree
+            {
+                return Err("target changed; review the new candidate".into());
+            }
+            return Ok(());
+        }
         let tree = git(
             &self.repository,
             &[
@@ -306,15 +320,21 @@ impl Approval {
         {
             return Err("candidate promotion does not match the approved proof".into());
         }
-        git(
-            &candidate.repository,
-            &[
-                "merge-base",
-                "--is-ancestor",
-                &record.landed_sha,
-                &candidate.target_branch,
-            ],
-        )?;
+        let reachable = [
+            &candidate.target_branch,
+            &format!("origin/{}", candidate.target_branch),
+        ]
+        .iter()
+        .any(|target| {
+            git(
+                &candidate.repository,
+                &["merge-base", "--is-ancestor", &record.landed_sha, target],
+            )
+            .is_ok()
+        });
+        if !reachable {
+            return Err("published candidate is absent from its target history".into());
+        }
         Ok(Some(record))
     }
 
@@ -324,13 +344,20 @@ impl Approval {
             return Ok(true);
         }
         let candidate = &self.candidate;
+        // A local merge whose push failed is not a landed mapping. With an
+        // origin, only fetched remote history can repair an interrupted write.
+        let operations = crate::worktree::GitOperations::new(candidate.repository.clone());
+        let target = operations
+            .fetch_merge_target(&candidate.target_branch)
+            .map_err(|error| format!("publication could not be confirmed: {error}"))?
+            .unwrap_or_else(|| candidate.target_branch.clone());
         let commits = git(
             &candidate.repository,
             &[
                 "rev-list",
                 "--first-parent",
                 "--max-count=256",
-                &format!("{}..{}", candidate.target_sha, candidate.target_branch),
+                &format!("{}..{}", candidate.target_sha, target),
             ],
         )?;
         for landed in commits.lines() {
@@ -352,39 +379,34 @@ impl Approval {
     }
 
     pub(crate) fn validate_for_merge(&self, root: &Path, task: &Task) -> Result<(), String> {
-        if let Some(record) = self.promotion()? {
-            if git(
-                &self.candidate.repository,
-                &["rev-parse", &self.candidate.target_branch],
-            )? == record.landed_sha
-                && task.deliverables.factory_branch_anchor.as_deref()
-                    == Some(self.candidate.source_sha.as_str())
-            {
-                // A local promotion can precede a rejected push. Until fresh
-                // containment proves publication, it must still match today's
-                // plan/evidence and source before another push is authorized.
-                // A cleaned-up source ref may be absent; the immutable candidate
-                // still binds its source commit. An existing ref may not advance.
-                if context_digest(root, task)? != self.candidate.context_digest
-                    || git(
-                        &self.candidate.repository,
-                        &["rev-parse", "--verify", &self.candidate.source_branch],
-                    )
-                    .ok()
-                    .is_some_and(|source| source != self.candidate.source_sha)
-                {
-                    return Err(
-                        "unpublished promotion changed; review the current candidate".into(),
-                    );
-                }
-                return repository_proof::verify_repository_proof(&self.candidate.proof)
-                    .map_err(|error| error.to_string());
-            }
-        }
         self.candidate.validate(root, task)
     }
 
-    pub(crate) fn promote(&self, landed: &str) -> Result<(), String> {
+    /// Reconciled delivery can close on its original mapping after other
+    /// deliveries advance the target; it must not push those changes again.
+    pub(crate) fn confirmed_publication(
+        &self,
+        operations: &crate::worktree::GitOperations,
+    ) -> Result<Option<(String, String)>, String> {
+        if !self.reconcile_promotion()? {
+            return Ok(None);
+        }
+        let record = self.promotion()?.ok_or("published mapping missing")?;
+        let target = operations
+            .fetch_merge_target(&self.candidate.target_branch)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(git(
+                &self.candidate.repository,
+                &["rev-parse", &self.candidate.target_branch],
+            )?);
+        git(
+            &self.candidate.repository,
+            &["merge-base", "--is-ancestor", &record.landed_sha, &target],
+        )?;
+        Ok(Some((record.landed_sha, target)))
+    }
+
+    pub(crate) fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let candidate = &self.candidate;
         if git(
             &candidate.repository,
@@ -399,6 +421,12 @@ impl Approval {
             &candidate.repository,
             &["merge-base", "--is-ancestor", &candidate.target_sha, landed],
         )?;
+        Ok(())
+    }
+
+    pub(crate) fn promote(&self, landed: &str) -> Result<(), String> {
+        self.verify_landing(landed)?;
+        let candidate = &self.candidate;
         let record = Promotion {
             dispatch_id: self.dispatch_id.clone(),
             verdict_id: self.verdict_id.clone(),
@@ -408,6 +436,77 @@ impl Approval {
             landed_sha: landed.into(),
         };
         write_once(&candidate.directory()?.join("promotion.json"), &record)
+    }
+    /// Persist only a confirmed landing. An unconfirmed first publication
+    /// restores our own target ref, so another lane cannot ship a held source.
+    pub(crate) fn finish_publication(
+        &self,
+        operations: &crate::worktree::GitOperations,
+        outcome: &crate::worktree::git::TargetPushOutcome,
+        attempted: &str,
+    ) -> Result<Option<String>, String> {
+        use crate::worktree::git::TargetPushOutcome;
+        if outcome.is_published() {
+            let landed = match outcome {
+                TargetPushOutcome::Pushed { sha } | TargetPushOutcome::AlreadyCurrent { sha } => {
+                    sha.as_str()
+                }
+                _ => attempted,
+            };
+            if let Some(record) = self.promotion()? {
+                git(
+                    &self.candidate.repository,
+                    &["merge-base", "--is-ancestor", &record.landed_sha, landed],
+                )?;
+            } else {
+                self.promote(landed)?;
+            }
+            return Ok(None);
+        }
+        if self.promotion()?.is_some() {
+            return Ok(Some(
+                "Previously published mapping retained; no local history was rewound.".into(),
+            ));
+        }
+        self.verify_landing(attempted)?;
+        // Restore only our ref and merge paths. reset --hard would discard
+        // unrelated operator edits which the merge deliberately preserved.
+        let restored = operations
+            .compare_and_swap_ref(
+                &self.candidate.target_branch,
+                &self.candidate.target_sha,
+                attempted,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                let checkouts = operations
+                    .list_worktrees()
+                    .map_err(|error| error.to_string())?;
+                for checkout in checkouts.iter().filter(|checkout| {
+                    checkout.branch.as_deref() == Some(self.candidate.target_branch.as_str())
+                }) {
+                    git(
+                        &checkout.path,
+                        &[
+                            "read-tree",
+                            "-u",
+                            "-m",
+                            attempted,
+                            &self.candidate.target_sha,
+                        ],
+                    )?;
+                }
+                Ok(())
+            });
+        Ok(Some(match restored {
+            Ok(()) => format!(
+                "Unconfirmed reviewed merge restored locally to {}. Candidate, source and approval retained; fix the push cause and retry.",
+                self.candidate.target_sha
+            ),
+            Err(error) => format!(
+                "Local rollback declined: {error}. Inspect the target before retrying; concurrent history was preserved."
+            ),
+        }))
     }
 }
 
@@ -571,16 +670,7 @@ impl CasCore {
                     verdict_id: verdict.id.clone(),
                 };
                 if approval.reconcile_promotion().map_err(fail)? {
-                    let published = approval.promotion().map_err(fail)?.is_some_and(|record| {
-                        task.deliverables.green_merge_commit.as_deref()
-                            == Some(record.landed_sha.as_str())
-                    });
-                    // Only the existing published-merge fact freezes the
-                    // original review context. A local merge whose push failed
-                    // must obtain a fresh review after material context drift.
-                    if published || candidate.context_digest == digest {
-                        return Ok(Some(approval));
-                    }
+                    return Ok(Some(approval));
                 }
             }
             if candidate.context_digest == digest

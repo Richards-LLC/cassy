@@ -1175,3 +1175,6 @@ pub trait EntityStore: Send + Sync {
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(test)]
+mod project_hold_tests;

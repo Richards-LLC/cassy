@@ -51,6 +51,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Knowledge page** - a distilled, source-linked page about the current repository; the code index connects symbols to that context.
 
 - **Hosted queue precheck** - `cas release precheck <sha>` validates an exact commit on hosted CI and records its run; `--status` reports results and elapsed time. A supervisor's parked merge refused for pending CI resumes automatically on green for the authorized source, repository and target. Terminal CI evidence or a moved lane sends one notice, and pending retries expire after two hours. A landed merge preserves a held close as a follow-up. The precheck isolates Python imports, recovers uncertain dispatches without sending another run, reports JSON errors and deletes completed precheck refs only at the expected SHA.
+- **Queue archive dependencies** - hosted Rust suite builds restore a compatible main-scoped dependency cache while compiling current source. Advisory main priming fills a missing cache after queue-proof reuse; it adds no required check, and disposable queue refs do not save dependency copies.
 
 ## Primary Journeys
 

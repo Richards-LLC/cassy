@@ -27,6 +27,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **`cas-test-audit` skill** — A read-only procedure for auditing a project's tests: five buckets (dead, superseded, restates-implementation, duplicate, slow), per-language detector recipes with a precision check, CI-timing recipes per runner, and a ledger format. Cuts need operator approval and each names its covering test. It reports that merge-queue time is mostly the build, so a test cost list is not the route to queue speed.
 
+### Fixed — Queue archive dependency cache
+
+- **Hosted queue archives can reuse main-scoped dependencies** — A missing
+  compatible cache now triggers advisory priming from main after queue-tree
+  reuse, using the archive's actual compiler/profile key. Queue runs restore
+  dependencies without saving disposable queue-ref copies, and still build
+  their current source on every cache hit or miss. Priming adds no required
+  check and runs outside the validation dependency chain.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

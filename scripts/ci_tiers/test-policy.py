@@ -354,6 +354,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             self.assertTrue(consumer['with'][field])
             self.assertEqual(consumer['with'][field], producer['with'][field])
         self.assertEqual(archive['env'], prime['env'], 'cache lookup must see the actual archive profile')
+        for name in ('CARGO_PROFILE_DEV_DEBUG','CARGO_PROFILE_TEST_DEBUG'):
+            self.assertEqual(archive['env'][name],'0')
         self.assertEqual(action['outputs']['cache-hit']['value'], '${{ steps.cargo-cache.outputs.cache-hit }}')
         self.assertTrue(prime['continue-on-error'], 'cache maintenance cannot fail a required validation')
         build = next(step for step in archive['steps'] if step.get('name') == 'Build full suite archive')
@@ -397,6 +399,9 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                                        'inputs.shared-key':caller['with']['shared-key'],
                                        'inputs.cache-save-if':str(save).lower()})
                         self.assertEqual(self.gh_expr(cache['with']['save-if'],inputs),writes)
+                        for field in ('key','shared-key'):
+                            source = 'cache-key' if field == 'key' else field
+                            self.assertEqual(self.gh_value(cache['with'][field],inputs),caller['with'][source])
                         self.assertEqual(self.gh_value(cache['with']['cache-targets'],inputs),'true',
                                          'read-only consumers must still restore target dependencies')
                     if primes and self.gh_expr(seed['if'],context):
@@ -418,6 +423,9 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'false',
                 'needs.ci-diff.outputs.class':'docs-only'}
         self.assertFalse(self.gh_expr(prime['if'],docs))
+        self.assertFalse(self.gh_expr(prime['if'],{**docs,
+            'needs.ci-diff.outputs.class':'rust-touched',
+            'vars.CASSY_MERGE_QUEUE_SELF_HOSTED':'enabled'}))
         calls.write_text('')
         failed = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
                                            'CALLS':str(calls),'CARGO_STATUS':'17'})

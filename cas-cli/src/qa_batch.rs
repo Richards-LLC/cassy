@@ -481,13 +481,14 @@ fn covering_receipt(
     };
     // Retired history can recover only its exact delivery. Without an active
     // park, a later integrated head may be an unreviewed correction, rather
-    // than an umbrella integration receipt for the reviewed work.
-    if task.deliverables.factory_branch_anchor.is_none() && head != anchor {
-        return Ok(None);
-    }
+    // than an umbrella integration receipt for the reviewed work. cas-bc15:
+    // a head inside the receipt's reviewed staging is no such correction,
+    // so a request_changes history no longer strands a merged delivery.
+    let retired = task.deliverables.factory_branch_anchor.is_none() && head != anchor;
     let receipts = receipts_for_task(root, &project, &task.id).map_err(|e| e.to_string())?;
     for receipt in receipts {
-        if receipt.project_id != project
+        if (retired && ancestor(repo, head, &receipt.staging_sha) != Some(true))
+            || receipt.project_id != project
             || receipt.task_heads.get(&task.id) != Some(&anchor)
             || ancestor(repo, &anchor, head) != Some(true)
             || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)

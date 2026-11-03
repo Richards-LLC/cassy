@@ -11594,7 +11594,16 @@ impl CasCore {
         if let Err(message) = crate::qa_batch::ensure_deferred_close(
             &self.cas_root, &task, req.commit_receipt.as_deref(), commit_receipt_window.as_ref(),
         ) {
-            return Ok(Self::tool_error(message));
+            // cas-bc15: a live supervisor's reasoned override (validated
+            // above) answers deferred batch evidence, and the task records it.
+            if !supervisor_override {
+                return Ok(Self::tool_error(message));
+            }
+            close_notes.record(&mut task, &format!(
+                "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                req.reason.as_deref().unwrap_or_default().trim(),
+            ));
         }
 
         // Proceed with close

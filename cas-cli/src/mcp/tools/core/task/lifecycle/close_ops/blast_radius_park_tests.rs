@@ -1103,6 +1103,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     receipt("completed", Some("failure"));
     let rerun = cassy.close_green_merged_delivery(ID).await.receipt(ID);
     assert!(rerun.contains("rerunning once"), "{rerun}");
+    // pin: the exact gh invocation is the rerun behaviour under test.
     assert!(std::fs::read_to_string(state.join("calls")).unwrap().contains("run rerun 77 --failed"));
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 

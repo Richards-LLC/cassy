@@ -421,6 +421,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         "scope": "user"
     })).unwrap();
     let prompt = cas::cloud::peer_mailbox::render_prompt(&message);
+    // pin: the attachment must identify the sharing project for cross-project recipients.
     assert!(prompt.contains("shared from project github.com/source/blue"), "{prompt}");
     let fetch_args = prompt.lines()
         .find_map(|line| line.strip_prefix("Fetch: artifact "))

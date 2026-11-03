@@ -2689,7 +2689,8 @@ async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_
 #[tokio::test]
 async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
     let mut env = test_env();
-    for change in ["source", "target", "epic plan", "evidence", "manifest"] {
+    for change in ["source", "target", "epic plan", "evidence", "manifest", "unpublished promotion"] {
+        if change == "unpublished promotion" && !cfg!(unix) { continue; }
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2741,6 +2742,23 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 std::fs::write(directory.join("LEDGER.md"), format!(
                     "# Changed evidence\n\nbuild: {}\nscope: fixture\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=0; NOT EXERCISED=1; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| M01 | Evidence changed | Re-review | Changed after approval | NOT EXERCISED: fixture | fixture | - | - |\n",
                     fixture.tip)).unwrap();
+            }
+            "unpublished promotion" => {
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    let hook = fixture.repo.root.join(".git/hooks/pre-push");
+                    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+                    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    let failed = fixture.service.factory(Parameters(merge.clone())).await.unwrap();
+                    // pin: a rejected push must leave the publication explicitly unconfirmed.
+                    assert!(get_text(&failed).contains("NOT PUSHED"), "{}", get_text(&failed));
+                    std::fs::remove_file(hook).unwrap();
+                    assert_ne!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+                        git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]));
+                    let mut epic = tasks.get("epic-rebound").unwrap();
+                    epic.design = "The plan changed after the local merge, before publication.".into();
+                    tasks.update(&epic).unwrap();
+                }
             }
             "manifest" => {
                 let path = std::fs::read_dir(fixture.cas_root.join("verification-candidates"))

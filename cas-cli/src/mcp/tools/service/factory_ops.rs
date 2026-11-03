@@ -705,13 +705,34 @@ fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
     }
 }
 
+/// The harness an account folder belongs to, by its `~/.claude[-*]` or
+/// `~/.codex[-*]` name; `None` for any other folder.
+fn account_dir_harness(dir: &str) -> Option<cas_mux::SupervisorCli> {
+    let name = std::path::Path::new(dir.trim().trim_end_matches('/')).file_name()?.to_str()?;
+    [
+        (crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
+        (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex),
+    ]
+    .into_iter()
+    .find(|(provider, _)| name == format!(".{}", provider.name()) || name.starts_with(provider.prefix()))
+    .map(|(_, cli)| cli)
+}
+
 pub(crate) fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
+    let cli = recycle_worker_cli(agent);
     cas_mux::WorkerSpec {
         name: Some(agent.name.clone()),
-        cli: recycle_worker_cli(agent),
+        cli,
         model: agent.metadata.get("worker_model").cloned(),
         effort: worker_effort_from_agent(agent),
-        config_dir: agent.metadata.get("worker_account_dir").cloned(),
+        // cas-24f3: a row that recorded another harness's account (written by
+        // the same foreign registration that misrecorded its cli) cannot
+        // launch this harness; inherit the default account instead.
+        config_dir: agent
+            .metadata
+            .get("worker_account_dir")
+            .filter(|dir| account_dir_harness(dir).is_none_or(|owner| owner == cli))
+            .cloned(),
         requester_config_dir: None,
         requester_secure_storage_dir: None,
     }
@@ -6352,8 +6373,10 @@ impl CasService {
         // harness would not interpret. Mixed `all_workers` calls retain the
         // existing fail-closed behavior below; supervisors can recycle the
         // named Codex worker explicitly and reset Claude recipients together.
+        // cas-24f3: resolve the harness exactly as the recycle recipe does, so
+        // a Codex row misrecorded as Claude is not sent down the Claude path.
         if recipients.len() == 1
-            && worker_cli_from_agent(&recipients[0]) == cas_mux::SupervisorCli::Codex
+            && recycle_worker_cli(&recipients[0]) == cas_mux::SupervisorCli::Codex
         {
             let mut recycle_req = req;
             recycle_req.action = "recycle_worker".to_string();
@@ -6391,7 +6414,7 @@ impl CasService {
         let mut refusals: Vec<String> = Vec::new();
 
         for agent in recipients {
-            let cli = worker_cli_from_agent(&agent);
+            let cli = recycle_worker_cli(&agent);
             if reset::context_reset_command(cli).is_none() {
                 refusals.push(format!(
                     "{}: {}",
@@ -20210,6 +20233,9 @@ effort = "high"
         agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
         let spec = worker_spec_from_agent(&agent);
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        // cas-24f3: the Claude account came from the same foreign
+        // registration; Codex has no hooks.json there, so the launch refused.
+        assert_eq!(spec.config_dir, None, "a Codex relaunch must not use a Claude account");
         cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
             .expect("the repaired Codex recipe relaunches");
     }

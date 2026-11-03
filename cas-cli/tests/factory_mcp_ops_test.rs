@@ -5784,10 +5784,21 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 
 /// Current recorded harness wins over a same-name Active ghost: Codex
 /// recycles, while Grok/OpenCode retain their unsupported-reset refusal.
+/// cas-24f3: a Codex row misrecorded as `claude` beside its Codex model
+/// resets as Codex too, as recycle_worker already reads it.
 #[tokio::test]
 async fn test_clear_context_uses_current_idle_harness_cas_1114() {
-    for cli in ["codex", "grok", "opencode"] {
-        let (guard, fixture) = clear_context_fixture("badger", cli, "0");
+    for (cli, model) in [
+        ("codex", None),
+        ("claude", Some("gpt-6.1-sol")),
+        ("grok", None),
+        ("opencode", None),
+    ] {
+        let (guard, mut fixture) = clear_context_fixture("badger", cli, "0");
+        if let Some(model) = model {
+            fixture.worker.metadata.insert("worker_model".into(), model.into());
+        }
+        let cli = if model.is_some() { "codex" } else { cli };
         let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
         let store = env.agent_store();

@@ -1473,3 +1473,44 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     let started = unified_task(&service, serde_json::json!({"action":"start","id":"dependent"})).await;
     assert!(started.contains("Started task"), "{started}");
 }
+
+#[tokio::test]
+async fn model_eval_close_requires_passing_receipt() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    std::fs::write(root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+    let store = open_task_store(&root).unwrap();
+    let service = CasService::new(core, None);
+    for id in ["cas-model-eval", "cas-no-eval"] {
+        let mut task = cas::types::Task::new(id.into(), id.into());
+        task.status = TaskStatus::InProgress;
+        task.depth = cas::types::TaskDepth::Light;
+        task.assignee = Some(format!("test-session-{}", std::process::id()));
+        store.add(&task).unwrap();
+    }
+    let run_log = temp.path().join("reader-eval.log");
+    std::fs::write(&run_log, "dataset=reader-44 model=provider/model evaluation complete\n").unwrap();
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    let target = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
+        "note_type":"model_eval_target","notes":serde_json::json!({"dataset":"reader-44", "thresholds":{"accuracy_percent":{"min":95}}}).to_string()})).await;
+    assert!(target.contains("Added"), "{target}");
+    set_test_agent_role(&root, AgentRole::Worker);
+    for measured in [80.3, 86.4, 87.9] {
+        let receipt = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
+            "note_type":"model_eval_receipt","notes":serde_json::json!({"dataset":"reader-44", "model":"provider/model",
+                "run_log":run_log, "measurements":{"accuracy_percent":measured}}).to_string()})).await;
+        assert!(receipt.contains("Added"), "{receipt}");
+        let refused = unified_task(&service, serde_json::json!({"action":"close","id":"cas-model-eval"})).await;
+        assert!(refused.contains("MODEL EVAL UNMET") && refused.contains("95") && refused.contains(&measured.to_string()), "{refused}");
+        assert_eq!(store.get("cas-model-eval").unwrap().status, TaskStatus::InProgress);
+    }
+    unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval","note_type":"model_eval_receipt",
+        "notes":serde_json::json!({"dataset":"reader-44","model":"provider/model","run_log":run_log,
+            "measurements":{"accuracy_percent":96}}).to_string()})).await;
+    for id in ["cas-model-eval", "cas-no-eval"] {
+        let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
+        assert!(closed.contains("Closed task"), "{id}: {closed}");
+        assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed);
+    }
+}

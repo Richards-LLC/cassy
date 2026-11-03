@@ -379,8 +379,7 @@ fn test_rule_share_roundtrip() {
 }
 
 /// cas-c487: updates must snapshot the resulting rule and retain earlier versions.
-/// cas-30af: deletes must
-/// leave a queryable retired row instead of destroying it.
+/// cas-30af: deletes must leave a queryable retired row instead of destroying it.
 #[test]
 fn test_rule_history_and_tombstone_delete() {
     let temp = TempDir::new().unwrap();
@@ -464,7 +463,9 @@ fn test_rule_delete_then_restore_latest_lifecycle_state() {
     let deleted: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
     assert_eq!(deleted.status, store.get(&rule.id).unwrap().status);
 
-    store.restore_version(&rule.id, None, Some("reviewer"), None).unwrap();
+    store
+        .restore_version(&rule.id, None, Some("reviewer"), None)
+        .unwrap();
     let restored = store.get(&rule.id).unwrap();
     assert_eq!(restored.content, rule.content);
     assert_eq!(restored.status, cas_types::RuleStatus::Proven);
@@ -552,8 +553,8 @@ fn test_rule_writes_wait_out_a_concurrent_writer() {
     assert_eq!(final_rule.content, "v2");
     assert_eq!(final_rule.status, cas_types::RuleStatus::Retired);
     let versions = store.list_versions(&rule.id).unwrap();
-    // Newest first: delete (prior: proven v2), promote (prior: draft v2),
-    // update (prior: draft v1), create.
+    // Newest first: delete (retired v2), promote (proven v2),
+    // update (draft v2), create (draft v1).
     let history: Vec<(i64, String, String, String)> = versions
         .iter()
         .map(|v| {
@@ -572,18 +573,18 @@ fn test_rule_writes_wait_out_a_concurrent_writer() {
                 4,
                 "delete".to_string(),
                 "v2".to_string(),
-                "proven".to_string()
+                "retired".to_string()
             ),
             (
                 3,
                 "update".to_string(),
                 "v2".to_string(),
-                "draft".to_string()
+                "proven".to_string()
             ),
             (
                 2,
                 "update".to_string(),
-                "v1".to_string(),
+                "v2".to_string(),
                 "draft".to_string()
             ),
             (

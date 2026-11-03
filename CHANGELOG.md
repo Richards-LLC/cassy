@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Rule version history
+
+- **Snapshot the rule saved by each change** — Was: an update's version stored
+  the previous wording. → Now: each new lifecycle version records the persisted
+  result in the same transaction. Restoring without a version selects the previous
+  lifecycle state, so deleting then restoring still reactivates the rule. Existing
+  history rows are left unchanged.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

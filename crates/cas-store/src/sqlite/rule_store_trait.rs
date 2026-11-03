@@ -10,8 +10,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 
 impl SqliteRuleStore {
-    /// Read one rule on an already-locked connection or open transaction
-    /// (cas-1502: update reads the prior snapshot inside its write lock).
+    /// Read one rule on an already-locked connection or open transaction.
     fn get_on(conn: &Connection, id: &str) -> Result<Rule> {
         let rule = conn
             .query_row(
@@ -117,31 +116,16 @@ impl SqliteRuleStore {
         let change_note = change_note.unwrap_or("update");
         let changed_at = Utc::now().to_rfc3339();
 
-        // cas-1502: the history row reads (the prior snapshot, the next version
-        // number) before it writes. In a DEFERRED transaction that read takes a
-        // snapshot that must later be upgraded to a writer, and SQLite answers
+        // cas-1502: allocating the next history version reads before it writes.
+        // In a DEFERRED transaction that read takes a snapshot that must later
+        // be upgraded to a writer, and SQLite answers
         // an upgrade over a foreign commit with SQLITE_BUSY without consulting
         // the busy handler: rule update/promote/delete failed "database is
         // locked" in milliseconds. BEGIN IMMEDIATE takes the write lock first,
-        // with bounded retry (as cas-d5c8 did for task writes), and the prior
-        // snapshot is read inside it, so the history row is never stale.
+        // with bounded retry (as cas-d5c8 did for task writes). The mutation and
+        // its resulting snapshot must stay inside that same transaction.
         let result = (|| -> Result<()> {
             let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
-            let previous = Self::get_on(&tx, &rule.id)?;
-            let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
-                StoreError::Parse(format!("failed to serialize rule history: {error}"))
-            })?;
-            Self::insert_version(
-                &tx,
-                &rule.id,
-                &snapshot_json,
-                &previous.content,
-                previous.status,
-                &changed_by,
-                &changed_at,
-                change_note,
-                operation,
-            )?;
             let rows = tx.execute(
                 "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
@@ -175,6 +159,24 @@ impl SqliteRuleStore {
             if rows == 0 {
                 return Err(StoreError::RuleNotFound(rule.id.clone()).into());
             }
+            // cas-c487: a version describes the state produced by this mutation.
+            // Read it back so immutable and COALESCE-preserved fields also match
+            // the persisted row rather than the caller's proposed Rule.
+            let persisted = Self::get_on(&tx, &rule.id)?;
+            let snapshot_json = serde_json::to_string(&persisted).map_err(|error| {
+                StoreError::Parse(format!("failed to serialize rule history: {error}"))
+            })?;
+            Self::insert_version(
+                &tx,
+                &rule.id,
+                &snapshot_json,
+                &persisted.content,
+                persisted.status,
+                &changed_by,
+                &changed_at,
+                change_note,
+                operation,
+            )?;
             tx.commit()?;
             Ok(())
         })();
@@ -265,12 +267,12 @@ impl SqliteRuleStore {
                 .ok_or_else(|| StoreError::Parse(format!("rule version not found: {id} v{version}")))?,
             None => conn
                 .query_row(
-                    "SELECT snapshot_json FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1",
+                    "SELECT snapshot_json FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1 OFFSET 1",
                     params![id],
                     |row| row.get(0),
                 )
                 .optional()?
-                .ok_or_else(|| StoreError::Parse(format!("no rule history for: {id}")))?,
+                .ok_or_else(|| StoreError::Parse(format!("no prior rule history for: {id}")))?,
         };
         drop(conn);
 
@@ -289,7 +291,7 @@ impl SqliteRuleStore {
                 default_note = format!("restore version {version}");
                 Some(default_note.as_str())
             }
-            (None, None) => Some("restore latest version"),
+            (None, None) => Some("restore previous version"),
         };
         self.update_recorded(&restored, changed_by, note, "restore")
     }

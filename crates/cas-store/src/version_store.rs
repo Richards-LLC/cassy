@@ -23,7 +23,7 @@ pub const RULE_AND_SKILL_VERSIONS_SCHEMA_STATEMENTS: &[&str] = &[
     SKILL_VERSIONS_SCHEMA_STATEMENTS[1],
 ];
 
-/// A prior rule state captured before a mutation.
+/// The persisted rule state produced by a lifecycle mutation.
 #[derive(Debug, Clone)]
 pub struct RuleVersion {
     pub id: i64,

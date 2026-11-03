@@ -1,0 +1,4 @@
+{
+  "$comment": "Team Tailscale tailnets whose machine hubs hosted Commander (hub.petrastella.io) may load media from, connect to and frame. One entry per <tailnet> label of <machine>.<tailnet>.ts.net. scripts/deploy-hub-release.py builds the hosted Content-Security-Policy from this list; a change ships with the next release.",
+  "tailnets": ["tailf5a734"]
+}

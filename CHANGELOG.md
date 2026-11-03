@@ -60,7 +60,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added — Model evaluation proof
 
-- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts name the model, measured values and a bound run log; misses remain open and close explains the failed bar.
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
 
 ## [3.100.0] - 2026-11-03
 

@@ -1946,7 +1946,7 @@ or `gt`/`lt` (strict) bounds, for example:
 Record the evaluation with `note_type=outcome_receipt`:
 
 ```json
-{"measurements":{"stability_percent":72.7,"p95_seconds":1.48},"receipt":"artifact:reader-evaluation"}
+{"measurements":{"stability_percent":72.7,"p95_seconds":1.48},"receipt":"/absolute/path/to/evaluation.json"}
 ```
 
 The measurements must name every target metric and include a non-empty receipt
@@ -1960,9 +1960,10 @@ shared phase's own target: a task's own ancestor chain stays outside the outcome
 hold, while external prerequisite phases still gate it. Ordinary open blockers
 retain their existing parallel-preparation policy.
 
-Phase outcome notes compare supplied measurements and require a non-empty
-receipt reference. Evaluator artifact, dataset and model validation belongs to
-the separate model-eval receipt gate; a phase note alone does not validate them.
+Phase and model-eval receipts share the same saved evaluation JSON artifact
+format below. Both verify its measurements, thresholds, model, command and run
+log, binding the files by content. A model-eval target additionally fixes the
+dataset identity and cannot be waived by an operator phase exception.
 
 Only the operator, from their own terminal, can accept a miss:
 `cas qa outcome-override <phase-id> --reason '<why>'`. This writes a decision
@@ -1980,17 +1981,29 @@ supervisor records `task action=notes note_type=model_eval_target` with:
 {"dataset":"reader-44-v1","thresholds":{"accuracy_percent":{"min":95}}}
 ```
 
-The assignee or a registered supervisor records `note_type=model_eval_receipt`:
+Save the evaluator's result under the task artifacts directory, for example
+`evaluation.json`:
 
 ```json
-{"dataset":"reader-44-v1","model":"provider/model","run_log":"/absolute/path/to/evaluation.log","measurements":{"accuracy_percent":87.9}}
+{"dataset":"reader-44-v1","model":"provider/model","command":"reader-eval --dataset reader-44-v1","run_log":"/absolute/path/to/evaluation.log","thresholds":{"accuracy_percent":{"min":95}},"measurements":{"accuracy_percent":87.9}}
 ```
 
-The dataset must match the immutable target, every threshold needs a measured
-value, and the model id must be non-empty. The run log must be a readable,
-non-empty file at an absolute path; keep it under the task artifacts directory.
-Cassy binds the receipt to its contents and rejects a log changed after recording.
-The evaluation runner supplies measurements; recording proof does not run a model.
+The assignee or a registered supervisor records `note_type=model_eval_receipt`
+using the same receipt shape as a phase outcome:
+
+```json
+{"measurements":{"accuracy_percent":87.9},"receipt":"/absolute/path/to/evaluation.json"}
+```
+
+For a remote artifact, fetch it with `artifact action=fetch` first and use the
+returned local path. An arbitrary artifact label or inline claims alone do not
+count as proof.
+
+The dataset and thresholds must match the immutable target, and the receipt's
+measurements must match the artifact. The artifact names a model and evaluation
+command, plus a readable, non-empty run log at an absolute path. Cassy binds both
+files by content and rejects either changing after recording. The evaluation
+runner supplies measurements; recording proof does not execute the command.
 
 A below-bar evaluation is saved as `MODEL_EVAL_MISS`. Close refuses and names
 the bar and measured values. Missing proof also refuses. A passing receipt is

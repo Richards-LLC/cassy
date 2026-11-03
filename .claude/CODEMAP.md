@@ -38,7 +38,7 @@
 
 ## CLI, hooks and application services
 
-- `cas-cli/src/model_eval.rs` - dataset-bound model evaluation targets, receipt validation and run-log integrity; shares numeric bars and dependency holds with phase outcomes.
+- `cas-cli/src/model_eval.rs` - dataset-bound model evaluation targets, saved-artifact validation and run-log integrity; shares numeric bars and dependency holds with phase outcomes.
 - `cas-cli/src/phase_outcome.rs` - measured Epic/Gate outcomes, inherited dependency holds and operator exceptions.
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, application modules and command dispatch.

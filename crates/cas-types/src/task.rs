@@ -1752,7 +1752,7 @@ mod tests {
         assert!(deliverables.model_eval.is_none());
         assert!(deliverables.pre_close_hook.is_none());
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
-        let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"run_log_sha256":null});
+        let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"artifact":null});
         let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"model_eval":eval})).unwrap();
         assert_eq!(parsed.model_eval.as_ref(), Some(&eval));
         assert_eq!(serde_json::to_value(parsed).unwrap()["model_eval"], eval);

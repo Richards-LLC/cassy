@@ -746,7 +746,7 @@ impl SqliteRuleStore {
 
     fn stakeholder_json(rule: &Rule) -> Result<Option<String>> {
         rule.stakeholder.as_ref().map(serde_json::to_string).transpose()
-            .map_err(|e| StoreError::Parse(format!("Cannot serialize stakeholder attribution: {e}")))
+            .map_err(|e| crate::error::StoreError::Parse(format!("Cannot serialize stakeholder attribution: {e}")))
     }
 
     /// Open or create a SQLite rule store (uses same database as entry store)

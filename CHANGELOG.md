@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Policy hygiene
+
+- **Expire superseded policy memories** — Superseded tags and legacy leading
+  markers remove memories from session context, including pinned and AI-selected
+  entries. Updates persist their expiry while retaining the historical record.
+- **Report rule drift without changing policy** — Compare rule source with
+  generated harness files and an explicit peer snapshot, including status,
+  content, scope and Cloud sync settings.
+- **Keep stakeholder instructions with their evidence** — Attributed rules
+  retain verbatim words and scope; attributed hard rules need a review date.
+  Stakeholder constraint memories require an expiry.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

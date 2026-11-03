@@ -296,7 +296,10 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     }
                 }
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
-                    && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                    && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                        // Synthetic API failures end with stop_sequence and can
+                        // omit turn_duration. They still owe the operator a reply.
+                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true))
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
@@ -1332,7 +1335,9 @@ mod tests {
         let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
             &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
         );
-        scan(&mut MirrorScanState::default());
+        let mut state = MirrorScanState::default();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 1, "the daemon must read the failing supervisor's transcript");
         let replies = operator_replies(&queue);
         assert_eq!(replies.len(), 1, "the first failing turn must be visible immediately");
         assert_eq!(replies[0].message, error, "conversation pane retains actionable error");

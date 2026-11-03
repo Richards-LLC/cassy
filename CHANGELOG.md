@@ -11,6 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
 
+### Fixed — QA impact coverage
+
+- **Keep changed source files in the impact manifest** — Files remain listed as
+  unowned when semantic journey selection excludes their registry owners, so
+  daemon source changes no longer disappear from QA impact reports.
+
 ### Fixed — Detached worker completion
 
 - **Wake workers when capped background runs finish** — Detached commands now

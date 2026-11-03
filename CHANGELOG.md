@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA impact coverage
+
+- **Keep changed source files in the impact manifest** — Files remain listed as
+  unowned when semantic journey selection excludes their registry owners, so
+  daemon source changes no longer disappear from QA impact reports.
+
 ### Fixed — Verification timing
 
 - **Measure recorded verifier duration** — Verdicts now record elapsed time

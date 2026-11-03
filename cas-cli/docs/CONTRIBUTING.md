@@ -1932,6 +1932,26 @@ intent. Missing CI and transport failures retain it without merging; daemon
 restarts resume the persisted intent. In-progress and unparked tasks never arm
 an automatic retry.
 
+## Verification timing
+
+`verification action=add` records `duration_ms` even when the caller omits it.
+`duration_source` distinguishes three measurements:
+
+| Source | Interval |
+| --- | --- |
+| `explicit` | Caller-supplied `duration_ms`, including zero; overrides automatic timing. |
+| `capability_bound_to_consumed` | Persisted capability `bound_at` to `consumed_at`; excludes dispatch wait before the child binds. |
+| `dispatch_elapsed_fallback` | Dispatch `requested_at` to verdict `created_at`; includes review/queue wait and is not isolated verifier runtime. |
+
+Direct supervisor verdicts retain `capability_id=NULL`; no child authority is
+created to measure time. The fallback also covers a legacy capability missing
+its bind timestamp. Child verdict `created_at` equals the persisted consume
+boundary; terminal dispatch `resolved_at` records resolution. Explicit duration
+overrides do not replace those audit timestamps. Negative clock deltas clamp to
+zero. `verification action=show` displays the source, and the quality ledger uses
+the recorded duration. Identical retries retain the original measurement.
+Migration m293 adds a nullable source; legacy rows stay unknown without backfill.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

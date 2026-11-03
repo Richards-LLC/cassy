@@ -430,6 +430,25 @@ async fn rule_drift_reports_generated_and_peer_status_without_mutating_policy() 
         result.structured_content.is_some(),
         "the local snapshot must be exportable for a peer check"
     );
+    let snapshot = &result.structured_content.as_ref().unwrap()["snapshot"];
+    assert!(
+        snapshot["cloud"].is_null(),
+        "missing [cloud] must stay visible in the export"
+    );
+    let mut wrong_project = peer;
+    wrong_project["project"] = json!("another-project");
+    let rejected = service
+        .rule(Parameters(
+            serde_json::from_value(
+                json!({"action": "drift", "peer_snapshot": wrong_project.to_string()}),
+            )
+            .unwrap(),
+        ))
+        .await;
+    assert!(
+        rejected.is_err(),
+        "a different project's policy must not be compared as a peer"
+    );
 }
 
 #[tokio::test]
@@ -499,6 +518,25 @@ async fn stakeholder_rule_requires_and_preserves_verbatim_scope_and_review_date(
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains(words) && text.contains(scope), "{text}");
+    let changed_quote = "Keep shipping to staging; review prompts via PR.";
+    let updated = service
+        .rule(Parameters(
+            serde_json::from_value(
+                json!({"action": "update", "id": rule.id, "stakeholder_quote": changed_quote}),
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(updated.is_error, Some(true));
+    let updated = service
+        .inner
+        .open_rule_store()
+        .unwrap()
+        .get(&rule.id)
+        .unwrap();
+    assert_eq!(updated.stakeholder.as_ref().unwrap().quote, changed_quote);
+    assert_eq!(updated.stakeholder.as_ref().unwrap().scope, scope);
 }
 
 #[tokio::test]

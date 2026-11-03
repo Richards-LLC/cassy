@@ -172,7 +172,7 @@ impl CasCore {
                             || rule.review_after != other.review_after
                         {
                             findings.push(format!(
-                                "{id}: content or scope differs from peer {}",
+                                "{id}: content, scope or provenance differs from peer {}",
                                 peer.machine
                             ));
                         }

@@ -142,3 +142,23 @@ it("shows the Codex alias and valid login help when identity metadata is unavail
   click("[data-login]"); await settle();
   expect(host.copy).toHaveBeenCalledWith("cas codex login work");
 });
+
+it.each(["claude", "codex"] as const)("rechecks %s usage without management or switching, with dated snapshots and retry", async provider => {
+  const account = { ...row, key: `${provider}:spare`, provider, login_state: "logged_in" as const };
+  const { host } = setup(false, account);
+  const check = vi.fn().mockResolvedValue({ checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", reason: "Snapshot is stale; open a session on this account to refresh.", windows: [{ name: "5h", used_percent: 23, resets_at: "2026-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2026-11-08T16:57:00Z" }] });
+  Object.assign(host, { checkUsage: check });
+  await settle();
+  const button = () => [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "Check usage")!;
+  expect(button()).toBeDefined(); button().click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Checked at Nov 3, 12:00 PM ET"));
+  expect(check).toHaveBeenCalledWith("linux", `${provider}:spare`, expect.any(AbortSignal));
+  expect(document.body.textContent).toContain("Usage as of Nov 3, 11:00 AM ET");
+  expect(document.body.textContent).toContain("5h 23% used");
+  expect(document.body.textContent).toContain("weekly 44% used");
+  expect(document.body.textContent).toContain("Snapshot is stale");
+  expect(host.change).not.toHaveBeenCalled(); expect(host.changed).not.toHaveBeenCalled();
+  check.mockRejectedValueOnce(new Error("Lookup rate limited; try again.")); button().click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Lookup rate limited; try again."));
+  expect(button().disabled).toBe(false);
+});

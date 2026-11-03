@@ -322,8 +322,12 @@ end-of-lane, once the worker is done with that worktree.
    `verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `verification action=qa_status task_id=<task-id>`.
    Already merged before anyone closed it (it never parked)? Cassy opens no round for code
-   that is already on trunk. Close it yourself with `supervisor_override=true reason="…"
-   commit_receipt=<merged sha>`; the waiver is recorded against that commit. A no-code task is
+   that is already on trunk. Close it yourself with `commit_receipt=<merged sha>`. When no
+   local build can sign in, satisfy the evidence gate from the deployment rather than
+   overriding: set `cas config set qa.deployed_origins <origin>` once per project (a
+   `https://<project>-*-<team>.vercel.app` pattern covers per-deployment hosts), then cite a
+   bundle that declares `deployed`. Missing configuration is not a reason to override; use
+   `supervisor_override=true reason="…"` only when no evidence can be produced. A no-code task is
    never gated by independent QA.
 3. Merge into the epic branch:
 

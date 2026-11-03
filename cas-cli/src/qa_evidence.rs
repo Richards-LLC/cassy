@@ -18,6 +18,9 @@ use serde::Deserialize;
 #[path = "qa_journeys.rs"]
 pub mod journeys;
 
+#[path = "qa_deployed_origins.rs"]
+pub mod deployed_origins;
+
 /// Note token that cites the implementer's bundle manifest.
 pub const BUNDLE_CITATION: &str = "qa-bundle:";
 /// Independent-review evidence, never a producer close-gate citation.
@@ -149,6 +152,8 @@ struct DeployedEvidence {
 
 /// Shortest recorded reason accepted for a deployed-origin run.
 const DEPLOYED_REASON_MIN_CHARS: usize = 20;
+/// The visual-QA refusal for an undeclared remote run.
+const REMOTE_RUN_PROBLEM: &str = "which is not a local build of the delivered commit";
 
 /// `scheme://host[:port]` of a URL, lower-cased, or `None` if it is not an
 /// http(s) URL with a host.
@@ -525,7 +530,11 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     let cited = cited_bundle_path(ctx.notes).ok_or_else(|| {
         EvidenceRefusal::new(
             format!("not cited (no `{BUNDLE_CITATION}` note)"),
-            cite_command(ctx),
+            format!(
+                "{}. {}",
+                cite_command(ctx),
+                deployed_origins::setup_hint(ctx.deployed_origins)
+            ),
         )
     })?;
     let manifest_path = resolve_inside_task_dir(ctx, &cited)?;
@@ -931,7 +940,20 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             &delivered_label,
             deployed_origin.as_deref(),
         )
-        .map_err(|problem| EvidenceRefusal::new(problem, run_command()))?,
+        .map_err(|problem| {
+            // cas-f426: a remote run without a declaration learns the
+            // deployed-origin route instead of only "run it locally".
+            let command = if deployed_origin.is_none() && problem.contains(REMOTE_RUN_PROBLEM) {
+                format!(
+                    "{}; {}",
+                    run_command(),
+                    deployed_origins::setup_hint(ctx.deployed_origins)
+                )
+            } else {
+                run_command()
+            };
+            EvidenceRefusal::new(problem, command)
+        })?,
         "scoped" => {
             let Some(relative) = files
                 .visual_qa_baseline_json
@@ -1347,7 +1369,7 @@ fn check_run_provenance(
             && !deployed_origin.is_some_and(|origin| url_origin(target).as_deref() == Some(origin))
     }) {
         return Err(format!(
-            "{claim} {} ran against {remote}, which is not a local build of the delivered commit (a production or remote origin shows what is deployed there, not this commit)",
+            "{claim} {} ran against {remote}, {REMOTE_RUN_PROBLEM} (a production or remote origin shows what is deployed there, not this commit)",
             report.display()
         ));
     }
@@ -1801,12 +1823,14 @@ fn check_deployed_declaration(
             "remove `deployed` from bundle.json".to_string(),
         ));
     }
-    let allowed: Vec<String> = ctx
-        .deployed_origins
-        .iter()
-        .filter_map(|configured| url_origin(configured))
-        .collect();
-    if !allowed.iter().any(|configured| *configured == origin) {
+    if !deployed_origins::allows(ctx.deployed_origins, &origin) {
+        let allowed: Vec<String> = ctx
+            .deployed_origins
+            .iter()
+            .filter_map(|configured| deployed_origins::normalize(configured).ok())
+            .collect();
+        let mut added = allowed.clone();
+        added.push(origin.clone());
         return Err(EvidenceRefusal::new(
             format!(
                 "from the wrong origin: {origin} is not a configured deployed origin (qa.deployed_origins: {})",
@@ -1817,7 +1841,9 @@ fn check_deployed_declaration(
                 }
             ),
             format!(
-                "run against a configured deployment, or have the supervisor add it: `cas config set qa.deployed_origins {origin}`"
+                "run against a configured deployment, or have a supervisor add it in this project: `cas config set qa.deployed_origins {}` (per-deployment hosts take a pattern such as {})",
+                added.join(","),
+                deployed_origins::VERCEL_PATTERN_EXAMPLE
             ),
         ));
     }
@@ -2295,11 +2321,7 @@ pub(crate) fn validate_api_evidence(ctx: &EvidenceContext<'_>) -> Result<PathBuf
         .and_then(url_origin)
         .ok_or_else(|| refuse("API transcript has no HTTP origin"))?;
     if !is_local_origin(&origin) {
-        if !ctx
-            .deployed_origins
-            .iter()
-            .any(|allowed| url_origin(allowed).as_deref() == Some(origin.as_str()))
-        {
+        if !deployed_origins::allows(ctx.deployed_origins, &origin) {
             return Err(refuse("API origin is not in qa.deployed_origins"));
         }
         let sha = field("deployed_sha:").unwrap_or_default();

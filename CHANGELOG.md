@@ -16,6 +16,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Codex without the Claude account, and clear_context recycles it instead of
   searching Claude project folders.
 
+### Fixed — QA evidence from deployments
+
+- **Close user-facing work with evidence from a deployment** — The QA
+  evidence gate now accepts per-deployment origin patterns such as
+  `https://<project>-*-<team>.vercel.app` in `qa.deployed_origins`, so
+  projects with no local build that can sign in can close from preview or
+  production walks. Its refusals now name the current setting and the
+  `cas config set qa.deployed_origins` command, rather than leaving a
+  supervisor override as the only route.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

@@ -1,3 +1,4 @@
+import type { CheckedAccountUsage } from "./account-usage-check";
 import type { CommandReceipt } from "./supervisor-commands";
 import type { AccountChange, AccountsCatalog } from "./accounts-model";
 import { installationLock, notifyInstallation } from "./installation-access";
@@ -854,6 +855,10 @@ export class HubConnectionSupervisor {
   /** Registry-backed machine accounts; management uses the hub's allowlist. */
   async accounts(signal?: AbortSignal): Promise<AccountsCatalog> {
     return this.request("GET", "/v1/accounts", undefined, signal);
+  }
+
+  async checkAccountUsage(account: string, signal?: AbortSignal): Promise<CheckedAccountUsage> {
+    return this.request("GET", `/v1/accounts/usage?${new URLSearchParams({ account })}`, undefined, signal);
   }
 
   async changeAccount(change: AccountChange): Promise<void> {

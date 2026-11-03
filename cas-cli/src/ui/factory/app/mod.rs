@@ -1777,7 +1777,6 @@ impl FactoryApp {
                     ) || worker_waits.get(worker).is_some_and(|read| {
                         active.is_some_and(|task| task.task_id == read.task) && read.waiting
                     }) {
-                        self.merge_alert_retries.waiting(worker);
                         return None;
                     }
                     Some(current)
@@ -1921,12 +1920,15 @@ impl FactoryApp {
                     // Missing refs or an unavailable fresh read still owe one
                     // liveness relay, not an unbounded relay every retry minute.
                     let unknown = merge_alert::WorkerWait {
-                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, status_at: None,
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, completion: None,
                     };
                     let read = worker_waits.get(worker)
                         .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
-                    if !self.merge_alert_retries.admit_idle(worker, read, merge_now) {
+                    if !self.merge_alert_retries.admit_idle(worker, read) {
                         continue;
+                    }
+                    if let Some(completion) = &read.completion {
+                        prompt.text = format!("{}\n{}", completion.detail(), prompt.text);
                     }
                 }
                 prompts.push(prompt);

@@ -424,9 +424,16 @@ async fn newer_request_supersedes_the_queued_one() {
         "{reply}"
     );
 
+    let queued = read_request(&queued_path(&fixture.cas_root, OWN_TASK)).unwrap();
+    let session = queued.factory_session.as_deref();
+    assert!(worker_build_pending(&fixture.cas_root, WORKER, session));
+    assert!(!worker_build_pending(&fixture.cas_root, "another-worker", session));
+    assert!(!worker_build_pending(&fixture.cas_root, WORKER, Some("another-session")));
+
     let runner = fixture.runner(BUILT);
     assert!(runner.run_next().unwrap());
     assert!(!runner.run_next().unwrap());
+    assert!(!worker_build_pending(&fixture.cas_root, WORKER, session));
     let calls = fixture.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(calls[0].contains(&fixture.head), "{calls:?}");

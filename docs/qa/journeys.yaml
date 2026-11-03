@@ -1623,6 +1623,7 @@ journeys:
   - A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close
     stays visible and the page does not scroll sideways
   - Open Accounts from the shell, inspect per-machine login and capacity, confirm a named profile removal and see New session refresh without a page reload
+  - Check usage on Claude and Codex rows in Accounts and New session without selecting or switching an account; see Checked at, Usage as of, Eastern reset times and stale/missing reasons
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -1631,6 +1632,7 @@ journeys:
   - hub-web/src/provider-mark.ts
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
+  - hub-web/src/account-usage-check.ts
   - cas-cli/src/hub/accounts.rs
   - cas-cli/src/hub/account_routes.rs
   - hub-web/src/launch-session.ts

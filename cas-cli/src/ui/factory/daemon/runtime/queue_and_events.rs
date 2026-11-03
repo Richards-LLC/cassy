@@ -12988,6 +12988,9 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     if let Err(error) = crate::factory_capacity_wait::reconcile(
         &cas_dir, Some(&session_name), chrono::Utc::now())
     { tracing::warn!(%error, "capacity wait reconciliation failed; retrying next reminder scan"); }
+    if let Err(error) = crate::factory_worker_runs::reconcile(
+        &cas_dir, Some(&session_name), chrono::Utc::now())
+    { tracing::warn!(%error, "detached worker completion reconciliation failed; retrying next reminder scan"); }
 
     let reminder_store = match open_reminder_store(&cas_dir) {
         Ok(s) => s,

@@ -16,6 +16,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a logged-out account or a mismatched configuration directory and retain the
   account-selection diagnostics that explain why a named login was not chosen.
 
+### Fixed — Detached worker completion
+
+- **Wake workers when capped background runs finish** — Detached commands now
+  record their exit and log path and deliver one completion message to the
+  owning worker, with daemon retry recovery. Live runs and candidate builds
+  suppress idle alerts; unchanged idle episodes no longer wake the supervisor
+  repeatedly, and a completed run's alert states its exit.
+
 ### Fixed — Verification timing
 
 - **Measure recorded verifier duration** — Verdicts now record elapsed time
@@ -28,6 +36,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Steady Most recent session marker** — Each sibling conversation reserves
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
+
+### Added — Commander account usage
+
+- **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.
 
 ## [3.100.0] - 2026-11-03
 

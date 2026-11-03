@@ -2961,13 +2961,20 @@ mod worker_attention_tests {
 
     #[test]
     fn merge_queue_ejection_relays_to_supervisor_and_worker_once_and_notes_task() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",
             "merge-queue-ejection-test",
         )]);
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "merge-queue-ejection-test");
+        register_supervisor(&cas_dir, "delivery-owner");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut watcher = Agent::new_with_role("watcher-id".into(), "watcher".into(), AgentRole::Supervisor);
+        watcher.factory_session = Some("merge-queue-ejection-test".into());
+        agents.register(&watcher).unwrap();
+        let mut worker = Agent::new_with_role("worker-id".into(), "fast-jaguar-59".into(), AgentRole::Worker);
+        worker.factory_session = Some("delivery-owner".into());
+        agents.register(&worker).unwrap();
         let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-fc35".to_string(), "parked delivery".to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
@@ -2983,6 +2990,7 @@ mod worker_attention_tests {
             "merge-group-run:32386300052",
             Some("Fast Validation — CI tiers › Test release publication guards"),
         );
+        env.set("CAS_FACTORY_SESSION", "another-watcher");
         let replay = enqueue_merge_queue_ejection_relay(
             &cas_dir,
             "cas-fc35",
@@ -3007,6 +3015,8 @@ mod worker_attention_tests {
             2,
             "one supervisor relay plus one worker inbox row"
         );
+        assert!(rows.iter().all(|row| row.factory_session.as_deref() == Some("delivery-owner")),
+            "both notices must carry the delivery owner session: {rows:?}");
         // cas-fd0a: one typed wake naming the PR and the failing job.
         assert!(rows.iter().any(|row| row.target == "supervisor"
             && row.prompt.contains("failed merge_group run 32386300052")
@@ -3044,6 +3054,31 @@ mod worker_attention_tests {
             outcomes,
             [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
         );
+    }
+
+    #[test]
+    fn cas_160f_unregistered_or_sessionless_worker_cannot_wake_ambient_supervisor() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "local-watcher")]);
+        for sessionless in [false, true] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            register_supervisor(&cas_dir, "local-watcher");
+            if sessionless {
+                let worker = Agent::new_with_role("worker-id".into(), "foreign-worker".into(), AgentRole::Worker);
+                crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+            }
+            let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            tasks.add(&cas_types::Task::new("cas-foreign".into(), "Synced delivery".into())).unwrap();
+            let result = enqueue_merge_queue_ejection_relay(
+                &cas_dir, "cas-foreign", "foreign-worker", 1464, Some(41665277909),
+                "merge-group-run:41665277909", None,
+            );
+            assert!(matches!(result, WorkerAttentionRelayOutcome::Pending), "foreign ownership must remain pending: {result:?}");
+            assert!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().is_empty());
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("supervisor-id", 10).unwrap().is_empty());
+            assert!(tasks.get("cas-foreign").unwrap().notes.is_empty());
+            assert!(cas_store::quality_events_for_task(&cas_dir, "cas-foreign").unwrap().is_empty());
+        }
     }
 
     #[test]

@@ -2362,6 +2362,28 @@ mod tests {
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
         assert_eq!(first.ejections[0].occurrence, "merge-group-run:901");
 
+        let observed_exit = collect_merge_queue_ejections(
+            &ejected, std::slice::from_ref(&delivery), &BTreeSet::from([556]),
+        ).unwrap();
+        assert_eq!(observed_exit.ejections[0].occurrence, first.ejections[0].occurrence,
+            "dropping in-memory queue membership or restarting cannot create another occurrence");
+
+        // A real requeue/dequeue with only the historical failed run still rearms.
+        let mut stale_run_exit = FakeTransport {
+            runs: vec![failed.clone()], pulls: ejected.pulls.clone(), delivery_pulls: Vec::new(),
+            job: String::new(), log: None, calls: Cell::new(0),
+        };
+        stale_run_exit.pulls[0].updated_at = "2026-08-20T15:41:00Z".into();
+        let stale = collect_merge_queue_ejections(
+            &stale_run_exit, std::slice::from_ref(&delivery), &BTreeSet::from([556]),
+        ).unwrap();
+        let stale_replay = collect_merge_queue_ejections(
+            &stale_run_exit, std::slice::from_ref(&delivery), &BTreeSet::new(),
+        ).unwrap();
+        assert_ne!(stale.ejections[0].occurrence, first.ejections[0].occurrence,
+            "a later queue exit must not be suppressed by an old failed run");
+        assert_eq!(stale.ejections[0].occurrence, stale_replay.ejections[0].occurrence);
+
         let requeued = FakeTransport {
             runs: vec![failed],
             pulls: vec![pull(556, &delivery.branch, true, "2026-08-20T15:40:00Z")],

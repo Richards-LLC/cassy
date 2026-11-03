@@ -1400,11 +1400,15 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
         .current_dir(repo).status().unwrap().success(), "fixture delivery must remain unmerged");
 }
 
-fn eval_receipt_artifact(dir: &std::path::Path, thresholds: serde_json::Value, measurements: serde_json::Value) -> serde_json::Value {
+fn eval_receipt_artifact(root: &std::path::Path, task: &str, thresholds: serde_json::Value, measurements: serde_json::Value) -> serde_json::Value {
+    let config = cas::config::Config::load(root).unwrap();
+    let base = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let dir = cas::config::project_factory_artifacts_root(root, &base).join(task);
+    std::fs::create_dir_all(&dir).unwrap();
     let stem = uuid::Uuid::new_v4().to_string();
     let path = dir.join(format!("eval-{stem}.json"));
     let log = dir.join(format!("eval-{stem}.log"));
-    std::fs::write(&log, "reader evaluation completed\n").unwrap();
+    std::fs::write(&log, format!("MODEL_EVAL_RESULT {}\n", serde_json::json!({"measurements":measurements}))).unwrap();
     std::fs::write(&path, serde_json::json!({"dataset":"reader-44", "model":"provider/model", "command":"reader-eval --dataset reader-44",
         "run_log":log,"thresholds":thresholds,"measurements":measurements}).to_string()).unwrap();
     serde_json::json!({"measurements":measurements,"receipt":path})
@@ -1439,7 +1443,7 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     }
     for (kind, note) in [
         ("outcome_target", serde_json::json!({"stability": {"min":95.0}, "p95_seconds":{"max":1.0}})),
-        ("outcome_receipt", eval_receipt_artifact(temp.path(), serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":72.7,"p95_seconds":1.48}))),
+        ("outcome_receipt", eval_receipt_artifact(&root, "phase-reader", serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":72.7,"p95_seconds":1.48}))),
     ] {
         let result = unified_task(&service, serde_json::json!({
             "action":"notes", "id":"phase-reader", "note_type":kind,"notes":note.to_string(),
@@ -1478,7 +1482,7 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     assert!(independent.contains("Started task"), "{independent}");
     set_test_agent_role(&root, AgentRole::Supervisor);
     unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
-        "notes":eval_receipt_artifact(temp.path(), serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":99,"p95_seconds":0.9})).to_string()})).await;
+        "notes":eval_receipt_artifact(&root, "phase-reader", serde_json::json!({"stability":{"min":95},"p95_seconds":{"max":1}}), serde_json::json!({"stability":99,"p95_seconds":0.9})).to_string()})).await;
     set_test_agent_role(&root, AgentRole::Worker);
     let started = unified_task(&service, serde_json::json!({"action":"start","id":"dependent"})).await;
     assert!(started.contains("Started task"), "{started}");
@@ -1504,9 +1508,19 @@ async fn model_eval_close_requires_passing_receipt() {
         "note_type":"model_eval_target","notes":serde_json::json!({"dataset":"reader-44", "thresholds":{"accuracy_percent":{"min":95}}}).to_string()})).await;
     assert!(target.contains("Added"), "{target}");
     set_test_agent_role(&root, AgentRole::Worker);
+    let unsupported = eval_receipt_artifact(&root, "cas-model-eval",
+        serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":96}));
+    let artifact: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(unsupported["receipt"].as_str().unwrap()).unwrap()).unwrap();
+    std::fs::write(artifact["run_log"].as_str().unwrap(),
+        "MODEL_EVAL_RESULT {\"measurements\":{\"accuracy_percent\":80.3}}\n").unwrap();
+    let rejected = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
+        "note_type":"model_eval_receipt","notes":unsupported.to_string()})).await;
+    assert!(rejected.contains("MODEL_EVAL_UNBACKED") && rejected.contains("accuracy_percent") && rejected.contains("96"), "{rejected}");
+    assert!(!store.get("cas-model-eval").unwrap().notes.contains("MODEL_EVAL_PASS"));
     for measured in [80.3, 86.4, 87.9] {
         let receipt = unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval",
-            "note_type":"model_eval_receipt","notes":eval_receipt_artifact(temp.path(), serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":measured})).to_string()})).await;
+            "note_type":"model_eval_receipt","notes":eval_receipt_artifact(&root, "cas-model-eval", serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":measured})).to_string()})).await;
         assert!(receipt.contains("Added"), "{receipt}");
         let refused = unified_task(&service, serde_json::json!({"action":"close","id":"cas-model-eval"})).await;
         assert!(refused.contains("MODEL EVAL UNMET") && refused.contains("95") && refused.contains(&measured.to_string()), "{refused}");
@@ -1514,7 +1528,7 @@ async fn model_eval_close_requires_passing_receipt() {
         assert!(store.get("cas-model-eval").unwrap().notes.contains("MODEL_EVAL_MISS"));
     }
     unified_task(&service, serde_json::json!({"action":"notes","id":"cas-model-eval","note_type":"model_eval_receipt",
-        "notes":eval_receipt_artifact(temp.path(), serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":96})).to_string()})).await;
+        "notes":eval_receipt_artifact(&root, "cas-model-eval", serde_json::json!({"accuracy_percent":{"min":95}}), serde_json::json!({"accuracy_percent":96})).to_string()})).await;
     for id in ["cas-model-eval", "cas-no-eval"] {
         let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
         assert!(closed.contains("Closed task"), "{id}: {closed}");

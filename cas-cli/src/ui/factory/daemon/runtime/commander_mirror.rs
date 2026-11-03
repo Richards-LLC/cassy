@@ -476,6 +476,8 @@ pub(crate) struct MirrorScanState {
     #[cfg(test)]
     resolution_scans: usize,
     #[cfg(test)]
+    unresolved_warnings: usize,
+    #[cfg(test)]
     receipt_reads: usize,
     #[cfg(test)]
     poll_clock: Option<std::time::Instant>,
@@ -1306,6 +1308,8 @@ mod tests {
     fn claude_thinking_only_end_turn_preserves_the_later_pane_answer() {
         let values = vec![
             serde_json::json!({"timestamp":"2026-09-29T16:11:33Z","type":"user","uuid":"prompt-alpha","message":{"content":"[cas #2 operator Daniel@Desktop verified 0s first] ALPHA"}}),
+            // cas-ce9d: a progress line earlier in the turn is not its answer.
+            serde_json::json!({"timestamp":"2026-09-29T16:11:35Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Now a read-only look."}],"stop_reason":"tool_use"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:37Z","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal work"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:38Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replied ALPHA"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:39Z","type":"system","subtype":"turn_duration"}),
@@ -1688,6 +1692,32 @@ mod tests {
         assert_eq!(payload.reply_to, history.iter().find(|row| row.source == "terminal").map(|row| row.id));
         assert_eq!(payload.message, "**Ready**\n- Next step is clear.");
         assert_eq!(payload.device_id, "*");
+    }
+
+    /// cas-ce9d: a supervisor whose transcript cannot be found is named in a
+    /// warning once per source, never skipped in silence every second.
+    #[test]
+    fn unresolvable_supervisor_transcript_warns_once_cas_ce9d() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        let agents = SqliteAgentStore::open(&root).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = Agent::new_with_role("sup-id".into(), "sup".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some("factory-1".into());
+        supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+        supervisor.metadata.insert(
+            "supervisor_account_dir".into(),
+            temp.path().join(".claude-other").to_string_lossy().into_owned(),
+        );
+        agents.register(&supervisor).unwrap();
+        let mut state = MirrorScanState::default();
+        for _ in 0..3 {
+            scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, std::slice::from_ref(&supervisor), &mut state);
+        }
+        assert_eq!(state.unresolved_warnings, 1);
     }
 
     #[test]

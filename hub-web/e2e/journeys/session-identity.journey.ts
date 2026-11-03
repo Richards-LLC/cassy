@@ -1,4 +1,5 @@
 import { test, expect, journeyPart } from "./journey";
+import { mkdir } from "node:fs/promises";
 import { journeyDay, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
@@ -195,6 +196,44 @@ const atlas = (): Machine => ({
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
 
+// cas-6faf: the same keyed rows must keep their geometry when recency moves.
+test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journeyPart, async ({ page, journey }) => {
+  const machine = atlas();
+  machine.sessions = machine.sessions.slice(0, 2);
+  machine.sessions[0]!.supervisor = "thoughtful-chinchilla-84";
+  const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
+  await journey.open();
+  await showConversationList(page);
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const rows = list.locator(".conversation-row");
+  const row = (codename: string) => rows.filter({ hasText: codename });
+  const rects = () => rows.evaluateAll(nodes => nodes.map(node => {
+    const { x, y, width, height } = node.getBoundingClientRect();
+    return { key: node.getAttribute("data-thread-key"), x, y, width, height };
+  }));
+  const capture = process.env.SESSION_RECENCY_CAPTURE_DIR;
+  if (capture) await mkdir(capture, { recursive: true });
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await expect(rows).toHaveCount(2);
+    const currentKey = await rows.filter({ has: page.locator('.conversation-session-slot:not([aria-hidden="true"])') }).getAttribute("data-thread-key");
+    const next = machine.sessions.find(session => `atlas:${session.name}` !== currentKey)!;
+    const nextRow = row(next.supervisor!);
+    const previousRow = rows.filter({ hasText: machine.sessions.find(session => `atlas:${session.name}` === currentKey)!.supervisor! });
+    const before = await rects();
+    if (capture) await page.screenshot({ path: `${capture}/initial-${width}.png` });
+    next.last_activity_at = journeyStamp();
+    await hub.announceCatalog("atlas");
+    await expect(nextRow).toHaveAttribute("data-most-recent", "true");
+    if (capture) await page.screenshot({ path: `${capture}/moved-${width}.png` });
+    await journey.stage(`Recency moves, every row stays in place at ${width}px`, async () => {
+      expect(await rects()).toEqual(before);
+      await expect(nextRow).toHaveAccessibleName(/most recent/i);
+      await expect(previousRow).not.toHaveAccessibleName(/most recent/i);
+    });
+  }
+});
+
 test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) => {
   const hub = await journey.hub({
     machines: [atlas()],
@@ -230,7 +269,9 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(list.getByRole("group", { name: "gabber-studio · 3 conversations on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(3);
     const rows = list.locator(".conversation-row");
     // cas-ade2: rows sort by supervisor name; Most recent marks the newest where it stands.
-    await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "noble-cheetah-84", "wild-shark-68"]);
+    await expect(rows.locator(".conversation-supervisor-name")).toHaveText(["calm-puma-34", "noble-cheetah-84", "wild-shark-68"]);
+    await expect(row("calm-puma-34").locator(".conversation-session-mark")).toBeVisible();
+    await expect(row("noble-cheetah-84").locator(".conversation-session-mark")).toBeHidden();
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
@@ -474,7 +515,7 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
     const group = list.getByRole("group", { name: "gabber-studio · 2 conversations on Atlas", exact: true });
     await expect(group.locator(".conversation-row")).toHaveCount(2);
     await expect(list.getByRole("group", { name: "pulse-card · 1 conversation on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(1);
-    await expect(group.locator(".conversation-session-mark")).toHaveText("Most recent");
+    await expect(group.locator('.conversation-session-slot:not([aria-hidden="true"]) .conversation-session-mark')).toHaveText("Most recent");
     await group.locator(".conversation-row").first().focus();
     await page.keyboard.press("Tab");
     await expect(group.locator(".conversation-row").last()).toBeFocused();

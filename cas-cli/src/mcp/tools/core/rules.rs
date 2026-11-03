@@ -248,6 +248,33 @@ impl CasCore {
         Ok(Some(id))
     }
 
+    /// cas-56266: list the cited sites a rule change leaves for review in one
+    /// linked cleanup task. The rule change is already stored, so a listing
+    /// failure is reported rather than undoing it.
+    fn rule_cleanup_suffix(&self, rule: &Rule, changes: &[crate::rule_refs::RuleChange]) -> String {
+        if changes.is_empty() {
+            return String::new();
+        }
+        let filed = (|| -> anyhow::Result<Option<String>> {
+            let message = |error: McpError| anyhow::anyhow!(error.message.into_owned());
+            let version = self
+                .open_rule_store()
+                .map_err(message)?
+                .list_versions(&rule.id)?
+                .iter()
+                .map(|version| version.version)
+                .max()
+                .unwrap_or_default();
+            let tasks = self.open_task_store().map_err(message)?;
+            crate::rule_refs::file_cleanup(&self.cas_root, tasks.as_ref(), rule, changes, &format!("v{version}"))
+        })();
+        match filed {
+            Ok(Some(id)) => format!("; cleanup task {id} lists its cited sites"),
+            Ok(None) => String::new(),
+            Err(error) => format!("; cited-site cleanup listing failed: {error:#}"),
+        }
+    }
+
     fn retrieval_aggregates_for_rule(
         &self,
         rule_id: &str,
@@ -862,15 +889,22 @@ impl CasCore {
         Parameters(req): Parameters<IdRequest>,
     ) -> Result<CallToolResult, McpError> {
         let rule_store = self.open_rule_store()?;
+        let before = rule_store.get(&req.id).ok();
 
         rule_store.delete(&req.id).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to delete: {e}")),
             data: None,
         })?;
+        let cleanup = match (before, rule_store.get(&req.id)) {
+            (Some(before), Ok(after)) => {
+                self.rule_cleanup_suffix(&after, &crate::rule_refs::update_changes(&before, &after))
+            }
+            _ => String::new(),
+        };
 
         Ok(Self::success(format!(
-            "Retired rule: {} (history retained)",
+            "Retired rule: {} (history retained){cleanup}",
             req.id
         )))
     }
@@ -900,6 +934,7 @@ impl CasCore {
             message: Cow::from(format!("Rule not found: {e}")),
             data: None,
         })?;
+        let before = rule.clone();
 
         let mut changes = Vec::new();
 
@@ -1037,8 +1072,9 @@ impl CasCore {
         let suffix = chore
             .map(|id| format!("; encode chore {id} exists"))
             .unwrap_or_default();
+        let cleanup = self.rule_cleanup_suffix(&rule, &crate::rule_refs::update_changes(&before, &rule));
         Ok(Self::success(format!(
-            "Updated rule {}: {}{}",
+            "Updated rule {}: {}{}{cleanup}",
             req.id,
             changes.join(", "),
             suffix

@@ -13037,7 +13037,7 @@ async fn test_epic_status_surfaces_existing_encode_chore_cas_d4fc() {
     );
     chore.task_type = TaskType::Chore;
     chore.external_ref = Some(format!("rule-encode:{}", rule.id));
-    tasks.create(&chore).unwrap();
+    tasks.add(&chore).unwrap();
     let before = serde_json::to_value(tasks.get(&chore.id).unwrap()).unwrap();
     let reply = env.service.rule(Parameters(serde_json::from_value(serde_json::json!({
         "action": "update", "id": rule.id, "tags": "enforceable:test",

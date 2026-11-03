@@ -11755,17 +11755,21 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         assert!(dirty.contains("commits behind"), "{dirty}");
         git_stdout(&worker_path, &["checkout", "--", "README"]);
 
-        // Clean is insufficient when the worker still carries unmerged commits.
-        std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
+        // cas-dd0e: unmerged commits (an earlier PR, open or squash-merged)
+        // no longer make a clean idle worker wait: start cuts this task's own
+        // branch beside them.
+        std::fs::write(worker_path.join("unmerged.txt"), "earlier PR work\n").unwrap();
         git_stdout(&worker_path, &["add", "unmerged.txt"]);
         git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
-        let stale = assign(&env, &task_b, assignee)
+        let beside = assign(&env, &task_b, assignee)
             .await
-            .expect_err("genuinely stale worker must be refused");
+            .expect("a clean idle worker with an earlier PR on its lane may take new work");
         assert!(
-            stale.contains("commits behind") && stale.contains("epic/foreign"),
-            "{stale}"
+            beside.contains(&format!("cut factory/{worker}-{task_b}"))
+                && beside.contains("epic/foreign"),
+            "{beside}"
         );
+        store.update(&targeted).unwrap();
         git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
 
         let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
@@ -11916,30 +11920,19 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         }))
         .unwrap();
         // cas-ff6c: the cas-8001 shape. Another task's merged per-task branch
-        // is refused, left unchanged, and the refusal names this task's cut.
+        // is never reused or reset. cas-dd0e: a fresh task gets its own cut
+        // from the target instead of a refusal, leaving that branch unchanged.
         let started_on = if worker_branch == format!("factory/{worker}") {
             let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
             worker_branch.to_string()
         } else {
-            let refused = env
-                .service
-                .task(Parameters(start.clone()))
-                .await
-                .expect_err("another task's per-task branch must not be reused");
             let own = format!("factory/{worker}-{task_b}");
+            let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert!(
-                refused.message.contains("cas-prior's per-task branch")
-                    && refused.message.contains(&format!(
-                        "git fetch origin epic/foreign && git switch -c {own} origin/epic/foreign && git push -u origin {own}"
-                    )),
-                "{refused}"
+                started.contains("TASK BRANCH CUT") && started.contains(&own),
+                "{started}"
             );
-            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
-            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-            git_stdout(&worker_path, &["fetch", "origin", "epic/foreign"]);
-            git_stdout(&worker_path, &["switch", "-c", &own, "origin/epic/foreign"]);
-            get_text(&env.service.task(Parameters(start)).await.unwrap());
             assert_eq!(
                 git_stdout(&worker_path, &["rev-parse", worker_branch]),
                 clean_tip
@@ -12261,6 +12254,92 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
             assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
         }
         assert_eq!(std::fs::read(worker_path.join("README")).unwrap(), dirty_before);
+    }
+}
+
+/// cas-dd0e: a worker's lane still holds an earlier hotfix PR's commits after
+/// a squash merge, so they never reach the target. A fresh task must not wait
+/// on that lane: start cuts `factory/<worker>-<task>` from the target beside
+/// it, and the next hotfix gets its own branch too, so the PRs run at once.
+/// Resumes keep refusing foreign lane work (cas-5eb1a below).
+#[tokio::test]
+async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e() {
+    let home = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-hotfix-lanes")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "hotfix-worker-12";
+    let worker_path = init_sync_repo(&env, worker);
+    let project = env.cas_root.parent().unwrap().to_path_buf();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"hotfix-lanes-fixture\"\n",
+    )
+    .unwrap();
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-hotfix-lanes".into());
+    agent.metadata.insert(
+        "clone_path".into(),
+        worker_path.to_string_lossy().into_owned(),
+    );
+    env.agent_store().register(&agent).unwrap();
+
+    // The first hotfix's PR commit stays on the lane; the target squashed it.
+    std::fs::write(worker_path.join("first.txt"), "first hotfix\n").unwrap();
+    git_stdout(&worker_path, &["add", "first.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "fix(cas-aaaa): first hotfix"]);
+    let lane_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    std::fs::write(project.join("first.txt"), "first hotfix\n").unwrap();
+    git_stdout(&project, &["add", "first.txt"]);
+    git_stdout(&project, &["commit", "-m", "first hotfix (#1)"]);
+    let target_tip = git_stdout(&project, &["rev-parse", "main"]);
+
+    let start = |id: &str| -> TaskRequest {
+        serde_json::from_value(serde_json::json!({ "action": "start", "id": id })).unwrap()
+    };
+    let store = env.task_store();
+    let mut started_on = Vec::new();
+    for id in ["cas-bbbb", "cas-cccc"] {
+        let mut task = Task::new(id.into(), format!("independent hotfix {id}"));
+        task.assignee = Some(worker.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:hotfix-lanes-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let started = get_text(
+            &env.service
+                .task(Parameters(start(id)))
+                .await
+                .unwrap_or_else(|error| panic!("{id} must start beside the occupied lane: {error}")),
+        );
+        let own = format!("factory/{worker}-{id}");
+        assert!(started.contains(&own), "{started}");
+        assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), target_tip);
+        assert_eq!(
+            store.get(id).unwrap().deliverables.factory_branch_start.map(|start| start.branch),
+            Some(own.clone())
+        );
+        // This hotfix's PR is pushed and parked; the next one must not wait.
+        std::fs::write(worker_path.join(format!("{id}.txt")), "hotfix\n").unwrap();
+        git_stdout(&worker_path, &["add", "."]);
+        git_stdout(&worker_path, &["commit", "-m", &format!("fix({id}): hotfix")]);
+        let mut parked = store.get(id).unwrap();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.factory_branch_anchor =
+            Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+        store.update(&parked).unwrap();
+        started_on.push(own);
+    }
+    // Each PR keeps its own branch, and the lane keeps the first hotfix.
+    assert_eq!(git_stdout(&worker_path, &["rev-parse", &format!("factory/{worker}")]), lane_tip);
+    for own in &started_on {
+        assert_ne!(git_stdout(&worker_path, &["rev-parse", own]), target_tip, "{own}");
     }
 }
 

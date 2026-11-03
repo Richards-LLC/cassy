@@ -200,6 +200,7 @@ const sup = (id: number, message: string, from: string, at: string, kind = "answ
 test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journeyPart, async ({ page, journey }) => {
   const machine = atlas();
   machine.sessions = machine.sessions.slice(0, 2);
+  machine.sessions[0]!.supervisor = "thoughtful-chinchilla-84";
   const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
   await journey.open();
   await showConversationList(page);

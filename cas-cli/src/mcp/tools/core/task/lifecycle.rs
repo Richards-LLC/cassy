@@ -5523,6 +5523,7 @@ mod related_recall_response_tests {
         let response = core.cas_task_create(Parameters(req)).await
             .map(text).unwrap_or_else(|error| error.message.to_string());
         assert!(response.contains(&owner), "a second supervisor must see the real ask owner: {response}");
+        // pin: an ownership warning must identify the exact external source supplied by the caller.
         assert!(response.contains(source), "the ownership response must identify the ask: {response}");
     }
 

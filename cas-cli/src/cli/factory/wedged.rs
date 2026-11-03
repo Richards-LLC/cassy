@@ -3786,37 +3786,80 @@ mod tests {
         assert_eq!(got, WorkerLivenessState::Alive);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn background_processes_reports_a_real_long_running_child_and_no_child_case() {
-        // This process is the fake pane PID. Its direct `sleep` child is the
-        // same shape as `codex -> shell -> cargo` after a backgrounded build.
-        assert_eq!(
-            background_processes_for(std::process::id()),
-            BackgroundProcessState::Available(vec![]),
-            "the fake pane must begin with no descendants"
-        );
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn long-running fake background job");
-        // Linux publishes the child relationship asynchronously relative to
-        // `spawn` returning; settle only the test fixture, never production.
-        std::thread::sleep(Duration::from_millis(20));
-        let observed = background_processes_for(std::process::id());
-        child.kill().expect("stop fake background job");
-        child.wait().expect("reap fake background job");
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
 
-        let BackgroundProcessState::Available(processes) = observed else {
-            panic!("live /proc child walk unexpectedly unavailable: {observed:?}");
-        };
-        assert!(
-            processes
-                .iter()
-                .any(|process| process.command == "sleep" && process.age_secs < 5),
-            "expected named, age-bearing child evidence: {processes:?}"
+        struct HeldJob(Child);
+        impl Drop for HeldJob {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = std::process::id();
+        assert_eq!(
+            background_processes_for(root),
+            BackgroundProcessState::Available(vec![])
         );
-        assert!(BackgroundProcessState::Available(processes).is_active());
+        assert_eq!(
+            background_processes_for(u32::MAX),
+            BackgroundProcessState::Unavailable
+        );
+        for (command, argument, active) in [
+            ("cargo", "build", true),
+            ("cas", "serve", false),
+            ("node", "@playwright/mcp/cli.js", false),
+            ("node", "node_modules/playwright/cli.js", true),
+        ] {
+            let started = std::time::Instant::now();
+            let mut child = HeldJob(
+                Command::new("/bin/bash")
+                    .arg0(command)
+                    .args([
+                        "--noprofile",
+                        "--norc",
+                        "-c",
+                        "printf 'ready\\n'; read -r _",
+                        "fixture",
+                        argument,
+                    ])
+                    // The lookup must inspect argv, never inherited env markers.
+                    .env("CAS_PROCESS_TEST_MARKER", "@playwright/mcp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .expect("spawn owned background fixture"),
+            );
+            let mut ready = String::new();
+            BufReader::new(child.0.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n", "fixture must be running before lookup");
+            let observed = background_processes_for(root);
+            let BackgroundProcessState::Available(processes) = &observed else {
+                panic!("native child lookup unexpectedly unavailable: {observed:?}");
+            };
+            assert_eq!(
+                has_active_work(false, &observed),
+                active,
+                "{command} {argument}: {observed:?}"
+            );
+            if active {
+                assert!(
+                    processes.iter().any(|process| process.command == command
+                        && process.age_secs <= started.elapsed().as_secs() + 1),
+                    "expected named, age-bearing evidence: {processes:?}"
+                );
+            }
+            drop(child);
+        }
+        assert_eq!(
+            background_processes_for(root),
+            BackgroundProcessState::Available(vec![])
+        );
     }
 
     #[cfg(target_os = "linux")]

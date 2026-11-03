@@ -7710,6 +7710,11 @@ impl CasCore {
             data: None,
         })?;
 
+        if !task.is_terminal()
+            && let Err(message) = crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id, true)
+        {
+            return Ok(Self::tool_error(message));
+        }
         if task.task_type == TaskType::Epic && !task.is_terminal() {
             if let Ok(actor) = self.get_agent_id() {
                 if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {

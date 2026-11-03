@@ -2432,6 +2432,8 @@ impl CasCore {
             task.notes = fresh.notes;
         }
 
+        crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &req.id, false)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;

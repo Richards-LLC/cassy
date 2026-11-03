@@ -764,6 +764,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
             crate::cli::qa_rapid_response::RapidResponseCommand::Status => None,
             _ => Some("Opening or closing a rapid-response window (`cas qa rapid-response`)"),
         },
+        Commands::Qa(crate::cli::qa::QaCommand::OutcomeOverride { .. }) => {
+            Some("Overriding a measured phase outcome (`cas qa outcome-override`)")
+        }
         Commands::Qa(crate::cli::qa::QaCommand::AuthorOverride { .. }) => {
             Some("Overriding the independent QA author rule (`cas qa author-override`)")
         }
@@ -1114,6 +1117,7 @@ mod tests {
             "qa rapid-response disable cas-ep1c",
             "qa rapid-response review-migration cas-de11 --note checked",
             "qa author-override cas-de11 --note accepted",
+            "qa outcome-override cas-phase --reason accepted",
         ] {
             assert!(
                 operator_only_cas_invocation(&words(line)).is_some(),

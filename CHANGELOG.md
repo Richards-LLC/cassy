@@ -18,6 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep missed plan targets out of merges** — Supervisor instructions now require the plan's measured target, hold only dependent work when it is missed, and keep independent deliveries shipping. Briefs carry the plan section and metric through worker close; characterization protects only behaviour the plan keeps.
 
+### Added — Measured phase outcomes
+
+- **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

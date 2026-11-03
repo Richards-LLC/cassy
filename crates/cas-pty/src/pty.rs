@@ -4278,6 +4278,53 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0() {
+        use std::os::unix::fs::PermissionsExt;
+        for native in [Some("2.1.316"), None] {
+            let temp = tempfile::tempdir().unwrap();
+            let stale = temp.path().join("npm/bin/claude");
+            let current = temp.path().join(".local/bin/claude");
+            for (path, version) in [(&stale, Some("2.1.116")), (&current, native)] {
+                let Some(version) = version else { continue };
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version} (Claude Code)'; else printf '%s' \"$0\" > \"$1\"; fi\n")).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let marker = temp.path().join("launched");
+            let config = PtyConfig {
+                command: "claude".into(),
+                args: vec![marker.to_string_lossy().into_owned()],
+                cwd: Some(temp.path().to_path_buf()),
+                env: vec![
+                    ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+                    ("PATH".into(), stale.parent().unwrap().to_string_lossy().into_owned()),
+                    ("CAS_AGENT_ROLE".into(), "supervisor".into()),
+                ],
+                ..PtyConfig::default()
+            };
+            let result = Pty::spawn("claude-resolution", config);
+            if native.is_none() {
+                let error = match result { Ok(mut pty) => { pty.kill(); panic!("stale CLI must refuse before launch") }, Err(error) => error.to_string() };
+                assert!(error.contains("2.1.280") && error.contains("2.1.116"), "{error}");
+                assert!(!marker.exists());
+                continue;
+            }
+            let mut pty = result.unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(_)) => break,
+                    Some(PtyEvent::Error(error)) => panic!("{error}"),
+                    Some(PtyEvent::Output(_)) => {},
+                    None => panic!("fixture did not exit"),
+                }
+            }
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), current.to_string_lossy());
+        }
+    }
+
     /// Run `script` under `sh -c` in a PTY as `role` and return its output.
     #[cfg(target_os = "linux")]
     async fn probe_output(role: &str, script: &str, env: &[(String, String)]) -> Result<String> {

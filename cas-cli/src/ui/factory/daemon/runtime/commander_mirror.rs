@@ -1303,6 +1303,45 @@ mod tests {
     }
 
     #[test]
+    fn claude_api_error_reaches_commander_in_one_scan_cas_d8e0() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (temp, root, queue) = terminal_session(vec![]);
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.cc_session_id = Some("failed-turn".into());
+        agent.metadata.insert("supervisor_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let send = queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "hello?", Some("factory-1"),
+            None, None, false, None,
+            &OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+                device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+        ).unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        let directory = temp.path().join("account/projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let error = "API Error: 400 Claude Code 2.1.116 does not support this model; version 2.1.280 or newer is required";
+        let records = [
+            serde_json::json!({"timestamp":at(0),"type":"user","uuid":"input","message":{"content":format!("[cas #{} operator Alice@phone verified 0s first] hello?", send.id())}}),
+            // Real Claude failures use stop_sequence and emit no turn_duration.
+            serde_json::json!({"timestamp":at(1),"type":"assistant","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":error}]}}),
+        ];
+        std::fs::write(directory.join("failed-turn.jsonl"), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
+        );
+        scan(&mut MirrorScanState::default());
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1, "the first failing turn must be visible immediately");
+        assert_eq!(replies[0].message, error, "conversation pane retains actionable error");
+        assert!(replies[0].summary.contains("API Error: 400"), "session preview must show error");
+        assert_eq!(replies[0].reply_to, Some(send.id()));
+        scan(&mut MirrorScanState::default());
+        assert_eq!(operator_replies(&queue).len(), 1, "daemon replay must not duplicate errors");
+    }
+
+    #[test]
     fn claude_thinking_only_end_turn_preserves_the_later_pane_answer() {
         let values = vec![
             serde_json::json!({"timestamp":"2026-09-29T16:11:33Z","type":"user","uuid":"prompt-alpha","message":{"content":"[cas #2 operator Daniel@Desktop verified 0s first] ALPHA"}}),

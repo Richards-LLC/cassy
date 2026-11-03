@@ -8920,6 +8920,12 @@ impl FactoryDaemon {
             operator_replies,
         } = selection;
         replacement_workers.extend(self.pending_worker_replacements());
+        // cas-062b: a cleared or submitted draft ends the pane's hold notice.
+        if self.app.operator_draft_hold
+            && !self.app.mux.pane_composer_dirty(self.app.supervisor_name())
+        {
+            self.app.operator_draft_hold = false;
+        }
         // Reuse the hook's message-class seam for inline operator/peer labels.
         // The roster arrived from QueueSelect; there is no loop-thread read.
         let supervisor_senders: HashMap<String, String> = registered_agents.iter()
@@ -10543,6 +10549,13 @@ impl FactoryDaemon {
                     } else {
                         wake_decision.status_detail()
                     };
+                    // cas-062b: show the operator, outside the composer, that
+                    // his own draft is holding a Commander message.
+                    if pane_state.composer_dirty && wake_sender == WakeSender::Operator
+                        && pane_target == self.app.supervisor_name()
+                    {
+                        self.app.operator_draft_hold = true;
+                    }
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });

@@ -13,6 +13,7 @@ use crate::mcp::tools::core::task::lifecycle::{repository_proof, review_tier};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Candidate {
+    pub cas_root: PathBuf,
     pub task_id: String,
     pub repository: PathBuf,
     pub source_branch: String,
@@ -42,11 +43,31 @@ struct Promotion {
     landed_sha: String,
 }
 
+const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
+
+fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
+    let message = git(
+        Path::new(&proof.repository_root),
+        &["show", "-s", "--format=%B", &proof.head_commit],
+    )?;
+    let Some(key) = message.strip_prefix(CANDIDATE_COMMIT_PREFIX) else {
+        return Ok(None);
+    };
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("candidate context identity is invalid".into());
+    }
+    Ok(Some(key.to_string()))
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
@@ -183,13 +204,12 @@ pub(crate) fn candidate_for_dispatch(
     let Some(proof) = dispatch.repository.as_ref() else {
         return Ok(None);
     };
-    let checkout = Path::new(&proof.worktree_root);
-    if !checkout.starts_with(root.join("verification-candidates")) {
+    let Some(bound_key) = proof_candidate_key(proof)? else {
         return Ok(None);
-    }
-    let manifest = checkout
-        .parent()
-        .ok_or("candidate manifest directory missing")?
+    };
+    let manifest = root
+        .join("verification-candidates")
+        .join(&bound_key)
         .join("candidate.json");
     let candidate: Candidate =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|error| error.to_string())?)
@@ -206,11 +226,8 @@ pub(crate) fn candidate_for_dispatch(
     if candidate.proof != *proof
         || candidate.task_id != dispatch.task_id
         || candidate.repository.to_string_lossy() != proof.repository_root
-        || checkout
-            .parent()
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str())
-            != Some(key.as_str())
+        || candidate.cas_root != root
+        || bound_key != key
         || git(
             &candidate.repository,
             &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
@@ -222,10 +239,17 @@ pub(crate) fn candidate_for_dispatch(
 }
 
 impl Candidate {
-    fn directory(&self) -> Result<&Path, String> {
-        Path::new(&self.proof.worktree_root)
-            .parent()
-            .ok_or_else(|| "candidate directory missing".into())
+    fn directory(&self) -> Result<PathBuf, String> {
+        let key = candidate_key(
+            &self.task_id,
+            &self.repository,
+            &self.source_branch,
+            &self.source_sha,
+            &self.target_branch,
+            &self.target_sha,
+            &self.context_digest,
+        )?;
+        Ok(self.cas_root.join("verification-candidates").join(key))
     }
 
     pub(crate) fn validate(&self, root: &Path, task: &Task) -> Result<(), String> {
@@ -405,10 +429,9 @@ impl CasCore {
             "Review the disposable candidate at {} (head {}). PASS continues this merge; no worker close retry or second verifier is needed.",
             proof.worktree_root, proof.head_commit,
         ));
-        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
-            &self.cas_root, queue.as_ref(), &dispatch.id, &task.id, &dispatch.owner_agent_id,
-            dispatch.deadline_at, task.assignee.as_deref().unwrap_or("worker"), location.as_deref(),
-            dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()), None,
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_candidate_verification_handoff(
+            &self.cas_root, queue.as_ref(), dispatch, task.assignee.as_deref().unwrap_or("worker"),
+            location.as_deref().unwrap_or("Review the exact candidate bound to this dispatch."),
         ).map_err(fail)?;
         Ok(())
     }
@@ -418,13 +441,20 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         status: VerificationStatus,
     ) -> Result<String, McpError> {
-        let agents = self.open_agent_store()?;
-        let owner = agents.get(&dispatch.owner_agent_id).map_err(fail)?;
-        let recipient =
-            crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_notice_recipient(
-                agents.as_ref(),
-                owner.factory_session.as_deref(),
+        if self
+            .open_task_store()?
+            .get(&dispatch.task_id)
+            .map_err(fail)?
+            .is_terminal()
+        {
+            return Ok(
+                "\nThe delivery is already complete; its original approval is retained.".into(),
             );
+        }
+        let agents = self.open_agent_store()?;
+        let rows = agents.list(None).map_err(fail)?;
+        let recipient =
+            crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
         let action = if status == VerificationStatus::Approved {
             "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed."
         } else {
@@ -656,7 +686,11 @@ impl CasCore {
                 || candidate.target_branch != target
                 || candidate.target_sha != target_sha
                 || candidate.context_digest != digest
-                || Path::new(&candidate.proof.worktree_root) != directory.join("checkout")
+                || candidate.cas_root != self.cas_root
+                || proof_candidate_key(&candidate.proof)
+                    .map_err(fail)?
+                    .as_deref()
+                    != directory.file_name().and_then(|name| name.to_str())
                 || candidate.proof.repository_root != repository.to_string_lossy()
                 || git(
                     repo,
@@ -675,29 +709,15 @@ impl CasCore {
             return Ok(candidate);
         }
         std::fs::create_dir_all(&directory).map_err(fail)?;
-        let checkout = directory.join("checkout");
-        if checkout.exists() {
-            let bound = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-                .map_err(fail)?
-                .and_then(|dispatch| dispatch.repository)
-                .is_some_and(|proof| Path::new(&proof.worktree_root) == checkout);
-            if bound {
-                return Err(fail(
-                    "candidate manifest missing for an existing dispatch; explicit recovery required",
-                ));
-            }
-            git(
-                repo,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    checkout
-                        .to_str()
-                        .ok_or_else(|| fail("non-UTF8 candidate path"))?,
-                ],
-            )
-            .map_err(fail)?;
+        if let Some(dispatch) =
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
+            && let Some(proof) = dispatch.repository.as_ref()
+            && proof_candidate_key(proof).map_err(fail)?.as_deref()
+                == directory.file_name().and_then(|name| name.to_str())
+        {
+            return Err(fail(
+                "candidate manifest missing for an existing dispatch; explicit recovery required",
+            ));
         }
         let merged = git(
             repo,
@@ -719,31 +739,49 @@ impl CasCore {
                 "-p",
                 &source_sha,
                 "-m",
-                "Cassy task verification candidate",
+                &format!(
+                    "{CANDIDATE_COMMIT_PREFIX}{}",
+                    directory
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| fail("candidate key missing"))?
+                ),
             ],
         )
         .map_err(fail)?;
+        let key = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| fail("candidate key missing"))?;
         git(
             repo,
             &[
-                "worktree",
-                "add",
-                "--detach",
-                "--no-checkout",
-                checkout
-                    .to_str()
-                    .ok_or_else(|| fail("non-UTF8 candidate path"))?,
+                "update-ref",
+                &format!("refs/cas/verification-candidates/{key}"),
                 &candidate_sha,
             ],
         )
         .map_err(fail)?;
-        // Materialize the candidate without invoking the project's checkout
-        // bootstrap hooks or introducing another dependency/check stage.
-        git(&checkout, &["reset", "--hard", &candidate_sha]).map_err(fail)?;
-        let proof =
-            repository_proof::capture_repository_proof_with_anchors(repo, &checkout, Vec::new())
+        let checkout = crate::factory_review_scratch::create_candidate(
+            &self.cas_root,
+            repo,
+            &task.id,
+            &candidate_sha,
+        )
+        .map_err(fail)?;
+        let mut proof =
+            repository_proof::capture_repository_proof_at_target(repo, &candidate_sha, Vec::new())
                 .map_err(fail)?;
+        // The reviewed object is immutable; the managed checkout is a reading
+        // location whose eventual GC cannot rewrite the original verdict.
+        proof.worktree_root = checkout
+            .path
+            .canonicalize()
+            .map_err(fail)?
+            .to_string_lossy()
+            .into_owned();
         let candidate = Candidate {
+            cas_root: self.cas_root.clone(),
             task_id: task.id.clone(),
             repository,
             source_branch: source.into(),
@@ -760,7 +798,11 @@ impl CasCore {
         let mut current = store.get(&task.id).map_err(fail)?;
         let expected = current.clone();
         let marker = "PREMERGE CANDIDATE PREPARATION";
-        if !current.notes.contains(marker) {
+        if !current
+            .notes
+            .lines()
+            .any(|line| line.starts_with(&format!("{marker}:")))
+        {
             current.notes.push_str(&format!(
                 "\n\n{marker}: {} ms; source={} target={} candidate={} tree={}",
                 candidate.preparation_ms,

@@ -4750,10 +4750,12 @@ impl CasCore {
         // not another delivery review. This local hint never authorizes a
         // mutation: the existing fresh containment check below must confirm it.
         let deferred_contained_review = if let Some(task) = scoped_task.as_deref() {
-            let bound = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .and_then(|dispatch| dispatch.repository)
-                .is_some_and(|proof| std::path::Path::new(&proof.worktree_root).starts_with(cas_root.join("verification-candidates")));
+            let bound = match cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))? {
+                Some(dispatch) => super::premerge_verification::candidate_for_dispatch(&cas_root, &dispatch)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some(),
+                None => false,
+            };
             let remote = format!("origin/{}", worktree.parent_branch);
             let target = if manager.git().has_origin_remote() && manager.git().resolve_commit(&remote).is_some() {
                 remote.as_str()

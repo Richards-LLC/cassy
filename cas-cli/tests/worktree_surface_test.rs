@@ -2510,6 +2510,13 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap()
             .expect("the merge preflight dispatches the existing required verifier");
         let proof = dispatch.repository.as_ref().expect("candidate repository proof");
+        let handoffs = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap().peek_all(100).unwrap();
+        let handoff = handoffs.iter().find(|row| row.source == format!("verification-dispatch:{}", dispatch.id))
+            .expect("durable pre-merge review handoff");
+        assert_eq!(handoff.factory_session.as_deref(), Some("rebound-session"));
+        assert!(handoff.prompt.contains("A PASS continues the merge"));
+        assert!(!handoff.prompt.contains("queues the worker's close retry"));
+
         let prepared = tasks.get(&task.id).unwrap();
         let timing = prepared.notes.lines()
             .find(|line| line.starts_with("PREMERGE CANDIDATE PREPARATION:"))
@@ -2734,8 +2741,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                     fixture.tip)).unwrap();
             }
             "manifest" => {
-                let path = Path::new(&dispatch.repository.as_ref().unwrap().worktree_root)
-                    .parent().unwrap().join("candidate.json");
+                let path = std::fs::read_dir(fixture.cas_root.join("verification-candidates"))
+                    .unwrap().next().unwrap().unwrap().path().join("candidate.json");
                 let mut body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 body["context_digest"] = serde_json::Value::String("forged approval context".into());
                 std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
@@ -3937,7 +3944,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
+    assert_eq!(fetches, 2 + 3,
+        "two merge-path fetches plus the existing final-close integration proofs (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 
@@ -4098,6 +4106,14 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     tasks.update(&task).unwrap();
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
     implicit.id = Some("alice".into());
+    let held = service.factory(Parameters(implicit.clone())).await.expect_err("rework needs its pre-merge review");
+    assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+    let approved = service.verification(Parameters(verification_req(serde_json::json!({
+        "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+        "status": "approved", "summary": "Recorded rework candidate approved before publication",
+    })))).await.unwrap();
+    assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
     match service.factory(Parameters(implicit)).await {
         Ok(result) => {
             let text = get_text(&result);
@@ -5357,7 +5373,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
         .into_owned();
     std::fs::write(
         cas_root.join("config.toml"),
-        format!("[worktrees]\nenabled = false\nbase_path = \"{unique}\"\n"),
+        format!("[worktrees]\nenabled = false\nbase_path = \"{unique}\"\n[verification]\nenabled = false\n"),
     )
     .unwrap();
 
@@ -7938,7 +7954,7 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf, Temp
     // transport uses the retained local origin rather than the public host.
     let project_config = "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n";
     std::fs::write(cas_root.join("config.toml"),
-        format!("{project_config}[worktrees]\nenabled = false\n"))
+        format!("{project_config}[worktrees]\nenabled = false\n[verification]\nenabled = false\n"))
         .unwrap();
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
     run_git(&["branch", "epic/c85e"], &repo.root);

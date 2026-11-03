@@ -43,6 +43,7 @@ pub mod consolidation;
 pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
+pub(crate) mod rule_refs;
 pub mod error;
 pub(crate) mod epic_design_review;
 pub mod extraction;

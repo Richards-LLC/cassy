@@ -20,6 +20,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Stakeholder constraint memories require an expiry. Ordinary rule updates retain
   stored provenance; explicit attribution clearing records its resulting history.
 
+### Added — Rule traceability
+
+- **Keep rule-driven code tied to its reason** — Code and tests can cite a rule
+  with its verbatim scope. Worker close checks declared causal sites and cited
+  rule coverage; `cas rules refs <id>` lists tracked references for review.
+
 ### Fixed — Worker startup guidance
 
 - **Preserve worker scope and startup headroom** — Restored the protected task,

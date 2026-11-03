@@ -12,6 +12,7 @@ pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
+mod rule_references;
 mod rebased_delivery;
 pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_patches;
 pub(crate) use super::qa_dispatch::freshest_target_ref;
@@ -6075,6 +6076,11 @@ impl CasCore {
         }
         // Receipt acceptance is an alternate close entry: bind snapshot
         // approval before the immutable proof cycle can be persisted.
+        if let Err(message) = self.check_rule_reference_delivery(
+            task, &context.repo_root, Some(&input.commit_sha), &input.scope_summary,
+        ) {
+            return Ok(Self::tool_error(message));
+        }
         if let Some(error) = snapshot_approval::rejection(
             &context.repo_root,
             Some(&input.merge_base_sha),
@@ -9052,6 +9058,14 @@ impl CasCore {
                 )
             });
             let mut upkeep_refusals = Vec::new();
+            let rule_head = super::qa_evidence_gate::delivered_head(
+                &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
+            );
+            if let Err(message) = self.check_rule_reference_delivery(
+                &task, &evidence_repo, rule_head.as_deref(), req.reason.as_deref().unwrap_or(""),
+            ) {
+                gate_refusals.push(message);
+            }
             match registry_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,

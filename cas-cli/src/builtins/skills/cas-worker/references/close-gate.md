@@ -18,6 +18,21 @@ CI owns fast-row proof; local receipts are pre-push feedback. Park reads
 exact-tip capped test receipts, never runs checks. For changelog scope and
 format, follow [Changelog at park](#changelog-at-park).
 
+## Rule-driven sites
+
+For an existing rule cited in the task or newest supervisor brief, put a
+`cas-rule: <id> scope: <JSON-quoted verbatim scope>` comment beside each causal
+code/test site. Declare the sites in the brief or close reason as one JSON line:
+
+```text
+Rule-driven sites: [{"rule_id":"<id>","path":"src/file.rs","anchor":"<exact trimmed source line>"}]
+```
+
+Each cited rule needs a marker; every declared anchor needs its adjacent marker.
+When present, `stakeholder.scope` is the expected scope, exactly as recorded.
+Inspect `cas rules refs <id> --json`; the verifier checks causal changes omitted
+from the declaration. This does not require citations on unrelated edits.
+
 ## Clean-tree receipt
 
 Run `git status --porcelain` and `git rev-parse HEAD`. Empty porcelain and HEAD

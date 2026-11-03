@@ -76,6 +76,15 @@ impl CasCore {
             "Close reason: cite a run id, artifact id or receipt path beside a third-party or future proof claim, or write \"deferred to <stage>\"."
                 .to_string(),
         );
+        if crate::rule_refs::task_context(task).contains("rule-")
+            && let Ok(store) = self.open_rule_store()
+            && let Ok(rules) = store.list()
+        {
+            let ids = crate::rule_refs::task_rule_ids(task, &rules);
+            if !ids.is_empty() {
+                lines.push(format!("Rule references: {} need marked code/test sites. Declare Rule-driven sites in the brief or close receipt; each anchor needs its adjacent marker and verbatim scope. Inspect with `cas rules refs <id>`.", ids.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+        }
         if receipt_scope::has_unreleased_section_at_head(&repo, "HEAD") {
             lines.push(
                 "Changelog: product or developer source needs a titled `## [Unreleased]` entry, or a decision note \"no changelog: <reason>\"."

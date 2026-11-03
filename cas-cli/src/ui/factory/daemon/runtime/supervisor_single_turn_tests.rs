@@ -1249,6 +1249,11 @@ async fn cas_062b_commander_send_waits_only_for_a_live_pane_draft() {
     let (root, mut daemon) = fixture().await;
     let supervisor = daemon.app.supervisor_name().to_string();
     let body = "ok slide two still shit, why?";
+    // An idle Claude prompt holding the operator's draft.
+    daemon.app.mux.get_mut(&supervisor).unwrap().feed(
+        "\x1b[2J\x1b[H────────────────────\r\n❯ you ar\r\n────────────────────".as_bytes()
+    ).unwrap();
+    daemon.pane_silent_since.insert(supervisor.clone(), Instant::now() - Duration::from_secs(600));
     daemon.app.mux.get(&supervisor).unwrap()
         .deliver_user_input(b"you ar", cas_mux::UserInputKind::KeyStream).await.unwrap();
     let id = enqueue(&daemon, "commander:Daniel@Chrome-Soundwave", body,

@@ -381,7 +381,12 @@ impl CasService {
         })?;
 
         // Resolve target: if provided, look up agent by name/ID; otherwise self-reminder
-        let (target_id, target_display) = if let Some(ref target_name) = req.target {
+        // The documented `target: "self"` is the same self-reminder as an omitted target.
+        let explicit_target = req
+            .target
+            .as_deref()
+            .filter(|target| !target.trim().eq_ignore_ascii_case("self"));
+        let (target_id, target_display) = if let Some(target_name) = explicit_target {
             let (id, name) = self.resolve_reminder_target(target_name, &owner_id)?;
             (Some(id), Some(name))
         } else {

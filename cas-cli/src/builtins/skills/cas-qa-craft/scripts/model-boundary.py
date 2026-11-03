@@ -13,7 +13,7 @@ STRINGS = re.compile(STRING)
 
 
 def git(repo, *args):
-    result = subprocess.run(["git", "-C", repo, *args], capture_output=True)
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", repo, *args], capture_output=True)
     if result.returncode:
         raise ValueError(result.stderr.decode("utf-8", errors="replace").strip())
     return result.stdout.decode("utf-8")

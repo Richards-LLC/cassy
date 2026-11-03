@@ -511,3 +511,48 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     expect(await dialog.locator(".accounts-editor").evaluate(node => node.getClientRects().length)).toBe(0);
   });
 });
+
+// One shared action, reached through both entry points; provider data is a fixture.
+test("HUB-J13 check native account usage before starting without switching", journeyPart, async ({ page, journey }) => {
+  const launch = atlasLaunch();
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
+  const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
+  const calls: string[] = [];
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts$/, route => route.fulfill({ headers, json: { accounts: ["claude", "codex"].map(provider => ({ key: `${provider}:main`, provider, name: "main", display_name: `${provider} main`, login_state: "logged_in", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: "Protected", disable: null, enable: "Already enabled", rename: "Protected", set_default: null } })) } }));
+  await page.route(/^https:\/\/atlas\.test\/v1\/accounts\/usage\?/, async route => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    expect(route.request().method()).toBe("GET");
+    const account = new URL(route.request().url()).searchParams.get("account")!; calls.push(account);
+    return route.fulfill({ headers, json: { checked_at: "2026-11-03T17:00:00Z", observed_at: "2026-11-03T16:00:00Z", source: "native snapshot", windows: [{ name: "5h", used_percent: 23, resets_at: "2050-11-03T20:00:00Z" }, { name: "weekly", used_percent: 44, resets_at: "2050-11-08T16:57:00Z" }], reason: "Snapshot is stale. Open a session on this account to refresh." } });
+  });
+  await journey.open();
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
+    await journey.stage(`Native usage in Accounts at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "Accounts", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Accounts", exact: true });
+      for (const provider of ["claude", "codex"]) {
+        await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
+        const result = dialog.locator(`[data-usage-account="${provider}:main"]`);
+        await expect(result).toContainText("5h 23% used"); await expect(result).toContainText("weekly 44% used");
+        await expect(result).toContainText("Checked at Nov 3, 12:00 PM ET"); await expect(result).toContainText("Usage as of Nov 3, 11:00 AM ET");
+        await expect(result).toContainText("Snapshot is stale");
+      }
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    });
+    await page.getByRole("button", { name: "Close accounts" }).click();
+    await journey.stage(`Native usage in New session at ${width} ${colorScheme}`, async () => {
+      await page.getByRole("button", { name: "New session", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "New session", exact: true });
+      await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+      await dialog.getByRole("button", { name: "Check usage for claude:support@petrastella.io", exact: true }).click();
+      await expect(dialog.locator('[data-usage-account="claude:support@petrastella.io"]')).toContainText("Checked at Nov 3, 12:00 PM ET");
+
+      await expect(dialog.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+      expect(hub.launches).toEqual([]);
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    });
+    await page.getByRole("dialog", { name: "New session", exact: true }).getByRole("button", { name: "Cancel", exact: true }).click();
+  }
+  expect(calls).toContain("claude:main"); expect(calls).toContain("codex:main");
+});

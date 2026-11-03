@@ -16,8 +16,8 @@ export interface AccountChange { operation: AccountOperation; account: string; c
 export function accountTime(instant: string): string {
   const date = new Date(instant);
   if (!Number.isFinite(date.getTime())) return "unknown time";
-  // DESIGN.md: 12-hour local time with the generic zone ("1:10 PM ET", never EDT/EST).
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "shortGeneric" }).format(date);
+  // Account checks use Eastern 12-hour time with the generic zone ("1:10 PM ET", never EDT/EST).
+  return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "shortGeneric" }).format(date);
 }
 
 export function accountCapacity(windows: readonly AccountWindow[], observed?: string | null, now = Date.now()): string[] {

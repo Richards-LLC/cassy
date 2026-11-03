@@ -1,3 +1,4 @@
+import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -10,6 +11,7 @@ export interface AccountsMachine { id: string; label: string; scopes: readonly S
 export interface AccountsHost {
   machines(): AccountsMachine[];
   list(machineId: string, signal: AbortSignal): Promise<AccountsCatalog>;
+  checkUsage: CheckAccountUsage;
   change(machineId: string, change: AccountChange): Promise<void>;
   changed(machineId: string): void;
   copy(text: string): Promise<void>;
@@ -37,12 +39,20 @@ export class AccountsSheet {
   private edit?: { machine: AccountsMachine; account: AccountRow; operation: AccountOperation } | { machine: AccountsMachine; cleanup: AccountRow[] };
   private generation = 0;
   private focusTarget?: { machine: string; account: string; operation: string };
-  constructor(private readonly host: AccountsHost, private readonly doc: Document = document) {}
+  private readonly usageChecks: AccountUsageChecks;
+  constructor(private readonly host: AccountsHost, private readonly doc: Document = document) {
+    this.usageChecks = new AccountUsageChecks((...args) => host.checkUsage(...args), () => this.dialog, () => {
+      for (const machine of host.machines()) {
+        const body = this.machineBody(machine.id), catalog = this.catalogs.get(machine.id);
+        if (body && catalog) { body.innerHTML = this.rows(machine, catalog); fillBars(body); }
+      }
+    });
+  }
 
   open(): void {
     const dialog = this.ensureDialog();
     this.loads.abort(); this.loads = new AbortController(); this.generation++;
-    this.clearEditor(); this.catalogs.clear();
+    this.usageChecks.reset(); this.clearEditor(); this.catalogs.clear();
     this.notice("");
     const machines = this.host.machines();
     this.$(".accounts-machines").innerHTML = machines.length ? machines.map(machine => `<section data-machine="${escapeHtml(machine.id)}" aria-label="${escapeHtml(machine.label)}"><h3 class="accounts-machine">${escapeHtml(machine.label)}</h3><div class="accounts-machine-body"><p role="status">Loading accounts…</p></div></section>`).join("") : '<p>No paired machines. Pair a machine to see its accounts.</p>';
@@ -57,8 +67,9 @@ export class AccountsSheet {
     dialog.className = "accounts-sheet"; dialog.setAttribute("aria-labelledby", "accounts-title");
     dialog.innerHTML = `<header class="accounts-heading"><div><h2 id="accounts-title">Accounts</h2><p>Logins, usage and where each one lives, on every paired machine.</p></div><button type="button" data-accounts-close aria-label="Close accounts">Close</button></header><p class="accounts-notice" role="status" aria-live="polite"></p><div class="accounts-machines"></div><form class="accounts-editor" hidden><h3></h3><p class="accounts-explanation"></p><label class="accounts-field"><span></span><input name="value" autocomplete="off" required></label><div class="dialog-actions"><button type="button" data-accounts-cancel>Cancel</button><button type="submit" class="primary">Confirm</button></div></form>`;
     this.doc.body.append(dialog); this.dialog = dialog;
-    dialog.addEventListener("close", () => { this.loads.abort(); this.generation++; this.clearEditor(); this.host.returnFocus(); });
+    dialog.addEventListener("close", () => { this.usageChecks.reset(); this.loads.abort(); this.generation++; this.clearEditor(); this.host.returnFocus(); });
     dialog.addEventListener("click", event => {
+      if (this.usageChecks.handle(event)) return;
       const button = (event.target as Element).closest<HTMLButtonElement>("button");
       if (!button) return;
       if (button.hasAttribute("data-accounts-close")) dialog.close();
@@ -156,7 +167,7 @@ export class AccountsSheet {
       return `<button type="button" ${attrs} data-operation="${op}"${this.pending || reason !== null ? ` disabled title="${escapeHtml(reason ?? "Unavailable")}"` : ""}>${ACTIONS[op]}</button>`;
     };
     const actions = grok ? "" : `<div class="accounts-actions" role="group" aria-label="Actions for ${escapeHtml(account.display_name)}">${button("set_default")}<details class="accounts-more"><summary aria-label="More actions for ${escapeHtml(account.display_name)}">⋯</summary><div class="accounts-menu">${operations.filter(op => op !== "set_default").map(button).join("")}</div></details></div>`;
-    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})</span><span class="accounts-badges">${badges}</span></div><p class="accounts-where">${where}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${state}${account.disabled ? " · Disabled" : ""}</span></p>${cleanup}${usage}${reasons}${login}${actions}</div></li>`;
+    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "lane" })}<div class="accounts-card-body"><div class="accounts-identity"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})</span><span class="accounts-badges">${badges}</span></div><p class="accounts-where">${where}</p><p class="accounts-state"><span class="status-chip status-chip--${tone}">${state}${account.disabled ? " · Disabled" : ""}</span></p>${cleanup}${!grok && this.usageChecks.hasResult(machine.id, account.key) ? "" : usage}${grok ? "" : this.usageChecks.markup(machine.id, account.key)}${reasons}${login}${actions}</div></li>`;
   }
 
   private begin(machine: AccountsMachine, account: AccountRow, operation: AccountOperation): void {

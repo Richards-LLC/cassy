@@ -269,6 +269,25 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn unusable_bubblewrap_falls_back_only_when_policy_allows() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = tempfile::tempdir().unwrap();
+        crate::test_paths::warm_stub(&bin.path().join("bwrap"), "#!/bin/sh\nexit 1\n");
+        let mut paths = vec![bin.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        env.set("PATH", std::env::join_paths(paths).unwrap());
+
+        let skill = skill_with_script("true");
+        let report = validate_skill_with_policy(&skill, false)
+            .expect("installed but unusable bubblewrap must allow the default fallback");
+        assert_eq!(report.warning.as_deref(), Some(NETWORK_ISOLATION_WARNING));
+        let error = validate_skill_with_policy(&skill, true)
+            .expect_err("required sandbox must fail closed before executing validation");
+        assert!(error.contains("require_sandbox"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn probe_has_no_network_by_default() {
         if find_executable("bwrap").is_none() {
             return;

@@ -689,91 +689,91 @@ pub struct TaskRequest {
 /// Unified rule operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct RuleRequest {
-    /// Name of the stakeholder whose instruction this rule represents.
+    /// Attributed person; requires quote and scope.
     #[serde(default)]
     pub stakeholder: Option<String>,
-    /// Stakeholder's words, preserved verbatim (required with attribution).
+    /// Verbatim stakeholder words.
     #[serde(default)]
     pub stakeholder_quote: Option<String>,
-    /// Scope of that instruction, separate from the interpreted rule.
+    /// Instruction scope.
     #[serde(default)]
     pub stakeholder_scope: Option<String>,
-    /// Review deadline (RFC3339); required for attributed hard rules.
+    /// RFC3339 review date; required for attributed hard rules.
     #[serde(default)]
     pub review_after: Option<String>,
-    /// Explicit JSON snapshot from a peer's rule action=drift result.
+    /// Peer drift snapshot JSON.
     #[serde(default)]
     pub peer_snapshot: Option<String>,
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::rule_action_schema",
-        description = "Operation. `list` returns proven rules only; `helpful` votes; `promote` (needs change_note) makes a rule proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar rules; `observe` keeps verifier lessons as candidates."
+        description = "list=proven; helpful=vote; promote needs change_note; delete=tombstone; drift=read-only source/generated/peer comparison."
     )]
     pub action: String,
 
     /// Rule ID (for get, update, delete, helpful, harmful)
-    #[schemars(description = "Rule ID for operations targeting a specific rule")]
+    #[schemars(description = "Rule ID")]
     #[serde(default)]
     pub id: Option<String>,
 
     /// Content (for create, update)
-    #[schemars(description = "Rule content/instruction")]
+    #[schemars(description = "Instruction")]
     #[serde(default)]
     pub content: Option<String>,
 
     /// Paths pattern (for create, update)
-    #[schemars(description = "Glob patterns for files this rule applies to")]
+    #[schemars(description = "File globs")]
     #[serde(default)]
     pub paths: Option<String>,
 
     /// Tags (comma-separated)
-    #[schemars(description = "Comma-separated tags")]
+    #[schemars(description = "CSV tags")]
     #[serde(default)]
     pub tags: Option<String>,
 
     /// Source entry IDs (comma-separated, for create)
-    #[schemars(description = "Source entry IDs this rule was derived from (comma-separated)")]
+    #[schemars(description = "CSV source memory IDs")]
     #[serde(default)]
     pub source_ids: Option<String>,
 
     /// Limit for list operations
-    #[schemars(description = "Maximum items to return")]
+    #[schemars(description = "Max rows")]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
     /// Scope filter
-    #[schemars(description = "Scope: 'global' or 'project'")]
+    #[schemars(description = "global or project")]
     #[serde(default)]
     pub scope: Option<String>,
 
     /// Auto-approve tools (for create, update)
-    #[schemars(description = "Tools to auto-approve (comma-separated, e.g., 'Read,Glob,Grep')")]
+    #[schemars(description = "CSV safe tools to approve")]
     #[serde(default)]
     pub auto_approve_tools: Option<String>,
 
     /// Auto-approve paths (for create, update)
-    #[schemars(description = "Path patterns for auto-approval (comma-separated globs)")]
+    #[schemars(description = "CSV auto-approval globs")]
     #[serde(default)]
     pub auto_approve_paths: Option<String>,
 
     /// Similarity threshold (for check_similar)
-    #[schemars(description = "Similarity threshold for check_similar (0.0-1.0, default: 0.75)")]
+    #[schemars(description = "Similarity 0..1; default .75")]
     #[serde(default)]
     pub threshold: Option<f32>,
 
-    /// Version number to restore; omitted restores the newest prior state.
+    /// Restore version; omit for previous.
     #[serde(default)]
     pub version: Option<i64>,
 
-    /// Compatibility field for clients that call this version_id.
+    /// Alias of version.
     #[serde(default)]
     pub version_id: Option<i64>,
 
-    /// Actor recorded in rule history.
+    /// History actor.
     #[serde(default)]
     pub changed_by: Option<String>,
 
-    /// Reason recorded in rule history (required for promote).
+    /// History reason; required for promote.
     #[serde(default)]
     pub change_note: Option<String>,
 }

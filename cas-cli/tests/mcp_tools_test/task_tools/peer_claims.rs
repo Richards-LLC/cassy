@@ -497,9 +497,7 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let cloud = FakeCloud::start();
     let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
-    let beta = machine(&cloud.url, PROJECT, "beta-sup");
     cloud.live(&alpha, "alpha-sup");
-    cloud.live(&beta, "beta-sup");
     let create = |title: &str, source: &str| -> TaskCreateRequest {
         serde_json::from_value(serde_json::json!({
             "title":title,"description":"Trace the observed failure and fix it.",
@@ -507,10 +505,42 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
         })).unwrap()
     };
     alpha.core.cas_task_create(Parameters(create("Repair callback dispatch", "https://github.com/Acme/Widget/issues/42"))).await.unwrap();
-    let response = beta.core.cas_task_create(Parameters(create("Correct stale scheduler routing", "https://github.com/acme/widget/pull/42/files?view=all#discussion"))).await
-        .map(extract_text).unwrap_or_else(|error| error.message.to_string());
-    assert!(response.contains("alpha-sup"), "different task IDs must retain the ask's existing owner: {response}");
-    assert!(response.contains("42"), "the source must remain identifiable: {response}");
+    for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+        for entry in ["create", "assign", "start", "spawn"] {
+            let beta = machine(&cloud.url, PROJECT, "beta-sup");
+            let agents = open_agent_store(&beta.cas_dir).unwrap();
+            let mut actor = agents.get(&beta.agent_id).unwrap();
+            actor.role = role;
+            agents.update(&actor).unwrap();
+            cloud.live(&beta, "beta-sup");
+            let source = "https://github.com/acme/widget/pull/42/files?view=all#discussion";
+            beta.put_task("cas-other", TaskType::Task);
+            let tasks = open_task_store(&beta.cas_dir).unwrap();
+            let mut task = tasks.get("cas-other").unwrap();
+            task.external_ref = Some(source.into());
+            tasks.update(&task).unwrap();
+            let response = match entry {
+                "create" => beta.core.cas_task_create(Parameters(create("Correct stale scheduler routing", source))).await.map(extract_text).map_err(|error| error.message.to_string()),
+                "assign" => beta.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({"id":task.id,"assignee":"new-worker"})).unwrap())).await.map(extract_text).map_err(|error| error.message.to_string()),
+                "start" => start(&beta.core, &task.id, false).await,
+                _ => factory(&factory_service(&beta), serde_json::json!({"action":"spawn_workers","count":1,"task_id":task.id})).await,
+            }.expect_err("a live source owner must refuse before local mutation");
+            assert!(response.contains("alpha-sup"), "{role}/{entry}: {response}");
+            // pin: the refusal must retain the caller's ask URL, including its alias.
+            assert!(response.contains(source), "{role}/{entry}: {response}");
+            let saved = tasks.get(&task.id).unwrap();
+            assert_eq!(saved.status, TaskStatus::Open, "{role}/{entry}");
+            assert!(saved.assignee.is_none(), "{role}/{entry}");
+            assert_eq!(tasks.list(None).unwrap().len(), 1, "{role}/{entry}");
+            assert!(cas::store::open_spawn_queue_store(&beta.cas_dir).unwrap().peek(10).unwrap().is_empty());
+        }
+    }
+    // Heartbeats keep a created ask claimed before a worker takes its task lease.
+    let renewed = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    assert_eq!(renewed.renewed, 1, "{renewed:?}");
+    // Numeric aliases in different repositories must remain independent.
+    let other = machine(&cloud.url, PROJECT, "other-sup");
+    other.core.cas_task_create(Parameters(create("Independent repository callback", "https://github.com/acme/other/issues/42"))).await.unwrap();
 }
 
 /// Acceptance: B's start of a task A holds is refused with A's identity; once

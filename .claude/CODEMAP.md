@@ -89,6 +89,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - delivery attribution, proof/upkeep gates and reviewed corrections; `gate_preflight.rs` snapshots park requirements.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs` - merge/close reconciliation and guarded Git delivery operations.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
+- `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start, ordered queues and spawning; existing Slack journal receipts and normalized GitHub peer claims.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
 - `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs and project-scoped integrated-delivery recovery actions at startup.

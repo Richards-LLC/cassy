@@ -61,6 +61,8 @@ pub const PEER_BUDGET: Duration = Duration::from_secs(8);
 /// cloud (a supervisor's `focus_epic`). Renewal keeps that claim alive;
 /// clearing the focus releases it.
 pub const META_FOCUS_CLAIM: &str = "cloud_focus_epic";
+/// Source claims acquired while creating or staffing stakeholder asks.
+pub const META_SOURCE_CLAIMS: &str = "cloud_source_claims";
 
 /// One request's bounded allowance of cloud round trips (cas-0078). Each
 /// call runs on the blocking pool, so a slow cloud never stalls the async
@@ -1072,6 +1074,13 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         && !targets.iter().any(|(id, _)| id == focus)
     {
         targets.push((focus.clone(), false));
+    }
+    if let Some(keys) = me.as_ref().and_then(|agent| agent.metadata.get(META_SOURCE_CLAIMS))
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+    {
+        for key in keys {
+            if !targets.iter().any(|(id, _)| id == &key) { targets.push((key, false)); }
+        }
     }
     let tasks = crate::store::open_task_store(cas_root).ok();
     let kind_of = |id: &str| match tasks.as_ref().and_then(|tasks| tasks.get(id).ok()) {

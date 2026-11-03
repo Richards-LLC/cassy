@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Shared stakeholder asks
+
+- **Name the supervisor who owns an ask** — Task creation and staffing check
+  the source before changing local work. Slack threads reuse existing claims;
+  GitHub issue and pull-request aliases share an advisory source claim across
+  independent task cards. Conflicts name the owner and source.
+
 ### Fixed — Verification
 
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could

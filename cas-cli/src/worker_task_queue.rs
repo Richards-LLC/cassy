@@ -150,6 +150,7 @@ impl CasCore {
             .transpose()?;
         let mut queue = queues.get(session, &worker.name).map_err(error)?;
         let changed = task_ids.is_some();
+        let mut source_notices = String::new();
         if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             ensure_owned_queue_checkout(&worker)?;
         }
@@ -167,7 +168,8 @@ impl CasCore {
                         "Worker task queue requires nonempty, distinct task IDs",
                     ));
                 }
-                tasks.get(id).map_err(error)?;
+                let task = tasks.get(id).map_err(error)?;
+                source_notices.push_str(&self.task_source_notice(task.external_ref.as_deref()).await?);
             }
             if queue.current_task.is_none() {
                 queue.current_task = tasks
@@ -214,7 +216,7 @@ impl CasCore {
                 .await?;
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
-        Ok(render(&worker.name, &queue))
+        Ok(format!("{}{source_notices}", render(&worker.name, &queue)))
     }
 
     /// Called after either close or park commits, including immutable receipts.

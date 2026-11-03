@@ -2849,6 +2849,12 @@ impl CasService {
         let force_peer_claim = req.force.unwrap_or(false);
         let prefix = crate::mcp::tools::core::guidance::caller_prefix();
         let mut peer_notice = String::new();
+        let source_ids = req.task_ids.clone().unwrap_or_else(|| req.task_id.iter().cloned().collect());
+        self.refresh_task_sources(&source_ids).await?;
+        for id in &source_ids {
+            let task = task_store.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            peer_notice.push_str(&self.inner.task_source_notice(task.external_ref.as_deref()).await?);
+        }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {
                 if !force_peer_claim {
@@ -4445,6 +4451,7 @@ impl CasService {
     pub(super) async fn factory_worker_queue(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
         let worker = req.id.as_deref().or(req.target.as_deref()).ok_or_else(|| Self::error(
             ErrorCode::INVALID_PARAMS, "worker_queue requires id=<worker>"))?;
+        if let Some(ids) = req.task_ids.as_ref() { self.refresh_task_sources(ids).await?; }
         self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
     }
 

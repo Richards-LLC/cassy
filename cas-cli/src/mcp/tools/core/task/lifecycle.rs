@@ -1679,6 +1679,7 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
+        let source_notice = self.task_source_notice(external_ref.as_deref()).await?;
         let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1723,6 +1724,7 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
+        if !source_notice.is_empty() { assignee_warnings.push(source_notice); }
         let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
@@ -2993,6 +2995,7 @@ impl CasCore {
         ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
+        peer_notes.push_str(&self.task_source_notice(task.external_ref.as_deref()).await?);
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
@@ -5519,13 +5522,33 @@ mod related_recall_response_tests {
             "external_ref":source,"actor":{"registration_id":beta.id},
         })).unwrap();
         journal.record_result(request, &held, None).unwrap();
-        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
-        req.external_ref = Some(source.into());
-        let response = core.cas_task_create(Parameters(req)).await
-            .map(text).unwrap_or_else(|error| error.message.to_string());
-        assert!(response.contains(&owner), "a second supervisor must see the real ask owner: {response}");
-        // pin: an ownership warning must identify the exact external source supplied by the caller.
-        assert!(response.contains(source), "the ownership response must identify the ask: {response}");
+        let tasks = core.open_task_store().unwrap();
+        let mut synced = crate::types::Task::new("cas-synced".into(), "Already synchronized task".into());
+        synced.external_ref = Some(source.into());
+        tasks.add(&synced).unwrap();
+        for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+            let mut actor = beta.clone();
+            actor.role = role;
+            core.open_agent_store().unwrap().update(&actor).unwrap();
+            for entry in ["create", "assign", "start"] {
+                let result = match entry {
+                    "create" => {
+                        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
+                        req.external_ref = Some(source.into());
+                        core.cas_task_create(Parameters(req)).await
+                    }
+                    "assign" => core.cas_task_update(Parameters(serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(serde_json::json!({"id":synced.id,"assignee":"new-worker"})).unwrap())).await,
+                    _ => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
+                };
+                let response = result.map(text).unwrap_or_else(|error| error.message.to_string());
+                assert!(response.contains(&owner), "{role}/{entry}: {response}");
+                // pin: the ownership warning must identify the caller's source.
+                assert!(response.contains(source), "{role}/{entry}: {response}");
+                assert_eq!(tasks.list(None).unwrap().len(), 1);
+                assert_eq!(tasks.get(&synced.id).unwrap().status, crate::types::TaskStatus::Open);
+                assert!(tasks.get(&synced.id).unwrap().assignee.is_none());
+            }
+        }
     }
 
     /// cas-dd56 item 1: a task whose title names its issue records it as

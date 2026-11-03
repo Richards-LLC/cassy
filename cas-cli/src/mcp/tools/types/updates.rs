@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EntryUpdateRequest {
+    /// Expiry timestamp, including when correcting an older stakeholder constraint.
+    #[serde(default)]
+    pub valid_until: Option<String>,
     /// Entry ID to update
     #[schemars(description = "ID of the entry to update")]
     pub id: String,
@@ -25,6 +28,18 @@ pub struct EntryUpdateRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RuleUpdateRequest {
+    /// Name of the stakeholder whose instruction this rule represents.
+    #[serde(default)]
+    pub stakeholder: Option<String>,
+    /// Stakeholder's words, preserved verbatim (required with attribution).
+    #[serde(default)]
+    pub stakeholder_quote: Option<String>,
+    /// Scope of that instruction, separate from the interpreted rule.
+    #[serde(default)]
+    pub stakeholder_scope: Option<String>,
+    /// Review deadline (RFC3339); required for attributed hard rules.
+    #[serde(default)]
+    pub review_after: Option<String>,
     /// Rule ID
     #[schemars(description = "ID of the rule to update")]
     pub id: String,

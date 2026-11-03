@@ -3932,6 +3932,40 @@ edits. It was removed from the late `test-ci-tiers` queue recipe. Its independen
 boundary self-tests remain there; merge-group admission does not repeat the
 content scan.
 
+## Policy hygiene and stakeholder evidence
+
+Use `rule action=drift` for a read-only comparison of the rule source and the
+configured generated rule directory (normally `.claude/rules/cas/`). Its
+`structured_content.snapshot` is an export: copy that JSON object into the
+`peer_snapshot` string of the other machine's `rule action=drift` request. Both
+snapshots must name the same canonical project. The report names missing or
+changed generated files, peer status/content/scope/provenance differences, and
+missing or different `[cloud]` sync settings. Capture time is shown; an imported
+snapshot does not prove the peer's current state. No rule is retired, synced or
+otherwise changed by this check. Absence of a peer snapshot is reported explicitly.
+
+When an instruction is attributed to a stakeholder, supply `stakeholder`,
+`stakeholder_quote` and `stakeholder_scope` on `rule action=create` or `update`.
+The quote is stored exactly as provided, separately from the interpreted rule
+content. Attributed hard rules also require a future RFC3339 `review_after`.
+`rule action=show` displays the evidence and deadline. Existing rules remain
+unattributed until someone supplies evidence; migration never guesses or backfills
+someone's words. Optional provenance travels with normal rule/cloud serialization.
+An update that omits attribution preserves the stored evidence, including older
+client writes. `rule action=update stakeholder=""` explicitly clears live
+attribution and its `stakeholder:` tags; omit quote/scope in that request.
+The clear and its resulting history snapshot commit together.
+This does not change delivery or staging policy.
+
+Tag a temporary stakeholder constraint memory `stakeholder:<name>,constraint`
+(or `stakeholder-constraint:<name>`) and supply an explicit RFC3339 `valid_until`.
+When a decision is replaced, update the old memory's tags to include
+`superseded,superseded-by:<replacement-id>` while retaining its other tags.
+Supersession ends its validity and removes it from session context, including
+pinned memories; explicit retrieval by ID still preserves the historical words.
+A leading word such as `SUPERSEDED` in prose never retires a memory or a
+handoff. A deadline alone remains sufficient for ordinary time-limited memories.
+
 ## Operator project holds
 
 Use `cas factory hold set --reason "<reason>"` from your own interactive

@@ -524,12 +524,13 @@ pub fn build_context_ai(
 
     // Add high-value memories
     let helpful_entries = store.list_helpful(limit)?;
-    for entry in helpful_entries.iter() {
+    for entry in helpful_entries.iter().filter(|entry| !entry.is_expired()) {
         candidates.push(ContextCandidate::from_entry(entry));
     }
 
     // Add pinned memories (always included)
-    let pinned_entries = store.list_pinned().unwrap_or_default();
+    let pinned_entries: Vec<_> = store.list_pinned().unwrap_or_default().into_iter()
+        .filter(|entry| !entry.is_expired()).collect();
     let pinned_ids: std::collections::HashSet<_> =
         pinned_entries.iter().map(|e| e.id.clone()).collect();
 
@@ -1195,6 +1196,11 @@ mod tests {
         );
         entry.helpful_count = 1;
         store.add(&entry).unwrap();
+        let mut stale = entry.clone();
+        stale.id = "ai-superseded-memory".into();
+        stale.tags = vec!["superseded".into()];
+        stale.memory_tier = cas_types::MemoryTier::InContext;
+        store.add(&stale).unwrap();
 
         let rules = SqliteRuleStore::open(temp.path()).unwrap();
         rules.init().unwrap();
@@ -1204,7 +1210,7 @@ mod tests {
         let claude = fake_bin.path().join("claude");
         crate::test_paths::warm_stub(
             &claude,
-            "#!/bin/sh\nprintf '%s' '{\"selected\": [\"ai-session-memory\"]}'\n",
+            "#!/bin/sh\nprintf '%s' '{\"selected\": [\"ai-session-memory\",\"ai-superseded-memory\"]}'\n",
         );
         let original_path = std::env::var_os("PATH").unwrap_or_default();
         let path = format!(
@@ -1222,6 +1228,7 @@ mod tests {
         };
         let context = build_context_ai(&input, 5, temp.path()).unwrap();
         assert!(context.contains("ai-session-memory"), "{context}");
+        assert!(!context.contains("ai-superseded-memory"), "{context}");
 
         drop(env);
         let db = Connection::open(temp.path().join("cas.db")).unwrap();

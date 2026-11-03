@@ -198,6 +198,10 @@ async fn test_all_store_types_accessible() {
 
     // Test rule store
     let req = RuleCreateRequest {
+        stakeholder: None,
+        stakeholder_quote: None,
+        stakeholder_scope: None,
+        review_after: None,
         scope: "project".to_string(),
         content: "Rule store test".to_string(),
         paths: None,

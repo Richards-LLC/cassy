@@ -300,6 +300,7 @@ fn handle_user_prompt_submit_capture(
                     team_id: None,
                     share: None,
                     operator_authority: None,
+                    stakeholder: None,
                 };
 
                 if rule_store.add(&rule).is_ok() {

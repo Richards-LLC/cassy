@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS rules (
     share TEXT,
     -- cas-5372: operator hard-rule authorisation, `<author>|<content sha256>`
     operator_authority TEXT,
-    origin_project TEXT
+    origin_project TEXT,
+    stakeholder TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_created ON rules(created DESC);
@@ -739,6 +740,15 @@ pub struct SqliteRuleStore {
 }
 
 impl SqliteRuleStore {
+    fn parse_stakeholder(value: Option<String>) -> rusqlite::Result<Option<cas_types::StakeholderAttribution>> {
+        value.map(|json| serde_json::from_str(&json).map_err(|e| rusqlite::Error::FromSqlConversionFailure(21, rusqlite::types::Type::Text, Box::new(e)))).transpose()
+    }
+
+    fn stakeholder_json(rule: &Rule) -> Result<Option<String>> {
+        rule.stakeholder.as_ref().map(serde_json::to_string).transpose()
+            .map_err(|e| crate::error::StoreError::Parse(format!("Cannot serialize stakeholder attribution: {e}")))
+    }
+
     /// Open or create a SQLite rule store (uses same database as entry store)
     pub fn open(cas_dir: &Path) -> Result<Self> {
         Self::open_with_origin_project(cas_dir, None)
@@ -814,7 +824,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project, stakeholder
              FROM rules WHERE status = 'proven' ORDER BY priority ASC, created DESC",
         )?;
 
@@ -855,6 +865,7 @@ impl SqliteRuleStore {
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
                     origin_project: row.get(20)?,
+                    stakeholder: Self::parse_stakeholder(row.get(21)?)?,
                     operator_authority: row
                         .get::<_, Option<String>>(19)?
                         .as_deref()
@@ -872,7 +883,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project, stakeholder
              FROM rules WHERE priority = 0 AND status IN ('proven', 'draft') ORDER BY created DESC",
         )?;
 
@@ -913,6 +924,7 @@ impl SqliteRuleStore {
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
                     origin_project: row.get(20)?,
+                    stakeholder: Self::parse_stakeholder(row.get(21)?)?,
                     operator_authority: row
                         .get::<_, Option<String>>(19)?
                         .as_deref()

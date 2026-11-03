@@ -16,7 +16,7 @@ impl SqliteRuleStore {
             .query_row(
                 "SELECT id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,
-                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project, stakeholder
                  FROM rules WHERE id = ?",
                 params![id],
                 |row| {
@@ -55,6 +55,7 @@ impl SqliteRuleStore {
                             .as_deref()
                             .and_then(|s| s.parse().ok()),
                         origin_project: row.get(20)?,
+                        stakeholder: Self::parse_stakeholder(row.get(21)?)?,
                     operator_authority: row
                             .get::<_, Option<String>>(19)?
                             .as_deref()
@@ -108,6 +109,7 @@ impl SqliteRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
         operation: &str,
+        clear_stakeholder: bool,
     ) -> Result<()> {
         let timer = TraceTimer::new();
         let changed_by = changed_by
@@ -160,7 +162,8 @@ impl SqliteRuleStore {
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
                  review_after = ?9, category = ?10, priority = ?11,
                  surface_count = ?12, scope = ?13, auto_approve_tools = ?14, auto_approve_paths = ?15, team_id = ?16, share = ?17, operator_authority = ?19,
-                 origin_project = COALESCE(?20, origin_project)
+                 origin_project = COALESCE(?20, origin_project),
+                 stakeholder = CASE WHEN ?22 THEN NULL ELSE COALESCE(?21, stakeholder) END
                  WHERE id = ?18",
                 params![
                     Self::source_ids_to_string(&rule.source_ids),
@@ -183,6 +186,8 @@ impl SqliteRuleStore {
                     rule.id,
                     rule.operator_authority.as_ref().map(|a| a.to_stored()),
                     rule.origin_project.as_ref(),
+                    Self::stakeholder_json(rule)?,
+                    clear_stakeholder,
                 ],
             )?;
             if rows == 0 {
@@ -245,6 +250,7 @@ impl SqliteRuleStore {
             changed_by,
             Some(change_note.unwrap_or("tombstone delete")),
             "delete",
+            false,
         )
     }
 
@@ -322,7 +328,7 @@ impl SqliteRuleStore {
             }
             (None, None) => Some("restore previous version"),
         };
-        self.update_recorded(&restored, changed_by, note, "restore")
+        self.update_recorded(&restored, changed_by, note, "restore", false)
     }
 }
 
@@ -389,8 +395,8 @@ impl RuleStore for SqliteRuleStore {
             tx.execute(
                 "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,
-                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project, stakeholder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     rule.id,
                     rule.created.to_rfc3339(),
@@ -415,6 +421,7 @@ impl RuleStore for SqliteRuleStore {
                     rule.origin_project.as_ref().or_else(|| {
                         (rule.scope == Scope::Project).then(|| self.origin_project.as_ref()).flatten()
                     }),
+                    Self::stakeholder_json(rule)?,
                 ],
             )?;
             Self::insert_version(
@@ -459,7 +466,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
-        self.update_recorded(rule, None, None, "update")
+        self.update_recorded(rule, None, None, "update", false)
     }
 
     fn update_with_metadata(
@@ -468,7 +475,18 @@ impl RuleStore for SqliteRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.update_recorded(rule, changed_by, change_note, "update")
+        self.update_recorded(rule, changed_by, change_note, "update", false)
+    }
+
+    fn update_clearing_stakeholder(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let mut cleared = rule.clone();
+        cleared.stakeholder = None;
+        self.update_recorded(&cleared, changed_by, change_note, "update", true)
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {
@@ -559,7 +577,7 @@ impl RuleStore for SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project, stakeholder
              FROM rules ORDER BY priority ASC, created DESC",
         )?;
 
@@ -600,6 +618,7 @@ impl RuleStore for SqliteRuleStore {
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
                     origin_project: row.get(20)?,
+                    stakeholder: Self::parse_stakeholder(row.get(21)?)?,
                     operator_authority: row
                         .get::<_, Option<String>>(19)?
                         .as_deref()

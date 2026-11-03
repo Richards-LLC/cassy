@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Peer artifact fetch
+
+- **Scoped fetch instructions** — Peer artifact attachments now carry their owning task and sharing project and print a working fetch command. Older pointers ask the sender for the task or a fresh share.
+
 ### Fixed — Merge queue notifications
 
 - **Route ejections to the delivery owner once** — Merge queue ejections use the

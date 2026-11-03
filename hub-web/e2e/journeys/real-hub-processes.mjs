@@ -115,16 +115,21 @@ export async function stopOwnedProcesses(list, identify, leader) {
   throw Error("owned launch processes did not exit; fixture retained");
 }
 
-// Linux cleanup before the fixture HOME is removed. The launch shim records
-// the hub-started reaper in launched-pid.
+// Linux cleanup before the fixture HOME is removed. A daemon writes lifecycle
+// records into HOME while it tears down, so every HOME-owned process must be
+// gone first. The launch shim records the hub-started reaper in launched-pid
+// only after it starts, so a launch caught mid-start has no record: sweep then.
 export async function stopLinuxFixtureProcesses(home) {
   const launched = join(home, "launched-pid");
-  if (!existsSync(launched)) return;
-  const owned = JSON.parse(await readFile(launched, "utf8"));
-  if (!Number.isSafeInteger(owned.pid) || owned.pid <= 1)
-    throw Error("invalid owned launch PID; fixture retained");
-  const leader = await linuxProcessIdentity(owned.pid);
-  if (leader && leader.starttime !== owned.starttime)
-    throw Error("owned launch PID was reused; fixture retained");
-  await stopOwnedProcesses(() => linuxOwnedProcesses(home), linuxProcessIdentity, owned.pid);
+  let leader;
+  if (existsSync(launched)) {
+    const owned = JSON.parse(await readFile(launched, "utf8"));
+    if (!Number.isSafeInteger(owned.pid) || owned.pid <= 1)
+      throw Error("invalid owned launch PID; fixture retained");
+    const identity = await linuxProcessIdentity(owned.pid);
+    if (identity && identity.starttime !== owned.starttime)
+      throw Error("owned launch PID was reused; fixture retained");
+    leader = owned.pid;
+  }
+  await stopOwnedProcesses(() => linuxOwnedProcesses(home), linuxProcessIdentity, leader);
 }

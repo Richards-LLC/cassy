@@ -19,7 +19,6 @@ mod epic_verdict_cache;
 mod receipt_scope;
 mod merge_queue_proof;
 mod verified_delivery;
-mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
@@ -6291,7 +6290,7 @@ impl CasCore {
         )))
     }
 
-    fn verification_dispatch_owner(&self, requester_id: &str) -> Result<String, McpError> {
+    pub(crate) fn verification_dispatch_owner(&self, requester_id: &str) -> Result<String, McpError> {
         let agent_store = self.open_agent_store()?;
         let requester = agent_store.get(requester_id).map_err(|_| McpError {
             code: ErrorCode::INVALID_REQUEST,
@@ -9124,12 +9123,6 @@ impl CasCore {
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
-            if gate_refusals.is_empty() {
-                self.prepare_merged_verification_dispatch(
-                    &task, &req, &close_project_root, &resolved_parent_branch,
-                    declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
-                )?;
-            }
             match run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,

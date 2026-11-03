@@ -4744,6 +4744,14 @@ impl CasCore {
             });
         }
 
+        // The existing task verifier runs on a disposable merge candidate,
+        // outside the target lock. Pending/rejected reviews hold only this lane.
+        let premerge_approval = if let Some(task) = scoped_task.as_deref() {
+            self.prepare_premerge_verification(task, &cwd, &worktree.branch, &worktree.parent_branch)?
+        } else {
+            None
+        };
+
         // All Cassy merges of this target serialize from the first origin
         // refresh through publication and durable delivery state. Waiting for
         // another merge must not block the async executor's worker thread.
@@ -5356,6 +5364,12 @@ impl CasCore {
                     });
                 }
             }
+            if let Some(approval) = premerge_approval.as_ref() {
+                let current = self.open_task_store()?.get(&approval.candidate.task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                approval.candidate.validate(&cas_root, &current)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
@@ -5621,6 +5635,10 @@ impl CasCore {
                         | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
                     )
                 });
+            if let Some(approval) = premerge_approval.as_ref() {
+                approval.promote(&target_tip)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             let push_outcome = match pr_landed_sha {
                 Some(sha) => crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha },
                 None => manager
@@ -5779,9 +5797,21 @@ impl CasCore {
         // path (the transactional one already published, before its close).
         // Every success receipt below carries this line — "Merged" alone is
         // not a truthful receipt when origin never saw the merge.
+        if target_push.is_none() && let Some(approval) = premerge_approval.as_ref() {
+            let landed = manager.git().resolve_commit(&worktree.parent_branch)
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
+            approval.promote(&landed)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        }
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
             let branch = worktree.parent_branch.clone();
-            let outcome = manager.git().publish_merge_target_with_retry(&branch);
+            // Peer reconciliation would change the reviewed tree. A reviewed
+            // candidate publishes exactly once; a raced push holds its lane.
+            let outcome = if premerge_approval.is_some() {
+                manager.git().publish_branch_to_origin(&branch)
+            } else {
+                manager.git().publish_merge_target_with_retry(&branch)
+            };
             (branch, outcome)
         });
         if transactional_delivery.is_none() {

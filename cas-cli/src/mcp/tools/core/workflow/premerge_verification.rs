@@ -83,7 +83,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 fn fail(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("PRE-MERGE VERIFICATION: {message}. No delivery was published."),
+        format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
     )
 }
 

@@ -52,6 +52,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   cannot create its sandbox use the existing plain-shell fallback and warning.
   Required sandbox isolation still fails closed.
 
+### Fixed — Queue archive dependency cache
+
+- **Hosted queue archives can reuse main-scoped dependencies** — A missing
+  compatible cache now triggers advisory priming from main after queue-tree
+  reuse, using the archive's actual compiler/profile key. Queue runs restore
+  dependencies without saving disposable queue-ref copies, and still build
+  their current source on every cache hit or miss. Priming adds no required
+  check and runs outside the validation dependency chain.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

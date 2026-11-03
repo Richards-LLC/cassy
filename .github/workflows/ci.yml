@@ -1135,6 +1135,14 @@ jobs:
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
     needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    # Profile inputs must be visible when rust-cache computes its key, not
+    # only at compile time. The advisory main producer reuses this mapping.
+    env: &suite-archive-profile
+      ZIG: ${{ github.workspace }}/.context/zig/zig
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: debuginfo
+      CARGO_PROFILE_TEST_STRIP: debuginfo
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1174,6 +1182,8 @@ jobs:
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Set up shared self-hosted Rust toolchain
         if: >-
@@ -1222,16 +1232,11 @@ jobs:
       # The cost is that a CI failure's backtrace loses line numbers; the test
       # name and assertion message are unaffected, and anyone who needs a
       # symbolised trace reproduces locally, where the normal `dev` profile
-      # (debug = 1) still applies. This override is scoped to this job only.
+      # (debug = 1) still applies. Only archive production and its advisory
+      # main cache producer share this profile.
       - name: Build full suite archive
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-          CARGO_PROFILE_DEV_STRIP: debuginfo
-          CARGO_PROFILE_TEST_STRIP: debuginfo
-        run: |
+        run: &suite-archive-command |
           if [[ -f scripts/cas-test-targets.py ]]; then
             python3 scripts/cas-test-targets.py cas-cli --check
           fi
@@ -1270,6 +1275,58 @@ jobs:
             ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
+
+  # Cache maintenance is intentionally outside the archive -> shards ->
+  # required fan-in graph. A main tree already proven by the queue may prime
+  # dependency artifacts, but never re-runs the suite or uploads its archive.
+  fast-validation-suite-cache:
+    name: Rust archive dependency cache (main maintenance)
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.rust-unaffected != 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
+      && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'merge-queue'
+      && vars.CASSY_MERGE_QUEUE_SELF_HOSTED != 'enabled'
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    concurrency:
+      group: main-suite-archive-cache
+      cancel-in-progress: true
+    env: *suite-archive-profile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: rust-setup
+        uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        if: steps.rust-setup.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@nextest
+
+      - name: Prime full suite archive dependencies
+        if: steps.rust-setup.outputs.cache-hit != 'true'
+        run: *suite-archive-command
+
+      - name: Report archive cache maintenance
+        env:
+          CACHE_HIT: ${{ steps.rust-setup.outputs.cache-hit }}
+        run: |
+          if [[ "$CACHE_HIT" == true ]]; then
+            echo 'Exact main archive dependency cache restored; no priming compile needed.'
+          else
+            echo 'Main archive dependencies compiled for later queue restoration; no suite run or validation skipped.'
           fi
 
   fast-validation-suite-shards:

@@ -1,0 +1,52 @@
+{
+  "protocol": "Simulated read-only verifier inputs; task records, plan documents, delivery files and proof below replace tool responses. No live Cassy verdict is authorized.",
+  "cases": [
+    {
+      "id": "narrow-reader",
+      "dependencies": [{"type": "ParentChild", "parent": "reader-epic"}],
+      "task": {
+        "id": "reader-delivery",
+        "description": "Implement the reader for the conversation phase.",
+        "acceptance_criteria": "Return a task_relation label and record the reader test result.",
+        "close_reason": "PASS: task_relation is implemented; reader test passed. Other fields can be follow-ups."
+      },
+      "epic": {
+        "id": "reader-epic",
+        "description": "Implement the conversation phase according to docs/reader-plan.md, section Reader contract.",
+        "acceptance_criteria": "The conversation reader supplies the planned answers.",
+        "decision_notes": []
+      },
+      "plan_documents": {
+        "docs/reader-plan.md": "# Reader contract\nThis reader delivery must return all five fields: task_relation, chosen_option, assent, correction, opt_out. Each field has its own confidence. No other delivery owns these fields."
+      },
+      "delivery_files": {
+        "reader.py": "def read(message):\n    return {'task_relation': {'value': 'related', 'confidence': 0.9}}\n",
+        "test_reader.py": "def test_reader():\n    assert read('continue')['task_relation']['value'] == 'related'\n"
+      },
+      "proof": {"command": "pytest test_reader.py", "exit_code": 0, "passed": 1}
+    },
+    {
+      "id": "missed-plan-target",
+      "dependencies": [{"type": "ParentChild", "parent": "reader-eval-epic"}],
+      "task": {
+        "id": "reader-eval-delivery",
+        "description": "Evaluate the selected reader for Phase 0.",
+        "acceptance_criteria": "Run the reader evaluation and record the observed accuracy, including misses; do not tune the bar.",
+        "close_reason": "PASS: eval ran and recorded 87/100 correct (87%). Misses are listed in the receipt. Accuracy tuning is a follow-up."
+      },
+      "epic": {
+        "id": "reader-eval-epic",
+        "description": "Choose a reader for Phase 0 according to docs/eval-plan.md, section Selection gate.",
+        "acceptance_criteria": "Select a reader that meets the Phase 0 gate.",
+        "decision_notes": []
+      },
+      "plan_documents": {
+        "docs/eval-plan.md": "# Selection gate\nBefore Phase 0 completes, the reader must achieve at least 95% accuracy on reader-v1, the fixed 100-example evaluation set. The evaluation delivery owns proving this outcome."
+      },
+      "delivery_files": {
+        "eval-receipt.json": "{\"dataset\":\"reader-v1\",\"examples\":100,\"correct\":87,\"accuracy_percent\":87,\"plan_target_percent\":95,\"command\":\"python eval_reader.py --dataset reader-v1\",\"exit_code\":0}"
+      },
+      "proof": {"receipt": "eval-receipt.json", "command": "python eval_reader.py --dataset reader-v1", "exit_code": 0, "accuracy_percent": 87, "plan_target_percent": 95}
+    }
+  ]
+}

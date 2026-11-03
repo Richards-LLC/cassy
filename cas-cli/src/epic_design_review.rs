@@ -424,6 +424,28 @@ mod tests {
             .await
             .unwrap();
 
+        let update = serde_json::from_value(serde_json::json!({
+            "id": "next-start", "status": "in_progress"
+        }))
+        .unwrap();
+        let update_error = core.cas_task_update(Parameters(update)).await.unwrap_err();
+        assert!(
+            update_error.message.contains("design review"),
+            "{update_error}"
+        );
+        add_child("moving-start", "epic-other", 0, 2, false);
+        let update = serde_json::from_value(serde_json::json!({
+            "id": "moving-start", "status": "in_progress", "epic": "epic-risk"
+        }))
+        .unwrap();
+        let move_error = core.cas_task_update(Parameters(update)).await.unwrap_err();
+        assert!(move_error.message.contains("design review"), "{move_error}");
+        assert_eq!(
+            tasks.get_parent_epic("moving-start").unwrap().unwrap().id,
+            "epic-other",
+            "a refused start-and-retarget must preserve epic membership"
+        );
+
         let service_core = CasCore::with_daemon(root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
         let service = crate::mcp::CasService::new(service_core, None);

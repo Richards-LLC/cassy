@@ -13,6 +13,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   unowned when semantic journey selection excludes their registry owners, so
   daemon source changes no longer disappear from QA impact reports.
 
+### Fixed — Detached worker completion
+
+- **Wake workers when capped background runs finish** — Detached commands now
+  record their exit and log path and deliver one completion message to the
+  owning worker, with daemon retry recovery. Live runs and candidate builds
+  suppress idle alerts; unchanged idle episodes no longer wake the supervisor
+  repeatedly, and a completed run's alert states its exit.
+
 ### Fixed — Verification timing
 
 - **Measure recorded verifier duration** — Verdicts now record elapsed time

@@ -1652,8 +1652,28 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env);
-    let child = spawn_detached(command).context("starting the detached worker-check runner")?;
+    let repo = std::env::current_dir()?;
+    let log = detached_log_path().context("detached worker-check requires a regular output log")?;
+    let run = crate::factory_worker_runs::register(cas_root, &repo, &log, chrono::Utc::now())?;
+    let command = match run.as_deref() {
+        Some(id) => detached_runner_command_with_run(&std::env::current_exe()?, cas_root, args, isolated_test_env, Some(id)),
+        None => detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env),
+    };
+    let mut child = match spawn_detached(command).context("starting the detached worker-check runner") {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(id) = &run { let _ = crate::factory_worker_runs::finish(cas_root, id, 1, chrono::Utc::now()); }
+            return Err(error);
+        }
+    };
+    if let Some(id) = run
+        && let Err(error) = crate::factory_worker_runs::bind(cas_root, &id, child.id())
+    {
+        // The unreaped session leader is ours, so its PID/PGID cannot be reused.
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL); }
+        let _ = child.wait();
+        return Err(error.context("registering the detached runner PID"));
+    }
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
         child.id()
@@ -1665,6 +1685,11 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
 /// refused or failed run is distinguishable from one still running (cas-6591).
 #[cfg(unix)]
 fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
+    detached_runner_command_with_run(executable, cas_root, args, isolated_test_env, None)
+}
+
+#[cfg(unix)]
+fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
@@ -1674,9 +1699,29 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
     if let Some(directory) = isolated_test_env {
         command.arg("--isolated-test-env").arg(directory);
     }
+    if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
 }
+
+/// Resolve the actual redirected file, rather than interpreting shell text.
+#[cfg(target_os = "linux")]
+fn detached_log_path() -> Option<PathBuf> {
+    std::fs::read_link("/proc/self/fd/1").ok().filter(|path| path.is_absolute() && path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn detached_log_path() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buffer = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+    if unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETPATH, buffer.as_mut_ptr()) } < 0 { return None; }
+    let length = buffer.iter().position(|byte| *byte == 0)?;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buffer[..length].to_vec())))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn detached_log_path() -> Option<PathBuf> { None }
 
 /// Spawn `command` as a new session leader with stdin closed and both output
 /// streams on this process's stdout.
@@ -4375,7 +4420,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
         let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
-        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach }) = factory.command else { panic!("worker-check command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach, completion_id: _ }) = factory.command else { panic!("worker-check command") };
         assert!(detach);
         assert_eq!(cas_root, root);
         assert_eq!(cargo_args, args);

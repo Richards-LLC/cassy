@@ -2001,6 +2001,26 @@ runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
+Detached capped runs register their worker/task, output log and PID incarnation
+before returning. Their existing worker-check command inherits a hidden
+`--completion-id`; after its capped producer returns, it records the original
+exit status and queues one completion message to that worker. The message names
+the log and task without claiming a test or task verdict. Completion delivery
+failure leaves durable state for the daemon's existing reminder scan to retry.
+If the callback is lost, the scan detects the exited PID and reads only this
+launch's bounded log tail for `worker-check: EXIT`; unavailable status stays
+explicitly unknown. PID reuse cannot keep an exited run active. These local
+records live under `.cas/worker-runs/`; no migration or authority capability is
+created. Linux and macOS resolve the actual stdout log file, and detached calls
+without a regular log are refused.
+
+Live registered runs and worker/session-matched candidate requests suppress
+worker-idle relays. A completed run ID, task or delivery-condition change can
+start a new idle episode; elapsed time, changing message ages and temporary wait
+expiry cannot repeat an unchanged episode. Its one idle alert includes the
+registered job's exit and log path. Restart recovery queues a completion once;
+notification acceptance does not prove the worker model acted on it.
+
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
 copies matching exact-delivery receipts into worker evidence. Dirty trees,

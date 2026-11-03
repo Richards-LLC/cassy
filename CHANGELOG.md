@@ -58,6 +58,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added — Model-owned plan boundaries
 
+- **Compact verifier guidance** — Boundary review now follows its installed
+  reference, keeping procedure out of the verifier prompt while preserving
+  blocking site reports and approved-plan exceptions. Plan-fit, rule-citation
+  and epic procedures also move to references to fit the verifier prompt budget.
 - **Reserve meaning for the model in a plan** — An optional plan boundary now
   flags added literal collections, regexes and exact-string assertions in
   reserved areas. The verifier names blocking interpretation code and checks

@@ -44,7 +44,9 @@ artifact or an authorized later revision, save that source in the task artifacts
 and use `--plan-file <file>` instead. That file can contain one fenced block or
 the raw boundary JSON. Cite the authorization and source; never export an
 unapproved delivery's weaker declaration. Invalid metadata or unreadable input
-returns exit 2 with a JSON error.
+returns exit 2 with a JSON error. A missing helper is also an error naming the
+missing input, never a clear result. When reviewing an already merged delivery,
+use its recorded delivery base; never compare HEAD to itself.
 
 The helper emits one JSON document with `plan`, `base`, `head`, `boundary`,
 `findings` and `allowed`. Each site has `file`, `line` and `kind`; allowed sites
@@ -63,11 +65,14 @@ source execution. It reports sites without echoing literal contents.
 
 These deliberately broad syntax signals do not decide intent. The verifier reads
 each site and the complete diff, distinguishes deterministic state/validation
-from reply interpretation, and records the plan evidence for any false positive.
+from reply interpretation, and records each false positive with its deterministic
+purpose and plan evidence. Never infer meaning from a vocabulary or tune the
+heuristic to expected replies.
 Aliases, mixed/dynamic collections, comments inside lists and unsupported syntax
 may evade the heuristic; a clear scan is not evidence of semantic compliance.
 New meaning-matching code within the boundary is blocking unless the approved
 plan allows it. Name each site, the violated concern and authorization for any
-exception. Record `MODEL-BOUNDARY` alongside `PLAN-FIT`; the existing plan-fit
-rejection rules still apply. Script fixtures prove detection and scope, not the
-independent model's verdict.
+exception. Set `PLAN-FIT: NOT VERIFIED` for violations and report
+`MODEL-BOUNDARY: VERIFIED|NOT VERIFIED|INCONCLUSIVE|NOT APPLICABLE` with the
+site/plan mapping. The existing plan-fit rejection rules still apply. Script
+fixtures prove detection and scope, not the independent model's verdict.

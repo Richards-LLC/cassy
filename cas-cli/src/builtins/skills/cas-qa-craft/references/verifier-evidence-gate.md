@@ -1,9 +1,8 @@
 # Verifier evidence gate
 
-The task-verifier reads this file when a task, or any child of an epic, has a
-non-empty `demo_statement`, and for any acceptance criterion that states a
-measurable claim (see Measurable claims below). It runs before the verifier
-reads the close reason. Workers produce the evidence; the verifier consumes it.
+The task-verifier follows this reference for evidence, plan fit, rule citations
+and epic verification. Demo and measurable-claim gates run before reading the
+close reason. Workers produce the evidence; the verifier consumes it.
 
 ## Demo-statement evidence mode
 
@@ -119,3 +118,64 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 ## Rule candidates
 
 On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.
+
+## Plan conformance
+
+Run `task action=dep_list id=<task-id>` to discover ParentChild dependencies. Read each parent epic with `task action=show id=<epic-id> full=true`, including its acceptance criteria, design and decision notes. Read the relevant sections of any plan document named by the task or epic, fetching cited artifacts and reading their contents. Follow intermediate parents to the epic when necessary. A task card and its close reason are not substitutes for the plan.
+
+Identify the fields, behaviours and measurable targets that the plan assigns to this delivery or phase. Map each obligation to implementation and proof in the delivery found in Step 3; finalize this check after reading the changed files. Name each missing field or behaviour individually, with its plan section and delivery evidence. Compare every applicable plan target with the actual result, including targets recorded in delivered evidence even when the card only asks to run or report a measurement. Apply Step 0's measurable-claims evidence gate to these targets too. Passing tests or completing the card does not prove the plan's outcome.
+
+Respect the planned division of work: a child implementing its assigned slice need not implement the entire epic. Cite the plan section or authoritative scope decision assigning other obligations elsewhere. A worker's narrower card, follow-up, renamed field, or lowered threshold is not an approved plan revision. If an authorized operator decision revised the plan, cite that decision and check against the revised obligations; never silently accept a scope reduction.
+
+Record one explicit `PLAN-FIT:` line in the verdict summary:
+
+- **VERIFIED**: every applicable planned obligation is implemented and proven; cite the plan sections and evidence, including a receipt for each measurable target.
+- **NOT VERIFIED**: the delivery or card is narrower than its assigned plan scope, a planned field or behaviour is omitted, or an applicable plan target was missed. Set `status=rejected`, name every omission or missed target as blocking, and include a supervisor decision question: restore the planned scope/outcome, or obtain an authorized plan revision? Do not broaden the worker's assignment yourself. An owner, follow-up or non-blocking label does not excuse a known plan miss.
+- **INCONCLUSIVE**: the referenced plan cannot be read, the assigned slice is ambiguous, or outcome evidence is unavailable. State the missing source or proof and ask the supervisor to resolve it; use `status=supervisor_call` only if no known rejection condition applies. Never approve by assuming plan fit.
+- **NOT APPLICABLE**: no parent epic, referenced plan or applicable plan target exists after checking dependencies and evidence. State that reason; do not invent a plan.
+
+
+## Rule-reference procedure
+
+For a task or brief citing an existing stakeholder rule, compare the causal code/test sites
+with its `Rule-driven sites:` declaration and `cas rules refs <id> --json`.
+Reject omitted rule-driven sites or missing adjacent `cas-rule:` markers; a
+marker on an unrelated function does not cover them. Check the verbatim scope
+against `stakeholder.scope` when present, without expanding it to unrelated work.
+
+
+## Epic verification
+
+When `task_type=epic`, use `verification_type=epic` and check, in order:
+
+0. **Child-demo evidence first:** the evidence gate in Step 0 when any child has a demo statement.
+1. **All subtasks closed:** every child from `task action=dep_list id=<epic-id>` is `closed`; otherwise reject.
+2. **No open blockers.**
+3. **Plan outcome:** apply Step 2 to the assembled epic's full planned scope and measurable acceptance targets, with receipts for actual outcomes. Closed children and passing checks do not prove those outcomes. A missed target or omitted planned behaviour is `PLAN-FIT: NOT VERIFIED` and rejects, even if every child's card passed. Follow-ups cannot excuse an unmet obligation of this epic.
+4. **Close reason covers the whole epic**, not only the last child. Follow-ups that belong to future epics are fine only when they do not defer an obligation of this epic's plan.
+5. **Verify on the epic branch**, not a worker worktree.
+6. **Stranded-branch gate:** a clean review does not override the merge-state gate. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target. A `stranded_branch_override` is valid only when the close response authorizes it for a live registered supervisor who records the inspection narrative.
+7. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic. Treat an unassigned, stale, or mismatched owner as a blocking authority failure.
+
+The close reason may come from the verification prompt, the epic's latest note, or its close-reason field.
+
+## Verdict recording
+
+One template; set `status`, `summary`, `confidence` and `issues` for the outcome:
+
+```text
+verification action=add task_id=<id> dispatch_id=<dispatch-id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict>\n\nBlocking:\n- <file:line: what must be done>\n\nImprovements (non-blocking):\n- <file:line: suggestion>" issues='[{"file":"src/file","line":42,"severity":"blocking","category":"stub","code":"<snippet>","problem":"<what is missing>","suggestion":"<exact fix>"}]'
+```
+
+- Categories describe the defect, not whether it blocks: `correctness`, `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`, `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`. Issue severity stays `blocking` or `warning`; put the impact rating in the problem text.
+
+## Delivery checkout
+
+The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, inspect the delivery in a managed disposable checkout:
+
+```bash
+cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
+```
+
+The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. See Scratch checkout lifetime above for location and cleanup.
+Use this managed checkout as the working directory for review.

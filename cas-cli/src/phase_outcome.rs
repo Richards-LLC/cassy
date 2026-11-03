@@ -237,7 +237,11 @@ pub(crate) fn record_override(
     entries.insert(
         id.into(),
         OperatorOverride {
-            outcome: task.deliverables.phase_outcome.clone().unwrap(),
+            outcome: task
+                .deliverables
+                .phase_outcome
+                .clone()
+                .context("phase has no serialized outcome to override")?,
             reason: reason.trim().into(),
             recorded_at: now,
         },
@@ -253,7 +257,10 @@ pub(crate) fn record_override(
         ),
     )?;
     let path = root.join(OVERRIDES);
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::create_dir_all(
+        path.parent()
+            .context("operator override path has no parent")?,
+    )?;
     let staging = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&staging, serde_json::to_vec_pretty(&entries)?)?;
     std::fs::rename(staging, path)?;
@@ -270,6 +277,22 @@ pub(crate) fn refusal(
     include_self: bool,
 ) -> Result<Option<String>> {
     let origin = id;
+    // A sibling prerequisite shares some ancestors with the task. Those are
+    // implementation phases whose outcomes this work is meant to establish,
+    // rather than external prerequisite phases whose outcomes gate it.
+    let mut own_ancestors = HashSet::new();
+    let mut ancestors = vec![id.to_string()];
+    while let Some(ancestor) = ancestors.pop() {
+        if own_ancestors.insert(ancestor.clone()) {
+            ancestors.extend(
+                store
+                    .get_dependencies(&ancestor)?
+                    .into_iter()
+                    .filter(|dep| dep.dep_type == DependencyType::ParentChild)
+                    .map(|dep| dep.to_id),
+            );
+        }
+    }
     let mut pending = vec![(id.to_string(), false)];
     let mut visited = HashSet::new();
     let mut misses = Vec::new();
@@ -278,7 +301,7 @@ pub(crate) fn refusal(
             continue;
         }
         let task = store.get(&id)?;
-        if (prerequisite || (include_self && id == origin))
+        if ((prerequisite && !own_ancestors.contains(&id)) || (include_self && id == origin))
             && let Some(outcome) = read(&task)?
             && !overridden(root, &task)
         {

@@ -1955,8 +1955,14 @@ an evaluator. A missing or failed receipt holds the phase's `blocks` and
 `requires_start` dependants, including children of dependent phases, at start,
 close and merge. The refusal names the target and measurement. Closed phase
 status does not stand in for a passing result. Its own implementation children
-and independent work can continue. Ordinary open blockers retain their existing
-parallel-preparation policy.
+and independent work can continue. A sibling dependency does not evaluate the
+shared phase's own target: a task's own ancestor chain stays outside the outcome
+hold, while external prerequisite phases still gate it. Ordinary open blockers
+retain their existing parallel-preparation policy.
+
+Phase outcome notes compare supplied measurements and require a non-empty
+receipt reference. Evaluator artifact, dataset and model validation belongs to
+the separate model-eval receipt gate; a phase note alone does not validate them.
 
 Only the operator, from their own terminal, can accept a miss:
 `cas qa outcome-override <phase-id> --reason '<why>'`. This writes a decision

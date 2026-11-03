@@ -2470,6 +2470,134 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 }
 
 #[tokio::test]
+async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
+    let mut env = test_env();
+    for verdict in ["approved", "rejected"] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(
+            fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n",
+        )
+        .unwrap();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.acceptance_criteria = "Review this candidate before publishing it.".into();
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let first = fixture.service.factory(Parameters(merge.clone())).await;
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+            before,
+            "an unresolved required verifier must hold the local target; response: {first:?}"
+        );
+        assert_eq!(
+            git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]),
+            before,
+            "an unresolved required verifier must hold publication"
+        );
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id)
+            .unwrap()
+            .expect("the merge preflight dispatches the existing required verifier");
+        let proof = dispatch.repository.as_ref().expect("candidate repository proof");
+        assert_ne!(PathBuf::from(&proof.worktree_root), fixture.worker);
+        let candidate_tree = git_stdout(
+            &fixture.repo.root,
+            &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
+        );
+        let recorded = fixture
+            .service
+            .verification(Parameters(verification_req(serde_json::json!({
+                "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+                "status": verdict, "summary": "Candidate publication ordering control",
+            }))))
+            .await
+            .unwrap();
+        assert!(!recorded.is_error.unwrap_or(false), "{}", get_text(&recorded));
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+        let continued = fixture.service.factory(Parameters(merge)).await;
+        if verdict == "approved" {
+            assert_eq!(
+                git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound^{tree}"]),
+                candidate_tree,
+                "publication must contain the approved candidate tree: {continued:?}"
+            );
+            assert_ne!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+            assert_eq!(
+                git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+                git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"])
+            );
+        } else {
+            assert_eq!(
+                git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+                before,
+                "a rejected candidate cannot change the target: {continued:?}"
+            );
+            assert_eq!(
+                git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]),
+                before
+            );
+            // These are the existing exemptions. Neither an unresolved nor a
+            // rejected delivery may hold a target lock across model review.
+            for (id, name, file) in [
+                ("cas-ef52", "bob", "notes.md"),
+                ("cas-ef53", "carol", "ordinary.rs"),
+            ] {
+                let branch = format!("factory/{name}-{id}");
+                let worker = fixture.cas_root.join("worktrees").join(name);
+                let base = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+                run_git(&["worktree", "add", "-b", &branch, worker.to_str().unwrap(), &base], &fixture.repo.root);
+                std::fs::write(worker.join(file), "Independent delivery\n").unwrap();
+                run_git(&["add", file], &worker);
+                run_git(&["commit", "-m", &format!("{id}: independent delivery")], &worker);
+                run_git(&["push", "origin", &branch], &worker);
+                let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+                let mut exempt = Task::new(id.into(), "Independent exempt delivery".into());
+                exempt.depth = TaskDepth::Deep;
+                exempt.status = TaskStatus::AwaitingMerge;
+                exempt.assignee = Some(name.into());
+                exempt.deliverables.work_target = task.deliverables.work_target.clone();
+                exempt.deliverables.factory_branch_anchor = Some(tip.clone());
+                exempt.deliverables.parked_branch = Some(branch.clone());
+                exempt.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+                    work_target: exempt.deliverables.work_target.clone().unwrap(),
+                    assignee: name.into(), branch: branch.clone(), base_sha: base,
+                });
+                tasks.add(&exempt).unwrap();
+                let mut independent = coord_req("worktree_merge");
+                independent.id = Some(branch);
+                independent.task_id = Some(id.into());
+                independent.cleanup = Some(false);
+                let response = fixture.service.factory(Parameters(independent)).await;
+                run_git(&["merge-base", "--is-ancestor", &tip, "epic/rebound"], &fixture.repo.root);
+                assert_eq!(
+                    git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+                    git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]),
+                    "independent exempt delivery publishes while another is held: {response:?}"
+                );
+                assert!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, id).unwrap().is_none());
+            }
+        }
+        assert_eq!(
+            cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
+            dispatch.id,
+            "publication/close must consume the same verifier, without a post-merge dispatch"
+        );
+        let prompts = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap().peek_all(100).unwrap();
+        assert!(prompts.iter().all(|row| !row.source.starts_with("verification-approved-close:")),
+            "candidate approval continues the merge; no worker close-retry loop: {prompts:?}");
+    }
+}
+
+#[tokio::test]
 async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
     let mut env = test_env();
     let fixture = rebound_merge_fixture(&mut env).await;

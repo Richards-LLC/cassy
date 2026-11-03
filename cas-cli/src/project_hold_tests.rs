@@ -11,6 +11,8 @@ fn held_project() -> (tempfile::TempDir, std::path::PathBuf) {
     tasks.add(&ready).unwrap();
     let mut parked = cas_types::Task::new("cas-hold-merge".into(), "merge hold probe".into());
     parked.status = cas_types::TaskStatus::AwaitingMerge;
+    parked.created_at = chrono::Utc::now() - chrono::Duration::days(30);
+    parked.updated_at = parked.created_at;
     tasks.add(&parked).unwrap();
     std::fs::create_dir_all(root.join("operator")).unwrap();
     std::fs::write(root.join("operator/project-hold.json"), serde_json::json!({

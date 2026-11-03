@@ -3138,7 +3138,7 @@ using Violet's author names without treating those labels as operator authority.
 A thread reference includes a channel read so newer sibling posts are visible.
 The lookup has a four-second outer deadline (including Cloud memory lookup),
 three seconds for Violet setup and reads, at most six reads of 50 messages,
-and at most ten excerpts in an 1,800-byte section. Known additional posts have
+and at most ten excerpts in a 1,800-byte section. Known additional posts have
 a `+N more` line. Bot/app posts and configured Violet bot IDs are excluded.
 Empty results add no section; service failures, partial reads and read caps
 leave a one-line couldn't-check notice. This check adds no Slack writes.

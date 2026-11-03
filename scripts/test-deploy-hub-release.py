@@ -128,7 +128,8 @@ class DeployTests(unittest.TestCase):
                 "$schema": "https://openapi.vercel.sh/vercel.json",
                 "headers": [{"source": "/(.*)", "headers": [
                     {"key": "Content-Security-Policy", "value": self.csp},
-                    {"key": "X-Content-Type-Options", "value": "nosniff"}]}]})
+                    {"key": "X-Content-Type-Options", "value": "nosniff"},
+                    {"key": "Referrer-Policy", "value": "no-referrer"}]}]})
             self.assertEqual((site / "public/index.html").read_bytes(), self.new["index.html"])
             static = site / "public"
             expected = {"index.html": self.new["index.html"],
@@ -236,13 +237,15 @@ class DeployTests(unittest.TestCase):
 
     def test_hosted_csp_names_each_team_tailnet_and_refuses_widening(self):
         policy = dict(part.split(" ", 1) for part in hub.hosted_csp(["tailf5a734", "tail0b1c2d"]).split("; "))
-        both = "https://*.tail0b1c2d.ts.net https://*.tailf5a734.ts.net"
+        # A hub may serve on any --tailscale-serve-port; CSP's :* port matches
+        # every port, the scheme default included.
+        both = "https://*.tail0b1c2d.ts.net:* https://*.tailf5a734.ts.net:*"
         loopback = "http://127.0.0.1:*"
         # blob: is for composer thumbnails, so images only, never media.
         self.assertEqual(policy["img-src"], f"'self' data: blob: {both} {loopback}")
         self.assertEqual(policy["media-src"], f"'self' {both} {loopback}")
-        self.assertEqual(policy["connect-src"], f"'self' {both} wss://*.tail0b1c2d.ts.net "
-                         f"wss://*.tailf5a734.ts.net {loopback} ws://127.0.0.1:* "
+        self.assertEqual(policy["connect-src"], f"'self' {both} wss://*.tail0b1c2d.ts.net:* "
+                         f"wss://*.tailf5a734.ts.net:* {loopback} ws://127.0.0.1:* "
                          "https://petra-stella-cloud.vercel.app https://api.github.com")
         self.assertEqual(policy["frame-src"], f"'self' {both} {loopback}")
         self.assertEqual(policy["script-src"], "'self'")

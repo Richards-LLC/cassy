@@ -211,6 +211,9 @@ def hosted_csp(tailnets):
     is same-origin). Hosted Commander's media, sockets and visual pages come
     from the selected machine hub, so every team tailnet is listed explicitly.
     No directive may carry a bare https:, wss: or * source (cas-1b35).
+    A hub can serve on any --tailscale-serve-port, so tailnet sources carry
+    :*. CSP3 "port-part matches" returns Matches for a * port, the scheme's
+    default port included, so no bare-port form is needed.
     """
     if not isinstance(tailnets, list) or not tailnets:
         raise RuntimeError(f"{TAILNETS} must list at least one tailnet")
@@ -218,8 +221,8 @@ def hosted_csp(tailnets):
         if not isinstance(name, str) or not TAILNET.fullmatch(name):
             raise RuntimeError(f"invalid tailnet {name!r} in {TAILNETS}: use the <tailnet> of <machine>.<tailnet>.ts.net")
     names = sorted(set(tailnets))
-    https = [f"https://*.{name}.ts.net" for name in names]
-    wss = [f"wss://*.{name}.ts.net" for name in names]
+    https = [f"https://*.{name}.ts.net:*" for name in names]
+    wss = [f"wss://*.{name}.ts.net:*" for name in names]
     directives = [
         ("default-src", ["'none'"]),
         ("script-src", ["'self'"]),
@@ -296,7 +299,9 @@ def assemble_site(dist, scratch, csp):
     command([str(Path(__file__).with_name("verify-hub-dist.sh"))],
             env=dict(os.environ, DIST_DIR=str(public / "commander"), ORIGIN_INDEX=str(public / "index.html")))
     headers = [{"key": "Content-Security-Policy", "value": csp},
-               {"key": "X-Content-Type-Options", "value": "nosniff"}]
+               {"key": "X-Content-Type-Options", "value": "nosniff"},
+               # As hub-served Commander sends (cas-cli hub/server.rs).
+               {"key": "Referrer-Policy", "value": "no-referrer"}]
     (site / "vercel.json").write_text(json.dumps(
         {"$schema": SCHEMA, "headers": [{"source": "/(.*)", "headers": headers}]}) + "\n")
     (site / ".vercel").mkdir()

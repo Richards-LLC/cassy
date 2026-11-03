@@ -26,6 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   acted and when. Startup leads with the hold, action lists and relays wait,
   and worker spawning and merges refuse until the operator lifts it.
 
+### Added — Measured phase outcomes
+
+- **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

@@ -4344,6 +4344,13 @@ impl CasCore {
             }
         }
 
+        if let Some(task_id) = task_id {
+            let tasks = crate::store::open_task_store(&cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
+
         // cas-9c34: the supervisor is acting on this task's merge request,
         // whatever this attempt's outcome; it is read.
         if let Some(task_id) = task_id

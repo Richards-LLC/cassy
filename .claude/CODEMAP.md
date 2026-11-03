@@ -48,6 +48,7 @@
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs` - health, update receipts and account/root readiness.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
 - `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hook dispatch, native lifecycle handlers and policy, including pattern-signal refusal for every factory role and inherited native subagents.
+- `cas-cli/src/hooks/handoff_updates.rs` - bounded Violet reads of handoff-named channels and threads; newer human posts precede the saved handoff.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync/presence, peer mailboxes and local agent binding.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - knowledge distillation, indexing and composed retrieval.

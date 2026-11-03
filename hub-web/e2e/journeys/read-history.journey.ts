@@ -506,8 +506,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       expect(await y(), "the reader's turn is below the page they loaded, not above it").toBeGreaterThan(before.y);
       return;
     }
-    await expect.poll(y, { message: `"${before.key}" stays where the reader left it` }).toBeGreaterThanOrEqual(before.y - 3);
-    expect(await y()).toBeLessThanOrEqual(before.y + 3);
+    await expect.poll(async () => Math.abs((await y()) - before.y), { message: `"${before.key}" stays where the reader left it (px from ${before.y})` }).toBeLessThanOrEqual(3);
     // The older turns are above, off screen until the reader scrolls up.
     expect(await page.locator(".conversation-reading.thread").evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
   };

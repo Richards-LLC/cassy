@@ -76,7 +76,12 @@ impl CasCore {
             "Close reason: cite a run id, artifact id or receipt path beside a third-party or future proof claim, or write \"deferred to <stage>\"."
                 .to_string(),
         );
-        if receipt_scope::has_unreleased_section_at_head(&repo, "HEAD") {
+        if receipt_scope::has_changelog_fragments_at(&repo, "HEAD") {
+            lines.push(format!(
+                "Changelog: product or developer source needs a titled entry in its own `{}/{id}.md` fragment (not in CHANGELOG.md), or a decision note \"no changelog: <reason>\".",
+                receipt_scope::CHANGELOG_FRAGMENT_DIR,
+            ));
+        } else if receipt_scope::has_unreleased_section_at_head(&repo, "HEAD") {
             lines.push(
                 "Changelog: product or developer source needs a titled `## [Unreleased]` entry, or a decision note \"no changelog: <reason>\"."
                     .to_string(),

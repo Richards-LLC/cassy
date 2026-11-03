@@ -102,7 +102,7 @@ Factory turn costs are recorded locally for Claude, Codex and Grok supervisors a
 - Before/after evidence: `cas deliverable capture` captures masked merge-base/head shots or passing journey goals in one bounded run; `cas deliverable pairs` selects complete verified pairs by task or commit provenance. Project defaults live under `[qa.capture]`.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Test value audit: `cas-cli/src/builtins/skills/cas-test-audit/` is a read-only agent procedure (buckets, detector recipes, CI-timing recipes, ledger format); cuts need operator approval and each names a covering test.
-- Release history: `CHANGELOG.md`.
+- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section.
 
 
 

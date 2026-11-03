@@ -18,4 +18,6 @@ cas-cli/src/builtins/reference-history.json merge=cas-generated
 # cas-7aa5: parallel epics each add a section under ## [Unreleased]. The
 # `cas-changelog` driver (scripts/cas-merge-drivers.py) keeps both, in merge
 # order; a conflicting edit to a released section still conflicts.
+# GitHub's mergeability check and merge queue ignore custom drivers, so
+# deliveries write changelog.d/<task-id>.md fragments instead (cas-f2be).
 CHANGELOG.md merge=cas-changelog

@@ -1979,6 +1979,14 @@ for the inventory and per-test process isolation rules. Run
 `python3 scripts/cas-test-targets.py cas-cli --check` from the repository root
 after adding an integration suite so a missing module cannot silently drop tests.
 
+Hub/doctor/status fixtures that inject a private `HOME` and `PATH` set
+`CAS_TEST_HUB_PATH` to the desired candidate PATH. Hub discovery then uses
+only those supplied absolute entries (plus Claude's native slots under that HOME), without a login
+shell or fixed host directories. Lib tests set this candidate input rather
+than mutating process-global PATH. This narrows discovery; minimum-version
+verification still applies. A fake Claude used to test missing profiles must
+answer `--version` with a compatible version before its normal auth payload.
+
 Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.

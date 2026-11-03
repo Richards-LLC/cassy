@@ -201,6 +201,10 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
                     text = done.stdout or text
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+            # This inert provider implements our current fixture contract,
+            # independently of a missing or stale Claude on the host.
+            if name == "claude" and flag == "--version":
+                text = "2.1.316 (Claude Code load fixture)\n"
             probe_file = fake_bin / f".{name}{flag}"
             probe_file.write_text(text)
             probes[flag] = probe_file

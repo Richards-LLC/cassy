@@ -2508,6 +2508,11 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap()
             .expect("the merge preflight dispatches the existing required verifier");
         let proof = dispatch.repository.as_ref().expect("candidate repository proof");
+        let prepared = tasks.get(&task.id).unwrap();
+        let timing = prepared.notes.lines()
+            .find(|line| line.starts_with("PREMERGE CANDIDATE PREPARATION:"))
+            .expect("the first real Git candidate preparation records its elapsed time");
+        eprintln!("{timing}");
         assert_ne!(PathBuf::from(&proof.worktree_root), fixture.worker);
         let candidate_tree = git_stdout(
             &fixture.repo.root,
@@ -2523,7 +2528,7 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap();
         assert!(!recorded.is_error.unwrap_or(false), "{}", get_text(&recorded));
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
-        let continued = fixture.service.factory(Parameters(merge)).await;
+        let continued = fixture.service.factory(Parameters(merge.clone())).await;
         if verdict == "approved" {
             assert_eq!(
                 git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound^{tree}"]),
@@ -2534,6 +2539,15 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             assert_eq!(
                 git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
                 git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"])
+            );
+            let landed = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+            let retry = fixture.service.factory(Parameters(merge)).await;
+            assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), landed,
+                "an idempotent publication retry cannot create another merge: {retry:?}");
+            assert_eq!(
+                cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
+                dispatch.id,
+                "an already-published candidate consumes its existing mapping instead of dispatching another review: {retry:?}"
             );
         } else {
             assert_eq!(

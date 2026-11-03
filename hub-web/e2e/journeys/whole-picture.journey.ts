@@ -143,6 +143,22 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         else expect(Math.round(box.x + box.width), "a drawer on the right edge").toBe(width);
         const request = hub.frames.find((frame) => frame.kind === "WorkEventsRequest" && (frame.body as { agent?: string }).agent === WORKER);
         expect(request, "the timeline reads the worker's own stream").toBeTruthy();
+        // cas-c74f: the worker's name in the terminal note reads whole, and
+        // the raw-output button lines up with the note's text.
+        const layout = await dialog.evaluate((node, worker) => {
+          const note = [...node.querySelectorAll<HTMLElement>(".worker-timeline-note")].find((p) => p.textContent!.includes("own terminal"))!;
+          const walker = document.createTreeWalker(note, NodeFilter.SHOW_TEXT);
+          let text: Node | null;
+          while ((text = walker.nextNode()) && !text.textContent!.includes(worker));
+          const range = document.createRange();
+          const at = text!.textContent!.indexOf(worker);
+          range.setStart(text!, at); range.setEnd(text!, at + worker.length);
+          const lines = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
+          const textLeft = document.createRange(); textLeft.selectNodeContents(note);
+          const button = node.querySelector<HTMLElement>(".worker-timeline-raw")!.getBoundingClientRect().left;
+          return { lines, offset: Math.round(button - textLeft.getClientRects()[0].left) };
+        }, WORKER);
+        expect(layout, "the worker name reads whole and the button meets the text edge").toEqual({ lines: 1, offset: 0 });
       });
 
       await journey.stage("The timeline follows the worker live", async () => {

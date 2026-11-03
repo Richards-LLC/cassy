@@ -94,7 +94,9 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
     // own terminal is on its machine. Say so instead of implying otherwise.
     fallback.textContent = "Open the supervisor's raw output";
     const limit = document.createElement("p"); limit.className = "worker-timeline-note";
-    limit.textContent = `Commander shows the supervisor's terminal only. ${subject.worker}'s own terminal is on its machine.`;
+    // The worker's name is one identifier: it never breaks at its hyphen.
+    const name = document.createElement("span"); name.className = "worker-timeline-name"; name.textContent = `${subject.worker}'s`;
+    limit.append("Commander shows the supervisor's terminal only. ", name, " own terminal is on its machine.");
     children.push(limit);
     fallback.onclick = () => { dialog.close(); handlers.rawOutput?.(); };
     children.push(fallback);

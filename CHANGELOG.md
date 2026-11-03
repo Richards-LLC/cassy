@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander worker timeline on a phone
+
+- **Worker name and terminal button line up** — In a worker's timeline at
+  390 px, the worker's name in the terminal note no longer breaks at its
+  hyphen, and the "Open the supervisor's raw output" button now lines up with
+  the note's text instead of sitting 8 px to its left.
+
 ### Added
 
 - **Rich evidence in Commander** — Mermaid diagrams follow the current theme,

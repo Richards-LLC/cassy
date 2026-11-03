@@ -1679,8 +1679,12 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
-        let source_admission = self.task_source_admission(external_ref.as_deref(), &id,
-            supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?;
+        let source_admission = if execution_note.as_deref() == Some("no-code") {
+            super::source_claim::SourceAdmission::default()
+        } else {
+            self.task_source_admission(external_ref.as_deref(), &id,
+                supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?
+        };
         if source_admission.override_grant.is_some() { task_notes.push_str(&source_admission.notice); }
         let mut task = Task {
             id: id.clone(),

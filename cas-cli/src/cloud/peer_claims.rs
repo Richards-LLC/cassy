@@ -125,7 +125,8 @@ fn forget_source_claim(root: &Path, agent_id: &str, key: &str) -> Result<(), Str
 fn active_source_task(root: &Path, key: &str) -> Result<Option<crate::types::Task>, String> {
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     Ok(tasks.list(None).map_err(|error| error.to_string())?.into_iter().find(|task| {
-        !task.is_terminal() && task.external_ref.as_deref().and_then(github_source_key).as_deref() == Some(key)
+        !task.is_terminal() && task.execution_note.as_deref() != Some("no-code")
+            && task.external_ref.as_deref().and_then(github_source_key).as_deref() == Some(key)
     }))
 }
 

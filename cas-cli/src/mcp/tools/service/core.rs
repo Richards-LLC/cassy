@@ -294,7 +294,7 @@ impl CasService {
             });
         }
         let finding_epic = finding_origin.as_ref().and(req.epic.clone());
-        if target_project.is_none() { self.refresh_task_source(req.external_ref.as_deref()).await?; }
+        if target_project.is_none() && req.execution_note.as_deref() != Some("no-code") { self.refresh_task_source(req.external_ref.as_deref()).await?; }
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -490,7 +490,10 @@ impl CasService {
         let target_repo = req.target_repo.clone();
         let target_branch = req.target_branch.clone();
         let state_patch = req.state_patch.clone();
-        if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty()) || req.external_ref.is_some() {
+        let no_code_source = req.execution_note.as_deref() == Some("no-code")
+            || req.execution_note.is_none() && req.id.as_ref().and_then(|id| self.inner.open_task_store().ok()?.get(id).ok())
+                .is_some_and(|task| task.execution_note.as_deref() == Some("no-code"));
+        if !no_code_source && (req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty()) || req.external_ref.is_some()) {
             if let Some(source) = req.external_ref.as_deref()
                 && req.id.as_deref().is_none_or(|id| crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_none())
             {

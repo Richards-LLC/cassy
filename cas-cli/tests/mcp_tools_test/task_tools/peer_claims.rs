@@ -506,6 +506,9 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
     };
     alpha.core.cas_task_create(Parameters(create("Repair callback dispatch", "https://github.com/Acme/Widget/issues/42"))).await.unwrap();
     let alpha_task = open_task_store(&alpha.cas_dir).unwrap().list(None).unwrap().pop().unwrap();
+    let mut proof = create("Portable source audit receipt", "https://github.com/acme/widget/pull/42");
+    proof.execution_note = Some("no-code".into());
+    alpha.core.cas_task_create(Parameters(proof)).await.expect("no-code external_ref is a proof artifact, not an ask");
     for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
         for entry in ["create", "assign", "start", "spawn", "claim", "transfer"] {
             let beta = machine(&cloud.url, PROJECT, "beta-sup");
@@ -543,6 +546,23 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
     // Heartbeats keep a created ask claimed before a worker takes its task lease.
     let renewed = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
     assert_eq!(renewed.renewed, 1, "{renewed:?}");
+    let delegated = machine(&cloud.url, PROJECT, "delegated-supervisor");
+    delegated.put_task("cas-split", TaskType::Epic);
+    delegated.child_of("cas-share", "cas-split");
+    let tasks = open_task_store(&delegated.cas_dir).unwrap();
+    let mut share = tasks.get("cas-share").unwrap();
+    share.external_ref = Some("https://github.com/acme/widget/issues/42".into());
+    tasks.update(&share).unwrap();
+    let now = Utc::now();
+    cas_store::insert_epic_split(&delegated.cas_dir, &cas_store::EpicSplit {
+        id:"split-source".into(), epic_id:"cas-split".into(), local_agent_id:delegated.agent_id.clone(),
+        peer_agent_id:alpha.agent_id.clone(), peer_name:"alpha-sup".into(), peer_machine:hostname(),
+        direction:cas_store::SplitDirection::Incoming, mine:vec![share.id.clone()], theirs:vec![],
+        state:cas_store::SplitState::Accepted, reason:Some("agreed child delegation".into()), message_id:None,
+        expires_at:now+Duration::minutes(30), created_at:now, decided_at:Some(now), decided_by:Some(delegated.agent_id.clone()),
+        cleanup_pending:false, expiry_notice_pending:false,
+    }).unwrap();
+    delegated.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({"id":share.id,"assignee":"delegated-worker"})).unwrap())).await.expect("the binding epic split retains source delegation authority");
     let beta = machine(&cloud.url, PROJECT, "deliberate-second");
     // Environment role alone must never authorize a source override.
     env.set("CAS_AGENT_ROLE", "supervisor");

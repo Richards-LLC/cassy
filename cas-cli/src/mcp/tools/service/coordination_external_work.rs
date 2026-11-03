@@ -95,6 +95,7 @@ impl CasService {
         let tasks = self.inner.open_task_store()?;
         for id in ids {
             let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            if task.execution_note.as_deref() == Some("no-code") { continue; }
             if crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_some() { continue; }
             self.refresh_task_source(task.external_ref.as_deref()).await?;
         }

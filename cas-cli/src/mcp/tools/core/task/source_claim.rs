@@ -55,6 +55,9 @@ impl CasCore {
         task: &crate::types::Task,
         override_reason: Option<&str>,
     ) -> Result<SourceAdmission, McpError> {
+        if task.execution_note.as_deref() == Some("no-code") {
+            return Ok(SourceAdmission::default());
+        }
         if let Some(split) = source_split(&self.cas_root, &task.id) {
             return Ok(format!(
                 "\nSource ownership: task {} is governed by epic split {split}; its delegation and takeover gates apply.",
@@ -171,7 +174,8 @@ impl CasCore {
         let budget = PeerBudget::default();
         let (answer, fence) = budget
             .run(move || {
-                let (answer, fence, _) = claims.with_budget(budget).acquire_for_local_lease(
+                let claims = claims.with_budget(budget);
+                let (mut answer, fence, _) = claims.acquire_for_local_lease(
                     &root,
                     &key,
                     ClaimKind::Task,
@@ -180,6 +184,13 @@ impl CasCore {
                     crate::cloud::peer_claims::lease_duration_secs(&root),
                     &|id| local.contains(id),
                 );
+                // A legacy conflict envelope names only the agent. Source
+                // refusals also need the task carried by the lock's reason.
+                if matches!(answer, Acquire::PeerHolds(_))
+                    && let Ok(Some(hold)) = claims.peer_hold(&key, &|id| local.contains(id))
+                {
+                    answer = Acquire::PeerHolds(hold);
+                }
                 if answer == Acquire::Claimed {
                     // Existing agent metadata projects these claims into the usual
                     // heartbeat; no independent source lease table or protocol.

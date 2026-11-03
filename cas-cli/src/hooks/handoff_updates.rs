@@ -386,15 +386,16 @@ mod tests {
 
     #[test]
     fn real_handoff_prose_does_not_trigger_slack_reads() {
-        // Real release/handoff excerpts from mem-d3b8120845fc15fae32b134acb5bf69c.
+        // Real handoff excerpts from mem-d3b8120845fc15fae32b134acb5bf69c;
+        // release versions normalized to fixture values (PR references unchanged).
         let handoff = Entry {
             content: r#"ROLE: cas-src supervisor on prowl, factory session cassy-loyal-cardinal-4.
 SHIPPED (all on main):
-- 3.98.1, PR #1455, e8986af6's predecessor dda91798 (9:16 AM ET): running-only Commander session list plus catalog-independent sends, reconnect and drafts.
-- 3.98.2, PR #1456, f2798785 (1:04 PM ET): kill guard denies pattern kills for every factory role (cas-a290), plus the "[CI] Run only what tests need" epic cas-e1c6.
-- 3.99.0, PR #1459, c59bd4b6 (2:58 PM ET, soundwave led): includes cas-2453, worker briefs moved from argv to a 0600 file inside the worktree, OpenCode-safe.
-- 3.99.1, PR #1461, e8986af6 (4:07 PM ET): cas-35f6, dead-worker same-name respawn and recycle.
-- 3.100.0, PR #1462, 24047c8a (published 12:31 AM ET Nov 3, soundwave led): testing/CI train.
+- 9.99.1, PR #1455, e8986af6's predecessor dda91798 (9:16 AM ET): running-only Commander session list plus catalog-independent sends, reconnect and drafts.
+- 9.99.2, PR #1456, f2798785 (1:04 PM ET): kill guard denies pattern kills for every factory role (cas-a290), plus the "[CI] Run only what tests need" epic cas-e1c6.
+- 9.99.3, PR #1459, c59bd4b6 (2:58 PM ET, soundwave led): includes cas-2453, worker briefs moved from argv to a 0600 file inside the worktree, OpenCode-safe.
+- 9.99.4, PR #1461, e8986af6 (4:07 PM ET): cas-35f6, dead-worker same-name respawn and recycle.
+- 9.99.5, PR #1462, 24047c8a (published 12:31 AM ET Nov 3, soundwave led): testing/CI train.
 NOTHING IN FLIGHT. Next actions only on an operator or peer trigger:
 - Next train: the supervisor holding the evidence leads, the other agrees first.
 - release/testing-and-ci is open for follow-ups (soundwave wild-kestrel-63 leads).

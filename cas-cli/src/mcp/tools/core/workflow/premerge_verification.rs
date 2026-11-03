@@ -189,7 +189,11 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     for directory in crate::config::factory_task_artifact_dirs(root, &paths.base, &task.id) {
         let ledger = directory.join("LEDGER.md");
         match std::fs::read(ledger) {
-            Ok(bytes) => hash.update(bytes),
+            Ok(bytes) => {
+                hash.update(b"ledger\0");
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }

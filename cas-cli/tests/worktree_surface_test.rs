@@ -2746,6 +2746,7 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
             "unpublished promotion" => {
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
+                    let target_before_push = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
                     let hook = fixture.repo.root.join(".git/hooks/pre-push");
                     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
                     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2753,8 +2754,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                     // pin: a rejected push must leave the publication explicitly unconfirmed.
                     assert!(get_text(&failed).contains("NOT PUSHED"), "{}", get_text(&failed));
                     std::fs::remove_file(hook).unwrap();
-                    assert_ne!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
-                        git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]));
+                    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+                        target_before_push, "a rejected reviewed push cannot leave this delivery in the shared target for another lane to publish");
                     let mut epic = tasks.get("epic-rebound").unwrap();
                     epic.design = "The plan changed after the local merge, before publication.".into();
                     tasks.update(&epic).unwrap();

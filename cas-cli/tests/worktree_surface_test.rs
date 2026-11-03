@@ -2747,7 +2747,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
                     run_git(&["checkout", "epic/rebound"], &fixture.repo.root);
-                    std::fs::write(fixture.repo.root.join("README.md"), "Unrelated operator edit\n").unwrap();
+                    let operator_edit = "Unrelated operator edit\n";
+                    std::fs::write(fixture.repo.root.join("README.md"), operator_edit).unwrap();
                     let target_before_push = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
                     let hook = fixture.repo.root.join(".git/hooks/pre-push");
                     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
@@ -2760,7 +2761,7 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                     std::fs::remove_file(hook).unwrap();
                     assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
                         target_before_push, "a rejected reviewed push cannot leave this delivery in the shared target for another lane to publish");
-                    assert_eq!(std::fs::read_to_string(fixture.repo.root.join("README.md")).unwrap(), "Unrelated operator edit\n");
+                    assert_eq!(std::fs::read_to_string(fixture.repo.root.join("README.md")).unwrap(), operator_edit);
                     assert!(fixture.worker.exists(), "source cleanup must wait for confirmed publication");
                     assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
                     let mut epic = tasks.get("epic-rebound").unwrap();

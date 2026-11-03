@@ -11,9 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Content-Security-Policy on hub.petrastella.io** — Hosted Commander now
   sends a CSP. Images, media, live connections and visual pages may come only
-  from the team's Tailscale tailnets listed in `hub-web/hosted-tailnets.json`,
-  with no blanket `https:` source. Scripts, styles and workers stay
-  same-origin. The release deploy redeploys when only that list changes and
+  from the team's Tailscale tailnets listed in `hub-web/hosted-tailnets.json`
+  or a loopback hub, with no blanket `https:` source. Composer image previews
+  (`blob:`), the pairing cloud and the GitHub release check stay allowed.
+  Scripts, styles and workers stay same-origin. The release deploy redeploys when only that list changes and
   verifies that the live site serves the policy before keeping the deployment.
 
 ### Fixed — Commander worker timeline on a phone

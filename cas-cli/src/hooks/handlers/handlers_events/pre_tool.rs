@@ -9413,8 +9413,11 @@ EOF
             "python3 -c 'import subprocess; subprocess.run([\"cas\", \"config\", \"set\", \"factory.write_roots\", \"/x\"])'",
             "perl -e 'system(\"cas config set factory.write_roots /x\")'",
             "perl -e 'system(\"cas config set --quiet factory.write_roots /x\")'",
-            // Verifier ver-1ab57a0bca7c: an escape between the words, and the
-            // key held in a variable, are still refused.
+            // Verifier ver-1ab57a0bca7c: an option and its value, an escape
+            // between the words, and the key held in a variable stay refused.
+            "cas config set --store here factory.write_roots /x",
+            "cas config set --store=here factory.write_roots /x",
+            "python3 -c 'import os; os.system(\"cas config set\\tfactory.write_roots /x\")'",
             "node -e 'require(\"child_process\").execSync(\"cas config set\\\\ factory.write_roots /x\")'",
             "python3 -c 'import subprocess; k = \"factory.write_roots\"; subprocess.run([\"cas\", \"config\", \"set\", k, \"/x\"])'",
             "python3 - <<'EOF'\nimport os\nos.system('cas config set factory.write_roots /x')\nEOF",

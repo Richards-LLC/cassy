@@ -1309,6 +1309,8 @@ jobs:
         with:
           cache-key: fast-validation-suite-archive
           shared-key: fast-validation-suite-build
+          # Exact hits skip priming; cancelled work must never become one.
+          cache-on-failure: "false"
           cache-save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install nextest

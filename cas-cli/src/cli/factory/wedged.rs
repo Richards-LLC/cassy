@@ -1890,6 +1890,15 @@ fn is_cas_sidecar(command: &str, pid: u32) -> bool {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
+    // Match executable identity, not an argument or the truncated kernel comm.
+    // Keep walking descendants: the host's actual tool jobs still count.
+    if raw.split(|byte| *byte == 0).next().is_some_and(|arg0| {
+        Path::new(std::str::from_utf8(arg0).unwrap_or_default())
+            .file_name()
+            .is_some_and(|name| name == "codex-code-mode-host")
+    }) {
+        return true;
+    }
     if (command == "cas" || command.starts_with("cas-"))
         && raw.split(|byte| *byte == 0).any(|part| part == b"serve")
     {
@@ -4013,8 +4022,13 @@ mod tests {
             printf 'idle\n'
             while read -r command; do
                 case "$command" in
-                    start) (exec -a cargo sleep 600) & job=$!; printf 'working\n' ;;
-                    stop) kill "$job"; wait "$job" || :; job=; printf 'idle\n' ;;
+                    start)
+                        (exec -a cargo "$BASH" --noprofile --norc -c 'printf "working\n"; read -r _') <&0 &
+                        job=$!
+                        wait "$job" || :
+                        job=
+                        printf 'idle\n'
+                        ;;
                 esac
             done
         "#;

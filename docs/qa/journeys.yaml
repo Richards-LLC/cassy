@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  codex-host-sidecar-idleness:
+    title: Persistent Codex hosts leave workers idle while their owned tool jobs still count as activity
+    tasks: [cas-f3ab]
+    invariants: [HUB-J26-BACKGROUND-BOUND]
+    journeys: [HUB-J26]
   dead-worker-same-name-recovery:
     title: Same-name spawn and recycle replace dead workers while retaining their checkout and unpublished work
     tasks: [cas-35f6]

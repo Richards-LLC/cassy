@@ -12,9 +12,13 @@ inputs:
       evict each other's artifacts through one shared key.
     required: true
   shared-key:
-    description: Explicit cache job identity shared by compatible producers and consumers.
+    description: Explicit cache job identity shared by compatible producers and consumers; replaces cache-key identity.
     required: false
     default: ""
+  cache-on-failure:
+    description: Save partial dependencies after failure or cancellation; disable for exact-hit priming.
+    required: false
+    default: "true"
   cache-save-if:
     description: Allow cache writes independently of target restoration.
     required: false
@@ -79,5 +83,5 @@ runs:
         # Cold-build measurements immediately clean target; retain only the
         # registry cache instead of restoring binaries with no consumer.
         cache-targets: ${{ inputs.save-cache }}
-        cache-on-failure: true
+        cache-on-failure: ${{ inputs.cache-on-failure }}
         save-if: ${{ inputs.save-cache == 'true' && inputs.cache-save-if == 'true' }}

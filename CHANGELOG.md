@@ -61,6 +61,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   their current source on every cache hit or miss. Priming adds no required
   check and runs outside the validation dependency chain.
 
+### Fixed — Worker activity and CI maintenance
+
+- **Keep idle Codex workers visible** — Persistent Codex code hosts no longer
+  count as background jobs; work launched below them still does.
+- **Save only completed archive priming** — Cancelled or timed-out advisory
+  cache producers leave no partial exact cache that would skip future priming.
+- **Report queued ghosts without repeated failures** — Runs that reject
+  cancellation and remain queued emit warnings and individual summary links.
+  Unreadable rejected runs still fail; accepted requests remain distinct from
+  verified reclamation.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

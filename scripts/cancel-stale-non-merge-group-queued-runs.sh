@@ -11,7 +11,7 @@ watchdog_policy_init
 repository="$WATCHDOG_REPOSITORY"
 queue_seconds="$WATCHDOG_THRESHOLD_SECONDS"
 now_epoch="$WATCHDOG_NOW_EPOCH"
-selected=0 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0
+selected=0 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0 unverified=0
 
 list_call="repos/$repository/actions/runs?status=queued&per_page=100"
 if ! queued_runs="$(watchdog_api_read "$list_call")"; then
@@ -66,8 +66,15 @@ while IFS=$'\t' read -r run_id created_at event head_branch; do
                     ;;
                 *)
                     unresolved=$((unresolved + 1))
-                    printf '::error::unresolved stale queued run=%s current_status=%s after rejected cancellation; inspect https://github.com/%s/actions/runs/%s\n' \
-                        "$run_id" "$current_status" "$repository" "$run_id" >&2
+                    # GitHub can retain queued ghosts that reject cancellation
+                    # indefinitely. Keep each visible without a red run every
+                    # five minutes; an unreadable status still fails the sweep.
+                    [[ "$current_status" == queued ]] || unverified=$((unverified + 1))
+                    detail="unresolved stale queued run=$run_id current_status=$current_status after rejected cancellation; inspect https://github.com/$repository/actions/runs/$run_id"
+                    printf '::warning::%s\n' "$detail" >&2
+                    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+                        printf '%s\n\n' "$detail" >>"$GITHUB_STEP_SUMMARY"
+                    fi
                     ;;
             esac
             ;;
@@ -80,4 +87,4 @@ printf '%s\nCancellation acceptance does not verify reclamation.\n' "$summary"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     printf '%s\n\nCancellation acceptance does not verify reclamation.\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
 fi
-(( unresolved == 0 ))
+(( unverified == 0 ))

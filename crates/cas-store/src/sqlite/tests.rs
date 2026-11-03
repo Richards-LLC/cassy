@@ -448,6 +448,34 @@ fn test_rule_history_and_tombstone_delete() {
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
 }
 
+#[test]
+fn test_rule_delete_then_restore_latest_lifecycle_state() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    let mut rule = Rule::new("rule-restore-latest".into(), "Retain the reviewed rule".into());
+    rule.status = cas_types::RuleStatus::Proven;
+    store.add(&rule).unwrap();
+
+    store.delete(&rule.id).unwrap();
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions[0].operation, "delete");
+    assert_eq!(versions[0].status, cas_types::RuleStatus::Retired);
+    let deleted: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(deleted.status, store.get(&rule.id).unwrap().status);
+
+    store.restore_version(&rule.id, None, Some("reviewer"), None).unwrap();
+    let restored = store.get(&rule.id).unwrap();
+    assert_eq!(restored.content, rule.content);
+    assert_eq!(restored.status, cas_types::RuleStatus::Proven);
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions[0].operation, "restore");
+    let snapshot: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(snapshot.content, restored.content);
+    assert_eq!(snapshot.status, restored.status);
+}
+
 /// cas-1502: another agent holds the write lock and commits while a rule
 /// update, promote (an update) and tombstone delete run. Each must wait the
 /// writer out, not fail "database is locked", and leave the right rule and

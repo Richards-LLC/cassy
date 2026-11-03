@@ -378,6 +378,7 @@ mod tests {
         tasks.update(&closed_report).unwrap();
         // Neither an expired report, a P2 nor an internal finding is the fifth report.
         add_child("expired", "epic-risk", 49, 0, true);
+        add_child("future", "epic-risk", -1, 0, true);
         add_child("minor", "epic-risk", 0, 2, true);
         add_child("internal", "epic-risk", 0, 0, false);
         add_child("first-start", "epic-risk", 0, 2, false);

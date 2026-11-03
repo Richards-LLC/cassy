@@ -384,6 +384,58 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn real_handoff_prose_does_not_trigger_slack_reads() {
+        // Real release/handoff excerpts from mem-d3b8120845fc15fae32b134acb5bf69c.
+        let handoff = Entry {
+            content: r#"ROLE: cas-src supervisor on prowl, factory session cassy-loyal-cardinal-4.
+SHIPPED (all on main):
+- 3.98.1, PR #1455, e8986af6's predecessor dda91798 (9:16 AM ET): running-only Commander session list plus catalog-independent sends, reconnect and drafts.
+- 3.98.2, PR #1456, f2798785 (1:04 PM ET): kill guard denies pattern kills for every factory role (cas-a290), plus the "[CI] Run only what tests need" epic cas-e1c6.
+- 3.99.0, PR #1459, c59bd4b6 (2:58 PM ET, soundwave led): includes cas-2453, worker briefs moved from argv to a 0600 file inside the worktree, OpenCode-safe.
+- 3.99.1, PR #1461, e8986af6 (4:07 PM ET): cas-35f6, dead-worker same-name respawn and recycle.
+- 3.100.0, PR #1462, 24047c8a (published 12:31 AM ET Nov 3, soundwave led): testing/CI train.
+NOTHING IN FLIGHT. Next actions only on an operator or peer trigger:
+- Next train: the supervisor holding the evidence leads, the other agrees first.
+- release/testing-and-ci is open for follow-ups (soundwave wild-kestrel-63 leads).
+- cas-3b9f stages 2+ (precision measurement, gabber proof, CLI, gate) are not started.
+RULES IN FORCE:
+- Epic titles: "[AREA] short outcome".
+- One review, one batch fix, a fix-only re-review, then cut.
+"#.into(),
+            created: "2026-11-03T13:16:00Z".parse().unwrap(),
+            ..Default::default()
+        };
+        for content in [
+            handoff.content.clone(),
+            "Read CHANGELOG and CONTRIBUTING; PR #1455 and issue #1462.".into(),
+        ] {
+            let handoff = Entry {
+                content,
+                ..handoff.clone()
+            };
+            assert!(
+                targets(&references(&handoff)).is_empty(),
+                "plain prose is not a Slack target"
+            );
+            let context = "## 🔁 Current Handoff\n\n### handoff-new — saved time\nbody";
+            assert_eq!(
+                enrich(context, &handoff, &[], |_| panic!(
+                    "no Slack read is warranted"
+                )),
+                context
+            );
+        }
+        let real_ids = targets("C0123456789 G0ABC1234 CABCDEF12345 #project-chat");
+        assert_eq!(
+            real_ids
+                .iter()
+                .map(|target| target.channel.as_str())
+                .collect::<Vec<_>>(),
+            ["C0123456789", "G0ABC1234", "CABCDEF12345", "project-chat"]
+        );
+    }
+
+    #[test]
     fn session_start_lists_posts_newer_than_named_handoff_and_omits_quiet_section() {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path()).unwrap();

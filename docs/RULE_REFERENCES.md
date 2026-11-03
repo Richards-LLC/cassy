@@ -34,4 +34,18 @@ Scanning recognizes comment syntax, not a language AST. Do not put real rule ids
 
 ## Stakeholder provenance integration
 
-`rule_refs::stakeholder_scope` is the one enrichment seam. It directly reads cas-adeb's optional `Rule.stakeholder.scope`, using its existing `StakeholderAttribution {name, quote, scope}` type and migration m294 (governance base `46861faf`). It adds no provenance fields or migration. The real close regression stores that attribution and rejects a broader marker scope. Omitted update fields preserve attribution; an explicit MCP clear makes it absent, so legacy marker semantics apply. Follow-up: reference navigation can expose the existing stakeholder identity and quote. Retirement, expiry and supersession cleanup are a separate task; this change never retires a rule or edits its referenced code.
+`rule_refs::stakeholder_scope` is the one enrichment seam. It directly reads cas-adeb's optional `Rule.stakeholder.scope`, using its existing `StakeholderAttribution {name, quote, scope}` type and migration m294 (governance base `46861faf`). It adds no provenance fields or migration. The real close regression stores that attribution and rejects a broader marker scope. Omitted update fields preserve attribution; an explicit MCP clear makes it absent, so legacy marker semantics apply. Follow-up: reference navigation can expose the existing stakeholder identity and quote.
+
+## Cleanup when a rule changes
+
+These rule changes list the rule's cited sites for review:
+
+- `rule action=delete` retires the rule.
+- `rule action=update` adds a `superseded` or `superseded-by:<rule-id>` tag.
+- `rule action=update stakeholder=""` clears its attribution.
+- `rule action=update stakeholder_scope=...` changes its scope; only markers recording a different scope are listed.
+- Daemon maintenance finds that a stakeholder rule's `review_after` has passed. Unattributed rules are skipped because their review date is only a default hint.
+
+Cassy scans the project's tracked working tree with the same scanner as `cas rules refs`. It files one chore for the checkout, titled `Review <n> <rule-id> citation(s) in <repo>`, listing each `path:line` and recorded scope. Its `external_ref` is `rule-cleanup:<rule-id>:<change>`, where `<change>` is the rule history version or the expired review date. A retry or a repeated sweep therefore returns the same chore. Nothing is filed when no site needs review or the project is not a Git checkout. The rule tool's reply names the chore, or the listing error; the stored rule change stands either way.
+
+Cassy never edits or deletes a cited site. The chore's owner removes each marker together with the code written for it, or re-scopes it. Only the project checkout holding the rule store is scanned. For a global rule cited in other repositories, run `cas rules refs <rule-id>` in each one.

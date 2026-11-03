@@ -248,6 +248,33 @@ impl CasCore {
         Ok(Some(id))
     }
 
+    /// cas-56266: list the cited sites a rule change leaves for review in one
+    /// linked cleanup task. The rule change is already stored, so a listing
+    /// failure is reported rather than undoing it.
+    fn rule_cleanup_suffix(&self, rule: &Rule, changes: &[crate::rule_refs::RuleChange]) -> String {
+        if changes.is_empty() {
+            return String::new();
+        }
+        let filed = (|| -> anyhow::Result<Option<String>> {
+            let message = |error: McpError| anyhow::anyhow!(error.message.into_owned());
+            let version = self
+                .open_rule_store()
+                .map_err(message)?
+                .list_versions(&rule.id)?
+                .iter()
+                .map(|version| version.version)
+                .max()
+                .unwrap_or_default();
+            let tasks = self.open_task_store().map_err(message)?;
+            crate::rule_refs::file_cleanup(&self.cas_root, tasks.as_ref(), rule, changes, &format!("v{version}"))
+        })();
+        match filed {
+            Ok(Some(id)) => format!("; cleanup task {id} lists its cited sites"),
+            Ok(None) => String::new(),
+            Err(error) => format!("; cited-site cleanup listing failed: {error:#}"),
+        }
+    }
+
     fn retrieval_aggregates_for_rule(
         &self,
         rule_id: &str,
@@ -862,15 +889,22 @@ impl CasCore {
         Parameters(req): Parameters<IdRequest>,
     ) -> Result<CallToolResult, McpError> {
         let rule_store = self.open_rule_store()?;
+        let before = rule_store.get(&req.id).ok();
 
         rule_store.delete(&req.id).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to delete: {e}")),
             data: None,
         })?;
+        let cleanup = match (before, rule_store.get(&req.id)) {
+            (Some(before), Ok(after)) => {
+                self.rule_cleanup_suffix(&after, &crate::rule_refs::update_changes(&before, &after))
+            }
+            _ => String::new(),
+        };
 
         Ok(Self::success(format!(
-            "Retired rule: {} (history retained)",
+            "Retired rule: {} (history retained){cleanup}",
             req.id
         )))
     }
@@ -900,6 +934,7 @@ impl CasCore {
             message: Cow::from(format!("Rule not found: {e}")),
             data: None,
         })?;
+        let before = rule.clone();
 
         let mut changes = Vec::new();
 
@@ -1037,8 +1072,9 @@ impl CasCore {
         let suffix = chore
             .map(|id| format!("; encode chore {id} exists"))
             .unwrap_or_default();
+        let cleanup = self.rule_cleanup_suffix(&rule, &crate::rule_refs::update_changes(&before, &rule));
         Ok(Self::success(format!(
-            "Updated rule {}: {}{}",
+            "Updated rule {}: {}{}{cleanup}",
             req.id,
             changes.join(", "),
             suffix
@@ -1553,6 +1589,113 @@ mod tests {
         rule.harmful_count = 0;
         rule.status = RuleStatus::Stale;
         assert!(core.ensure_encode_chore(&rule).unwrap().is_some());
+    }
+
+    /// A Git checkout whose code and test cite `id` under two recorded scopes.
+    fn cited_rule(core: &CasCore, root: &std::path::Path, id: &str) {
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(root).args(args).status();
+            assert!(status.unwrap().success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        for (path, scope, item) in [
+            ("src/sms.rs", "Only SMS sends", "fn send_sms() {}"),
+            ("tests/sms.rs", "All sending", "fn rejects_send() {}"),
+        ] {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, format!("// cas-rule: {id} scope: {scope:?}\n{item}\n")).unwrap();
+        }
+        git(&["add", "src", "tests"]);
+        let mut rule = Rule::new(id.into(), "Limit SMS sending".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(),
+            quote: "Please limit sending".into(),
+            scope: "All sending".into(),
+        });
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+    }
+
+    /// The one cleanup task, its listed sites, and proof nothing was deleted.
+    fn cleanup_task(root: &std::path::Path, core: &CasCore, id: &str) -> String {
+        let tasks = core.open_task_store().unwrap().list(None).unwrap();
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        let link = tasks[0].external_ref.as_deref().unwrap_or_default();
+        assert!(link.starts_with(&format!("rule-cleanup:{id}:")), "{link}");
+        for path in ["src/sms.rs", "tests/sms.rs"] {
+            let text = std::fs::read_to_string(root.join(path)).unwrap();
+            assert!(text.contains(&format!("cas-rule: {id} ")), "{path} was edited");
+        }
+        tasks[0].description.clone()
+    }
+
+    /// cas-56266: retiring, superseding or un-attributing a rule lists every
+    /// cited site in one linked cleanup task.
+    #[tokio::test]
+    async fn whole_rule_changes_file_one_cleanup_task_listing_every_site_cas_56266() {
+        for change in ["retire", "supersede", "clear"] {
+            let (temp, core) = isolated_core();
+            cited_rule(&core, temp.path(), "rule-901");
+            let request = |tags: Option<&str>, stakeholder: Option<&str>| RuleUpdateRequest {
+                stakeholder: stakeholder.map(str::to_owned),
+                ..update_rule("rule-901", tags, None)
+            };
+            match change {
+                "retire" => core.cas_rule_delete(Parameters(IdRequest { id: "rule-901".into() })).await,
+                "supersede" => core.cas_rule_update(Parameters(request(Some("superseded,superseded-by:rule-902"), None))).await,
+                _ => core.cas_rule_update(Parameters(request(None, Some("")))).await,
+            }
+            .unwrap();
+            let listed = cleanup_task(temp.path(), &core, "rule-901");
+            for site in [r#"src/sms.rs:1 scope: "Only SMS sends""#, r#"tests/sms.rs:1 scope: "All sending""#] {
+                assert!(listed.contains(site), "{change}: {listed}");
+            }
+        }
+    }
+
+    /// cas-56266: narrowing the stakeholder scope lists only the markers whose
+    /// recorded scope no longer matches it.
+    #[tokio::test]
+    async fn narrowing_a_rule_lists_sites_outside_its_new_scope_cas_56266() {
+        let (temp, core) = isolated_core();
+        cited_rule(&core, temp.path(), "rule-903");
+        let narrow = RuleUpdateRequest {
+            stakeholder_scope: Some("Only SMS sends".into()),
+            ..update_rule("rule-903", None, None)
+        };
+        core.cas_rule_update(Parameters(narrow)).await.unwrap();
+        let listed = cleanup_task(temp.path(), &core, "rule-903");
+        assert!(listed.contains(r#"tests/sms.rs:1 scope: "All sending""#), "{listed}");
+        assert!(!listed.contains("src/sms.rs"), "{listed}");
+    }
+
+    /// cas-56266: daemon maintenance files one cleanup task when a stakeholder
+    /// rule's review_after passes, and repeated sweeps reuse it.
+    #[test]
+    fn expired_review_after_files_its_cleanup_task_once_cas_56266() {
+        let (temp, core) = isolated_core();
+        cited_rule(&core, temp.path(), "rule-904");
+        let store = core.open_rule_store().unwrap();
+        let mut rule = store.get("rule-904").unwrap();
+        rule.review_after = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        store.update(&rule).unwrap();
+        let config = crate::daemon::DaemonConfig {
+            cas_root: core.cas_root.clone(),
+            process_observations: false,
+            consolidate_memories: false,
+            auto_prune: false,
+            apply_decay: false,
+            update_entity_summaries: false,
+            index_code: false,
+            index_bm25: false,
+            agent_purge_age_hours: 0,
+            ..crate::daemon::DaemonConfig::default()
+        };
+        for _ in 0..2 {
+            crate::daemon::run_maintenance(&config).unwrap();
+        }
+        let listed = cleanup_task(temp.path(), &core, "rule-904");
+        assert!(listed.contains("src/sms.rs:1") && listed.contains("tests/sms.rs:1"), "{listed}");
     }
 
     #[test]

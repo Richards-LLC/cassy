@@ -181,7 +181,7 @@ Record applicable evidence and the reason for each inapplicable surface:
 | User-visible change | Release-note impact and the project's publication rubric. |
 
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
-criterion evidence, safety facts and deferred proof ownership. Read actual tool
+criterion evidence, the linked plan section and its metric receipt, safety facts and deferred proof ownership. A missed plan metric is never non-blocking. Read actual tool
 rejections as state; forward verification-required guidance once to the supervisor.
 
 To wait blocked on a pending verification dispatch without waking the

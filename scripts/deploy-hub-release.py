@@ -33,6 +33,9 @@ SCHEMA = "https://openapi.vercel.sh/vercel.json"
 TAILNETS = "hub-web/hosted-tailnets.json"
 # Pairing relay and operator inbox (Commander's cas-pairing-relay-origin).
 CLOUD = "https://petra-stella-cloud.vercel.app"
+# Commander's latest-release check (hub-web/src/machine-version.ts LATEST_RELEASE_URL).
+RELEASES = "https://api.github.com"
+LOOPBACK = "http://127.0.0.1:*"
 TAILNET = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
@@ -221,11 +224,14 @@ def hosted_csp(tailnets):
         ("default-src", ["'none'"]),
         ("script-src", ["'self'"]),
         ("style-src", ["'self'"]),
-        ("img-src", ["'self'", "data:", *https]),
-        ("media-src", ["'self'", *https]),
+        # blob: only for images: composer thumbnails are local object URLs,
+        # as in the hub-served policy (cas-cli hub/server.rs).
+        ("img-src", ["'self'", "data:", "blob:", *https, LOOPBACK]),
+        # A loopback machine hub serves its media proxy like a tailnet hub.
+        ("media-src", ["'self'", *https, LOOPBACK]),
         ("font-src", ["'self'"]),
-        ("connect-src", ["'self'", *https, *wss, "http://127.0.0.1:*", "ws://127.0.0.1:*", CLOUD]),
-        ("frame-src", ["'self'", *https, "http://127.0.0.1:*"]),
+        ("connect-src", ["'self'", *https, *wss, LOOPBACK, "ws://127.0.0.1:*", CLOUD, RELEASES]),
+        ("frame-src", ["'self'", *https, LOOPBACK]),
         ("object-src", ["'none'"]),
         ("base-uri", ["'none'"]),
         ("frame-ancestors", ["'none'"]),

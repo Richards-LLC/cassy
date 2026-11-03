@@ -15469,6 +15469,7 @@ mod tests {
         // pin: the machine marker and declaration contract must reach a worker
         // before it implements a task that cites an existing rule.
         assert!(prompt.contains("Rule references required for rule-177"), "{prompt}");
+        // pin: Rule-driven sites: is the machine-readable receipt field name.
         assert!(prompt.contains("Rule-driven sites:"), "{prompt}");
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }

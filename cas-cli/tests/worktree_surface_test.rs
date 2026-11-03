@@ -2612,6 +2612,62 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
 }
 
 #[tokio::test]
+async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_once() {
+    let mut env = test_env();
+    let fixture = rebound_merge_fixture(&mut env).await;
+    std::fs::write(fixture.cas_root.join("config.toml"),
+        "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+    let tasks = open_task_store(&fixture.cas_root).unwrap();
+    let mut task = tasks.get("cas-e429").unwrap();
+    task.depth = TaskDepth::Deep;
+    task.labels = vec!["force-verifier".into()];
+    tasks.update(&task).unwrap();
+    let agents = open_agent_store(&fixture.cas_root).unwrap();
+    assert!(matches!(agents.try_claim(&task.id, "rebound-worker", 600, Some("unpublished receipt"))
+        .unwrap(), cas::types::ClaimResult::Success(_)));
+    let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+    let mut receipt = delivery_receipt(&task.id, "rebound-worker", &fixture.repo, "alice");
+    receipt.repo_selector = "project:rebound".into();
+    receipt.source_branch = fixture.branch.clone();
+    receipt.commit_sha = fixture.tip.clone();
+    receipt.target_branch = "epic/rebound".into();
+    receipt.target_sha = before.clone();
+    receipt.merge_base_sha = git_stdout(&fixture.repo.root,
+        &["merge-base", &fixture.branch, "epic/rebound"]);
+    let submitted = delivery_service(&fixture.cas_root, "rebound-worker")
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "worker handoff",
+            "completion_receipt": serde_json::to_string(&receipt).unwrap(),
+        })))).await.unwrap();
+    let (_, transaction) = cas_store::get_latest_worker_delivery(&fixture.cas_root, &task.id)
+        .unwrap().unwrap_or_else(|| panic!("unpublished receipt must create its candidate proof before merge: {}", get_text(&submitted)));
+    assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+    let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id)
+        .unwrap().unwrap();
+    assert_eq!(dispatch.delivery_transaction_id.as_deref(), Some(transaction.id.as_str()));
+    let candidate = dispatch.repository.as_ref().expect("receipt and candidate share one atomic dispatch");
+    let tree = git_stdout(&fixture.repo.root, &["rev-parse", &format!("{}^{{tree}}", candidate.head_commit)]);
+    let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+        "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+        "status": "approved", "summary": "Transactional candidate approved before publication",
+    })))).await.unwrap();
+    assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(fixture.branch);
+    merge.task_id = Some(task.id.clone());
+    merge.cleanup = Some(false);
+    let result = fixture.service.factory(Parameters(merge)).await;
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound^{tree}"]), tree,
+        "transactional merge publishes the already-approved candidate: {result:?}");
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+        git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]));
+    assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
+        dispatch.id, "transactional publication cannot add a post-merge verifier");
+}
+
+#[tokio::test]
 async fn cas_619c_worktree_merge_warns_for_an_unparked_in_progress_task() {
     let mut env = test_env();
     let fixture = rebound_merge_fixture(&mut env).await;

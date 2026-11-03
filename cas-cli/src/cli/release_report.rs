@@ -1243,9 +1243,20 @@ fn classify_area(title: &str, body: &str) -> String {
 
 /// Non-shipped CHANGELOG categories remain in report prose, but do not
 /// contribute to change totals or the change map. Classify by source heading.
+/// Upgrade, migration and operator-guidance notes instruct readers about
+/// changes already counted under their own headings.
 fn is_non_shipped_category(category: &str) -> bool {
     let category = category.to_ascii_lowercase();
-    category.starts_with("test") || category.starts_with("doc") || category.starts_with("known limit")
+    [
+        "test",
+        "doc",
+        "known limit",
+        "upgrade",
+        "migration",
+        "operator guidance",
+    ]
+    .iter()
+    .any(|prefix| category.starts_with(prefix))
 }
 
 /// Strip trailing reference lists such as `(#1203, cas-d697)` from a title.
@@ -1833,7 +1844,7 @@ fn assemble_markdown(
             "Changes shipped".to_string(),
             change_count.to_string(),
             format!(
-                "{}; tests, docs and known limits not counted",
+                "{}; tests, docs, known limits and upgrade notes not counted",
                 kinds
                     .iter()
                     .map(|(kind, count)| format!("{count} {kind}"))
@@ -1957,7 +1968,7 @@ fn assemble_markdown(
         })
         .collect::<Vec<_>>();
     let mut method = vec![format!(
-        "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; entries under Test, Doc or Known limits headings are listed under the hood but not counted."
+        "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; entries under Test, Doc, Known limits, Upgrade, Migration or Operator guidance headings are listed under the hood but not counted."
     )];
     match (&sources.release_pr, &sources.closure_window) {
         (Some(pr), Some(window)) => method.push(format!(
@@ -3453,7 +3464,7 @@ mod tests {
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
         assert!(
-            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests, docs and known limits not counted |"),
+            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
             "{report}"
         );
         assert!(report.contains(

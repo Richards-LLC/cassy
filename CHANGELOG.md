@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Release report counts
+
+- **Stop counting upgrade notes as changes** — Was: bullets under `### Upgrade
+  notes` counted as shipped changes, with titles cut from their sentences. →
+  Now: upgrade, migration and operator-guidance notes stay in the report prose
+  but are left out of the change count and map, and the counting note names
+  them. v3.84.0 now counts 13 changes: 8 added, 3 changed and 2 fixed.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

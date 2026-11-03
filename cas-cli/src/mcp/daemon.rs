@@ -352,6 +352,27 @@ pub(crate) fn register_session_start_agent(
     cc_pid: u32,
     clone_path: Option<&str>,
 ) -> crate::store::Result<(Agent, bool)> {
+    register_session_start_identity(
+        cas_root, store, session_id, agent_name, agent_role, cc_pid, clone_path, true,
+    )
+}
+
+/// `caller_env` is false when this process is not the registering harness:
+/// the daemon that owns `.cas/daemon.sock` receives every agent's SessionStart,
+/// and its environment is its own pane's launch recipe. Stamping that recipe on
+/// another agent's row turned a Codex worker into `cli=claude` on a Claude
+/// account (cas-24f3). The hook already registered with its own environment.
+#[allow(clippy::too_many_arguments)]
+fn register_session_start_identity(
+    cas_root: &std::path::Path,
+    store: &dyn crate::store::AgentStore,
+    session_id: &str,
+    agent_name: Option<&str>,
+    agent_role: Option<&str>,
+    cc_pid: u32,
+    clone_path: Option<&str>,
+    caller_env: bool,
+) -> crate::store::Result<(Agent, bool)> {
     let configured_role = parse_agent_role_hint(agent_role);
     let requested_worker = configured_role == Some(AgentRole::Worker);
     // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its row (see
@@ -442,7 +463,11 @@ pub(crate) fn register_session_start_agent(
     if let Some(role) = configured_role {
         apply_agent_role(&mut agent, role);
     }
-    apply_factory_worker_metadata(&mut agent, clone_path);
+    if caller_env {
+        apply_factory_worker_metadata(&mut agent, clone_path);
+    } else if let Some(path) = clone_path {
+        agent.metadata.insert("clone_path".to_string(), path.to_string());
+    }
 
     // A failed delete/shutdown, revive, or automatic upsert can leave an
     // active row for an ended incarnation. Its status is not a resume receipt.
@@ -2109,7 +2134,7 @@ impl EmbeddedDaemon {
         // eager MCP bootstrap, rather than minting a fresh session-id row.
         let mut registered_id = None;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
-            if let Ok((agent, reused)) = register_session_start_agent(
+            if let Ok((agent, reused)) = register_session_start_identity(
                 &self.config.cas_root,
                 store.as_ref(),
                 &session_id,
@@ -2117,6 +2142,7 @@ impl EmbeddedDaemon {
                 agent_role.as_deref(),
                 cc_pid,
                 clone_path.as_deref(),
+                is_our_agent,
             ) {
                 registered_id = Some(agent.id.clone());
                 eprintln!(

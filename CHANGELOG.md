@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Codex worker recycle and context reset
+
+- **Keep each worker's own launch recipe** — The daemon that receives every
+  agent's session start no longer stamps its own harness, account, model and
+  effort on another worker's row, which had recorded Codex workers as Claude
+  on a Claude account. Recycling a row already damaged this way relaunches on
+  Codex without the Claude account, and clear_context recycles it instead of
+  searching Claude project folders.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

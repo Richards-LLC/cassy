@@ -310,43 +310,6 @@ fn refresh(accounts: &mut [Account]) {
     mark_duplicates_and_order(accounts);
 }
 
-/// Refresh picker capacity through the same identity-sharing path as the list.
-pub(crate) fn picker_usage_summaries(
-    provider: Provider,
-    folders: Vec<(String, PathBuf)>,
-    deadline: Duration,
-) -> std::collections::HashMap<String, String> {
-    let mut rows: Vec<_> = folders
-        .into_iter()
-        .map(|(name, folder)| {
-            let home = folder.parent().unwrap_or(Path::new("/"));
-            let mut row = account(provider, home, folder.clone());
-            row.name = name;
-            row
-        })
-        .collect();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let until = Instant::now() + deadline;
-    for (i, row) in rows.iter().enumerate() {
-        let sender = sender.clone();
-        let folder = row.folder.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send((
-                i,
-                None,
-                Some(crate::cli::limits::account_usage(provider, &folder)),
-            ));
-        });
-    }
-    drop(sender);
-    receive_updates(&mut rows, receiver, until);
-    rows.into_iter()
-        .filter_map(|row| {
-            crate::cli::limits::summarize_account_at(&row, Utc::now()).map(|summary| (row.name, summary))
-        })
-        .collect()
-}
-
 type ProbeUpdate = (
     usize,
     Option<LoginState>,

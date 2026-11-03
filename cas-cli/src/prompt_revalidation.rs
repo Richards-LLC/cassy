@@ -9,7 +9,6 @@ pub(crate) use cas_types::{
 
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
-const DELIVERY_PR_MERGED_ENVELOPE_OPEN: &str = "<delivery-pr-merged ";
 const DELIVERY_PR_MERGED_ENVELOPE_CLOSE: &str = "</delivery-pr-merged>";
 
 /// CAS-emitted envelopes that join `<cas-merge-request>` as things a
@@ -247,14 +246,6 @@ pub(crate) struct MergeRequestEnvelope {
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
 /// merged. The body deliberately names the exact close receipt so an idle
 /// worker can resume the terminal action without guessing which commit landed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeliveryPrMergedEnvelope {
-    pub task_id: String,
-    pub worker: String,
-    pub pr_number: u64,
-    pub merge_commit: String,
-}
-
 pub(crate) fn delivery_pr_merged_envelope(
     task_id: &str,
     worker: &str,
@@ -267,28 +258,6 @@ pub(crate) fn delivery_pr_merged_envelope(
     format!(
         "<delivery-pr-merged task_id=\"{task_id}\" worker=\"{worker}\" pr_number=\"{pr_number}\" merge_commit=\"{merge_commit}\">\nPR #{pr_number} merged at {merge_commit}: close {task_id} with commit_receipt={merge_commit}\n{DELIVERY_PR_MERGED_ENVELOPE_CLOSE}"
     )
-}
-
-pub(crate) fn parse_delivery_pr_merged_envelope(prompt: &str) -> Option<DeliveryPrMergedEnvelope> {
-    if !prompt.starts_with(DELIVERY_PR_MERGED_ENVELOPE_OPEN)
-        || !prompt.trim_end().ends_with(DELIVERY_PR_MERGED_ENVELOPE_CLOSE)
-    {
-        return None;
-    }
-    let tag_end = prompt.find('>')?;
-    let tag = &prompt[..tag_end];
-    Some(DeliveryPrMergedEnvelope {
-        task_id: xml_attribute(tag, "task_id")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-        worker: xml_attribute(tag, "worker")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-        pr_number: xml_attribute(tag, "pr_number")?.parse().ok()?,
-        merge_commit: xml_attribute(tag, "merge_commit")
-            .filter(|value| !value.is_empty())?
-            .to_string(),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2865,23 +2834,6 @@ mod tests {
             },
             "a later AwaitingMerge cycle must not revive the declined request"
         );
-    }
-
-    #[test]
-    fn delivery_pr_merge_wake_round_trips_and_names_the_close_receipt() {
-        let body = delivery_pr_merged_envelope(
-            "cas-7ea6",
-            "calm-octopus-51",
-            932,
-            "deadbeef",
-        );
-        let parsed = parse_delivery_pr_merged_envelope(&body).expect("daemon envelope parses");
-        assert_eq!(parsed.task_id, "cas-7ea6");
-        assert_eq!(parsed.worker, "calm-octopus-51");
-        assert_eq!(parsed.pr_number, 932);
-        assert_eq!(parsed.merge_commit, "deadbeef");
-        assert!(body.contains("close cas-7ea6 with commit_receipt=deadbeef"));
-        assert!(parse_delivery_pr_merged_envelope("quoted text").is_none());
     }
 
     #[test]

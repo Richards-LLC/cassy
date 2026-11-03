@@ -47,28 +47,6 @@ pub(crate) struct Component {
     age_s: u16,
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SilenceKind {
-    Sleep,
-    Reboot,
-    Maintenance,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct Silence {
-    kind: SilenceKind,
-    duration_s: u32,
-}
-
-impl Silence {
-    pub(crate) fn new(kind: SilenceKind, duration_s: u32) -> Option<Self> {
-        (1..=86_400)
-            .contains(&duration_s)
-            .then_some(Self { kind, duration_s })
-    }
-}
-
 struct Prepared {
     path: &'static str,
     body: Vec<u8>,
@@ -129,11 +107,7 @@ impl Reporter {
         self.phase = Phase::Stopped(reason);
     }
 
-    fn prepare(
-        &mut self,
-        components: Vec<Component>,
-        silence: Option<Silence>,
-    ) -> Option<&Prepared> {
+    fn prepare(&mut self, components: Vec<Component>) -> Option<&Prepared> {
         if self.pending.is_none() {
             let value = match &self.phase {
                 Phase::Stopped(_) => return None,
@@ -147,15 +121,11 @@ impl Reporter {
                         return None;
                     }
                     self.seq += 1;
-                    let mut report = json!({
+                    json!({
                         "wire_version": 1, "reporter_epoch": epoch,
                         "monitoring_generation": generation, "seq": self.seq.to_string(),
                         "components": components,
-                    });
-                    if let Some(silence) = silence {
-                        report["silence"] = json!(silence);
-                    }
-                    report
+                    })
                 }
             };
             self.pending = Some(Prepared {
@@ -485,7 +455,7 @@ pub fn spawn_presence_loop(root: PathBuf) -> tokio::task::JoinHandle<()> {
                 tracing::warn!("presence reporter stopped: enrollment replaced");
                 return;
             }
-            let Some(prepared) = reporter.prepare(components, None) else {
+            let Some(prepared) = reporter.prepare(components) else {
                 return;
             };
             let activation = prepared.path == ACTIVATE;

@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Runtime test coverage
+
+- **Remove unused runtime scaffolding** — Violet deliveries use their reader's
+  owner session; unused per-delivery overrides, delivery-PR parsing, relay URL
+  validation, planned-presence silence and duplicate reporting helpers have
+  been removed. Native Claude capacity checks now name their actual limits
+  and account-choice coverage.
+
 ## [3.99.1] - 2026-11-02
 
 ### Fixed — Worker recovery

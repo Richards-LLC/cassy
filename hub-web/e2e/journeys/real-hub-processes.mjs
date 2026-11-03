@@ -1,7 +1,11 @@
-// Darwin has no /proc. Inspect only PID relationships and start fingerprints;
-// never collect another process's arguments or environment to find ownership.
+// Owned-process discovery for real-hub fixtures. Darwin has no /proc: there,
+// inspect only PID relationships and start fingerprints, never another
+// process's arguments or environment.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { existsSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 const run = promisify(execFile);
 async function processTable(args) {
@@ -43,4 +47,84 @@ export async function darwinOwnedProcesses(root, remembered) {
   const rows = table.filter(row => row.pid !== root?.pid && owned.has(row.pid));
   for (const row of rows) remembered.set(row.pid, row);
   return rows;
+}
+
+// Linux: this fixture's unique HOME marks its processes, including PTY
+// children that lead their own session or were reparented when the reaper exited.
+export async function linuxProcessIdentity(pid) {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/);
+    return fields[0] === "Z" ? undefined
+      : { pid: Number(pid), parent: Number(fields[1]), starttime: fields[19] };
+  } catch (error) {
+    if (["ENOENT", "ESRCH"].includes(error.code)) return;
+    throw error;
+  }
+}
+
+async function linuxOwnedProcesses(home) {
+  const expected = `HOME=${home}`;
+  const processes = await Promise.all((await readdir("/proc"))
+    .filter(pid => /^\d+$/.test(pid)).map(async pid => {
+      try {
+        const identity = await linuxProcessIdentity(pid);
+        if (!identity) return;
+        const env = await readFile(`/proc/${pid}/environ`);
+        if (!env.toString().split("\0").includes(expected)) return;
+        if ((await linuxProcessIdentity(pid))?.starttime === identity.starttime) return identity;
+      } catch (error) {
+        if (["ENOENT", "ESRCH", "EACCES"].includes(error.code)) return;
+        throw error;
+      }
+    }));
+  return processes.filter(Boolean);
+}
+
+async function signalOwned(identity, signal, identify) {
+  if ((await identify(identity.pid))?.starttime !== identity.starttime) return;
+  try { process.kill(identity.pid, signal); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+}
+
+// Stop every captured owned process, and return only once none remains.
+// With a leader, its children (the daemon) stop first so the leader (the
+// reaper) can wait for them and finish its exit receipt.
+export async function stopOwnedProcesses(list, identify, leader) {
+  let processes = await list();
+  const exited = async () => {
+    const deadline = performance.now() + 3000;
+    do {
+      processes = await list();
+      if (!processes.length) return true;
+      await new Promise(ok => setTimeout(ok, 50));
+    } while (performance.now() < deadline);
+    return false;
+  };
+  if (leader !== undefined) {
+    for (const child of processes.filter(p => p.parent === leader))
+      await signalOwned(child, "SIGTERM", identify);
+    if (await exited()) return;
+  }
+  // Each signal is bounded to a PID that is still owned with the same start
+  // fingerprint, including a provider detached into its own process group.
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    for (const child of processes) await signalOwned(child, signal, identify);
+    if (await exited()) return;
+  }
+  throw Error("owned launch processes did not exit; fixture retained");
+}
+
+// Linux cleanup before the fixture HOME is removed. The launch shim records
+// the hub-started reaper in launched-pid.
+export async function stopLinuxFixtureProcesses(home) {
+  const launched = join(home, "launched-pid");
+  if (!existsSync(launched)) return;
+  const owned = JSON.parse(await readFile(launched, "utf8"));
+  if (!Number.isSafeInteger(owned.pid) || owned.pid <= 1)
+    throw Error("invalid owned launch PID; fixture retained");
+  const leader = await linuxProcessIdentity(owned.pid);
+  if (leader && leader.starttime !== owned.starttime)
+    throw Error("owned launch PID was reused; fixture retained");
+  await stopOwnedProcesses(() => linuxOwnedProcesses(home), linuxProcessIdentity, owned.pid);
 }

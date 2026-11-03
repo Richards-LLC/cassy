@@ -64,6 +64,21 @@ pub const META_FOCUS_CLAIM: &str = "cloud_focus_epic";
 /// Source claims acquired while creating or staffing stakeholder asks.
 pub const META_SOURCE_CLAIMS: &str = "cloud_source_claims";
 
+/// Serialize concurrent source additions using the existing local claim fence.
+pub(crate) fn remember_source_claim(root: &Path, agent_id: &str, key: &str) -> Result<(), String> {
+    let _fence = lock_task_claim_release(root, &format!("source-owner-{agent_id}")).map_err(|error| error.to_string())?;
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?;
+    let mut agent = agents.get(agent_id).map_err(|error| error.to_string())?;
+    let mut keys: Vec<String> = agent.metadata.get(META_SOURCE_CLAIMS)
+        .and_then(|value| serde_json::from_str(value).ok()).unwrap_or_default();
+    if !keys.iter().any(|known| known == key) {
+        keys.push(key.to_string());
+        agent.metadata.insert(META_SOURCE_CLAIMS.into(), serde_json::to_string(&keys).map_err(|error| error.to_string())?);
+        agents.update(&agent).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// One request's bounded allowance of cloud round trips (cas-0078). Each
 /// call runs on the blocking pool, so a slow cloud never stalls the async
 /// runtime, and all calls of one request share one deadline.

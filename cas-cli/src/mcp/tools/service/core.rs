@@ -491,7 +491,9 @@ impl CasService {
         let target_branch = req.target_branch.clone();
         let state_patch = req.state_patch.clone();
         if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty()) || req.external_ref.is_some() {
-            if let Some(source) = req.external_ref.as_deref() {
+            if let Some(source) = req.external_ref.as_deref()
+                && req.id.as_deref().is_none_or(|id| crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_none())
+            {
                 self.refresh_task_source(Some(source)).await?;
             } else if let Some(id) = req.id.as_ref() {
                 self.refresh_task_sources(std::slice::from_ref(id)).await?;

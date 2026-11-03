@@ -1780,7 +1780,7 @@ impl CasCore {
         if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty())
             || changes.contains(&"external_ref")
         {
-            let notice = self.task_source_notice(task.external_ref.as_deref()).await?;
+            let notice = self.task_source_notice_for(&task).await?;
             if !notice.is_empty() { warnings.push(notice); }
         }
         let mut assignee_override_audit = None;

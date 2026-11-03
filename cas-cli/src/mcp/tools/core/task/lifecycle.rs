@@ -2995,7 +2995,7 @@ impl CasCore {
         ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
-        peer_notes.push_str(&self.task_source_notice(task.external_ref.as_deref()).await?);
+        peer_notes.push_str(&self.task_source_notice_for(&task).await?);
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;

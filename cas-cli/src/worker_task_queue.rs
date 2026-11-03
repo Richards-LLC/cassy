@@ -169,7 +169,7 @@ impl CasCore {
                     ));
                 }
                 let task = tasks.get(id).map_err(error)?;
-                source_notices.push_str(&self.task_source_notice(task.external_ref.as_deref()).await?);
+                source_notices.push_str(&self.task_source_notice_for(&task).await?);
             }
             if queue.current_task.is_none() {
                 queue.current_task = tasks

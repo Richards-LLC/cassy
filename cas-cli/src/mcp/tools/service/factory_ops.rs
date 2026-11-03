@@ -1,4 +1,5 @@
 pub(crate) mod usage_limits;
+mod spawn_names;
 use crate::factory_target_cache::missing_gitdir_checkouts;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
@@ -245,7 +246,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
     let default_codex_home = dirs::home_dir().map(|home| home.join(".codex"));
-    if specs.iter().any(|spec| {
+    let needs_default = specs.iter().any(|spec| {
         spec.cli == cas_mux::SupervisorCli::Codex
             && spec
                 .config_dir
@@ -257,18 +258,31 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
                 .as_deref()
                 .filter(|dir| !dir.trim().is_empty())
                 .is_none()
-    }) && !default_codex_home.as_deref().is_some_and(|home| {
-        home.is_dir()
-            && home.to_str().is_some_and(|home| {
-                crate::capability::probe_account_auth(
-                    cas_mux::SupervisorCli::Codex,
-                    Some(home),
-                    deadline,
-                )
-                .availability
-                    != cas_factory::CapabilityAvailability::Unavailable
-            })
-    }) {
+    });
+    let mut default_evidence = None;
+    let default_problem = if !needs_default { None } else {
+        match default_codex_home.as_deref() {
+            None => Some("the default Codex home cannot be resolved because HOME is unavailable".to_string()),
+            Some(home) => match std::fs::metadata(home) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+                    Some(format!("the default Codex home {} is missing; no account was selected", home.display())),
+                Err(error) => Some(format!("the default Codex home {} is unreadable: {error}", home.display())),
+                Ok(metadata) if !metadata.is_dir() => Some(format!("the default Codex home {} is not a directory", home.display())),
+                Ok(_) => match home.to_str() {
+                    None => Some("the default Codex home path is not valid UTF-8".to_string()),
+                    Some(path) => {
+                        let evidence = crate::capability::probe_account_auth(cas_mux::SupervisorCli::Codex, Some(path), deadline);
+                        let problem = (evidence.availability == cas_factory::CapabilityAvailability::Unavailable)
+                            .then(|| format!("the default Codex home {} is logged out: {}", home.display(),
+                                evidence.reason.as_deref().unwrap_or("Codex reports no authenticated account")));
+                        default_evidence = Some(evidence);
+                        problem
+                    }
+                },
+            },
+        }
+    };
+    if let Some(problem) = default_problem {
         // The default home is already the implicit worker launch target. A
         // named account must still be selected by the caller when that default
         // is absent or logged out; Unknown retains the existing probe policy.
@@ -299,7 +313,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             None => "account registry unreadable".into(),
         };
         return Err(format!(
-            "spawn refused: the default Codex home is absent or logged out. Pass config_dir with the intended CODEX_HOME, \
+            "spawn refused: {problem}. Pass config_dir with the intended CODEX_HOME, \
              or set the project worker config_dir in .cas/config.toml ([factory.defaults] or [[factory.workers]]) \
              for hub/Commander spawns. Registered logged-in Codex homes: {accounts}. \
              No worktree was created and no task was assigned."
@@ -307,7 +321,11 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     }
     preflight_account_auth_with(
         specs,
-        |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+        |cli, account_dir| {
+            if cli == cas_mux::SupervisorCli::Codex && account_dir.is_none()
+                && let Some(evidence) = default_evidence.as_ref() { return evidence.clone(); }
+            crate::capability::probe_account_auth(cli, account_dir, deadline)
+        },
         || installed_codex_version(deadline),
     )
 }
@@ -3072,9 +3090,14 @@ impl CasService {
         if worker_names.is_empty() && specs.iter().all(|spec| spec.name.is_some()) {
             worker_names = specs.iter().filter_map(|spec| spec.name.clone()).collect();
         }
-        // Reserve concrete identities before the daemon binds the queue/task.
-        if isolate && worker_names.is_empty() {
-            worker_names = (0..slots).map(|_| next_name()).collect();
+        // Resolve concrete names before binding, while the producer can still
+        // refuse without creating a queue row or pre-assigning a task.
+        if isolate {
+            let requested = if worker_names.is_empty() {
+                specs.iter().map(|spec| spec.name.clone()).collect()
+            } else { worker_names.iter().cloned().map(Some).collect() };
+            worker_names = spawn_names::allocate(self.inner.cas_root.clone(), req.task_id.clone(), requested, &mut next_name)
+                .await.map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         }
 
         // Capture the requesting account separately for each resolved
@@ -3096,6 +3119,8 @@ impl CasService {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
+        let account_error = |error: String| Self::error(ErrorCode::INVALID_PARAMS,
+            format!("{error}{account_selection_notice}{default_sources_notice}"));
 
         // Preserve the existing install refusal when no Codex CLI is on PATH.
         // The account preflight is meaningful only after a binary can probe it.
@@ -3118,14 +3143,14 @@ impl CasService {
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
                 preflight_codex_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    .map_err(&account_error)?;
             }
         }
 
         // Validate the resolved or recommended account before the legacy
         // strict fallback can hide an unusable Codex home behind a generic
         // auth error. This gate precedes queue insertion and worktree creation.
-        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        preflight_account_auth(&specs).map_err(&account_error)?;
 
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
@@ -3141,7 +3166,7 @@ impl CasService {
                 strict_cli,
                 Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
             )
-            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?
+            .map_err(|error| account_error(error.to_string()))?
         };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
@@ -13477,9 +13502,15 @@ mod spawn_lifecycle_tests {
         // its authenticated login never chooses a different registered account.
         let default = env.home().join(".codex");
         std::fs::create_dir_all(&default).unwrap();
+        let logged_out = preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect_err("an existing logged-out default must be distinguished from a missing directory");
+        // pin: filesystem absence and affirmative login-status refusal are distinct user remedies.
+        assert!(logged_out.contains("logged out") && !logged_out.contains("is missing"), "{logged_out}");
         std::fs::write(default.join("auth.json"), "{}").unwrap();
         preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect("authenticated default account remains usable without an explicit selector");
+        preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect("consecutive calls resolve the same authenticated default");
         assert!(
             error.contains("project"),
             "refusal omitted the project worker config_dir remedy: {error}"

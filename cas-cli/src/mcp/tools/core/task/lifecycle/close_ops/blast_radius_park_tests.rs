@@ -840,13 +840,16 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
 
     let repo = f.dir.path();
+    git(repo, &["config", "user.name", "CAS Test"]);
+    git(repo, &["config", "user.email", "cas@example.test"]);
     let tasks = open_task_store(&f.cas_dir()).unwrap();
     env.set("CAS_AGENT_ROLE", "supervisor");
     let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
     cassy.set_agent_id_for_testing("br-supervisor-session".into());
-    cassy.prepare_premerge_verification(&f.task(), repo, LANE, "main")
+    let preflight = cassy.prepare_premerge_verification(&f.task(), repo, LANE, "main")
         .expect_err("the required review is prepared before publication");
-    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap()
+        .unwrap_or_else(|| panic!("candidate dispatch missing: {preflight:?}"));
 
     env.set("CAS_AGENT_ROLE", "worker");
     call(&f.worker, serde_json::json!({"action": "update", "id": ID, "status": "blocked"})).await;

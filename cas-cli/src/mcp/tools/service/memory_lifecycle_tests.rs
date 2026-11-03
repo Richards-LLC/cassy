@@ -297,3 +297,24 @@ async fn cas_e29c_search_provenance_never_exposes_unknown_birth_as_a_date() {
     );
     assert!(!text.contains("0001-01-01"), "{text}");
 }
+
+#[tokio::test]
+async fn superseding_a_memory_expires_it_and_removes_it_from_session_start() {
+    use cas_core::hooks::{config::DefaultHooksConfig, context::{ContextStores, build_context_with_stores}, types::HookInput};
+    for markdown in [false, true] {
+        let (_dir, service, store, _queue) = service(markdown);
+        let mut old = Entry::new("stale-freeze".into(), "A superseded stakeholder gate".into());
+        old.memory_tier = MemoryTier::InContext;
+        store.add(&old).unwrap();
+        let render = || {
+            let stores = ContextStores { project_store: Some(store.as_ref()), ..ContextStores::empty() };
+            build_context_with_stores(&HookInput::default(), &stores, &DefaultHooksConfig::new(), 10, None, "mcp__cs__").unwrap().0
+        };
+        assert!(render().contains("stale-freeze"));
+        memory(&service, json!({"action": "update", "id": old.id, "tags": "superseded,superseded-by:current-policy"})).await;
+        let stored = store.get(&old.id).unwrap();
+        assert!(stored.valid_until.is_some_and(|until| until <= chrono::Utc::now()), "supersession must persist expiry");
+        assert!(!render().contains("stale-freeze"));
+        assert_eq!(stored.content, old.content, "history stays available by ID");
+    }
+}

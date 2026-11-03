@@ -96,3 +96,19 @@ fn test_temporal_validity() {
     assert!(!entry.is_temporally_valid());
     assert!(entry.is_expired());
 }
+
+#[test]
+fn superseded_memories_are_expired_even_without_a_deadline() {
+    for (content, tags, superseded) in [
+        ("Old gate", vec!["superseded"], true),
+        ("Old gate", vec![" SUPERSEDED-BY:mem-new "], true),
+        ("SUPERSEDED by the current policy", vec![], true),
+        ("A discussion of superseded rules", vec![], false),
+        ("Supersededness is a topic", vec![], false),
+    ] {
+        let mut entry = Entry::new("policy".into(), content.into());
+        entry.tags = tags.into_iter().map(str::to_owned).collect();
+        assert_eq!(entry.is_expired(), superseded, "{entry:?}");
+        assert_eq!(entry.is_temporally_valid(), !superseded, "{entry:?}");
+    }
+}

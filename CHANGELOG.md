@@ -38,6 +38,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   recorded scope, as does an expired stakeholder `review_after`. Nothing is
   deleted automatically.
 
+### Fixed — Model evaluation evidence
+
+- **Run-backed measurements** — Evaluation receipts now require matching machine-readable measurements in the run log. Both proof files stay inside the owning task artifacts directory, and missing prerequisite evidence explains how to re-record it.
+
 ### Fixed — Worker startup guidance
 
 - **Preserve worker scope and startup headroom** — Restored the protected task,

@@ -114,7 +114,7 @@ impl CasCore {
                         "MODEL EVAL RECEIPT REJECTED: only the task assignee or a live registered supervisor may record model evaluation proof"));
                 }
             }
-            let verdict = crate::model_eval::record_note(task_store.as_ref(), &req.id, &outcome_kind, &req.note)
+            let verdict = crate::model_eval::record_note(&self.cas_root, task_store.as_ref(), &req.id, &outcome_kind, &req.note)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
             crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
             if let Err(error) = self.record_task_note_activity(&req.id, &outcome_kind, &req.note, None) {
@@ -127,7 +127,7 @@ impl CasCore {
                 ErrorCode::INVALID_PARAMS,
                 format!("OUTCOME RECORD REJECTED: only a live registered supervisor records phase targets and measurements ({error:?})"),
             ))?;
-            crate::phase_outcome::record_note(task_store.as_ref(), &req.id, &outcome_kind, &req.note)
+            crate::phase_outcome::record_note(&self.cas_root, task_store.as_ref(), &req.id, &outcome_kind, &req.note)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
             crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
             if let Err(error) = self.record_task_note_activity(&req.id, &outcome_kind, &req.note, None) {

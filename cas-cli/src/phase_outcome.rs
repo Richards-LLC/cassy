@@ -141,6 +141,7 @@ fn read(task: &Task) -> Result<Option<Outcome>> {
 /// Called only after the MCP boundary authenticates a live supervisor.
 /// Targets are immutable: receipt updates cannot quietly lower the agreed bar.
 pub(crate) fn record_note(
+    root: &Path,
     store: &dyn cas_store::TaskStore,
     id: &str,
     kind: &str,
@@ -178,6 +179,8 @@ pub(crate) fn record_note(
             );
             previous.validate()?;
             crate::model_eval::bind_artifact(
+                root,
+                id,
                 previous
                     .evidence
                     .as_mut()
@@ -315,7 +318,7 @@ pub(crate) fn refusal(
         let task = store.get(&id)?;
         let evaluate =
             (prerequisite && !own_ancestors.contains(&id)) || (include_self && id == origin);
-        if evaluate && let Some(reason) = crate::model_eval::refusal(&task)? {
+        if evaluate && let Some(reason) = crate::model_eval::refusal(root, &task)? {
             misses.push(reason);
         }
         if evaluate
@@ -325,7 +328,7 @@ pub(crate) fn refusal(
             let unmet = outcome.misses();
             if unmet.is_empty() {
                 if let Some(evidence) = &outcome.evidence {
-                    crate::model_eval::verify_artifact(evidence, &outcome.target)?;
+                    crate::model_eval::verify_artifact(root, &task.id, evidence, &outcome.target)?;
                 }
             } else {
                 misses.push(format!(
@@ -399,6 +402,7 @@ mod tests {
                 .unwrap();
         }
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_target",
@@ -416,11 +420,13 @@ mod tests {
         );
         assert!(check(&root, store.as_ref(), "independent", true).is_ok());
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
             &crate::model_eval::fixture_receipt(
-                &project,
+                &root,
+                "reader",
                 serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
                 serde_json::json!({"stability": 72.7, "p95": 1.48}),
             )
@@ -438,6 +444,7 @@ mod tests {
         );
         assert!(
             record_note(
+                &root,
                 store.as_ref(),
                 "reader",
                 "outcome_target",
@@ -447,6 +454,7 @@ mod tests {
         );
         assert!(
             record_note(
+                &root,
                 store.as_ref(),
                 "reader",
                 "outcome_receipt",
@@ -477,11 +485,13 @@ mod tests {
         assert!(check(&root, store.as_ref(), "child", false).is_ok());
         assert!(check(&root, store.as_ref(), "child", true).is_ok());
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
             &crate::model_eval::fixture_receipt(
-                &project,
+                &root,
+                "reader",
                 serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
                 serde_json::json!({"stability": 73, "p95": 1.5}),
             )
@@ -493,11 +503,13 @@ mod tests {
             "new evidence requires a new operator decision"
         );
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
             &crate::model_eval::fixture_receipt(
-                &project,
+                &root,
+                "reader",
                 serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
                 serde_json::json!({"stability": 99, "p95": 0.9}),
             )
@@ -505,6 +517,27 @@ mod tests {
         )
         .unwrap();
         assert!(check(&root, store.as_ref(), "child", true).is_ok());
+        let evidence = read(&store.get("reader").unwrap())
+            .unwrap()
+            .unwrap()
+            .evidence
+            .unwrap();
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&evidence.receipt).unwrap()).unwrap();
+        for missing in [
+            evidence.receipt.as_str(),
+            artifact["run_log"].as_str().unwrap(),
+        ] {
+            let bytes = std::fs::read(missing).unwrap();
+            std::fs::remove_file(missing).unwrap();
+            let error = check(&root, store.as_ref(), "child", true).unwrap_err();
+            // pin: dependent tasks must identify the prerequisite and give an actionable recovery.
+            assert!(
+                error.contains("reader") && error.contains("re-record the receipt"),
+                "{error}"
+            );
+            std::fs::write(missing, bytes).unwrap();
+        }
         // Malformed persisted state fails closed rather than disappearing.
         let mut reader = store.get("reader").unwrap();
         reader.deliverables.phase_outcome = Some(serde_json::json!({"target":{}}));

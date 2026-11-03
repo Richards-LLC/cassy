@@ -1476,7 +1476,7 @@ fn project_hold_generates_no_ready_backlog_and_next_event_alerts_once() {
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&[]);
     assert!(prompts.is_empty());
     let prompts = f.relay();
-    assert_eq!(prompts.len(), 1, "the next real event gets its first READY");
+    assert_eq!(prompts.len(), 1);
     assert!(prompts[0].is_merge_ready());
     assert!(f.relay().is_empty(), "the decision is delivered only once");
 }

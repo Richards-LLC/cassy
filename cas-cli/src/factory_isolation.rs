@@ -537,6 +537,35 @@ mod tests {
         assert!(rendered.contains("factory/zen-bear-56"), "{rendered}");
     }
 
+    /// cas-f0f3: independent QA detaches its own linked worktree at the bound
+    /// SHA. Only a detached shared checkout, or a plain directory inside it,
+    /// is a trunk misbinding.
+    #[test]
+    fn my_context_accepts_a_detached_own_linked_worktree_cas_f0f3() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let git = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let qa = tmp.path().join("subtle-pelican-6");
+        git(&repo, &["worktree", "add", "--detach", qa.to_str().unwrap(), "main"]);
+        let rendered = render_worker_binding_at("subtle-pelican-6", true, Some(&qa));
+        assert!(!rendered.contains("MISBINDING"), "{rendered}");
+        assert!(rendered.contains("**Worktree Binding**: OK"), "{rendered}");
+
+        git(&repo, &["switch", "-q", "--detach", "main"]);
+        let stale = repo.join(".cas").join("worktrees").join("subtle-pelican-6");
+        std::fs::create_dir_all(&stale).unwrap();
+        for shared in [&repo, &stale] {
+            let rendered = render_worker_binding_at("subtle-pelican-6", true, Some(shared));
+            assert!(rendered.contains("ISOLATION MISBINDING"), "{rendered}");
+            assert!(rendered.contains("shared trunk"), "{rendered}");
+        }
+    }
+
     #[test]
     fn my_context_confirms_a_correct_binding_without_alarm() {
         let rendered = render_worker_binding(

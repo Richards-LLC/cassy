@@ -378,7 +378,8 @@ fn test_rule_share_roundtrip() {
     assert_eq!(store.get("rule-001").unwrap().share, None);
 }
 
-/// cas-30af: updates must retain the prior rule snapshot and deletes must
+/// cas-c487: updates must snapshot the resulting rule and retain earlier versions.
+/// cas-30af: deletes must
 /// leave a queryable retired row instead of destroying it.
 #[test]
 fn test_rule_history_and_tombstone_delete() {
@@ -399,20 +400,25 @@ fn test_rule_history_and_tombstone_delete() {
 
     let versions = store.list_versions("rule-history-01").unwrap();
     assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].content, "original content");
+    let live = store.get(&rule.id).unwrap();
+    let snapshot: Rule = serde_json::from_str(&versions[0].snapshot_json).unwrap();
+    assert_eq!(live.content, "updated content");
+    assert_eq!(snapshot.content, live.content);
+    assert_eq!(versions[0].content, live.content);
+    assert_eq!(versions[1].content, "original content");
     assert_eq!(versions[0].operation, "update");
     assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
     assert_eq!(versions[0].change_note, "revise wording");
 
     let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
-    let prior_content: String = conn
+    let recorded_content: String = conn
         .query_row(
             "SELECT content FROM rule_versions WHERE rule_id = 'rule-history-01' ORDER BY id DESC LIMIT 1",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(prior_content, "original content");
+    assert_eq!(recorded_content, live.content);
 
     store.delete("rule-history-01").unwrap();
     let retired = store.get("rule-history-01").unwrap();

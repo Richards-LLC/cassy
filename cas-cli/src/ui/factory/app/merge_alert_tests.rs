@@ -797,7 +797,6 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     f.app.merge_alert_retries.now = Some(at(2));
     f.ci(Some("failure"));
     assert_eq!(f.relay().len(), 1, "a changed condition alerts at once, even after a status");
-    f.app.merge_alert_retries.waiting("merge-w");
     message(at(6), &status);
     f.app.merge_alert_retries.now = Some(at(13));
     assert!(f.relay().is_empty(), "a no-need status quiets the identical repeat");
@@ -850,7 +849,7 @@ fn background_child_suppresses_idle_until_it_finishes() {
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
 #[test]
-fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
+fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
     // Green delivery tips have a one-shot merge signal, not an idle backoff.
@@ -858,12 +857,23 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");
+    let log = f.repo.path().join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let run = crate::factory_worker_runs::register(&f.app.cas_dir, f.repo.path(), &log, now)
+        .unwrap().unwrap();
+    crate::factory_worker_runs::bind(&f.app.cas_dir, &run, std::process::id()).unwrap();
+    assert!(f.relay().is_empty(), "a registered job needs no lane lock or harness ancestry to suppress idle");
+    crate::factory_worker_runs::finish(&f.app.cas_dir, &run, 7, now).unwrap();
+    let finished = f.relay();
+    assert_eq!(finished.len(), 1, "one completed run starts one new idle episode at the same tip");
+    assert!(finished[0].text.contains("EXIT 7") && finished[0].text.contains(log.to_str().unwrap()),
+        "the idle relay states which detached job ended: {}", finished[0].text);
     for minutes in [1, 2, 5] {
         f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(minutes));
         assert!(f.relay().is_empty(), "identical idle signal must not wake again at minute {minutes}");
     }
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1));
-    assert_eq!(f.relay().len(), 1, "a long backoff permits a reminder about a genuinely stuck worker");
+    assert!(f.relay().is_empty(), "elapsed time is not a new idle episode");
     std::fs::write(f.repo.path().join("delivery.rs"), "// new tip\n").unwrap();
     git(f.repo.path(), &["commit", "-qam", "new tip"]);
     assert_eq!(f.relay().len(), 1, "new tip is a changed idle signal");
@@ -880,7 +890,7 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_
     // A failed fresh read has no worker_waits row; it needs the same unknown key.
     let events = vec![f.event.clone()];
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(2));
-    assert_eq!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.len(), 1);
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(), "uncertain rereads never re-arm the same idle episode");
     assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
         "failed reads retain first-alert liveness without manufacturing repeated wakes");
 

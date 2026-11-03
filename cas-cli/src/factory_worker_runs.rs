@@ -140,10 +140,25 @@ pub(crate) fn register(
         return Ok(None);
     };
     let leases = agents.list_agent_leases(&owner.id)?;
-    let task = leases
+    let mut task = leases
         .into_iter()
         .find(|lease| lease.expires_at > now)
         .map(|lease| lease.task_id);
+    if task.is_none() {
+        let tasks = crate::store::open_task_store_local(root)?;
+        let owned = tasks
+            .list(Some(cas_types::TaskStatus::InProgress))?
+            .into_iter()
+            .filter(|task| {
+                task.assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee == owner.id || assignee == owner.name)
+            })
+            .collect::<Vec<_>>();
+        if owned.len() == 1 {
+            task = Some(owned[0].id.clone());
+        }
+    }
     let id = uuid::Uuid::new_v4().simple().to_string();
     let run = Run {
         id: id.clone(),
@@ -233,7 +248,47 @@ pub(crate) fn finish(root: &Path, id: &str, code: i32, now: DateTime<Utc>) -> Re
     notify(root, &mut run)
 }
 
-fn notify(_root: &Path, _run: &mut Run) -> Result<()> {
+fn notify(root: &Path, run: &mut Run) -> Result<()> {
+    if run.notified {
+        return Ok(());
+    }
+    let agents = crate::store::open_agent_store(root)?;
+    let current = agents.get(&run.worker_id).ok().is_some_and(|agent| {
+        agent.role == cas_types::AgentRole::Worker
+            && agent.is_alive()
+            && agent.name == run.worker
+            && agent.factory_session == run.session
+    });
+    if !current {
+        return Ok(());
+    }
+    let completion = Completion {
+        id: run.id.clone(),
+        at: run
+            .finished_at
+            .ok_or_else(|| anyhow::anyhow!("run has not finished"))?,
+        exit_code: run.exit_code,
+        log: run.log.clone(),
+    };
+    let body = format!(
+        "{}\nTask: {}\nRead the log and continue the assigned task; obey any recorded admission retry time. This is a command completion, not a task verdict.",
+        completion.detail(),
+        run.task.as_deref().unwrap_or("not bound at launch")
+    );
+    let queue = crate::store::open_prompt_queue_store(root)?;
+    queue.enqueue_idempotent(
+        "worker-check",
+        &run.worker,
+        &body,
+        run.session.as_deref(),
+        Some("Detached worker run finished"),
+        None,
+        &format!("worker-run-complete:{}:{}", run.worker_id, run.id),
+        Some(&cas_store::QueueOrigin::Daemon),
+    )?;
+    run.notified = true;
+    save(root, run)?;
+    crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(root);
     Ok(())
 }
 
@@ -243,6 +298,7 @@ pub(crate) fn monitor(root: &Path, id: &str, execute: impl FnOnce() -> Result<()
     if std::env::current_dir()?.canonicalize()? != run.repo {
         bail!("detached completion belongs to another checkout");
     }
+    bind(root, id, std::process::id())?;
     let result = execute();
     if let Err(error) = finish(root, id, if result.is_ok() { 0 } else { 1 }, Utc::now()) {
         eprintln!("worker-check completion pending daemon retry: {error}");
@@ -292,10 +348,8 @@ pub(crate) fn reconcile(root: &Path, session: Option<&str>, now: DateTime<Utc>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::AgentStore;
 
-    #[test]
-    fn registered_job_notifies_its_worker_once_with_exit_and_log() {
+    fn fixture() -> (crate::test_support::TestEnvGuard, PathBuf, PathBuf, PathBuf) {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let repo = env.home().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -315,6 +369,12 @@ mod tests {
         agents.register(&worker).unwrap();
         let log = repo.join("run.log");
         std::fs::write(&log, "").unwrap();
+        (env, root, repo, log)
+    }
+
+    #[test]
+    fn registered_job_notifies_its_worker_once_with_exit_and_log() {
+        let (_env, root, repo, log) = fixture();
         let now = Utc::now();
         let id = register(&root, &repo, &log, now).unwrap().unwrap();
         bind(&root, &id, std::process::id()).unwrap();
@@ -324,8 +384,31 @@ mod tests {
                 .unwrap()
                 .running
         );
-        let result = monitor(&root, &id, || bail!("fixture command failed"));
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas",
+            "factory",
+            "worker-check",
+            "--cas-root",
+            root.to_str().unwrap(),
+            "--completion-id",
+            &id,
+            "--",
+            "invalid-producer-request",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Factory(args)) = &cli.command else {
+            panic!("factory command");
+        };
+        let result = crate::cli::factory::execute(args, &cli, Some(&root));
         assert!(result.is_err(), "keep the producer exit result");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Only package-scoped"),
+            "execute the real capped producer validation"
+        );
         let completed = snapshot(&root, "run-worker", None, now).unwrap();
         assert!(!completed.running);
         let completion = completed.completion.unwrap();
@@ -346,5 +429,40 @@ mod tests {
             rows[0].prompt.contains("EXIT 1") && rows[0].prompt.contains(log.to_str().unwrap())
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
+    #[test]
+    fn lost_completion_recovers_once_and_never_borrows_an_earlier_log_exit() {
+        use std::io::Write;
+        let (_env, root, repo, log) = fixture();
+        std::fs::write(&log, "worker-check: EXIT 0\n").unwrap();
+        let now = Utc::now();
+        for (tail, expected) in [("worker-check: EXIT 7\n", Some(7)), ("", None)] {
+            let id = register(&root, &repo, &log, now).unwrap().unwrap();
+            bind(&root, &id, std::process::id()).unwrap();
+            let mut run = load(&root, &id).unwrap();
+            // A live recycled PID is not this command's process incarnation.
+            run.fingerprint = Some(run.fingerprint.unwrap_or(0) + 1);
+            save(&root, &run).unwrap();
+            OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .unwrap()
+                .write_all(tail.as_bytes())
+                .unwrap();
+            reconcile(&root, Some("run-session"), now).unwrap();
+            reconcile(&root, Some("run-session"), now).unwrap();
+            let recovered = load(&root, &id).unwrap();
+            assert_eq!(recovered.exit_code, expected);
+            assert!(recovered.finished_at.is_some() && recovered.notified);
+        }
+        let rows = crate::store::open_prompt_queue_store(&root)
+            .unwrap()
+            .peek_for_targets(&["run-worker"], Some("run-session"), 10)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one durable wake per recovered run, including unknown status"
+        );
     }
 }

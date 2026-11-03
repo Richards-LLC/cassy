@@ -1422,3 +1422,40 @@ fn cas_16e1_not_ready_lane_is_reread_after_the_settled_retry() {
     f.relay();
     assert!(probes(&f) > settled);
 }
+
+#[test]
+fn unmet_phase_suppresses_cached_and_queued_merge_prompts() {
+    let mut f = Fixture::new();
+    let mut ready = f.relay().pop().expect("green parked delivery is actionable");
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut phase = Task::new("cas-reader-phase".into(), "Reader phase".into());
+    phase.task_type = cas_types::TaskType::Epic;
+    store.add(&phase).unwrap();
+    store.add_dependency(&cas_types::Dependency {
+        from_id: "cas-9efb-test".into(), to_id: phase.id.clone(),
+        dep_type: cas_types::DependencyType::Blocks,
+        created_at: chrono::Utc::now(), created_by: None,
+    }).unwrap();
+    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_target", r#"{"stability":{"min":95}}"#).unwrap();
+    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", r#"{"measurements":{"stability":72.7},"receipt":"artifact:reader"}"#).unwrap();
+    assert!(f.relay().is_empty(), "a cached READY receipt cannot bypass a new outcome miss");
+    assert!(!crate::ui::factory::director::refresh_ci_merge_signal(
+        &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
+    let envelope: crate::prompt_revalidation::MergeRequestEnvelope = serde_json::from_value(serde_json::json!({
+        "task_id":"cas-9efb-test", "branch_tip":git(f.repo.path(), &["rev-parse","HEAD"]),
+        "target_branch":"epic/test", "target_branch_tip":git(f.repo.path(), &["rev-parse","origin/epic/test"]),
+    })).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap();
+    let text = crate::prompt_revalidation::attach_merge_request_envelope("merge delivered work", &envelope);
+    let row_id = queue.enqueue("merge-w", "supervisor", &text).unwrap();
+    let row = queue.peek_all(10).unwrap().into_iter().find(|r| r.id == row_id).unwrap();
+    let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
+        &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
+    assert!(facts.outcome_hold.unwrap().contains("72.7"));
+    crate::phase_outcome::record_note(store.as_ref(), &phase.id, "outcome_receipt", r#"{"measurements":{"stability":99},"receipt":"artifact:reader-pass"}"#).unwrap();
+    let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
+        &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
+    assert!(facts.outcome_hold.is_none());
+    assert!(crate::ui::factory::director::refresh_ci_merge_signal(
+        &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
+}

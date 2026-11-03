@@ -1404,7 +1404,7 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     let (temp, core) = setup_cas(&mut env);
     let root = temp.path().join(".cas");
     let store = open_task_store(&root).unwrap();
-    let service = CasService::new(core, None);
+    let service = CasService::new(core.clone(), None);
     set_test_agent_role(&root, AgentRole::Supervisor);
     for (id, kind) in [("phase-reader", TaskType::Epic), ("phase-next", TaskType::Epic),
                        ("dependent", TaskType::Task), ("independent", TaskType::Task)] {
@@ -1429,6 +1429,9 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
         })).await;
         assert!(result.contains("Added"), "{result}");
     }
+    let merge = core.worktree_merge("unused-worker", true, Some("dependent"), true, Some(false),
+        true, Some("supervisor wants to ship")).await.expect_err("a supervisor merge override cannot accept a phase miss");
+    assert!(merge.message.contains("OUTCOME UNMET"), "{}", merge.message);
     set_test_agent_role(&root, AgentRole::Worker);
     for action in ["start", "close"] {
         let refused = unified_task(&service, serde_json::json!({"action":action,"id":"dependent"})).await;
@@ -1436,6 +1439,14 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
         assert!(refused.contains("95") && refused.contains("72.7") && refused.contains("phase-reader"), "{refused}");
         assert_eq!(store.get("dependent").unwrap().status, TaskStatus::Open);
     }
+    for status in ["in_progress", "closed", "awaiting_merge"] {
+        let refused = unified_task(&service, serde_json::json!({"action":"update","id":"dependent","status":status})).await;
+        assert!(refused.contains("OUTCOME UNMET"), "update {status}: {refused}");
+    }
+    let forgery = unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",
+        "notes":serde_json::json!({"measurements":{"stability":100,"p95_seconds":0.1},"receipt":"artifact:forged"}).to_string(),
+        "supervisor_override":true,"reason":"worker says go"})).await;
+    assert!(forgery.contains("only a live registered supervisor"), "{forgery}");
     let independent = unified_task(&service, serde_json::json!({"action":"start","id":"independent"})).await;
     assert!(independent.contains("Started task"), "{independent}");
     set_test_agent_role(&root, AgentRole::Supervisor);

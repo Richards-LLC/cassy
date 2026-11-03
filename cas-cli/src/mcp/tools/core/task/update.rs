@@ -1992,6 +1992,13 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                && !task.is_terminal()
+            {
+                crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                    new_status != TaskStatus::InProgress)
+                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            }
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }

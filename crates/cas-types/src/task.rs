@@ -577,6 +577,11 @@ impl MergeCiAdmission {
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    /// Measured Epic/Gate target and receipt. Validated by the outcome service;
+    /// kept in existing JSON deliverables so legacy rows need no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_outcome: Option<Value>,
+
     /// Sync-safe origin for an unpublished lane; no host-local checkout path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_branch_origin: Option<EpicBranchOrigin>,
@@ -738,6 +743,8 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    phase_outcome: Option<Value>,
+    #[serde(default)]
     epic_branch_origin: Option<EpicBranchOrigin>,
     #[serde(default)]
     split_takeover: Option<SplitTakeoverAuthorization>,
@@ -792,6 +799,7 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            phase_outcome: value.phase_outcome,
             epic_branch_origin: value.epic_branch_origin,
             split_takeover: value.split_takeover,
             integration_batch: value.integration_batch,
@@ -1733,8 +1741,16 @@ mod tests {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(deliverables.epic_branch_origin.is_none());
         assert!(deliverables.work_target.is_none());
+        assert!(deliverables.phase_outcome.is_none());
         assert!(deliverables.pre_close_hook.is_none());
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
+        let outcome = serde_json::json!({"target":{"stability":{"min":95}},"evidence":null});
+        for payload in [serde_json::json!({"phase_outcome":outcome}),
+                        serde_json::Value::String(serde_json::json!({"phase_outcome":outcome}).to_string())] {
+            let parsed: TaskDeliverables = serde_json::from_value(payload).unwrap();
+            assert_eq!(parsed.phase_outcome.as_ref(), Some(&outcome));
+            assert_eq!(serde_json::to_value(parsed).unwrap()["phase_outcome"], outcome);
+        }
         for (state, expected) in [("green", MergeCiAdmission::Green), ("advisory", MergeCiAdmission::Advisory), ("override", MergeCiAdmission::Override)] {
             let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"green_merge_commit":"sha", "merge_ci_admission":state})).unwrap();
             assert_eq!(parsed.effective_merge_ci_admission(), expected);

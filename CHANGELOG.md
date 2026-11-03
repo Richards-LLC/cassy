@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased] — Measured phase outcomes
+
+- Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
+
 All notable changes to CAS are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

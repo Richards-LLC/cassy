@@ -53,8 +53,7 @@ pub fn resolve_for_project(
         detail: "home directory is unavailable".into(),
     })?;
     let candidates = launch_path(&home);
-    let executable =
-        find_executable(name, &candidates).ok_or(LaunchError::MissingBinary { cli: name })?;
+    let executable = launch_executable(name, &home, &candidates)?;
     // The factory daemon launches workers and capability probes by bare CLI
     // name. Keep the checked supervisor binary first, then every other
     // installed provider, before the service PATH. All consumers inherit this
@@ -478,8 +477,7 @@ pub fn profiles_for_project(
     })?;
     // The login-shell PATH and executable are shared by all status checks.
     let candidates = launch_path(&home);
-    let executable = find_executable(cli_name(cli), &candidates)
-        .ok_or(LaunchError::MissingBinary { cli: cli_name(cli) })?;
+    let executable = launch_executable(cli_name(cli), &home, &candidates)?;
     let path = std::env::join_paths(provider_path(&executable, &candidates)).map_err(|error| {
         LaunchError::ProbeFailed {
             cli: cli_name(cli),
@@ -681,6 +679,14 @@ fn provider_path(executable: &Path, candidates: &[PathBuf]) -> Vec<PathBuf> {
     path
 }
 
+fn launch_executable(name: &'static str, home: &Path, paths: &[PathBuf]) -> Result<PathBuf, LaunchError> {
+    if name == "claude" {
+        return cas_pty::resolve_claude_binary(home, paths)
+            .map_err(|detail| LaunchError::ProbeFailed { cli: name, detail });
+    }
+    find_executable(name, paths).ok_or(LaunchError::MissingBinary { cli: name })
+}
+
 fn find_executable(name: &str, paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().map(|dir| dir.join(name)).find(|path| {
         path.is_file() && {
@@ -780,7 +786,7 @@ mod tests {
         env.remove("CODEX_HOME");
         for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {
             let executable = bin.join(provider);
-            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::write(&executable, "#!/bin/sh\n[ \"$1\" != --version ] || echo '2.1.316 (Claude Code)'\nexit 0\n").unwrap();
             std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(matches!(resolve(cli, None), Err(LaunchError::ProfileMissing { path, .. }) if path == home.join(format!(".{provider}"))));
             for selector in ["main", "typo"] {
@@ -829,7 +835,7 @@ mod tests {
             ("codex", "login status", "Logged in using ChatGPT"),
         ] {
             let path = bin.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n[ \"$*\" = '{args}' ] || exit 71\nprintf '%s' '{output}'\n")).unwrap();
+            std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.316 (Claude Code)'; exit 0; fi\n[ \"$*\" = '{args}' ] || exit 71\nprintf '%s' '{output}'\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let now = chrono::Utc::now();

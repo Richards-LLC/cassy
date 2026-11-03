@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander supervisor startup
+
+- **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

@@ -296,7 +296,10 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     }
                 }
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
-                    && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                    && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                        // Synthetic API failures end with stop_sequence and can
+                        // omit turn_duration. They still owe the operator a reply.
+                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true))
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));

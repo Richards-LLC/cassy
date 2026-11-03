@@ -55,7 +55,9 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 ## Primary Journeys
 
-Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers and substantive status updates remain visible.
+Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers, substantive status updates and native Claude API errors remain visible; a failed turn appears in the conversation and session preview without waiting for another turn.
+
+Claude factory launches prefer the native installer’s active binary, then its newest installed version, then PATH. Commander checks the same executable before launch. Each launch verifies Claude Code 2.1.280 or newer and refuses with the detected path and version when no compatible client is available.
 
 Commander labels each machine's reported Cassy version in its project chip and paired-machine card. A newer published stable release adds a quiet update note; an hourly cached lookup retains its last known release while offline. The Web footer separately identifies the client release and build. Each online supervisor with a known MCP version also shows its own version badge; an upgrade arrow marks a supervisor running an older Cassy than its machine has installed, with reconnect guidance. Unknown versions stay unreported.
 

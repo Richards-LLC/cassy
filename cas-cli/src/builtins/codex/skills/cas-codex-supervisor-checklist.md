@@ -13,6 +13,7 @@ metadata:
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
 - Answer verified Commander questions once in your final pane reply; web, phone and offline catch-up receive the mirror. Shape it with the [reply contract](../cas-supervisor/references/operator-reply.md): diagrams, tables, callouts and tagged code render there. Use the shared [routing policy](../cas-supervisor/references/reference.md#verified-commander-messages) for unprompted updates or confirmed disabled/unmirrored delivery.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
+- A rule-driven brief names the rule and verbatim scope; known causal sites go in `Rule-driven sites:` or the worker's close receipt. Code/tests carry adjacent `cas-rule:` comments; verification checks omitted causal sites (see workflow.md).
 
 - For every Slack read and post, follow the `violet` skill and use `violet.violet_read` / `violet.violet_post` through the Violet proxy. Never use the Claude Slack connector or Codex Slack app. `cas doctor --host` warns when local Codex app metadata exposes Slack; Cassy's user-level Codex `PreToolUse` hook also matches Slack/Violet MCP tool names, but an older or untrusted install does not, so this guidance still applies. Only an explicit operator setting `slack.transport=any` opts out of the write guard.
 

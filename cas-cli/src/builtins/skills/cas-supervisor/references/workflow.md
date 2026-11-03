@@ -84,6 +84,14 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
+For rule-driven work, cite each rule id and its verbatim stakeholder scope in
+the brief. Declare known causal anchors with `Rule-driven sites:` (JSON objects
+with `rule_id`, repository-relative `path`, and exact source-line `anchor`), or
+require the worker to declare them in its close receipt. Code and tests carry
+adjacent `cas-rule: <id> scope: <JSON string>` comments. Close checks marker
+coverage and scope; verification checks undeclared causal sites. Unrelated work
+does not inherit the cited rule's scope.
+
 `qa.user_facing_labels` require `demo_statement` before creation/assignment:
 `As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
 

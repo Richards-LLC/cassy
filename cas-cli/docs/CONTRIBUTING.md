@@ -3215,6 +3215,13 @@ Build profiles must use `panic = "unwind"`. The MCP tool-dispatch panic catcher 
 
 ## Skill & Rule Sync
 
+Rule-driven code and tests carry a `cas-rule:` comment with the rule id and
+JSON-quoted verbatim scope. The brief or close receipt declares each causal
+site; close checks adjacent markers at the delivered tip and verifier review
+checks omissions. `cas rules refs <id> --json` lists tracked sites. See
+[Rule references](../../docs/RULE_REFERENCES.md) for syntax, legacy behavior and
+the optional stakeholder provenance seam.
+
 Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` files one idempotent encode chore on creation or tagging, even while draft, and can be promoted after its first verified occurrence. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).

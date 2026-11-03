@@ -12,6 +12,7 @@ pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
+mod rule_references;
 mod rebased_delivery;
 pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_patches;
 pub(crate) use super::qa_dispatch::freshest_target_ref;
@@ -6075,6 +6076,11 @@ impl CasCore {
         }
         // Receipt acceptance is an alternate close entry: bind snapshot
         // approval before the immutable proof cycle can be persisted.
+        if let Err(message) = self.check_rule_reference_delivery(
+            task, &context.repo_root, Some(&input.commit_sha), &input.scope_summary,
+        ) {
+            return Ok(Self::tool_error(message));
+        }
         if let Some(error) = snapshot_approval::rejection(
             &context.repo_root,
             Some(&input.merge_base_sha),
@@ -9052,6 +9058,14 @@ impl CasCore {
                 )
             });
             let mut upkeep_refusals = Vec::new();
+            let rule_head = super::qa_evidence_gate::delivered_head(
+                &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
+            );
+            if let Err(message) = self.check_rule_reference_delivery(
+                &task, &evidence_repo, rule_head.as_deref(), req.reason.as_deref().unwrap_or(""),
+            ) {
+                gate_refusals.push(message);
+            }
             match registry_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
@@ -27788,6 +27802,59 @@ mod merge_state_gate_tests {
             .collect::<Vec<_>>()
             .join("\n");
         (response.is_error, text)
+    }
+
+    #[tokio::test]
+    async fn close_requires_every_declared_rule_site_before_park_cas_4f87() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        let root = fixture.dir.path();
+        let rules = crate::store::open_rule_store(&root.join(".cas")).unwrap();
+        rules.init().unwrap();
+        let mut rule = Rule::new("rule-177".into(), "Only the SMS send path".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(), quote: "Only the SMS send path".into(), scope: "Only the SMS send path".into(),
+        });
+        rules.add(&rule).unwrap();
+        let declarations = concat!(
+            "Rule-driven sites: [",
+            "{\"rule_id\":\"rule-177\",\"path\":\"delivery.rs\",\"anchor\":\"fn send() {}\"},",
+            "{\"rule_id\":\"rule-177\",\"path\":\"delivery_test.rs\",\"anchor\":\"fn test_send() {}\"}]"
+        );
+        let marker = "// cas-rule: rule-177 scope: \"Only the SMS send path\"\n";
+        for marked in 0..=3 {
+            let production_marker = if marked == 2 { "// cas-rule: rule-177 scope: \"Every sending path\"\n" } else if marked > 0 { marker } else { "" };
+            std::fs::write(root.join("delivery.rs"), format!("{production_marker}fn send() {{}}\n")).unwrap();
+            std::fs::write(root.join("delivery_test.rs"), format!("{}fn test_send() {{}}\n", if marked > 1 { marker } else { "" })).unwrap();
+            git(root, &["add", "delivery.rs", "delivery_test.rs"]);
+            git(root, &["commit", "-q", "-m", "fix(cas-anchor): rule-driven sites"]);
+            git(root, &["push", "-q", "origin", &fixture.branch]);
+            let mut task = fixture.store.get(&fixture.task_id).unwrap();
+            task.description = "Apply rule-177 to the SMS path; rule-1770 is not this rule.".into();
+            task.notes = if marked < 2 {
+                format!("[2026-11-03 12:00] 📌 SPAWN BRIEF Apply rule-177.\n{declarations}")
+            } else { String::new() };
+            fixture.store.update(&task).unwrap();
+            // The worker can declare symbols in its receipt instead of the brief.
+            let reason = if marked >= 2 { format!("ready\n{declarations}") } else { "ready".into() };
+            let response = fixture.service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"close", "id":fixture.task_id, "reason":reason,
+            })).unwrap())).await.unwrap();
+            let text = response.content.iter().filter_map(|item| match &item.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            }).collect::<Vec<_>>().join("\n");
+            if marked < 3 {
+                assert!(text.contains("RULE REFERENCES REQUIRED"), "unmarked sites must refuse before park: {text}");
+                if marked < 2 {
+                    assert!(text.contains("delivery_test.rs"), "every declared site must be named: {text}");
+                } else {
+                    assert!(text.contains("stakeholder.scope"), "broadened stored scope must refuse: {text}");
+                }
+                assert_ne!(fixture.store.get(&fixture.task_id).unwrap().status, TaskStatus::AwaitingMerge);
+            } else {
+                assert!(!text.contains("RULE REFERENCES REQUIRED"), "valid markers must pass: {text}");
+                assert!(text.contains("MERGE REQUIRED"), "the normal merge gate must still run: {text}");
+            }
+        }
     }
 
     // cas-44e93 AC1: cas-e460 closed with a local-only child of its pushed

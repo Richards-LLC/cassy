@@ -1022,7 +1022,7 @@ pub(crate) fn spawn_brief_note(brief: &str, at: chrono::DateTime<chrono::Utc>) -
 
 /// The newest spawn brief in `notes`. A brief runs to the next note header,
 /// which is a blank line followed by `[YYYY-`.
-fn latest_spawn_brief(notes: &str) -> Option<&str> {
+pub(crate) fn latest_spawn_brief(notes: &str) -> Option<&str> {
     let start = notes.rfind(SPAWN_BRIEF_MARKER)? + SPAWN_BRIEF_MARKER.len();
     let rest = &notes[start..];
     let end = rest
@@ -1075,13 +1075,22 @@ pub(crate) fn worker_spawn_prompt(
     );
     // cas-ee68: the supervisor's spawn brief reaches the worker in this
     // message, before it can start the task.
-    if let Some(brief) = crate::store::open_task_store_cached(cas_dir)
+    if let Some(task) = crate::store::open_task_store_cached(cas_dir)
         .ok()
         .and_then(|store| store.get(task_id).ok())
-        .and_then(|task| latest_spawn_brief(&task.notes).map(str::to_string))
     {
-        message.push_str("\n\nYour supervisor's brief for this task (read it before you start):\n");
-        message.push_str(&brief);
+        if let Some(brief) = latest_spawn_brief(&task.notes) {
+            message.push_str("\n\nYour supervisor's brief for this task (read it before you start):\n");
+            message.push_str(brief);
+        }
+        if let Ok(store) = crate::store::open_rule_store(cas_dir)
+            && let Ok(rules) = store.list()
+        {
+            let ids = crate::rule_refs::task_rule_ids(&task, &rules);
+            if !ids.is_empty() {
+                message.push_str(&format!("\n\nRule references required for {}: put `cas-rule: <id> scope: <JSON-quoted verbatim scope>` comments beside rule-driven code and tests. Declare `Rule-driven sites: [{{\"rule_id\":\"<id>\",\"path\":\"src/file.rs\",\"anchor\":\"<exact source line>\"}}]` in the brief or close receipt. Close checks each declared anchor and coverage of every cited rule; the verifier checks omitted sites. Use `cas rules refs <id>` to inspect references.", ids.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+        }
     }
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
@@ -15392,6 +15401,9 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
+        task.description = "Apply rule-177 to the SMS send path.".into();
+        crate::store::open_rule_store(&cas_dir).unwrap()
+            .add(&cas_types::Rule::new("rule-177".into(), "Only SMS sends".into())).unwrap();
         let at = chrono::Utc::now();
         task.notes = [
             super::spawn_brief_note("Old brief, superseded.", at),
@@ -15454,6 +15466,11 @@ mod tests {
         assert!(!prompt.contains("Old brief"), "{prompt}");
         // pin: a note after the brief is not part of it.
         assert!(!prompt.contains("a later note"), "{prompt}");
+        // pin: the machine marker and declaration contract must reach a worker
+        // before it implements a task that cites an existing rule.
+        assert!(prompt.contains("Rule references required for rule-177"), "{prompt}");
+        // pin: Rule-driven sites: is the machine-readable receipt field name.
+        assert!(prompt.contains("Rule-driven sites:"), "{prompt}");
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }
 

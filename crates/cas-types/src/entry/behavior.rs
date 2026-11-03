@@ -257,6 +257,9 @@ impl Entry {
     /// - Current time is after valid_from (if set)
     /// - Current time is before valid_until (if set)
     pub fn is_temporally_valid(&self) -> bool {
+        if self.is_superseded() {
+            return false;
+        }
         let now = Utc::now();
 
         // Check valid_from
@@ -276,12 +279,30 @@ impl Entry {
         true
     }
 
-    /// Check if this entry is expired (past its valid_until date)
+    /// Explicit supersession markers, including the legacy leading marker.
+    /// Mere mentions of supersession in prose do not retire a memory.
+    pub fn is_superseded(&self) -> bool {
+        self.tags.iter().any(|tag| {
+            let tag = tag.trim();
+            tag.eq_ignore_ascii_case("superseded")
+                || tag.get(..14).is_some_and(|prefix| prefix.eq_ignore_ascii_case("superseded-by:"))
+                    && tag.get(14..).is_some_and(|id| !id.trim().is_empty())
+        }) || self.content.trim_start().split(|c: char| c.is_whitespace() || c == ':')
+            .next().is_some_and(|word| word.eq_ignore_ascii_case("superseded"))
+    }
+
+    /// Superseded memories are expired even when an older writer omitted the deadline.
     pub fn is_expired(&self) -> bool {
-        if let Some(until) = self.valid_until {
-            Utc::now() > until
-        } else {
-            false
+        self.is_superseded() || self.valid_until.is_some_and(|until| Utc::now() > until)
+    }
+
+    /// Persist the end of validity without extending an earlier deadline.
+    pub fn expire_if_superseded(&mut self, now: DateTime<Utc>) {
+        if self.is_superseded() {
+            self.valid_until = Some(self.valid_until.map_or(now, |until| until.min(now)));
+            if self.memory_tier.is_active() {
+                self.memory_tier = MemoryTier::Cold;
+            }
         }
     }
 

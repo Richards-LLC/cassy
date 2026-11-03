@@ -612,6 +612,7 @@ impl CasCore {
                         existing.importance = req.importance;
                         existing.valid_from = valid_from.clone();
                         existing.valid_until = valid_until.clone();
+                        existing.expire_if_superseded(Utc::now());
                         existing.pending_embedding = true;
 
                         if !store
@@ -775,7 +776,7 @@ impl CasCore {
         };
 
         let handoff_content = handoff_role.as_ref().map(|_| req.content.clone());
-        let entry = Entry {
+        let mut entry = Entry {
             origin_project: None,
             source_ids: Vec::new(),
             id: id.clone(),
@@ -813,6 +814,7 @@ impl CasCore {
             share: None,
         };
 
+        entry.expire_if_superseded(Utc::now());
         store.add(&entry).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to store entry: {e}")),
@@ -1335,6 +1337,7 @@ impl CasCore {
             return Ok(Self::success("No changes specified"));
         }
 
+        entry.expire_if_superseded(Utc::now());
         store.update(&entry).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),

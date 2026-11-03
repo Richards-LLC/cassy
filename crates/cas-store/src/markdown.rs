@@ -61,6 +61,10 @@ impl MarkdownStore {
             title: Option<String>,
             #[serde(default)]
             source_ids: Vec<String>,
+            #[serde(default)]
+            valid_from: Option<DateTime<Utc>>,
+            #[serde(default)]
+            valid_until: Option<DateTime<Utc>>,
         }
 
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
@@ -93,8 +97,8 @@ impl MarkdownStore {
             stability: 0.5,
             access_count: 0,
             importance: 0.5,
-            valid_from: None,
-            valid_until: None,
+            valid_from: fm.valid_from,
+            valid_until: fm.valid_until,
             review_after: None,
             last_reviewed: None,
             domain: None,
@@ -118,7 +122,7 @@ impl MarkdownStore {
              helpful_count: {}\n\
              harmful_count: {}\n\
              source_ids: {}\n\
-             {}{}\
+             {}{}{}{}\
              ---\n\n\
              {}",
             entry.id,
@@ -137,6 +141,8 @@ impl MarkdownStore {
                 .as_ref()
                 .map(|t| format!("title: {t}\n"))
                 .unwrap_or_default(),
+            entry.valid_from.map(|t| format!("valid_from: {}\n", t.to_rfc3339())).unwrap_or_default(),
+            entry.valid_until.map(|t| format!("valid_until: {}\n", t.to_rfc3339())).unwrap_or_default(),
             entry.content
         );
 
@@ -611,6 +617,20 @@ impl RuleStore for MarkdownRuleStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn memory_validity_survives_markdown_round_trip() {
+        let temp = TempDir::new().unwrap();
+        let store = MarkdownStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let mut entry = Entry::new("policy".into(), "Old policy".into());
+        entry.valid_from = Some(Utc::now() - chrono::Duration::days(1));
+        entry.valid_until = Some(Utc::now());
+        store.add(&entry).unwrap();
+        let saved = store.get(&entry.id).unwrap();
+        assert_eq!(saved.valid_from, entry.valid_from);
+        assert_eq!(saved.valid_until, entry.valid_until);
+    }
 
     #[test]
     fn rule_surface_count_round_trips_through_markdown_store() {

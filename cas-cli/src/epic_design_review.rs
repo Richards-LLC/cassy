@@ -345,7 +345,7 @@ pub(crate) fn lift(root: &Path, epic_id: &str, reason: &str) -> Result<()> {
         "run `cas factory design-review-lift` yourself from your own terminal",
         &InvocationContext::from_process(),
     ) {
-        anyhow::bail!(refusal);
+        anyhow::bail!(crate::cloud::presence::wrap_line(&refusal).trim_end().to_string());
     }
     record_lift(root, epic_id, reason, Utc::now())
 }

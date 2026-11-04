@@ -64,7 +64,7 @@ const ARTIFACT_UPLOAD_MIME_ALLOWLIST: &[&str] = &[
     "image/gif",
 ];
 
-fn validate_upload_mime(mime: &str) -> Result<String, UploadFailure> {
+pub(super) fn validate_upload_mime(mime: &str) -> Result<String, UploadFailure> {
     let canonical = mime.trim().to_ascii_lowercase();
     if ARTIFACT_UPLOAD_MIME_ALLOWLIST.contains(&canonical.as_str()) {
         Ok(canonical)

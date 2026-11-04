@@ -201,6 +201,8 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
   const machine = atlas();
   machine.sessions = machine.sessions.slice(0, 2);
   machine.sessions[0]!.supervisor = "thoughtful-chinchilla-84";
+  const firstMinute = Math.floor(journeyNow() / 60_000) * 60_000 - 240_000;
+  for (const sibling of machine.sessions) sibling.last_activity_at = new Date(firstMinute).toISOString();
   const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
   await journey.open();
   await showConversationList(page);
@@ -213,12 +215,12 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
   }));
   const capture = process.env.SESSION_RECENCY_CAPTURE_DIR;
   if (capture) await mkdir(capture, { recursive: true });
-  for (const width of [390, 1280]) {
+  for (const [index, width] of [390, 1280].entries()) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
     await expect(rows).toHaveCount(2);
-    // Keep all stamps in the past, with room for a later-minute move. This
-    // exercises catalog activity without depending on the test's elapsed time.
-    const minute = Math.floor(journeyNow() / 60_000) * 60_000 - 180_000;
+    // Advance past each row's activity high-water mark, with a later minute
+    // still in the past. No stage rewinds activity seen by the live list.
+    const minute = firstMinute + index * 120_000;
     for (const sibling of machine.sessions) sibling.last_activity_at = new Date(minute + 1_000).toISOString();
     machine.sessions[1]!.last_activity = `supervisor → ready-${width}`;
     await hub.announceCatalog("atlas");

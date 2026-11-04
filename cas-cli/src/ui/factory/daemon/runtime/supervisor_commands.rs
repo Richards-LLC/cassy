@@ -564,7 +564,8 @@ mod tests {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::finish_accepts_an_idle_supervisor_with_a_repainting_background_shell_cas_88ca") { return; }
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        for mid_turn in [false, true] {
+        for mode in ["idle", "busy", "unknown"] {
+        let mid_turn = mode == "busy";
         let (root, mut daemon) = fixture().await;
         let name = daemon.app.supervisor_name().to_owned();
         let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
@@ -578,6 +579,7 @@ mod tests {
         let end = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(1),"message":{"role":"assistant","stop_reason":"end_turn"}});
         let transcript = projects.join("finish-background.jsonl");
         std::fs::write(&transcript, if mid_turn { format!("{start}\n") } else { format!("{start}\n{end}\n") }).unwrap();
+        if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
         let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
             command: "/bin/sh".into(),
             args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
@@ -595,19 +597,21 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }).await.unwrap();
+        if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         let receipt = daemon.dispatch_supervisor_command(
             Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),
             owner.clone(),
         ).await.expect("native turn ended and the prompt is empty: background repaint must not refuse Finish");
         assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
-        if mid_turn {
+        if mid_turn || mode == "unknown" {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !daemon.supervisor_commands.readiness.as_ref().is_some_and(|job| job.is_finished()) { tokio::task::yield_now().await; }
             }).await.unwrap();
             let pending = daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
             assert!(matches!(pending, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
             assert!(std::fs::read(root.path().join("finish-input")).unwrap().is_empty(), "a truly active turn receives no command");
+            if mode == "unknown" { continue; }
             let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
             assert!(daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), foreign).await.is_err());
             // Waiting on a long turn cannot expire the not-yet-submitted command.

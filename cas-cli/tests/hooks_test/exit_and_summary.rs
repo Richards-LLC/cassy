@@ -20,6 +20,19 @@ fn test_exit_blocked_with_claimed_task() {
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
     assert_stop_blocked(&stop_output, &["remaining work", "Cannot exit"], None);
+
+    // cas-c9ec: /finish records a handoff. One that omits the task still
+    // blocks; one that names it lets the session end with the task intact.
+    save_handoff(&temp, session_id, "Shipped nothing yet; the blocking task is in flight.");
+    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
+    assert_stop_blocked(&stop_output, &["Cannot exit", "entry_type: handoff"], None);
+
+    save_handoff(&temp, session_id, &format!("In flight: {task_id}, next: rerun its tests."));
+    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
+    assert_stop_allowed(&stop_output, Some("remaining work"));
+    let task_store =
+        open_task_store_local(&temp.path().join(".cas")).expect("task store should open");
+    assert_eq!(task_store.get(&task_id).unwrap().status, TaskStatus::InProgress);
 }
 
 /// Test that Stop is allowed when all tasks are closed

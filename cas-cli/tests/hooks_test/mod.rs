@@ -468,6 +468,21 @@ pub(crate) fn claim_task(dir: &TempDir, task_id: &str, agent_id: &str) {
         .expect("claimed task should update");
 }
 
+/// Save a handoff memory for `session_id`, the entry `memory action=remember
+/// entry_type=handoff` stores.
+pub(crate) fn save_handoff(dir: &TempDir, session_id: &str, content: &str) {
+    let store = open_store_local(&dir.path().join(".cas")).expect("entry store should open");
+    let entry = Entry {
+        id: store.generate_id().expect("entry id should generate"),
+        entry_type: EntryType::Context,
+        tags: vec!["handoff".into(), "role:worker".into()],
+        content: content.into(),
+        session_id: Some(session_id.into()),
+        ..Default::default()
+    };
+    store.add(&entry).expect("handoff should save");
+}
+
 /// Mark a fixture task closed through the local task store.
 pub(crate) fn close_task(dir: &TempDir, task_id: &str) {
     let task_store =

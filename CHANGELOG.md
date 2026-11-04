@@ -104,6 +104,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
 
+### Fixed — Reminders to self
+
+- **Accept the documented `target=self`** — `coordination action=remind
+  target=self` now reminds the caller, as the parameter docs describe, instead
+  of failing with "No active agent found with name or ID 'self'".
+
 ### Added — Commander account usage
 
 - **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.

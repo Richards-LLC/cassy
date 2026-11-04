@@ -606,6 +606,75 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     assert_eq!(same_worker_rows, 1, "worker identity must remain singular");
 }
 
+/// cas-24f3: one daemon owns `.cas/daemon.sock` and receives every agent's
+/// SessionStart. Its own environment is another worker's launch recipe (here
+/// a Claude worker's), so registering a Codex worker's event must not stamp
+/// that recipe on the Codex row: recycle then looked for Codex hooks under a
+/// Claude account and clear_context searched Claude project directories.
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_session_start_keeps_a_foreign_workers_recipe_cas_24f3() {
+    struct Pane(std::process::Child);
+    impl Drop for Pane {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let codex = Pane(
+        std::process::Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut env = TestEnvGuard::temp_home();
+    // The socket owner's environment: a Claude worker's MCP server.
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_FACTORY_WORKER_CLI", "claude");
+    env.set("CAS_FACTORY_WORKER_ACCOUNT_DIR", "/home/u/.claude-owner");
+    env.set("CAS_FACTORY_WORKER_MODEL", "claude-opus-5-5");
+    env.set("CAS_FACTORY_WORKER_EFFORT", "max");
+    let temp = TempDir::new().unwrap();
+    let cas_root = init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&cas_root).unwrap();
+    let mut worker = Agent::new("codex-proud-puma-39-session".into(), "proud-puma-39".into());
+    worker.role = AgentRole::Worker;
+    worker.agent_type = cas_types::AgentType::Worker;
+    worker.pid = Some(codex.0.id());
+    stamp_pid_fingerprint(&mut worker, codex.0.id());
+    let recipe = [
+        ("worker_cli", "codex"),
+        ("worker_account_dir", "/home/u/.codex-worker"),
+        ("worker_model", "gpt-6.1-sol"),
+        ("worker_effort", "high"),
+    ];
+    for (key, value) in recipe {
+        worker.metadata.insert(key.into(), value.into());
+    }
+    agents.register(&worker).unwrap();
+
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: cas_root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    daemon
+        .handle_socket_event(DaemonEvent::SessionStart {
+            session_id: worker.id.clone(),
+            agent_name: Some(worker.name.clone()),
+            agent_role: Some("worker".into()),
+            cc_pid: codex.0.id(),
+            clone_path: Some("/tmp/proud-puma-39".into()),
+        })
+        .await;
+
+    let row = agents.get(&worker.id).unwrap();
+    for (key, value) in recipe {
+        assert_eq!(row.metadata.get(key).map(String::as_str), Some(value), "{key}: {row:?}");
+    }
+}
+
 /// GH #742: clear_context advances the transcript session before the old
 /// SessionEnd hook arrives. The old hook must preserve the worker row and its
 /// lease, and the following Claude/Codex registration must bind back to that

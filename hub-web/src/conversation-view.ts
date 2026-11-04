@@ -1631,7 +1631,9 @@ export class ConversationView {
         const tick = document.createElement("template"); tick.innerHTML = TICK;
         state.append(tick.content.firstElementChild!);
       }
-      const label = document.createElement("span"); label.textContent = delivered ? "Delivered" : "Queued for supervisor";
+      const label = document.createElement("span");
+      label.textContent = delivered ? "Delivered" : send.paneHold ?? "Queued for supervisor";
+      if (!delivered && send.paneHold) state.classList.add("conversation-pane-hold");
       state.append(label);
       bubble.append(state);
     } else if (send.state === "unconfirmed" && run && !run.expanded) {

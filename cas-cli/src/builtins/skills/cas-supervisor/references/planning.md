@@ -6,7 +6,7 @@ Before work is assigned:
 
 - **SRP enforcement** — Split tasks with more than one responsibility; "and" in a task description is a red flag
 - **Dependency ordering** — Sequence tasks so no worker blocks on unfinished work
-- **Scope lock** — Task brief is frozen at assignment; workers cannot expand scope unilaterally
+- **Scope lock** — Task brief is frozen at assignment; link the plan section and its metric so workers can check plan fit without expanding scope unilaterally
 
 ## Trajectory Gate
 
@@ -54,7 +54,7 @@ Canonical template:
   - Modify: `path/to/existing_file.rs`
   - Test: `path/to/test_file.rs`
 **Approach:** Key design or sequencing decision
-**Execution note:** test-first | characterization-first | additive-only | value-only | (omit)
+**Execution note:** test-first | characterization-first (only behaviour that stays) | additive-only | value-only | (omit)
 **Patterns to follow:** Reference existing code to mirror
 **Test scenarios:** one per changed behaviour, e.g. empty input -> returns error Z
 **Verification:** Observable outcomes when complete
@@ -67,7 +67,7 @@ Field purposes (write decisions, not code — "Approach" is 1–3 sentences of s
 - **Dependencies** — hard blockers go in `blocked_by`; soft ordering or "after X lands" notes stay as prose.
 - **Files** — the layer boundary from Spec Requirements, as paths.
 - **Approach** — the sequencing or design decision already made. Not a code sketch, not a pseudocode draft. If you find yourself writing pseudocode, you are doing the worker's job.
-- **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
+- **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. Never use `characterization-first` on behaviour the plan replaces; use it only to protect what stays. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
 - **Patterns to follow** — pointer to existing code or a prior commit the worker should mirror. Reduces stylistic drift.
 - **Test scenarios** — the Spec Requirements test guidance: one scenario per changed behaviour.
 - **Verification** — observable outcome. What can be demonstrated when done. Maps to `demo_statement`.
@@ -90,7 +90,7 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 ## Assignment Checks
 
 - **Agent-task fit** — Right capability for the job; no generalist on specialist work
-- **Context injection** — Send only needed context; withhold irrelevant info to prevent scope bleed
+- **Context injection** — Send only needed context; link the plan section and its metric in the brief, and withhold irrelevant info to prevent scope bleed
 - **Contract handoff** — Worker reads the acceptance criteria and accepts the assignment with a successful `task action=start`; no prose ACK is required
 
 ## Review Gates

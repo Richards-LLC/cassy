@@ -244,7 +244,10 @@ fn session_learn_stop_hook_uses_a_dedicated_classifier_prompt() {
 #[test]
 fn verifier_test_first_command_runs_on_a_fixture_repo() {
     let body = load(VERIFIER_PATHS[0]);
-    let gate = body.split("- `test-first`:").nth(1).expect("test-first gate");
+    // pin: route to the shared procedure whose documented command runs below.
+    assert!(body.contains("Code review procedure"));
+    let procedure = load(&format!("cas-cli/src/builtins/{EVIDENCE_GATE}"));
+    let gate = procedure.split("- `test-first`:").nth(1).expect("test-first gate");
     let command = gate.split("```bash").nth(1).unwrap().split("```").next().unwrap().trim();
     let temp = tempfile::tempdir().expect("temporary git fixture");
     let repo = temp.path();

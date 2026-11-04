@@ -124,6 +124,17 @@ enum ReusedFactoryBranchStart {
         tip: String,
         delivery_branch: Option<String>,
     },
+    /// cas-dd0e: the lane carries commits this task cannot claim, such as an
+    /// earlier hotfix PR that was squash-merged or is still open. Nothing was
+    /// changed; a fresh start cuts its own branch beside it, a resume refuses.
+    Occupied { commit: String },
+}
+
+/// The resume refusal for a lane carrying work this task cannot claim.
+fn occupied_lane_refusal(branch: &str, commit: &str, target_branch: &str) -> String {
+    format!(
+        "Cannot start task: {branch} carries unattributed commit {commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
+    )
 }
 
 /// cas-7ce6: keep a parked tip on its own per-task delivery branch, unless a
@@ -166,6 +177,23 @@ fn publish_parked_delivery_branch(
         " Its delivery stays on {branch} ({pushed}); merge it with \
          `factory action=worktree_merge id={branch} task_id={task_id}`."
     )
+}
+
+/// cas-2bdf: the first target ref (local, then `origin/<target>`) that the
+/// parked tip cannot merge into, with its conflicting paths. A missing ref or
+/// a failed preflight is not evidence of a conflict.
+fn parked_tip_target_conflicts(
+    repo: &std::path::Path,
+    target_branch: &str,
+    tip: &str,
+) -> Option<(String, Vec<String>)> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    [target_branch.to_string(), format!("refs/remotes/origin/{target_branch}")]
+        .into_iter()
+        .find_map(|target| {
+            let paths = git.preflight_merge_conflicts(&target, tip).ok()?;
+            (!paths.is_empty()).then_some((target, paths))
+        })
 }
 
 /// cas-ff6c: starting a task on another task's `factory/<worker>-<task>`
@@ -215,7 +243,7 @@ fn checkout_task_beside_parked_delivery(
         .output()
         .map_err(|error| format!("Cannot inspect parked checkout: {error}"))?;
     if !status.status.success() || !status.stdout.is_empty() {
-        return Err("Cannot start task beside a parked delivery: commit or stash tracked changes before switching branches.".into());
+        return Err("Cannot start task on its own branch: commit or stash tracked changes before switching branches.".into());
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
     if require_fresh_base {
@@ -491,9 +519,9 @@ fn reconcile_reused_factory_branch(
         });
     }
 
-    Err(format!(
-        "Cannot start task: {expected_branch} carries unattributed commit {unattributed_commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
-    ))
+    Ok(ReusedFactoryBranchStart::Occupied {
+        commit: unattributed_commit,
+    })
 }
 
 #[cfg(test)]
@@ -549,7 +577,7 @@ mod reused_factory_branch_tests {
     }
 
     #[test]
-    fn unrelated_prior_delivery_is_refused_with_commit_identity() {
+    fn unrelated_prior_delivery_occupies_the_lane_with_commit_identity() {
         let repo = repo();
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
@@ -562,8 +590,12 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect_err("unrelated prior delivery must refuse");
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+            .expect("unrelated prior delivery is reported, not reset");
+        let ReusedFactoryBranchStart::Occupied { commit } = result else {
+            panic!("unrelated prior delivery must occupy the lane: {result:?}");
+        };
+        let error = super::occupied_lane_refusal("factory/test-worker", &commit, "main");
 
         assert!(error.contains(&worker_tip), "{error}");
         assert!(!error.contains("git rebase"), "{error}");
@@ -1679,6 +1711,13 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
+        let source_admission = if execution_note.as_deref() == Some("no-code") {
+            super::source_claim::SourceAdmission::default()
+        } else {
+            self.task_source_admission(external_ref.as_deref(), &id,
+                supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?
+        };
+        if source_admission.override_grant.is_some() { task_notes.push_str(&source_admission.notice); }
         let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1708,6 +1747,7 @@ impl CasCore {
             branch: None,
             deliverables: crate::types::TaskDeliverables {
                 work_target,
+                source_claim_override: source_admission.override_grant.clone(),
                 ..Default::default()
             },
             team_id: None,
@@ -1723,6 +1763,7 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
+        if !source_admission.notice.is_empty() { assignee_warnings.push(source_admission.notice.clone()); }
         let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
@@ -1797,6 +1838,9 @@ impl CasCore {
                 }
             })?;
 
+        crate::epic_design_review::observe(&self.cas_root, &id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
@@ -2119,6 +2163,9 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Ok(Self::success(hold));
+        }
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to ready ones
@@ -2432,6 +2479,8 @@ impl CasCore {
             task.notes = fresh.notes;
         }
 
+        crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &req.id, false)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
@@ -2463,7 +2512,27 @@ impl CasCore {
         // task remains worker-complete and must stay parked for the supervisor.
         let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
         if resuming_awaiting_merge {
-            if !task.deliverables.merge_conflicted {
+            // cas-2bdf: only a close retry set the flag, so a merge-queue
+            // conflict dequeue or a moved target left the owner refused until
+            // the supervisor ran request_changes. Measure the parked tip
+            // against the target now; a clean tip still stays parked.
+            let live_conflict = (!task.deliverables.merge_conflicted)
+                .then(|| declared_repo_context.as_ref())
+                .flatten()
+                .and_then(|context| {
+                    let tip = task.deliverables.factory_branch_anchor.as_deref()
+                        .or(task.deliverables.parked_branch.as_deref())?;
+                    parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
+                });
+            if let Some((target_ref, paths)) = live_conflict.as_ref() {
+                task.notes = format!(
+                    "{}{}[{}] ✅ DECISION parked tip conflicts with {target_ref} in {}; owner resumes for a conflict-only repair (cas-2bdf). Merge the target into the branch rather than rebasing: prior test receipts stay valid when the resolution touches only CHANGELOG.md or generated hub-web/dist files",
+                    task.notes,
+                    if task.notes.is_empty() { "" } else { "\n\n" },
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    paths.join(", "),
+                );
+            } else if !task.deliverables.merge_conflicted {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
@@ -2473,10 +2542,11 @@ impl CasCore {
                          declines the delivery, or requires an amendment after merging — \
                          they must first run \
                          `{tool_prefix}task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
-                         a worker cannot self-reject or start a clean parked delivery. If \
-                         that merge fails with a genuine \
-                         git conflict, Cassy marks the parked task conflicted and its assigned \
-                         worker can then start task {} to resolve it.",
+                         a worker cannot self-reject or start a clean parked delivery. When \
+                         the parked tip genuinely conflicts with the current target (a \
+                         merge-queue conflict dequeue or a moved target), its assigned worker \
+                         can start task {} to resolve it; Cassy measures the local target and \
+                         origin/<target>, so `git fetch origin <target>` first if that ref is stale.",
                         req.id,
                         req.id,
                         tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
@@ -2494,6 +2564,9 @@ impl CasCore {
                 format!("{}\n\n{}", task.notes, audit)
             };
         }
+
+        crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &req.id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         // The caller or validated queue principal owns this execution lease.
         let agent_store = self.open_agent_store()?;
@@ -2629,6 +2702,51 @@ impl CasCore {
                     // its delivery branch remains checked out. That branch is
                     // the task's own history, not a reusable worker lane to
                     // reconcile against a temporarily missing retarget.
+                    // cas-dd0e: a fresh assignment has no work of its own to
+                    // keep, so it never waits on a lane that still holds an
+                    // earlier task's PR: it gets its own branch from the target.
+                    let fresh_start =
+                        initial_factory_branch_reset_target(&task, task.status).is_some();
+                    let mut beside_note = None;
+                    // cas-ff6c: another task's per-task branch is that task's
+                    // delivery ref, never a reusable lane. A supervisor
+                    // rebind that recorded this branch for the task is exempt.
+                    if let Some(owner_task) = crate::factory_isolation::own_task_branch_task_id(
+                        &worker.name,
+                        &worker_branch,
+                    )
+                    .filter(|owner_task| {
+                        *owner_task != task.id
+                            && !owner_task.starts_with(&format!("{}-", task.id))
+                    })
+                        && task
+                            .deliverables
+                            .factory_branch_start
+                            .as_ref()
+                            .is_none_or(|start| start.branch != worker_branch)
+                    {
+                        if !fresh_start {
+                            return Err(Self::error(
+                                ErrorCode::INVALID_PARAMS,
+                                foreign_task_branch_start_refusal(
+                                    worker_checkout,
+                                    &worker.name,
+                                    &worker_branch,
+                                    owner_task,
+                                    &task.id,
+                                    target_branch,
+                                ),
+                            ));
+                        }
+                        let owner_task = owner_task.to_string();
+                        let previous = worker_branch.clone();
+                        worker_branch = checkout_task_beside_parked_delivery(
+                            worker_checkout, &worker.name, &task.id, target_branch, false,
+                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        beside_note = Some(format!(
+                            "\n\n🔀 TASK BRANCH CUT: {previous} stays {owner_task}'s delivery, unchanged. This task starts on {worker_branch} from `{target_branch}`."
+                        ));
+                    }
                     let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
                         &worker.name,
                         &worker_branch,
@@ -2704,6 +2822,21 @@ impl CasCore {
                                 ),
                             )),
                             Ok(ReusedFactoryBranchStart::Unchanged) => None,
+                            Ok(ReusedFactoryBranchStart::Occupied { commit }) if fresh_start => {
+                                let lane = worker_branch.clone();
+                                worker_branch = checkout_task_beside_parked_delivery(
+                                    worker_checkout, &worker.name, &task.id, target_branch, false,
+                                ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                                Some(format!(
+                                    "\n\n🔀 TASK BRANCH CUT: {lane} still holds {commit} outside `{target_branch}` and stays unchanged. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
+                                ))
+                            }
+                            Ok(ReusedFactoryBranchStart::Occupied { commit }) => {
+                                return Err(Self::error(
+                                    ErrorCode::INVALID_PARAMS,
+                                    occupied_lane_refusal(&worker_branch, &commit, target_branch),
+                                ));
+                            }
                             Err(message) => {
                                 return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
                             }
@@ -2740,7 +2873,7 @@ impl CasCore {
                             base_sha,
                         });
                     }
-                    parked_branch_note.or(reset_note)
+                    parked_branch_note.or(beside_note).or(reset_note)
                 } else {
                     None
                 }
@@ -2993,6 +3126,8 @@ impl CasCore {
         ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
+        let source_admission = self.task_source_admission_for(&task, None).await?;
+        peer_notes.push_str(&source_admission.notice);
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
@@ -5492,6 +5627,66 @@ mod related_recall_response_tests {
         assert!(terms.contains(&"checkout") && terms.contains(&"release"), "{query}");
         for filler in ["the", "you", "see", "next", "before"] {
             assert!(!terms.contains(&filler), "{filler} in {query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stakeholder_source_create_names_the_slack_claim_owner_cas_12c1() {
+        use crate::coordination::external_work::{CONTRACT_SCHEMA, SqliteRequestJournal};
+        use crate::types::{Agent, AgentRole};
+        let _env = TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let beta = Agent::new_with_role("reg-supervisor-beta-07".into(), "beta".into(), AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&beta).unwrap();
+        core.set_agent_id_for_testing(beta.id.clone());
+        crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy").unwrap();
+        let source = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        let contract: serde_json::Value = serde_json::from_str(include_str!("../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
+        // pin: the coordination v1 fixture names its cross-machine ownership refusal case.
+        let mut held = contract["cases"].as_array().unwrap().iter().find(|case| case["name"] == "held by a peer").unwrap()["response"]["payload"].clone();
+        let owner = held["receipt"]["visible_owner"]["label"].as_str().unwrap().to_owned();
+        held["receipt"]["expires_at"] = serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
+        let journal = SqliteRequestJournal::open(temp.path()).unwrap();
+        let request = "00000002-2222-4222-8222-000000000002";
+        journal.prepare(request, "claim", &serde_json::json!({
+            "schema":CONTRACT_SCHEMA,"project_id":"github.com/richards-llc/cassy",
+            "external_ref":source,"actor":{"registration_id":beta.id},
+        })).unwrap();
+        journal.record_result(request, &held, None).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut synced = crate::types::Task::new("cas-synced".into(), "Already synchronized task".into());
+        synced.external_ref = Some(source.into());
+        tasks.add(&synced).unwrap();
+        for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+            let mut actor = beta.clone();
+            actor.role = role;
+            core.open_agent_store().unwrap().update(&actor).unwrap();
+            for entry in ["create", "assign", "start", "claim", "transfer"] {
+                // A supervisor can start epics; ordinary execution remains worker-only.
+                synced.task_type = if role == AgentRole::Supervisor && entry == "start" {
+                    crate::types::TaskType::Epic
+                } else { crate::types::TaskType::Task };
+                tasks.update(&synced).unwrap();
+                let result = match entry {
+                    "create" => {
+                        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
+                        req.external_ref = Some(source.into());
+                        core.cas_task_create(Parameters(req)).await
+                    }
+                    "assign" => core.cas_task_update(Parameters(serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(serde_json::json!({"id":synced.id,"assignee":"new-worker"})).unwrap())).await,
+                    "start" => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
+                    "claim" => core.cas_task_claim(Parameters(crate::mcp::tools::TaskClaimRequest {task_id:synced.id.clone(),duration_secs:600,reason:None})).await,
+                    _ => core.cas_task_transfer(Parameters(serde_json::from_value::<crate::mcp::tools::TaskTransferRequest>(serde_json::json!({"task_id":synced.id,"to_agent":"new-worker"})).unwrap())).await,
+                };
+                let response = result.map(text).unwrap_or_else(|error| error.message.to_string());
+                assert!(response.contains(&owner), "{role}/{entry}: {response}");
+                // pin: the ownership warning must identify the caller's source.
+                assert!(response.contains(source), "{role}/{entry}: {response}");
+                assert_eq!(tasks.list(None).unwrap().len(), 1);
+                assert_eq!(tasks.get(&synced.id).unwrap().status, crate::types::TaskStatus::Open);
+                assert!(tasks.get(&synced.id).unwrap().assignee.is_none());
+            }
         }
     }
 

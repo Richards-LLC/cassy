@@ -1199,12 +1199,18 @@ impl QueueJobs {
             };
             // Publish a verified operator turn only after its transport stamp
             // committed. This read stays on the store lane, never the loop.
-            let operator_message = if error.is_none() && stamp == QueueStamp::TransportDelivered {
+            // cas-062b: so does a park behind the operator's own pane draft,
+            // so Commander shows the hold instead of a silent queue.
+            let held_by_draft = matches!(&stamp, QueueStamp::ParkBusy { detail, .. }
+                if detail == super::queue_and_events::COMPOSER_HOLD_DETAIL);
+            let operator_message = if error.is_none()
+                && (stamp == QueueStamp::TransportDelivered || held_by_draft)
+            {
                 job_thread_prompt_queue(&cas_dir).ok().and_then(|queue| {
                     queue.queued_prompt(row).ok().flatten().and_then(|prompt| {
                         super::queue_and_events::commander_history_send(queue.as_ref(), prompt, "")
                     })
-                }).filter(|message| message.state == "delivered")
+                }).filter(|message| message.state == "delivered" || message.pane_hold.is_some())
             } else { None };
             QueueJobOutcome::Stamped(StampDone {
                 row,
@@ -1538,7 +1544,12 @@ impl QueueJobs {
                 QueueJobOutcome::Stamped(done) => {
                     self.stamp_landed(&done);
                     if let Some(message) = done.operator_message {
-                        self.operator_receipt_watches.remove(&message.notification_id);
+                        // A held turn still awaits its delivery receipt.
+                        if message.state == "delivered" {
+                            self.operator_receipt_watches.remove(&message.notification_id);
+                        } else {
+                            self.operator_receipt_watches.insert(message.notification_id);
+                        }
                         self.operator_messages.push(message);
                     }
                     if let Some(error) = &done.error {

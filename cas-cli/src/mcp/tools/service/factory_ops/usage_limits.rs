@@ -14,6 +14,14 @@ pub(crate) fn record_usage_limit(
     agent_id: &str,
     occurrence: &str,
 ) -> anyhow::Result<String> {
+    // A repeated report replays the notice the supervisor already received,
+    // without reading provider usage again. A legacy row with a request id
+    // recorded an obsolete 'queued switch' decision, so it is re-described
+    // under the current report-only policy instead.
+    let episodes = crate::store::open_spawn_queue_store(root)?;
+    if let Some((None, stored)) = episodes.limit_episode(occurrence)? {
+        return Ok(stored);
+    }
     let agent = crate::store::open_agent_store(root)?.get(agent_id)?;
     anyhow::ensure!(agent.role == cas_types::AgentRole::Worker, "not a worker");
     let cli = worker_cli_from_agent(&agent);
@@ -76,9 +84,9 @@ pub(crate) fn record_usage_limit(
         }
     }
     let detail = detail.trim_end().to_owned();
-    // Keep historical episode rows, including their old request IDs, compatible.
-    // A fresh notice always describes the current report-only policy rather than
-    // replaying an obsolete 'queued switch' decision from a previous release.
-    crate::store::open_spawn_queue_store(root)?.record_limit_episode(occurrence, &detail)?;
-    Ok(detail)
+    // A concurrent writer may have stored this occurrence first; its text wins.
+    Ok(match episodes.record_limit_episode(occurrence, &detail)? {
+        (None, stored) => stored,
+        (Some(_), _) => detail,
+    })
 }

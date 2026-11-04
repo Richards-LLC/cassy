@@ -1,0 +1,5 @@
+{
+  "$comment": "Team Tailscale tailnets whose machine hubs hosted Commander (hub.petrastella.io) may load media from, connect to and frame. One entry per <tailnet> label of <machine>.<tailnet>.ts.net. scripts/deploy-hub-release.py builds the hosted Content-Security-Policy from this file; a change ships with the next release. allow_any_tailnet: operator decision (Daniel, Nov 4 2026, verbatim: \"ts.net for now\") so teammates' and friends' tailnets are not locked out; it admits any Tailscale machine (*.ts.net) but no ordinary website. Review after 2026-12-04: set it to false to return to the named list below.",
+  "allow_any_tailnet": true,
+  "tailnets": ["tailf5a734"]
+}

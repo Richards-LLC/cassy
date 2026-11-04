@@ -2536,6 +2536,10 @@ impl WorkerSpawnContext {
                 }
             }
         }
+        // Recheck off the UI loop: reports may arrive after a request was queued.
+        if let Some(task) = self.task_id.as_deref().or(self.current_epic_id.as_deref()) {
+            crate::epic_design_review::ensure_staffing_allowed(&self.cas_dir, task)?;
+        }
         let worker_name = self.worker_name.clone();
         let task_id = self.task_id.as_deref();
         let isolate = self.isolate;

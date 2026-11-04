@@ -750,7 +750,11 @@ describe("ConversationView (Pebble thread)", () => {
     other.hydrateSend({ ...confirmed, state: "acknowledged" });
     const otherView = new ConversationView(document, other, { supervisor: "sup" }); otherView.update();
     expect(otherView.element.querySelector('.conversation-delivered')?.textContent).toBe("Queued for supervisor");
+    // cas-062b: a turn held behind the operator's own unsent pane draft says so.
+    other.hydrateSend({ ...confirmed, state: "acknowledged", pane_hold: "Held: your pane draft is unsent" }); otherView.update();
+    expect(otherView.element.querySelector('.conversation-pane-hold')?.textContent).toBe("Held: your pane draft is unsent");
     other.hydrateSend(confirmed); otherView.update();
+    expect(otherView.element.querySelector('.conversation-pane-hold')).toBeNull();
     expect(otherView.element.querySelector('.conversation-delivered')?.textContent).toBe("Delivered");
     // A reply linked to a send is its evidence: that send's tick steps aside.
     history.reply({ notification_id: 13, reply_to: 10, message: "Done.", summary: "", device_id: "d" }, at(9, 3)); view.update();

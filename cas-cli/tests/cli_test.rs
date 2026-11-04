@@ -25,6 +25,47 @@ fn cas_cmd(root: &std::path::Path) -> Command {
 }
 
 #[test]
+fn rule_refs_lists_tracked_sites_and_reports_malformed_markers_cas_4f87() {
+    let repo = TempDir::new().unwrap();
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args).current_dir(root).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["config", "color.grep", "always"]);
+    git(&["config", "grep.column", "true"]);
+    git(&["config", "grep.heading", "true"]);
+    std::fs::create_dir(root.join("src")).unwrap();
+    let scope = "Only Ben's SMS flow; preserve \"drafts\".";
+    let marker = format!("// cas-rule: rule-177 scope: {}", serde_json::to_string(scope).unwrap());
+    std::fs::write(root.join("src/send.rs"), format!("{marker}\nfn send() {{}}\n")).unwrap();
+    std::fs::write(root.join("test.py"), format!("#{}\ndef test_send(): pass\n", marker.trim_start_matches('/'))).unwrap();
+    std::fs::write(root.join("other.rs"), "// cas-rule: rule-178 scope: \"different\"\n").unwrap();
+    git(&["add", "src/send.rs", "test.py", "other.rs"]);
+    // Untracked files and symlinks are not repository source sites.
+    std::fs::write(root.join("untracked.rs"), &marker).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("untracked.rs"), root.join("link.rs")).unwrap();
+        git(&["add", "link.rs"]);
+    }
+    let output = cas_cmd(root).current_dir(root.join("src"))
+        .args(["rules", "refs", "rule-177", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let refs: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let refs = refs.as_array().unwrap();
+    assert_eq!(refs.len(), 2, "{refs:?}");
+    assert_eq!(refs[0]["path"], "src/send.rs");
+    assert_eq!(refs[1]["path"], "test.py");
+    assert!(refs.iter().all(|site| site["rule_id"] == "rule-177" && site["scope"] == scope && site["line"] == 1));
+    std::fs::write(root.join("test.py"), "# cas-rule: rule-177 scope: missing-json-quotes\n").unwrap();
+    cas_cmd(root).current_dir(root).args(["rules", "refs", "rule-177"])
+        .assert().failure().stderr(predicate::str::contains("test.py:1"));
+}
+
+#[test]
 fn test_help() {
     let mut env = crate::test_env_guard::TestEnvGuard::new();
     env.set("COLUMNS", "60");
@@ -3448,4 +3489,109 @@ fn release_precheck_preserves_child_exit_status() {
         .args(["release", "precheck", "missing-sha"])
         .assert().code(7)
         .stderr(predicate::str::is_empty());
+}
+
+mod factory_message_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Fixture {
+        temp: TempDir,
+        a: PathBuf,
+        b: PathBuf,
+        _env: crate::test_env_guard::TestEnvGuard,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut env = crate::test_env_guard::TestEnvGuard::new();
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join(".test-home");
+            std::fs::create_dir_all(&home).unwrap();
+            env.set("HOME", &home);
+            let a = temp.path().join("a");
+            let b = temp.path().join("b");
+            let manager = cas::ui::factory::SessionManager::new();
+            for (project, session, supervisor) in [
+                (&a, "project-a", "supervisor-a"),
+                (&b, "project-b", "supervisor-b"),
+            ] {
+                std::fs::create_dir_all(project).unwrap();
+                cas::store::init_cas_dir(project).unwrap();
+                manager.save_metadata(&cas::ui::factory::create_metadata(
+                    session, std::process::id(), supervisor, &[], None,
+                    Some(project.to_str().unwrap()), Some(32100),
+                )).unwrap();
+            }
+            Self { temp, a, b, _env: env }
+        }
+
+        fn command(&self) -> Command {
+            let mut cmd = cas_cmd(self.temp.path());
+            cmd.current_dir(&self.a)
+                .env("CAS_ROOT", self.a.join(".cas"))
+                .env("CAS_FACTORY_SESSION", "project-a")
+                .env("CAS_CLONE_PATH", &self.a)
+                .args(["factory", "message", "--from", "notifier", "--message", "fixture message"]);
+            cmd
+        }
+    }
+
+    #[test]
+    fn explicit_destination_wins_over_inherited_factory_context() {
+        let fixture = Fixture::new();
+        // Session and project selectors work independently, and both enqueue
+        // paths report the session that a destination daemon can consume.
+        for (session, project, operator, json) in [
+            (true, true, false, false),
+            (true, false, false, true),
+            (false, true, false, true),
+            (true, true, true, true),
+        ] {
+            let mut cmd = fixture.command();
+            if session { cmd.args(["--session", "project-b"]); }
+            if project { cmd.arg("--project-dir").arg(&fixture.b); }
+            if operator {
+                cmd.args(["--target", "operator", "--kind", "status"]);
+            } else {
+                cmd.args(["--target", "supervisor"]);
+            }
+            if json { cmd.arg("--json"); }
+            let output = cmd.assert().success().get_output().stdout.clone();
+            let queue = cas::store::open_prompt_queue_store(&fixture.b.join(".cas")).unwrap();
+            let row = queue.peek_all(20).unwrap().into_iter().max_by_key(|row| row.id)
+                .expect("explicit destination must receive the message");
+            assert_eq!(row.factory_session.as_deref(), Some("project-b"));
+            assert_eq!(row.target, if operator { "operator" } else { "supervisor-b" });
+            if json {
+                let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(report["session"], row.factory_session.unwrap());
+                assert_eq!(report["message_id"], row.id);
+                assert_eq!(report["target"], row.target);
+            } else {
+                let text = String::from_utf8(output).unwrap();
+                assert!(text.contains(&format!("Enqueued message {} for {} (session: project-b)", row.id, row.target)), "{text}");
+            }
+        }
+        assert!(cas::store::open_prompt_queue_store(&fixture.a.join(".cas"))
+            .unwrap().peek_all(20).unwrap().is_empty(), "inherited project must remain untouched");
+    }
+
+    #[test]
+    fn conflicting_explicit_destinations_refuse_before_enqueue() {
+        let fixture = Fixture::new();
+        for flag in ["--project-dir", "--cas-root"] {
+            let conflicting = if flag == "--cas-root" { fixture.a.join(".cas") } else { fixture.a.clone() };
+            fixture.command().args(["--session", "project-b", "--target", "supervisor"])
+                .arg(flag).arg(conflicting)
+                .assert().failure()
+                .stderr(predicate::str::contains("project-b"))
+                .stderr(predicate::str::contains(flag))
+                .stdout(predicate::str::contains("Enqueued").not());
+        }
+        for project in [&fixture.a, &fixture.b] {
+            assert!(cas::store::open_prompt_queue_store(&project.join(".cas"))
+                .unwrap().peek_all(20).unwrap().is_empty());
+        }
+    }
 }

@@ -700,12 +700,31 @@ fn surface_factory_inbox_with_transport_delivery(
         }
     };
     // cas-bf890: peer-supervisor and operator rows lead the block.
+    // cas-062b: operator rows keep their send order; other lanes keep
+    // their delivery order.
     let supervisor_ids = supervisor_senders(cas_root, &rows);
-    rows.sort_by_key(|row| inbox_lane(row, &supervisor_ids, &aliases));
+    rows.sort_by_key(|row| {
+        let lane = inbox_lane(row, &supervisor_ids, &aliases);
+        (lane, if lane == InboxLane::Operator { row.id } else { 0 })
+    });
     let lanes: Vec<InboxLane> = rows
         .iter()
         .map(|row| inbox_lane(row, &supervisor_ids, &aliases))
         .collect();
+    if matches!(surfacing, Surfacing::TurnStart)
+        && input.submitted_prompt().is_some_and(|prompt| {
+            !prompt.trim().is_empty()
+                && super::prompt_capture::is_operator_terminal_prompt(input, prompt.trim())
+        })
+    {
+        let earlier: Vec<i64> = rows
+            .iter()
+            .zip(&lanes)
+            .filter(|(_, lane)| **lane == InboxLane::Operator)
+            .map(|(row, _)| row.id)
+            .collect();
+        block_notes.extend(operator_sent_first_note(&earlier));
+    }
     Some(SurfacingOutcome {
         text: render_block(&block_notes, &rows, &lanes, digest_row(&digest), header),
         complete,
@@ -746,6 +765,21 @@ fn render_block(
         out.push('\n');
     }
     Some(out)
+}
+
+/// cas-062b: Commander messages the operator sent before typing this turn's
+/// pane prompt. The hook can only follow the typed prompt, so it says which
+/// came first; without this the typed prompt was answered first.
+fn operator_sent_first_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[send order] The operator sent message {} below from Commander before typing this \
+         turn's prompt in the pane. Answer in send order: these first, oldest first, then the \
+         typed prompt.",
+        id_list(ids)
+    ))
 }
 
 /// cas-6ccb (GH #1215): rows shown again because they were read with

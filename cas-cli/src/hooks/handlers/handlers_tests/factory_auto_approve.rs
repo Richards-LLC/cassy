@@ -250,7 +250,7 @@ fn factory_write_under_declared_scratchpad_is_allowed() {
 }
 
 #[test]
-fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account_configs() {
+fn harness_file_memory_is_writable_for_default_and_account_configs() {
     use std::os::unix::fs::symlink;
 
     let mut env = TestEnvGuard::temp_home();
@@ -296,7 +296,12 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
             ] {
                 let input = input_for("Write", path.to_str());
                 let out = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
-                let expected_allow = role == "supervisor" && active_memory;
+                // cas-2d9a (supervisor decision, Nov 4): the operator asked for
+                // memory writes "for all projects… like downloads", and
+                // Downloads applies to every role, so a worker writes its own
+                // project's memory too. Other projects, settings and the
+                // inactive config stay refused for both roles.
+                let expected_allow = active_memory;
                 assert_eq!(
                     allow_reason(&out).is_some(),
                     expected_allow,
@@ -310,8 +315,11 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
     }
 }
 
+/// cas-2d9a: a worker may write its own project's memory under its active
+/// config (see above), but not another project's memory in a config dir that
+/// is not its own.
 #[test]
-fn worker_write_under_harness_file_memory_remains_denied() {
+fn worker_write_under_foreign_harness_file_memory_remains_denied() {
     let mut env = TestEnvGuard::temp_home();
     set_role_env(&mut env, Some("worker"));
     let path = env
@@ -322,7 +330,7 @@ fn worker_write_under_harness_file_memory_remains_denied() {
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(
         deny_reason(&out).is_some(),
-        "worker scope must not expand into supervisor harness memory"
+        "worker scope must not expand into another config's project memory"
     );
 }
 

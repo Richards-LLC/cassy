@@ -189,6 +189,10 @@ pub(crate) fn enqueue_commander_message_with_client_ref(
                 prior.factory_session.as_deref().unwrap_or_default()
             );
         }
+        // Server-owned structured binding for automatic domain decisions. The
+        // rendered acknowledgement prefix remains display text, never authority.
+        attribution_json["in_reply_to"] = serde_json::json!(notification_id);
+        attribution_json["reply_text"] = serde_json::json!(text);
         bound_text = commander_reply_text(notification_id, text);
         bound_text.as_str()
     } else {

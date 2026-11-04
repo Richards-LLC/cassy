@@ -148,14 +148,17 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         key: "qa.deployed_origins",
         section: "qa",
         name: "QA Deployed Origins",
-        description: "Comma-separated remote origins (https://staging.example.com) whose authenticated runs may stand in for a local build in a QA evidence bundle when local auth is impossible, for example when the staging backend's CORS rejects localhost. The bundle must record the reason and prove the deployment served the delivered commit.",
+        description: "Comma-separated remote origins (https://staging.example.com) whose authenticated runs may stand in for a local build in a QA evidence bundle when local auth is impossible, for example when the staging backend's CORS rejects localhost. An entry may be a per-deployment pattern with one `*` in the leftmost host label (https://app-*-team.vercel.app). The bundle must record the reason and prove the deployment served the delivered commit.",
         value_type: ConfigType::StringList,
         default: "",
         constraint: Constraint::None,
         advanced: true,
         requires_feature: None,
         keywords: &["qa", "evidence", "deployed", "staging", "origin", "cors", "auth", "bundle"],
-        use_cases: &["Accept staging evidence for pages that need a staging login"],
+        use_cases: &[
+            "Accept staging evidence for pages that need a staging login",
+            "Accept Vercel preview deployments for a project with no local authenticated build",
+        ],
     });
 
     registry.register(ConfigMeta {

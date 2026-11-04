@@ -92,6 +92,9 @@ pub enum PaneBackend {
     Pty(Pty),
 }
 
+/// A dirty draft whose length the keystream cannot know (cas-062b).
+const DRAFT_UNKNOWN: usize = usize::MAX;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ComposerEscapeState {
     #[default]
@@ -250,6 +253,9 @@ pub struct Pane {
     /// clear/cancel. Panes that never receive attached-client input remain
     /// clean, preserving immediate worker-to-worker injection.
     composer_dirty: std::sync::atomic::AtomicBool,
+    /// Characters in a dirty draft typed with the cursor at its end, or
+    /// [`DRAFT_UNKNOWN`] (cas-062b).
+    draft_chars: std::sync::atomic::AtomicUsize,
     /// A CAS-injected payload has been written and its delayed submit CR has
     /// not completed yet. A second injection during this window would merge
     /// both payloads into one harness turn (cas-eacc).
@@ -305,6 +311,7 @@ impl Pane {
             harness,
             paste_tracker: std::sync::Mutex::new(crate::input_stream::BracketedPasteTracker::new()),
             composer_dirty: std::sync::atomic::AtomicBool::new(false),
+            draft_chars: std::sync::atomic::AtomicUsize::new(0),
             inject_submit_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -434,7 +441,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
-        Self::worker_resuming(
+        Self::worker_with_startup_prompt(
             name,
             cwd,
             cas_root,
@@ -452,12 +459,12 @@ impl Pane {
             factory_session,
             active_workers,
             None,
-            None,
         )
     }
 
+    /// Spawn a worker whose first turn is the assignment CAS prepared.
     #[allow(clippy::too_many_arguments)]
-    pub fn worker_resuming(
+    pub fn worker_with_startup_prompt(
         name: &str,
         cwd: PathBuf,
         cas_root: Option<&PathBuf>,
@@ -474,7 +481,6 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
         active_workers: Option<usize>,
-        resume_session: Option<&str>,
         startup_prompt: Option<&str>,
     ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
@@ -496,9 +502,6 @@ impl Pane {
         );
         if let Some(prompt) = startup_prompt {
             config.set_worker_startup_prompt(cli.backend().name(), prompt);
-        }
-        if let Some(id) = resume_session {
-            config.resume_worker_session(cli.backend().name(), id)?;
         }
         push_factory_session_env(&mut config, cli, factory_session);
         record_runtime_capabilities(cli, &config);
@@ -1604,6 +1607,8 @@ impl Pane {
     }
 
     fn mark_composer_dirty(&self) {
+        self.draft_chars
+            .store(DRAFT_UNKNOWN, std::sync::atomic::Ordering::Release);
         self.composer_dirty
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -1611,13 +1616,25 @@ impl Pane {
     fn clear_composer_dirty(&self) {
         self.composer_dirty
             .store(false, std::sync::atomic::Ordering::Release);
+        self.draft_chars.store(0, std::sync::atomic::Ordering::Release);
     }
 
     /// Track the final composer state after one attached-client keystream
     /// chunk. The same streaming paste tracker that recognizes true submits
     /// also keeps embedded paste newlines from looking like Enter.
+    ///
+    /// cas-062b: the draft is a character count while the cursor is known to
+    /// sit at its end, so typing and then erasing it with Backspace leaves a
+    /// clean composer. Anything that can move the cursor or insert unseen
+    /// text (navigation within a draft, meta keys, editing controls, Tab,
+    /// paste) makes the length unknown, which stays dirty until a submit or
+    /// explicit clear, as before.
     fn observe_key_stream_composer_input(&self, data: &[u8]) -> bool {
-        let mut dirty = self.is_composer_dirty();
+        let mut draft = if self.is_composer_dirty() {
+            self.draft_chars.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            0
+        };
         let mut marks_submit = false;
         let mut tracker = match self.paste_tracker.lock() {
             Ok(tracker) => tracker,
@@ -1628,7 +1645,7 @@ impl Pane {
         for &byte in data {
             let class = tracker.feed_byte(byte);
             if class == crate::input_stream::StreamByteClass::Paste {
-                dirty = true;
+                draft = DRAFT_UNKNOWN;
                 escape_state = ComposerEscapeState::Normal;
                 continue;
             }
@@ -1640,19 +1657,31 @@ impl Pane {
                         continue;
                     }
                     0x1b => {
-                        dirty = false;
+                        draft = 0;
+                        continue;
+                    }
+                    // Esc and a key in one chunk is a meta key (Alt+B moves
+                    // the cursor a word left), not a clear.
+                    0x20..=0x7f => {
+                        draft = DRAFT_UNKNOWN;
+                        escape_state = ComposerEscapeState::Normal;
                         continue;
                     }
                     _ => {
                         // The preceding Esc was standalone. Apply its clear
                         // before classifying the current non-sequence byte.
-                        dirty = false;
+                        draft = 0;
                         escape_state = ComposerEscapeState::Normal;
                     }
                 },
                 ComposerEscapeState::ControlSequence => {
                     if (0x40..=0x7e).contains(&byte) {
                         escape_state = ComposerEscapeState::Normal;
+                        // Navigation never creates a draft (cas-0b64), but
+                        // inside one it moves the cursor off the end.
+                        if draft != 0 {
+                            draft = DRAFT_UNKNOWN;
+                        }
                     }
                     continue;
                 }
@@ -1661,7 +1690,7 @@ impl Pane {
 
             match byte {
                 b'\r' | b'\n' => {
-                    dirty = false;
+                    draft = 0;
                     marks_submit = true;
                 }
                 // Defer deciding whether Esc is standalone until the next
@@ -1669,22 +1698,44 @@ impl Pane {
                 // the composer.
                 0x1b => escape_state = ComposerEscapeState::Escape,
                 // The two common line-clear/cancel controls.
-                0x03 | 0x15 => dirty = false,
-                // Printable input plus editing keys that can create/modify an
-                // unsubmitted draft. Backspace stays conservatively sticky:
-                // without the inner composer's buffer we cannot know whether
-                // it erased the final character.
-                b'\t' | 0x7f | 0x20..=0x7e => dirty = true,
-                _ => {}
+                0x03 | 0x15 => draft = 0,
+                // Backspace erases the character before the cursor, which is
+                // the end of a known draft; an empty composer has none.
+                0x08 | 0x7f => {
+                    if draft != DRAFT_UNKNOWN {
+                        draft = draft.saturating_sub(1);
+                    }
+                }
+                // Printable ASCII and the lead byte of each UTF-8 character.
+                0x20..=0x7e | 0xc0..=0xff => {
+                    if draft != DRAFT_UNKNOWN {
+                        draft += 1;
+                    }
+                }
+                // UTF-8 continuation bytes belong to the counted lead byte.
+                0x80..=0xbf => {}
+                // Tab completion, yank, stash restore, undo and image paste
+                // can insert text even into an empty composer.
+                b'\t' | 0x13 | 0x16 | 0x19 | 0x1f => draft = DRAFT_UNKNOWN,
+                // Other controls (Ctrl+A, Ctrl+W, ...) move or edit within a
+                // draft but do not create one.
+                _ => {
+                    if draft != 0 {
+                        draft = DRAFT_UNKNOWN;
+                    }
+                }
             }
         }
         if escape_state == ComposerEscapeState::Escape {
-            dirty = false;
+            draft = 0;
         }
-        if dirty {
-            self.mark_composer_dirty();
-        } else {
+        if draft == 0 {
             self.clear_composer_dirty();
+        } else {
+            self.draft_chars
+                .store(draft, std::sync::atomic::Ordering::Release);
+            self.composer_dirty
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         marks_submit
     }
@@ -1695,6 +1746,10 @@ impl Pane {
     pub(crate) fn observe_raw_client_input(&self, data: &[u8]) {
         if matches!(data, b"\x1b" | b"\x03" | b"\x15") {
             self.clear_composer_dirty();
+        } else if self.is_composer_dirty() {
+            // A raw navigation key can move the cursor off the draft's end,
+            // so its length is no longer known (cas-062b).
+            self.mark_composer_dirty();
         }
     }
 

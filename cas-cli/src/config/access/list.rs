@@ -192,6 +192,14 @@ impl Config {
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
+                "factory.design_review_bug_threshold".to_string(),
+                factory.design_review_bug_threshold.to_string(),
+            ),
+            (
+                "factory.design_review_window_hours".to_string(),
+                factory.design_review_window_hours.to_string(),
+            ),
+            (
                 "factory.supervisor_message_debounce_secs".to_string(),
                 factory.supervisor_message_debounce_secs.to_string(),
             ),

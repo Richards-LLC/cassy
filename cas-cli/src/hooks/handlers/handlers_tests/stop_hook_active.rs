@@ -151,4 +151,38 @@ fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
     remind("gh1302-session");
     let quiet = serde_json::to_string(&stop()).unwrap();
     assert!(!quiet.contains("No wake source"), "a pending reminder is a wake source: {quiet}");
+
+    // cas-2961 (gabber, Nov 3): an unrelated reminder hid that the supervisor
+    // had just messaged a mid-task worker with nothing to wake it but the reply.
+    let mut worker = cas_types::Agent::new_with_role(
+        "worker-id".into(), "patient-cheetah-32".into(), cas_types::AgentRole::Worker);
+    worker.factory_session = Some("gh1302-session".into());
+    crate::store::open_agent_store(&cas_root).unwrap().register(&worker).unwrap();
+    let mut task = cas_types::Task::new("cas-21f1".into(), "guard entry".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some("patient-cheetah-32".into());
+    crate::store::open_task_store(&cas_root).unwrap().add(&task).unwrap();
+    crate::store::open_prompt_queue_store(&cas_root).unwrap()
+        .enqueue_urgent_with_outcome("supervisor", "patient-cheetah-32", "Fix the word-rule entry.",
+            Some("gh1302-session"), None, None, false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: "cas-f3e3-stop-session".into() }))
+        .unwrap();
+    let warned = stop();
+    assert_eq!(decision_of(&warned), None, "the warning never blocks");
+    let uncovered = serde_json::to_string(&warned).unwrap();
+    assert!(uncovered.contains("Uncovered worker") && uncovered.contains("patient-cheetah-32 (cas-21f1)"), "{uncovered}");
+    assert!(!serde_json::to_string(&stop()).unwrap().contains("Uncovered worker"), "it warns once per turn");
+
+    crate::store::open_prompt_queue_store(&cas_root).unwrap()
+        .enqueue_urgent_with_outcome("supervisor", "patient-cheetah-32", "One more change.",
+            Some("gh1302-session"), None, None, false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: "cas-f3e3-stop-session".into() }))
+        .unwrap();
+    crate::store::open_reminder_store(&cas_root).unwrap()
+        .create_with_scope("cas-f3e3-stop-session", None, "worker done",
+            cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+            Some(&serde_json::json!({"task_id": "cas-21f1"})), 0, Some("gh1302-session"), None, false, None)
+        .unwrap();
+    let covered = serde_json::to_string(&stop()).unwrap();
+    assert!(!covered.contains("Uncovered worker"), "an event reminder on its task covers it: {covered}");
 }

@@ -1409,6 +1409,32 @@ pub fn emit_verification_dispatch_handoff(
         .map_err(|error| format!("verification-dispatch handoff enqueue failed: {error}"))
 }
 
+/// Hand an existing candidate dispatch to its owning supervisor.
+pub(crate) fn emit_candidate_verification_handoff(
+    cas_root: &Path,
+    queue: &dyn PromptQueueStore,
+    dispatch: &cas_types::VerificationDispatch,
+    worker: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+    let rows = agents.list(None).map_err(|error| error.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+    let body = crate::prompt_revalidation::candidate_verification_dispatch_envelope(dispatch, worker, reason);
+    if recipient.id == "operator" {
+        return crate::supervisor_notices::enqueue(cas_root, &recipient, "candidate_verification_required", &body, &dispatch.id)
+            .map_err(|error| error.to_string());
+    }
+    let source = format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}{}", dispatch.id);
+    queue.enqueue_idempotent(
+        &source, &recipient.name, &body, recipient.session.as_deref(),
+        Some(&format!("Candidate verification required: {}", dispatch.task_id)),
+        Some(NotificationPriority::High), &source, Some(&cas_store::QueueOrigin::Daemon),
+    ).map_err(|error| error.to_string())?;
+    crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+    Ok(())
+}
+
 /// Source prefix for independent-QA dispatch handoffs (cas-619f).
 pub const QA_DISPATCH_SOURCE_PREFIX: &str = "qa-dispatch:";
 

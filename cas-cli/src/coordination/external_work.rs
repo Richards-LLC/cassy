@@ -300,6 +300,50 @@ impl SqliteRequestJournal {
         }).collect()
     }
 
+    /// Advisory task preflight over the existing request journal. The service
+    /// refreshes authority through Violet/Cloud; this cache never grants a post
+    /// or a claim. Follow later renew/release/transfer receipts for the resource.
+    pub(crate) fn task_source_receipt(&self, source: &str, project: &str) -> Result<Option<Value>, JournalError> {
+        fn alias(source: &str) -> Option<String> {
+            let url = url::Url::parse(source).ok()?;
+            let parts = url.path_segments()?.collect::<Vec<_>>();
+            if url.scheme() != "https" || !url.host_str()?.ends_with(".slack.com")
+                || parts.len() != 3 || parts[0] != "archives" { return None; }
+            let root = url.query_pairs().find(|(key, _)| key == "thread_ts")
+                .map(|(_, value)| value.replace('.', ""))
+                .or_else(|| parts[2].strip_prefix('p').map(str::to_owned))?;
+            if root.is_empty() || !root.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+            Some(format!("{}/{}/{root}", url.host_str()?, parts[1]))
+        }
+        let Some(source) = alias(source) else { return Ok(None); };
+        let rows: Vec<(String, String)> = {
+            let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+            let mut query = conn.prepare("SELECT input_json, response_json FROM external_work_operations WHERE response_json IS NOT NULL ORDER BY created_at DESC, rowid DESC")
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| JournalError::Storage(error.to_string()))?
+                .collect::<Result<_, _>>().map_err(|error| JournalError::Storage(error.to_string()))?
+        };
+        let rows = rows.into_iter().filter_map(|(input, response)| Some((
+            serde_json::from_str::<Value>(&input).ok()?, serde_json::from_str::<Value>(&response).ok()?
+        ))).filter(|(input, _)| input["project_id"].as_str() == Some(project)).collect::<Vec<_>>();
+        let resource = rows.iter().find_map(|(input, response)| {
+            (input["external_ref"].as_str().and_then(alias).as_deref() == Some(source.as_str()))
+                .then(|| response["receipt"]["resource"]["id"].as_str().map(str::to_owned)).flatten()
+        });
+        let Some(resource) = resource else { return Ok(None); };
+        let receipt = rows.into_iter().find_map(|(_, response)| {
+            let receipt = &response["receipt"];
+            (receipt["resource"]["id"].as_str() == Some(resource.as_str())).then(|| receipt.clone())
+        });
+        Ok(receipt.filter(|receipt| {
+            receipt["resource"]["state"] == "claimed"
+                && receipt["visible_owner"]["registration_id"].is_string()
+                && receipt["expires_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                    .is_some_and(|at| at > Utc::now())
+        }))
+    }
+
     pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
         let conn = self
             .conn

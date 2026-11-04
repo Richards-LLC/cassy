@@ -55,6 +55,9 @@ export interface ConversationSend {
   held?: boolean;
   /** Brought back from this browser's storage after a reload (cas-e7b1). */
   restored?: boolean;
+  /** Queued, but the machine is holding it behind the operator's own unsent
+   * pane draft (cas-062b). Cleared once it is delivered. */
+  paneHold?: string;
 }
 
 /**
@@ -483,6 +486,7 @@ export class ConversationHistory {
     // Even older daemons' history row is durable queue acceptance, never a wire-in-flight send.
     const incoming = this.events.some((event) => event.kind === "reply" && event.value.reply_to === message.notification_id)
       ? "replied" : message.state === "sending" ? "acknowledged" : message.state;
+    const paneHold = incoming === "acknowledged" ? message.pane_hold : undefined;
     if (this.foreign(message.session)) {
       this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: incoming, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
       return;
@@ -500,6 +504,8 @@ export class ConversationHistory {
       if (existing.value.state !== "replied" && existing.value.state !== "delivered") {
         existing.value.state = incoming;
       }
+      if (paneHold && existing.value.state === "acknowledged") existing.value.paneHold = paneHold;
+      else delete existing.value.paneHold;
       existing.value.stamped = message.stamped;
       existing.value.deviceLabel = message.operator_label;
       // A turn already in the thread keeps what it is known to be. A
@@ -526,6 +532,7 @@ export class ConversationHistory {
       value.stamped = message.stamped;
       value.deviceLabel = message.operator_label;
       value.replyTo = message.reply_to ?? value.replyTo;
+      if (paneHold) value.paneHold = paneHold;
       delete value.sentAt;
       delete value.unconfirmedAt;
       delete value.restored;
@@ -545,6 +552,7 @@ export class ConversationHistory {
         stamped: message.stamped,
         deviceLabel: message.operator_label,
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
+        ...(paneHold ? { paneHold } : {}),
       },
       at,
       ...(shownAt === undefined ? {} : { shownAt }),

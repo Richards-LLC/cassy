@@ -1022,7 +1022,7 @@ pub(crate) fn spawn_brief_note(brief: &str, at: chrono::DateTime<chrono::Utc>) -
 
 /// The newest spawn brief in `notes`. A brief runs to the next note header,
 /// which is a blank line followed by `[YYYY-`.
-fn latest_spawn_brief(notes: &str) -> Option<&str> {
+pub(crate) fn latest_spawn_brief(notes: &str) -> Option<&str> {
     let start = notes.rfind(SPAWN_BRIEF_MARKER)? + SPAWN_BRIEF_MARKER.len();
     let rest = &notes[start..];
     let end = rest
@@ -1075,13 +1075,22 @@ pub(crate) fn worker_spawn_prompt(
     );
     // cas-ee68: the supervisor's spawn brief reaches the worker in this
     // message, before it can start the task.
-    if let Some(brief) = crate::store::open_task_store_cached(cas_dir)
+    if let Some(task) = crate::store::open_task_store_cached(cas_dir)
         .ok()
         .and_then(|store| store.get(task_id).ok())
-        .and_then(|task| latest_spawn_brief(&task.notes).map(str::to_string))
     {
-        message.push_str("\n\nYour supervisor's brief for this task (read it before you start):\n");
-        message.push_str(&brief);
+        if let Some(brief) = latest_spawn_brief(&task.notes) {
+            message.push_str("\n\nYour supervisor's brief for this task (read it before you start):\n");
+            message.push_str(brief);
+        }
+        if let Ok(store) = crate::store::open_rule_store(cas_dir)
+            && let Ok(rules) = store.list()
+        {
+            let ids = crate::rule_refs::task_rule_ids(&task, &rules);
+            if !ids.is_empty() {
+                message.push_str(&format!("\n\nRule references required for {}: put `cas-rule: <id> scope: <JSON-quoted verbatim scope>` comments beside rule-driven code and tests. Declare `Rule-driven sites: [{{\"rule_id\":\"<id>\",\"path\":\"src/file.rs\",\"anchor\":\"<exact source line>\"}}]` in the brief or close receipt. Close checks each declared anchor and coverage of every cited rule; the verifier checks omitted sites. Use `cas rules refs <id>` to inspect references.", ids.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+        }
     }
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
@@ -2551,6 +2560,11 @@ pub(super) const CLAUDE_FIRST_PROMPT_GRACE: std::time::Duration =
 /// selection before the daemon looks at it again. The recheck offers nothing
 /// to a busy pane; it only re-parks the row, or escalates once the recipient
 /// has gone silent for [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`].
+/// cas-062b: the hold recorded when an attached operator's draft protects
+/// the pane, and how Commander names it on the held message.
+pub(crate) const COMPOSER_HOLD_DETAIL: &str = "composer protected: operator draft is unsubmitted";
+pub(crate) const COMMANDER_PANE_HOLD: &str = "Held: your pane draft is unsent";
+
 pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2 * 60);
 
@@ -2733,6 +2747,8 @@ pub(crate) struct StallNudgeRead {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
     pub(crate) answered_blocker: bool,
+    /// Live measured prerequisite failure; read off the control lane.
+    pub(crate) outcome_hold: Option<String>,
     /// Daemon green readiness, refreshed off the loop. Ok(None) withdraws a
     /// positively stale signal; Err retains the action for a later retry.
     pub(crate) director_ready: Option<Result<Option<crate::ui::factory::director::Prompt>, String>>,
@@ -2885,7 +2901,15 @@ pub(crate) fn read_row_facts(
             task.as_ref(),
             &envelope,
         );
+        facts.outcome_hold = tasks.and_then(|tasks|
+            crate::phase_outcome::check(cas_dir, tasks, &envelope.task_id, true).err());
         facts.merge_request = Some((task, git));
+    }
+    if facts.director_ready.as_ref().and_then(|read| read.as_ref().ok())
+        .and_then(|prompt| prompt.as_ref()).and_then(|prompt| prompt.merge_alert.as_ref())
+        .is_some_and(|alert| crate::phase_outcome::merge_hold(cas_dir, &alert.task_id).is_some())
+    {
+        facts.director_ready = Some(Ok(None));
     }
     if row.kind.as_deref() == Some("worker_stall_nudge")
         && row.origin == Some(cas_store::QueueOrigin::Daemon)
@@ -3679,11 +3703,22 @@ pub(super) fn undelivered_relay_operator_alert(
             envelope.task_id,
             envelope.new_status.to_string().replace('_', " ")
         ),
-        None => queued
-            .summary
-            .clone()
-            .filter(|summary| !summary.trim().is_empty())
-            .unwrap_or_else(|| "a factory event".to_string()),
+        None => {
+            let summary = queued
+                .summary
+                .clone()
+                .filter(|summary| !summary.trim().is_empty());
+            match (&queued.origin, summary) {
+                // cas-2961: a worker's own message, not a factory event.
+                (Some(cas_store::QueueOrigin::RegisteredAgent { .. }), summary) => format!(
+                    "{} sent \"{}\"",
+                    queued.source,
+                    summary.unwrap_or_else(|| "a message".to_string())
+                ),
+                (_, Some(summary)) => summary,
+                (_, None) => "a factory event".to_string(),
+            }
+        }
     };
     let retry_state = if queued.processed_at.is_some() {
         "Cassy has stopped retrying it."
@@ -3764,6 +3799,8 @@ pub(super) fn undelivered_supervisor_relay_candidates(
     let task_store = crate::store::open_task_store_local(cas_dir).ok();
     candidates
         .into_iter()
+        // cas-2961: a worker's bare acknowledgement asks for nothing.
+        .filter(|queued| !crate::supervisor_message_wakes::pure_ack(&queued.prompt))
         .filter(|queued| relay_task_still_current(task_store.as_deref(), queued))
         .collect()
 }
@@ -3821,6 +3858,12 @@ pub(super) fn record_undelivered_relay_alerts(
 ) -> Vec<RelayOperatorAlert> {
     let mut alerts = Vec::new();
     for queued in candidates {
+        // cas-2961: the alarm's wake. A worker message CAS filed as a digest
+        // goes back to ordinary delivery, which wakes the idle supervisor once
+        // with the whole message; the alert's dedupe keeps the alarm single.
+        if let Err(error) = queue.release_stranded_supervisor_digest(queued.id) {
+            tracing::warn!(prompt_id = queued.id, %error, "cas-2961: failed to release a stranded digest");
+        }
         let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
         let (summary, mut message) = undelivered_relay_operator_alert(
             &queued,
@@ -8094,7 +8137,7 @@ impl FactoryDaemon {
                     "prompt_queue message remains durable pending a clean composer"
                 );
                 let detail = if self.app.mux.pane_composer_dirty(&pane_target) {
-                    "composer protected: operator draft is unsubmitted"
+                    COMPOSER_HOLD_DETAIL
                 } else if self.app.mux.pane_submit_pending(&pane_target) {
                     "composer protected: pending submit for an earlier payload"
                 } else if self.app.mux.inject_pending(&pane_target) {
@@ -8108,6 +8151,9 @@ impl FactoryDaemon {
                 } else {
                     "composer protected: input readiness changed during delivery; rechecking"
                 };
+                if detail == COMPOSER_HOLD_DETAIL {
+                    self.note_operator_draft_hold(&queued, &pane_target);
+                }
                 self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
@@ -8751,6 +8797,16 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
+    /// cas-062b: show the operator, outside the composer, that his own
+    /// unsubmitted supervisor-pane draft is holding a Commander message.
+    fn note_operator_draft_hold(&mut self, queued: &cas_store::QueuedPrompt, pane_target: &str) {
+        if pane_target == self.app.supervisor_name()
+            && self.wake_sender_for(queued.origin.as_ref()) == WakeSender::Operator
+        {
+            self.app.operator_draft_hold = true;
+        }
+    }
+
     /// Re-offer a parked inline or composer-held row when the pane becomes input-ready
     /// or a newer turn completion arrives. No queue/store work is repeated
     /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
@@ -8915,6 +8971,12 @@ impl FactoryDaemon {
             operator_replies,
         } = selection;
         replacement_workers.extend(self.pending_worker_replacements());
+        // cas-062b: a cleared or submitted draft ends the pane's hold notice.
+        if self.app.operator_draft_hold
+            && !self.app.mux.pane_composer_dirty(self.app.supervisor_name())
+        {
+            self.app.operator_draft_hold = false;
+        }
         // Reuse the hook's message-class seam for inline operator/peer labels.
         // The roster arrived from QueueSelect; there is no loop-thread read.
         let supervisor_senders: HashMap<String, String> = registered_agents.iter()
@@ -9040,6 +9102,16 @@ impl FactoryDaemon {
             // once that claim came back.
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
+            if cas_store::project_hold::is_action_relay(&queued.prompt)
+                && cas_store::project_hold::is_held(self.app.cas_dir())
+            {
+                self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "Project hold: action relay withheld".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::seconds(2),
+                    });
+                continue;
+            }
             let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
             let batch_len = facts.message_batch.len();
             let leader_held = facts.deferred_inbox.is_some()
@@ -9193,7 +9265,9 @@ impl FactoryDaemon {
                 ));
 
                 let (suppress_detail, guidance, summary) =
-                    match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {
+                    if let Some(reason) = facts.outcome_hold.as_ref() {
+                        (Some(reason.clone()), Some(reason.clone()), "phase outcome unmet — merge withheld")
+                    } else { match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {
                         MergeRequestDelivery::Deliver => {
                             if let MergeRequestDecision::Pending { target_tip } = &git
                                 && let Some(refreshed) =
@@ -9248,7 +9322,7 @@ impl FactoryDaemon {
                             )),
                             "merge request delivery anchor no longer applies",
                         ),
-                    };
+                    }};
 
                 if let (Some(detail), Some(guidance)) = (suppress_detail, guidance) {
                     tracing::info!(
@@ -10534,10 +10608,13 @@ impl FactoryDaemon {
                     // Keep the actionable draft explanation that PTY transport
                     // deferral used before this gate moved ahead of admission.
                     let pending_detail = if pane_state.composer_dirty {
-                        "composer protected: operator draft is unsubmitted".to_string()
+                        COMPOSER_HOLD_DETAIL.to_string()
                     } else {
                         wake_decision.status_detail()
                     };
+                    if pane_state.composer_dirty {
+                        self.note_operator_draft_hold(&queued, &pane_target);
+                    }
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
@@ -11708,7 +11785,8 @@ impl FactoryDaemon {
         // Step 2: Pop FIFO when no spawn is active. While one is active, only
         // a shutdown may pass so it can mark/cancel that in-flight worker.
         let action =
-            match take_next_pending_spawn(&mut self.pending_spawns, self.spawn_task.is_some()) {
+            match take_next_pending_spawn(&mut self.pending_spawns,
+                self.spawn_task.is_some() || cas_store::project_hold::is_held(self.app.cas_dir())) {
                 Some(a) => a,
                 None => return,
             };
@@ -12652,7 +12730,10 @@ pub(super) fn commander_history_send(
     }
     let (reply_to, text) = commander_history_message_text(&row.prompt);
     let delivery = if terminal { None } else { queue.message_delivery_report(row.id).ok().flatten() };
-    Some(crate::ui::factory::ConversationHistoryMessage {
+    let held_by_draft = delivery
+        .as_ref()
+        .is_some_and(|report| report.holding_detail.as_deref() == Some(COMPOSER_HOLD_DETAIL));
+    let mut message = crate::ui::factory::ConversationHistoryMessage {
         notification_id: row.id,
         client_ref: delivery.as_ref().and_then(|report| report.client_ref.clone()),
         target: row.target,
@@ -12668,6 +12749,7 @@ pub(super) fn commander_history_send(
         } else {
             "acknowledged".to_string()
         },
+        pane_hold: None,
         stamped: !terminal,
         reply_to,
         device_id: operator.map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
@@ -12683,7 +12765,12 @@ pub(super) fn commander_history_send(
         )),
         session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
         at: row.created_at.to_rfc3339(),
-    })
+    };
+    // cas-062b: queued behind the operator's own unsent pane draft.
+    if message.state == "acknowledged" && held_by_draft {
+        message.pane_hold = Some(COMMANDER_PANE_HOLD.to_string());
+    }
+    Some(message)
 }
 
 /// Remove the durable reply marker from the operator's visible message while
@@ -13506,6 +13593,15 @@ mod tests {
                 assert!(queue.limit_episode(&episode).unwrap().unwrap().0.is_none());
             }
         }
+        // A repeated report replays the stored notice; only a legacy switch row
+        // (one with a request id) is re-described under the report-only policy.
+        let episode = crate::mcp::tools::service::factory_ops::usage_limits::episode_key("provision-test", "codex", "first");
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        db.execute("UPDATE usage_limit_episodes SET detail='stored notice' WHERE episode=?", [&episode]).unwrap();
+        let repeat = || crate::mcp::tools::service::factory_ops::usage_limits::record_usage_limit(&root, "codex", &episode).unwrap();
+        assert_eq!(repeat(), "stored notice");
+        db.execute("UPDATE usage_limit_episodes SET detail='old switch', request_id=73 WHERE episode=?", [&episode]).unwrap();
+        assert!(repeat().contains("No restart queued"), "a legacy switch notice must not be replayed");
         // A queued 3.84 switch must also be inert after upgrading.
         let mut legacy = serde_json::to_value(cas_mux::WorkerSpec::builtin_default()).unwrap();
         legacy["limit_recycle"] = serde_json::json!({
@@ -15372,6 +15468,13 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
+        task.description = "Apply rule-177 to the SMS send path.".into();
+        // cas-d8295: only a stakeholder rule's citation asks for markers.
+        let mut rule = cas_types::Rule::new("rule-177".into(), "Only SMS sends".into());
+        rule.stakeholder = Some(cas_types::StakeholderAttribution {
+            name: "Ben".into(), quote: "Only SMS sends".into(), scope: "Only SMS sends".into(),
+        });
+        crate::store::open_rule_store(&cas_dir).unwrap().add(&rule).unwrap();
         let at = chrono::Utc::now();
         task.notes = [
             super::spawn_brief_note("Old brief, superseded.", at),
@@ -15434,6 +15537,11 @@ mod tests {
         assert!(!prompt.contains("Old brief"), "{prompt}");
         // pin: a note after the brief is not part of it.
         assert!(!prompt.contains("a later note"), "{prompt}");
+        // pin: the machine marker and declaration contract must reach a worker
+        // before it implements a task that cites an existing rule.
+        assert!(prompt.contains("Rule references required for rule-177"), "{prompt}");
+        // pin: Rule-driven sites: is the machine-readable receipt field name.
+        assert!(prompt.contains("Rule-driven sites:"), "{prompt}");
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }
 

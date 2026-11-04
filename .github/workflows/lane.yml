@@ -278,6 +278,7 @@ jobs:
           ./scripts/test-release-publish.sh
           ./scripts/test-install-on-publish.sh
           ./scripts/test-hub-pin.sh
+          python3 scripts/test-deploy-hub-release.py
 
       # Larger pushes own these checks here; small pushes ran them in the fast job.
       - name: Typecheck and test Commander web assets

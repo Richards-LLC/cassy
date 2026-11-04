@@ -1459,6 +1459,10 @@ pub struct FactoryApp {
     full_pane_hyperlinks: HyperlinkMap,
     /// Per-frame OSC 8 hyperlink metadata for the compact terminal pipeline.
     compact_pane_hyperlinks: HyperlinkMap,
+    /// cas-062b: a Commander message waits behind the operator's own
+    /// unsubmitted supervisor-pane draft. The daemon clears it once the
+    /// composer is clean.
+    pub(crate) operator_draft_hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1559,6 +1563,13 @@ impl FactoryApp {
 }
 
 impl FactoryApp {
+    /// cas-062b: the supervisor pane's one-line notice while a Commander
+    /// message waits behind the operator's own unsubmitted draft.
+    pub(crate) fn supervisor_draft_hold_notice(&self) -> Option<&'static str> {
+        (self.operator_draft_hold && self.mux.pane_composer_dirty(&self.supervisor_name))
+            .then_some(" Commander message waiting: send or clear your draft ")
+    }
+
     fn filter_director_agents_to_current_session(&mut self) {
         let mut allowed = std::collections::HashSet::with_capacity(self.worker_names.len() + 1);
         for name in &self.worker_names {

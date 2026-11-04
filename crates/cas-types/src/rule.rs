@@ -98,6 +98,14 @@ impl FromStr for RuleStatus {
     }
 }
 
+/// Verbatim evidence for an explicitly stakeholder-attributed instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StakeholderAttribution {
+    pub name: String,
+    pub quote: String,
+    pub scope: String,
+}
+
 /// A rule extracted from memory entries
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
@@ -120,6 +128,10 @@ pub struct Rule {
     /// Entry IDs this rule was extracted from
     #[serde(default)]
     pub source_ids: Vec<String>,
+
+    /// Attribution is evidence, separate from the agent's interpreted instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stakeholder: Option<StakeholderAttribution>,
 
     /// The rule description/content
     pub content: String,
@@ -247,6 +259,7 @@ impl Rule {
             origin_project: None,
             created: Utc::now(),
             source_ids: Vec::new(),
+            stakeholder: None,
             content,
             status: RuleStatus::default(),
             helpful_count: 0,
@@ -477,6 +490,7 @@ impl Default for Rule {
             origin_project: None,
             created: Utc::now(),
             source_ids: Vec::new(),
+            stakeholder: None,
             content: String::new(),
             status: RuleStatus::default(),
             helpful_count: 0,
@@ -658,5 +672,32 @@ mod tests {
         // Proven rules with dangerous tools cannot auto-approve
         rule.auto_approve_tools = Some("Bash".to_string());
         assert!(!rule.can_auto_approve());
+    }
+}
+
+#[cfg(test)]
+mod stakeholder_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_rule_wire_format_omits_absent_stakeholder() {
+        // pin: Unattributed rules retain the pre-provenance byte format used by cloud and history.
+        let legacy = r#"{"id":"legacy","scope":"project","created":"2026-11-03T00:00:00Z","source_ids":[],"content":"Existing instruction","status":"draft","helpful_count":0,"harmful_count":0,"tags":[],"paths":"","category":"general","priority":2,"surface_count":0}"#;
+        let rule: Rule = serde_json::from_str(legacy).unwrap();
+        assert!(rule.stakeholder.is_none());
+        assert_eq!(serde_json::to_string(&rule).unwrap(), legacy);
+    }
+
+    #[test]
+    fn stakeholder_verbatim_evidence_survives_cloud_wire_round_trip() {
+        let mut rule = Rule::new("attributed".into(), "Prompt changes via PR".into());
+        rule.stakeholder = Some(StakeholderAttribution {
+            name: "Ben".into(),
+            quote: "  Review PROMPT changes via PR.\nKeep shipping.  ".into(),
+            scope: "Prompt changes; staging delivery remains immediate".into(),
+        });
+        let wire = serde_json::to_string(&rule).unwrap();
+        let decoded: Rule = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.stakeholder, rule.stakeholder);
     }
 }

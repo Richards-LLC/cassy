@@ -162,6 +162,13 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+`cas factory message --session <name> --project-dir <project>` uses the
+destination session's store and queue session, even from another factory's
+shell with inherited `CAS_ROOT` and `CAS_FACTORY_SESSION`. Either selector
+can be used alone. Explicit `--project-dir` and `--cas-root` must resolve to
+the selected session's store; conflicts fail before enqueueing. The success
+line and JSON `session` field name the session written to the queue.
+
 Planning recall at task creation and worker spawn requires matching content terms;
 weak incidental matches stay silent. Each recalled item and operation lesson is
 shown at most once in a harness session. Spawn lessons tagged for a harness are
@@ -1071,6 +1078,8 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 | 1 | Everything else, including skills, agents and an unmeasurable diff | In `qa.mode=batch`, one release verdict naming every delivery; an unmeasurable diff, `force-verifier` or `qa.mode=per_task` gets its own verifier | The impacted journeys |
 | 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own verifier plus an adversarial probe, even when a release verdict names it | An `Adversarial probe:` row in the task ledger, in batch mode too |
 
+Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
+
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
@@ -1931,6 +1940,131 @@ a new admission refusal sends one durable supervisor notice and consumes that
 intent. Missing CI and transport failures retain it without merging; daemon
 restarts resume the persisted intent. In-progress and unparked tasks never arm
 an automatic retry.
+
+## Epic design-review staffing pause
+
+A report counts when its task type is `bug`, priority is P0 or P1, and its
+labels include exactly `stakeholder-reported`. Use that label only for a defect
+reported by a customer, operator, or other stakeholder; internal review findings
+do not count unless a stakeholder also reported the defect. Report time is the
+task's `created_at`, so adding the label later does not reset its age. Closed
+reports count too. Reports belong to each ancestor epic through parent-child
+links; unrelated epics and non-epic tasks remain available.
+
+`factory.design_review_bug_threshold` defaults to 5 (range 1–1000), and
+`factory.design_review_window_hours` defaults to 48 (range 1–8760). The window
+includes reports created exactly at its lower boundary and excludes future dates.
+Task creation, updates and parent linking evaluate the trigger; start and spawn
+admission also evaluate it for imported reports. A pause persists across restarts
+and beyond the window until the operator lifts it. Active work, delivery, merges
+and shipping to staging continue normally.
+
+The supervisor receives one durable prompt per pause asking for a design review
+against the epic plan. Start refusals identify the epic and the trigger reports.
+After reviewing the design, the operator runs from their own terminal:
+
+```sh
+cas factory design-review-lift <epic> --reason 'Review outcome and why staffing can resume'
+```
+
+The non-empty reason is recorded on the epic. The lift acknowledges reports
+created through the lift time; a fresh threshold of newer reports can pause the
+epic again. Agent contexts, including supervisors, cannot lift a pause. Lifts
+live under `.cas/operator/epic-design-review-lifts.json`; pause state lives in
+`.cas/epic-design-reviews.json`, with serialized atomic writes. This policy is
+per epic and independent of any project hold.
+
+## Measured phase outcomes
+
+A supervisor declares an immutable numeric target on an existing epic, phase
+sub-epic or `gate` task with `task action=notes note_type=outcome_target`.
+The JSON note maps metric names (including units) to `min`/`max` (inclusive)
+or `gt`/`lt` (strict) bounds, for example:
+
+```json
+{"stability_percent":{"min":95},"p95_seconds":{"lt":1}}
+```
+
+Record the evaluation with `note_type=outcome_receipt`:
+
+```json
+{"measurements":{"stability_percent":72.7,"p95_seconds":1.48},"receipt":"/absolute/path/to/evaluation.json"}
+```
+
+The measurements must name every target metric and include a non-empty receipt
+reference. The supervisor records the measured result; this action does not run
+an evaluator. A missing or failed receipt holds the phase's `blocks` and
+`requires_start` dependants, including children of dependent phases, at start,
+close and merge. The refusal names the target and measurement. Closed phase
+status does not stand in for a passing result. Its own implementation children
+and independent work can continue. A sibling dependency does not evaluate the
+shared phase's own target: a task's own ancestor chain stays outside the outcome
+hold, while external prerequisite phases still gate it. Ordinary open blockers
+retain their existing parallel-preparation policy.
+
+Phase and model-eval receipts share the same saved evaluation JSON artifact
+format below. Both verify its measurements, thresholds, model, command and run
+log, binding the files by content. A model-eval target additionally fixes the
+dataset identity and cannot be waived by an operator phase exception.
+
+Only the operator, from their own terminal, can accept a miss:
+`cas qa outcome-override <phase-id> --reason '<why>'`. This writes a decision
+note and binds the exception to the exact target and receipt; changed measurements
+require a new decision. Agent and supervisor shell contexts cannot issue it.
+A subsequent passing receipt releases the outcome hold. Other close, CI and QA
+gates still apply.
+
+## Model evaluation close proof
+
+A model-backed task or phase can declare an evaluation bar. A registered
+supervisor records `task action=notes note_type=model_eval_target` with:
+
+```json
+{"dataset":"reader-44-v1","thresholds":{"accuracy_percent":{"min":95}}}
+```
+
+Save the evaluator's result under the task artifacts directory, for example
+`evaluation.json`:
+
+```json
+{"dataset":"reader-44-v1","model":"provider/model","command":"reader-eval --dataset reader-44-v1","run_log":"/absolute/path/to/evaluation.log","thresholds":{"accuracy_percent":{"min":95}},"measurements":{"accuracy_percent":87.9}}
+```
+
+The assignee or a registered supervisor records `note_type=model_eval_receipt`
+using the same receipt shape as a phase outcome:
+
+```json
+{"measurements":{"accuracy_percent":87.9},"receipt":"/absolute/path/to/evaluation.json"}
+```
+
+For a remote artifact, fetch it with `artifact action=fetch` first and use the
+returned local path. An arbitrary artifact label or inline claims alone do not
+count as proof.
+
+The dataset and thresholds must match the immutable target, and the receipt's
+measurements must match the artifact. The artifact names a model and evaluation
+command, plus a readable run log at an absolute path. Both files must resolve
+inside the owning task's project-scoped artifacts directory; checkout files,
+other tasks' files and symlinks escaping that directory are refused. The evaluator
+must emit exactly one machine-readable result line in its run log:
+
+```text
+MODEL_EVAL_RESULT {"measurements":{"accuracy_percent":87.9}}
+```
+
+Every receipt metric must match that result's value. Missing, ambiguous or
+mismatched results are refused as `MODEL_EVAL_UNBACKED`, naming the unsupported
+metric and claimed value. A JSON artifact claiming 96 beside a logged 80.3 cannot
+pass. Cassy binds both files by content and rejects either changing after
+recording. Missing prerequisite files ask to re-record the receipt. The evaluation
+runner supplies the result line; recording proof does not execute the command.
+
+A below-bar evaluation is saved as `MODEL_EVAL_MISS`. Close refuses and names
+the bar and measured values. Missing proof also refuses. A passing receipt is
+saved as `MODEL_EVAL_PASS` and permits ordinary close checks to continue. An
+operator phase exception cannot waive a model-evaluation miss. Phase evaluation
+misses also hold dependent work through the existing outcome graph. Tasks with
+no declared evaluation bar retain their existing close behavior.
 
 ## Verification timing
 
@@ -3150,7 +3284,14 @@ Build profiles must use `panic = "unwind"`. The MCP tool-dispatch panic catcher 
 
 ## Skill & Rule Sync
 
-Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` files one idempotent encode chore on creation or tagging, even while draft, and can be promoted after its first verified occurrence. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+Rule-driven code and tests carry a `cas-rule:` comment with the rule id and
+JSON-quoted verbatim scope. The brief or close receipt declares each causal
+site; close checks adjacent markers at the delivered tip and verifier review
+checks omissions. `cas rules refs <id> --json` lists tracked sites. See
+[Rule references](../../docs/RULE_REFERENCES.md) for syntax, legacy behavior and
+the optional stakeholder provenance seam.
+
+Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` can be promoted after its first verified occurrence. Only an operator-authorised write from the registered non-factory operator session files its idempotent encode chore, even while draft. Agent and supervisor writes create no encode chore and name the operator command (`rule action=update id=<id> tags="<current tags>"`); previous rule authority does not grant a later writer permission to file one. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 
@@ -3179,6 +3320,17 @@ generated `SKILL.md` sections so consumers can evaluate them in their own
 runtime.
 
 ### Editing supervisor or worker guidance: the SessionStart budget is a hard constraint
+
+SessionStart also checks Slack channels and thread links named in its current
+handoff. `hooks/handoff_updates.rs` inserts newer human posts above that handoff,
+using Violet's author names without treating those labels as operator authority.
+A thread reference includes a channel read so newer sibling posts are visible.
+The lookup has a four-second outer deadline (including Cloud memory lookup),
+three seconds for Violet setup and reads, at most six reads of 50 messages,
+and at most ten excerpts in a 1,800-byte section. Known additional posts have
+a `+N more` line. Bot/app posts and configured Violet bot IDs are excluded.
+Empty results add no section; service failures, partial reads and read caps
+leave a one-line couldn't-check notice. This check adds no Slack writes.
 
 `cas-supervisor.md` and `cas-worker.md` are not ordinary docs. Their bodies are
 injected verbatim into the SessionStart `additionalContext`, which has a **9 216 B
@@ -3860,3 +4012,62 @@ admission job on factory and epic pushes and PRs, including direct release
 edits. It was removed from the late `test-ci-tiers` queue recipe. Its independent
 boundary self-tests remain there; merge-group admission does not repeat the
 content scan.
+
+## Policy hygiene and stakeholder evidence
+
+Use `rule action=drift` for a read-only comparison of the rule source and the
+configured generated rule directory (normally `.claude/rules/cas/`). Its
+`structured_content.snapshot` is an export: copy that JSON object into the
+`peer_snapshot` string of the other machine's `rule action=drift` request. Both
+snapshots must name the same canonical project. The report names missing or
+changed generated files, peer status/content/scope/provenance differences, and
+missing or different `[cloud]` sync settings. Capture time is shown; an imported
+snapshot does not prove the peer's current state. No rule is retired, synced or
+otherwise changed by this check. Absence of a peer snapshot is reported explicitly.
+
+When an instruction is attributed to a stakeholder, supply `stakeholder`,
+`stakeholder_quote` and `stakeholder_scope` on `rule action=create` or `update`.
+The quote is stored exactly as provided, separately from the interpreted rule
+content. Attributed hard rules also require a future RFC3339 `review_after`.
+`rule action=show` displays the evidence and deadline. Existing rules remain
+unattributed until someone supplies evidence; migration never guesses or backfills
+someone's words. Optional provenance travels with normal rule/cloud serialization.
+An update that omits attribution preserves the stored evidence, including older
+client writes. `rule action=update stakeholder=""` explicitly clears live
+attribution and its `stakeholder:` tags; omit quote/scope in that request.
+The clear and its resulting history snapshot commit together.
+This does not change delivery or staging policy.
+
+Tag a temporary stakeholder constraint memory `stakeholder:<name>,constraint`
+(or `stakeholder-constraint:<name>`) and supply an explicit RFC3339 `valid_until`.
+When a decision is replaced, update the old memory's tags to include
+`superseded,superseded-by:<replacement-id>` while retaining its other tags.
+Supersession ends its validity and removes it from session context, including
+pinned memories; explicit retrieval by ID still preserves the historical words.
+A leading word such as `SUPERSEDED` in prose never retires a memory or a
+handoff. A deadline alone remains sufficient for ordinary time-limited memories.
+
+## Operator project holds
+
+Use `cas factory hold set --reason "<reason>"` from your own interactive
+terminal to stop project dispatch and merges. The state is local to the
+project's shared `.cas/operator/project-hold.json`, protected by the existing
+operator write policy. It records the operator, reason and time, and retains
+both set and lift decisions. Agents cannot change it through MCP or the CLI.
+
+`cas factory hold status` shows the current hold.
+`cas --json factory hold status` returns `active` and the complete `history`.
+Lift it with `cas factory hold lift --reason "<reason>"`.
+
+While held, startup leads with the hold, ready and awaiting-merge lists hide
+action invitations, merge requests and stalled-supervisor relays are withheld,
+and spawning and merging refuse even with force or override flags. Unread
+relay rows receive no surface receipt; lifting restores visibility and normal
+admission. Ordinary mail remains readable. Unreadable hold state stops
+dispatch and merges until the operator repairs it. A hold has no automatic
+expiry, and an unheld project's staging delivery flow is unchanged.
+
+The hold filters parked rows at MCP list and startup presentation boundaries;
+internal task lists retain them for ownership fences, re-close exemptions and
+recovery checks. READY TO MERGE generation stops before caching or queueing an
+alert during the hold; lifting it alone generates no stale READY backlog.

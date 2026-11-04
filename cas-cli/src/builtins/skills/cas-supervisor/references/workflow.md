@@ -63,6 +63,16 @@ single-child epics distort epic reporting, so this is the preferred path.
 
 ### Brief fields: no spawn without them
 
+For a stakeholder ask, pass its Slack thread permalink or GitHub issue/PR URL
+as `external_ref` when creating the task, and keep it when assigning or spawning.
+MCP creation and staffing refuse a source held by a peer and name its owner;
+coordinate before duplicating that work. An intentional second GitHub task
+requires a live supervisor's `supervisor_override=true reason="<agreement>"`
+on create or assignment; its decision stays with that task. Slack uses the
+existing claim/status/handoff authority. Binding epic splits retain their own
+delegation and takeover rules. Ownership messages that require action use
+`kind=status`, because `kind=receipt` waits quietly until the peer's next turn.
+
 Before you spawn onto a task or assign it, its task record must carry four
 fields. A missing field means no spawn: fill it with `task action=update`
 first. A worker cannot recover a goal or a proof method the brief never named.
@@ -73,6 +83,14 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+
+For rule-driven work, cite each rule id and its verbatim stakeholder scope in
+the brief. Declare known causal anchors with `Rule-driven sites:` (JSON objects
+with `rule_id`, repository-relative `path`, and exact source-line `anchor`), or
+require the worker to declare them in its close receipt. Code and tests carry
+adjacent `cas-rule: <id> scope: <JSON string>` comments. Close checks marker
+coverage and scope; verification checks undeclared causal sites. Unrelated work
+does not inherit the cited rule's scope.
 
 `qa.user_facing_labels` require `demo_statement` before creation/assignment:
 `As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
@@ -220,7 +238,7 @@ Finish delivered work before expanding noncritical work. Apply this closure
 pass every turn, including startup and simultaneous worker completions:
 
 1. Inspect pushed lanes, `READY TO MERGE`, `awaiting_merge` and delivered corrections. Merge every reviewed
-   lane with satisfied QA gates and green required CI now; one lane's proof cannot delay
+   lane with satisfied QA gates, green required CI and plan target met now; one lane's proof cannot delay
    another ready merge. Complete any remaining close action.
 2. Give each held delivery a named blocker, next owner and event/reminder:
    missing candidate, review, QA, red/pending CI, or merge conflict. Assign
@@ -302,7 +320,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). Drain ready merges before free-form user replies.
+1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). A delivery whose phase misses its plan's measured target does not merge: hold only its dependents, keep shipping everything else, and ask the operator. Drain ready merges before free-form user replies. Stop merging while a project hold is set (`cas factory hold status`).
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before
@@ -322,8 +340,12 @@ end-of-lane, once the worker is done with that worktree.
    `verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `verification action=qa_status task_id=<task-id>`.
    Already merged before anyone closed it (it never parked)? Cassy opens no round for code
-   that is already on trunk. Close it yourself with `supervisor_override=true reason="…"
-   commit_receipt=<merged sha>`; the waiver is recorded against that commit. A no-code task is
+   that is already on trunk. Close it yourself with `commit_receipt=<merged sha>`. When no
+   local build can sign in, satisfy the evidence gate from the deployment rather than
+   overriding: set `cas config set qa.deployed_origins <origin>` once per project (a
+   `https://<project>-*-<team>.vercel.app` pattern covers per-deployment hosts), then cite a
+   bundle that declares `deployed`. Missing configuration is not a reason to override; use
+   `supervisor_override=true reason="…"` only when no evidence can be produced. A no-code task is
    never gated by independent QA.
 3. Merge into the epic branch:
 
@@ -473,8 +495,9 @@ replaces this manual precheck when its hosted command is available.
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
    Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Run targeted tests and journeys selected by the diff inside this loop. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
-2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 3), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
-3. Run the final assembled-tree gate. This is the epic's single build + test:
+2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
+3. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 4), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
+4. Run the final assembled-tree gate. This is the epic's single build + test:
    targeted worker tests complement one full assembly gate run
    on the epic tip proves every child and checks cross-task integration.
    **When the base branch lands through a merge queue that runs the full suite
@@ -499,11 +522,11 @@ replaces this manual precheck when its hosted command is available.
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
    reference the epic's integration proof; worker closes carry targeted receipts alongside it.
-4. Put all findings from the review, precheck and QA that need worker action into
+5. Put all findings from the review, precheck and QA that need worker action into
    one batch: a bounded epic-child fix-round task per worker, started together. Put
    the finding, required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. After the fix
+6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. After the fix
    lands, rerun the final assembled-tree gate on the new tip: re-enqueue the PR, or for a local gate capture the real exit code and record
    a fresh `ASSEMBLY_PROOF` for it:
 
@@ -513,7 +536,7 @@ replaces this manual precheck when its hosted command is available.
 
    Never pipe the test run to `tail`; that captures the pipe status, not the
    test status.
-6. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate passes (the local gate exits 0, or the queue lands the PR), reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
+7. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate passes (the local gate exits 0, or the queue lands the PR), reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
 
    ```text
    # One per worker lane — removes the worktree and deletes factory/<worker>
@@ -525,5 +548,5 @@ replaces this manual precheck when its hosted command is available.
    its refusal names the destination and its success receipt carries a loud trunk-push warning.
    `force=true` will not authorize trunk.
    If the tracked merge cannot act, stop and ask the operator to resolve it; do not use an untracked merge path.
-7. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
-8. Shut down the epic's workers by name: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`
+8. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
+9. Shut down the epic's workers by name: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`

@@ -776,8 +776,12 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // Return reminders as context if present, otherwise empty.
     // Stop hooks don't support hookSpecificOutput.additionalContext in Claude
     // Code's schema — route via systemMessage instead.
-    let notices = [codemap_reminder, supervisor_turn_ends_without_wake_source(cas_root, input)]
-        .into_iter()
+    let notices = [
+        codemap_reminder,
+        supervisor_turn_ends_without_wake_source(cas_root, input),
+        supervisor_turn_leaves_messaged_workers_uncovered(cas_root, input),
+    ]
+    .into_iter()
         .flatten()
         .map(|notice| format!("<system-reminder>{notice}</system-reminder>"))
         .collect::<Vec<_>>();
@@ -818,6 +822,90 @@ fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) 
     (!has_wake_source).then(|| {
         "No wake source: this supervisor turn ended with no pending reminder, so only a relay Cassy delivers can start your next turn. If work is open (idle workers, parked deliveries, a running CI or merge queue), set one now with coordination action=remind (an event such as ci_completed or task_completed, or a time watchdog with cross_session=true)."
             .to_string()
+    })
+}
+
+/// cas-2961: a supervisor messaged a mid-task worker this turn and stopped
+/// with no event reminder bound to that worker or its task, so only the
+/// worker's reply can start the next turn (gabber, Nov 3: 8 h idle). Warn
+/// once per turn, naming each worker. Advisory: it never blocks the stop.
+fn supervisor_turn_leaves_messaged_workers_uncovered(
+    cas_root: &Path,
+    input: &HookInput,
+) -> Option<String> {
+    let is_supervisor = std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor");
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
+    if !is_supervisor || session.is_empty() {
+        return None;
+    }
+    let id = current_agent_id(input);
+    let now = chrono::Utc::now();
+    // The previous stop bounds this turn; the first stop looks back an hour.
+    let mark = cas_root.join("supervisor-stop-mark.json");
+    let since = std::fs::read_to_string(&mark)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|value| value["session"] == session.as_str() && value["agent"] == id.as_str())
+        .and_then(|value| value["at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or(now - chrono::Duration::hours(1));
+    let _ = std::fs::write(
+        &mark,
+        serde_json::json!({"session": session, "agent": id, "at": now.to_rfc3339()}).to_string(),
+    );
+    let workers = crate::store::open_prompt_queue_store(cas_root)
+        .ok()?
+        .unanswered_worker_messages(&session, &id, since)
+        .ok()?;
+    if workers.is_empty() {
+        return None;
+    }
+    let tasks = crate::store::open_task_store(cas_root).ok()?.list(None).ok()?;
+    let reminders = crate::store::open_reminder_store(cas_root).ok()?;
+    let name = std::env::var("CAS_AGENT_NAME").unwrap_or_default();
+    let pending: Vec<_> = [id.as_str(), name.as_str()]
+        .into_iter()
+        .filter(|key| !key.is_empty())
+        .flat_map(|key| {
+            let mut own = reminders.list_pending(key).unwrap_or_default();
+            own.extend(reminders.list_pending_for_target(key).unwrap_or_default());
+            own
+        })
+        .filter(|reminder| {
+            reminder.session_id.as_deref() == Some(session.as_str())
+                && reminder.trigger_type == cas_store::ReminderTriggerType::Event
+        })
+        .collect();
+    let uncovered: Vec<String> = workers
+        .into_iter()
+        .filter_map(|worker| {
+            let held: Vec<&str> = tasks
+                .iter()
+                .filter(|task| {
+                    task.assignee.as_deref() == Some(worker.as_str())
+                        && matches!(
+                            task.status,
+                            crate::types::TaskStatus::InProgress
+                                | crate::types::TaskStatus::AwaitingMerge
+                                | crate::types::TaskStatus::Blocked
+                        )
+                })
+                .map(|task| task.id.as_str())
+                .collect();
+            let names = |value: &str| value == worker || held.contains(&value);
+            let covered = pending.iter().any(|reminder| {
+                reminder.task_id.as_deref().is_some_and(names)
+                    || reminder.trigger_filter.as_ref().and_then(|f| f.as_object()).is_some_and(
+                        |filter| filter.values().any(|value| value.as_str().is_some_and(names)),
+                    )
+            });
+            (!held.is_empty() && !covered).then(|| format!("{worker} ({})", held.join(", ")))
+        })
+        .collect();
+    (!uncovered.is_empty()).then(|| {
+        format!(
+            "Uncovered worker: you messaged {} this turn and no event reminder covers it, so nothing but its reply can start your next turn. Set coordination action=remind with remind_event=task_completed or task_blocked and that task_id before you stop.",
+            uncovered.join("; ")
+        )
     })
 }
 

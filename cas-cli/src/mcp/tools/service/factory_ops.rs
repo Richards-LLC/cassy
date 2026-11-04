@@ -723,13 +723,34 @@ fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
     }
 }
 
+/// The harness an account folder belongs to, by its `~/.claude[-*]` or
+/// `~/.codex[-*]` name; `None` for any other folder.
+fn account_dir_harness(dir: &str) -> Option<cas_mux::SupervisorCli> {
+    let name = std::path::Path::new(dir.trim().trim_end_matches('/')).file_name()?.to_str()?;
+    [
+        (crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
+        (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex),
+    ]
+    .into_iter()
+    .find(|(provider, _)| name == format!(".{}", provider.name()) || name.starts_with(provider.prefix()))
+    .map(|(_, cli)| cli)
+}
+
 pub(crate) fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
+    let cli = recycle_worker_cli(agent);
     cas_mux::WorkerSpec {
         name: Some(agent.name.clone()),
-        cli: recycle_worker_cli(agent),
+        cli,
         model: agent.metadata.get("worker_model").cloned(),
         effort: worker_effort_from_agent(agent),
-        config_dir: agent.metadata.get("worker_account_dir").cloned(),
+        // cas-24f3: a row that recorded another harness's account (written by
+        // the same foreign registration that misrecorded its cli) cannot
+        // launch this harness; inherit the default account instead.
+        config_dir: agent
+            .metadata
+            .get("worker_account_dir")
+            .filter(|dir| account_dir_harness(dir).is_none_or(|owner| owner == cli))
+            .cloned(),
         requester_config_dir: None,
         requester_secure_storage_dir: None,
     }
@@ -2586,6 +2607,24 @@ impl CasService {
             req.isolate = Some(true);
             req.task_id = ids.first().cloned();
         }
+        let staffing_tasks: Vec<&str> = req.task_ids.as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| req.task_id.as_deref().into_iter().collect());
+        if staffing_tasks.is_empty() {
+            if let Some(epic) = ctx.factory_session.as_deref()
+                .and_then(|session| std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok())
+                .and_then(|raw| serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok())
+                .and_then(|metadata| metadata.pinned_epic_id.or(metadata.epic_id))
+            {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, &epic)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        } else {
+            for task in staffing_tasks {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, task)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        }
         let provisioner_build = ctx
             .factory_session
             .as_ref()
@@ -2620,6 +2659,9 @@ impl CasService {
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.inner.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
             match factory_provision_build_compatibility(session, provisioner_build) {
                 FactoryProvisionBuildCheck::Compatible => String::new(),
@@ -2878,6 +2920,18 @@ impl CasService {
         let force_peer_claim = req.force.unwrap_or(false);
         let prefix = crate::mcp::tools::core::guidance::caller_prefix();
         let mut peer_notice = String::new();
+        let source_ids = req.task_ids.clone().unwrap_or_else(|| req.task_id.iter().cloned().collect());
+        self.refresh_task_sources(&source_ids).await?;
+        let mut source_admissions = Vec::new();
+        let mut checked_sources = std::collections::HashSet::new();
+        for id in &source_ids {
+            let task = task_store.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            if let Some(key) = task.external_ref.as_deref().and_then(crate::cloud::peer_claims::github_source_key)
+                && !checked_sources.insert(key) { continue; }
+            let admission = self.inner.task_source_admission_for(&task, None).await?;
+            peer_notice.push_str(&admission.notice);
+            source_admissions.push(admission);
+        }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {
                 if !force_peer_claim {
@@ -4485,6 +4539,7 @@ impl CasService {
     pub(super) async fn factory_worker_queue(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
         let worker = req.id.as_deref().or(req.target.as_deref()).ok_or_else(|| Self::error(
             ErrorCode::INVALID_PARAMS, "worker_queue requires id=<worker>"))?;
+        if let Some(ids) = req.task_ids.as_ref() { self.refresh_task_sources(ids).await?; }
         self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
     }
 
@@ -6392,8 +6447,10 @@ impl CasService {
         // harness would not interpret. Mixed `all_workers` calls retain the
         // existing fail-closed behavior below; supervisors can recycle the
         // named Codex worker explicitly and reset Claude recipients together.
+        // cas-24f3: resolve the harness exactly as the recycle recipe does, so
+        // a Codex row misrecorded as Claude is not sent down the Claude path.
         if recipients.len() == 1
-            && worker_cli_from_agent(&recipients[0]) == cas_mux::SupervisorCli::Codex
+            && recycle_worker_cli(&recipients[0]) == cas_mux::SupervisorCli::Codex
         {
             let mut recycle_req = req;
             recycle_req.action = "recycle_worker".to_string();
@@ -6431,7 +6488,7 @@ impl CasService {
         let mut refusals: Vec<String> = Vec::new();
 
         for agent in recipients {
-            let cli = worker_cli_from_agent(&agent);
+            let cli = recycle_worker_cli(&agent);
             if reset::context_reset_command(cli).is_none() {
                 refusals.push(format!(
                     "{}: {}",
@@ -6766,17 +6823,10 @@ impl CasService {
             .ok()
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
-        let branch = bound_path
-            .as_deref()
-            .and_then(crate::factory_isolation::branch_at);
-        output.push_str(&crate::factory_isolation::render_worker_binding(
+        output.push_str(&crate::factory_isolation::render_worker_binding_at(
             &agent.name,
             agent.role == AgentRole::Worker,
-            bound_path
-                .as_deref()
-                .map(|path| path.display().to_string())
-                .as_deref(),
-            branch.as_deref(),
+            bound_path.as_deref(),
         ));
 
         // Current task(s)
@@ -20313,6 +20363,9 @@ effort = "high"
         agent.metadata.insert("worker_model".into(), "gpt-6.1-sol".into());
         let spec = worker_spec_from_agent(&agent);
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        // cas-24f3: the Claude account came from the same foreign
+        // registration; Codex has no hooks.json there, so the launch refused.
+        assert_eq!(spec.config_dir, None, "a Codex relaunch must not use a Claude account");
         cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
             .expect("the repaired Codex recipe relaunches");
     }

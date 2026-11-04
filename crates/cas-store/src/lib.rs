@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
+pub mod project_hold;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
@@ -147,7 +148,7 @@ pub use delegation_receipt_store::{
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
-    create_worker_delivery_with_dispatch_for_lease, get_latest_worker_delivery,
+    create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
     list_worker_delivery_events, record_observed_delivery_merge,
     record_pending_observed_delivery_merge, transition_worker_delivery,
@@ -541,6 +542,17 @@ pub trait RuleStore: Send + Sync {
         self.update(rule)
     }
 
+    /// Explicitly clear live stakeholder evidence while recording the other update fields.
+    /// Missing evidence on an ordinary update must preserve the stored attribution.
+    fn update_clearing_stakeholder(
+        &self,
+        _rule: &Rule,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse("explicit stakeholder clearing is unavailable for this store".into()))
+    }
+
     /// Increment the number of times a rule was actually injected into
     /// context. Implementations with an atomic write path should override
     /// this method; the default preserves compatibility for lightweight
@@ -565,14 +577,14 @@ pub trait RuleStore: Send + Sync {
         self.delete(id)
     }
 
-    /// List prior rule states, newest first.
+    /// List recorded rule states, newest first (including the latest mutation).
     fn list_versions(&self, _id: &str) -> Result<Vec<RuleVersion>> {
         Err(StoreError::Parse(
             "rule version history is unavailable for this store".to_string(),
         ))
     }
 
-    /// Restore a prior rule state, or the latest prior state when version is None.
+    /// Restore a recorded rule state, or the previous lifecycle version when None.
     fn restore_version(
         &self,
         _id: &str,
@@ -1176,3 +1188,6 @@ pub trait EntityStore: Send + Sync {
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(test)]
+mod project_hold_tests;

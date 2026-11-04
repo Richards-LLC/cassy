@@ -1416,6 +1416,26 @@ pub(crate) fn verification_dispatch_envelope(
     )
 }
 
+/// The same durable dispatch identity, with its pre-publication continuation.
+pub(crate) fn candidate_verification_dispatch_envelope(
+    dispatch: &cas_types::VerificationDispatch,
+    worker: &str,
+    reason: &str,
+) -> String {
+    let head = dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()).unwrap_or("");
+    format!(
+        "{VERIFICATION_DISPATCH_ENVELOPE_OPEN}dispatch_id=\"{id}\" task_id=\"{task}\" owner=\"{owner}\" deadline=\"{deadline}\" bound_head=\"{head}\">\n\
+         Task {task}, delivered by {worker}, awaits its required pre-merge candidate review.\n\
+         {reason}\n\
+         Hand the verifier dispatch_id={id}. Record with verification action=add task_id={task} dispatch_id={id}. \
+         A PASS continues the merge; a FAIL or unresolved verdict holds this delivery.\n\
+         {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",
+        id = xml_attribute_value(&dispatch.id), task = xml_attribute_value(&dispatch.task_id),
+        owner = xml_attribute_value(&dispatch.owner_agent_id), deadline = dispatch.deadline_at.to_rfc3339(),
+        head = xml_attribute_value(head), worker = xml_attribute_value(worker),
+    )
+}
+
 const QA_DISPATCH_ENVELOPE_OPEN: &str = "<cas-qa-dispatch ";
 const QA_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-qa-dispatch>";
 

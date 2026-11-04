@@ -1817,6 +1817,12 @@ impl WorkEventService {
         }
     }
 
+    /// Requests whose answers have not been handed out yet.
+    #[cfg(test)]
+    pub(crate) fn in_flight(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Whether the change probe should run: a live client follows the stream
     /// and the last probe is `PROBE_INTERVAL` old (cas-ff22). The probe runs
     /// on the blocking lane like a page; the loop only compares strings.

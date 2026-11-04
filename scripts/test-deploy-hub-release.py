@@ -27,9 +27,10 @@ REAL_RUN = subprocess.run
 class Response(io.BytesIO):
     status = 200
 
-    def __init__(self, data, read_error=None):
+    def __init__(self, data, read_error=None, csp=None):
         super().__init__(data)
         self.read_error = read_error
+        self.headers = {} if csp is None else {"Content-Security-Policy": csp}
 
     def read(self, *args):
         if self.read_error:
@@ -56,6 +57,10 @@ class DeployTests(unittest.TestCase):
                     "app.css": b"css", "manifest.webmanifest": b"{}"}
         dist = self.repo / "hub-web/dist"
         dist.mkdir(parents=True)
+        # cas-7a33: each release carries the team tailnet list its CSP names.
+        (self.repo / "hub-web/hosted-tailnets.json").write_text(json.dumps({"tailnets": ["tailabc123"]}))
+        self.csp = hub.hosted_csp(["tailabc123"])
+        self.previous_csp = None
         for name, data in self.old.items():
             (dist / name).write_bytes(data)
         self.git("add", ".")
@@ -119,8 +124,12 @@ class DeployTests(unittest.TestCase):
             self.assertTrue({"--prod", "--skip-domain", "--yes"} <= set(args))
             self.assertNotIn("--prebuilt", args)
             site = Path(args[args.index("--cwd") + 1])
-            self.assertEqual(json.loads((site / "vercel.json").read_text()),
-                             {"$schema": "https://openapi.vercel.sh/vercel.json"})
+            self.assertEqual(json.loads((site / "vercel.json").read_text()), {
+                "$schema": "https://openapi.vercel.sh/vercel.json",
+                "headers": [{"source": "/(.*)", "headers": [
+                    {"key": "Content-Security-Policy", "value": self.csp},
+                    {"key": "X-Content-Type-Options", "value": "nosniff"},
+                    {"key": "Referrer-Policy", "value": "no-referrer"}]}]})
             self.assertEqual((site / "public/index.html").read_bytes(), self.new["index.html"])
             static = site / "public"
             expected = {"index.html": self.new["index.html"],
@@ -178,7 +187,10 @@ class DeployTests(unittest.TestCase):
             return Response(b"", read_error=error)
         if self.fail_at == "immutable" and url.hostname == "candidate.vercel.app":
             raise HTTPError(request.full_url, 302, "SSO redirect", {}, None)
-        return Response(files[name])
+        csp = self.previous_csp if variant == "previous" else self.csp
+        if self.fail_at == "no_csp" and variant == "candidate":
+            csp = None
+        return Response(files[name], csp=csp)
 
     def deploy(self, tag, *extra):
         before = len(self.verifications)
@@ -206,6 +218,7 @@ class DeployTests(unittest.TestCase):
         self.calls.clear()
         self.prerelease = False
         # Same live tree at a newer release tag: no hard-coded previous-tag pin.
+        self.previous_csp = self.csp
         self.assertEqual(self.deploy("v9.99.1"), 0)
         self.assertFalse(any(c[0] == "vercel" for c in self.calls))
         receipt = self.assets[-1]
@@ -213,6 +226,62 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(receipt["dist_tree"], self.old_tree)
         self.assertEqual(receipt["deployment_id"], "dpl_previous")
         self.assertTrue(receipt["verified_at"])
+        # cas-7a33: the same tree served without the release's CSP still deploys.
+        self.calls.clear()
+        self.previous_csp = None
+        self.new = self.old
+        self.assertEqual(self.deploy("v9.99.1"), 0)
+        self.assertEqual([c[2] for c in self.calls if c[:2] == ["vercel", "promote"]], ["dpl_candidate"])
+        self.assertEqual(self.assets[-1]["status"], "deployed")
+        self.assertEqual(self.assets[-1]["csp"], self.csp)
+
+    def test_hosted_csp_names_each_team_tailnet_and_refuses_widening(self):
+        policy = dict(part.split(" ", 1) for part in hub.hosted_csp(["tailf5a734", "tail0b1c2d"]).split("; "))
+        # A hub may serve on any --tailscale-serve-port; CSP's :* port matches
+        # every port, the scheme default included.
+        both = "https://*.tail0b1c2d.ts.net:* https://*.tailf5a734.ts.net:*"
+        loopback = "http://127.0.0.1:*"
+        # blob: is for composer thumbnails, so images only, never media.
+        self.assertEqual(policy["img-src"], f"'self' data: blob: {both} {loopback}")
+        self.assertEqual(policy["media-src"], f"'self' {both} {loopback}")
+        self.assertEqual(policy["connect-src"], f"'self' {both} wss://*.tail0b1c2d.ts.net:* "
+                         f"wss://*.tailf5a734.ts.net:* {loopback} ws://127.0.0.1:* "
+                         "https://petra-stella-cloud.vercel.app https://api.github.com")
+        self.assertEqual(policy["frame-src"], f"'self' {both} {loopback}")
+        self.assertEqual(policy["script-src"], "'self'")
+        self.assertEqual(policy["worker-src"], "'self'")
+        self.assertNotRegex(" ".join(policy.values()), r"(^|\s)(https?|wss?):(\s|$)|(^|\s)\*(\s|$)")
+        for tailnets in ([], ["*"], ["tailf5a734.ts.net"], ["evil.com/x"], [""], [7], None):
+            with self.subTest(tailnets=tailnets), self.assertRaises(RuntimeError):
+                hub.hosted_csp(tailnets)
+        # A release whose candidate omits the policy is never promoted.
+        self.fail_at = "no_csp"
+        self.assertEqual(self.deploy("v9.99.2"), 1)
+        self.assertFalse(any(c[:2] == ["vercel", "promote"] for c in self.calls))
+
+    def test_hosted_csp_allows_any_tailnet_by_operator_decision(self):
+        # cas-5d51: Daniel, Nov 4 2026: "ts.net for now". Only the tailnet
+        # sources change; every other directive stays byte-identical.
+        def directives(policy):
+            return dict(part.split(" ", 1) for part in policy.split("; "))
+        named = directives(hub.hosted_csp(["tailf5a734"]))
+        wide = directives(hub.hosted_csp(["tailf5a734"], allow_any_tailnet=True))
+        widened = {
+            directive: sources.replace("https://*.tailf5a734.ts.net:*", "https://*.ts.net:*")
+            .replace("wss://*.tailf5a734.ts.net:*", "wss://*.ts.net:*")
+            for directive, sources in named.items()
+        }
+        self.assertEqual(wide, widened)
+        self.assertIn("https://*.ts.net:* wss://*.ts.net:*", wide["connect-src"])
+        # The repository's own release config carries the decision.
+        repo = SCRIPT.resolve().parents[1]
+        self.assertEqual(hub.release_csp(repo, "HEAD"), hub.hosted_csp(["tailf5a734"], allow_any_tailnet=True))
+        # *.ts.net is the only wildcard host; bare schemes and * stay refused.
+        hub.refuse_blanket_sources("img-src", ["https://*.ts.net:*", "wss://*.tailf5a734.ts.net:*", hub.LOOPBACK])
+        for source in ("https:", "wss:", "*", "https://*.net:*", "https://*:*", "https://*.com",
+                       "wss://*.ts.net.evil.com:*", "https://*.evil.com/ts.net"):
+            with self.subTest(source=source), self.assertRaises(RuntimeError):
+                hub.refuse_blanket_sources("img-src", ["'self'", source])
 
     def test_changed_dist_is_verified_before_alias_and_failed_live_check_restores_previous(self):
         self.fail_at = "immutable"

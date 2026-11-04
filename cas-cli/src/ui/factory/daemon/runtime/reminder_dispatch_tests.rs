@@ -271,6 +271,24 @@ async fn idle_supervisor_with_replayed_call_wakes(stalled: bool) {
     } else {
         dispatch(&mut daemon, true, false).1
     };
+    if stalled {
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let hold = cas.join(cas_store::project_hold::STATE_FILE);
+        std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+        std::fs::write(&hold, r#"{"active":{"reason":"Review plan","operator":"fixture","set_at":"2026-11-03T14:00:00Z"},"history":[]}"#).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "a hold cannot submit a model turn");
+        assert!(teams_messages(&daemon).is_empty(), "no native inbox copy while held");
+        let queue = open_prompt_queue_store(&cas).unwrap();
+        let held = queue.peek_all(10).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(queue.recipient_receipt(held[0].id, daemon.app.supervisor_name()).unwrap().is_none());
+        std::fs::remove_file(hold).unwrap();
+        // Release the fixture's scheduled retry without a wall-clock sleep.
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap()
+            .execute("UPDATE prompt_queue SET next_attempt_at=NULL WHERE id=?", [held[0].id]).unwrap();
+    }
     daemon.process_prompt_queue().await.unwrap();
     typed_once(&root, &mut daemon, &body).await;
 }

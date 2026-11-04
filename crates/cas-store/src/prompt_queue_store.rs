@@ -2714,6 +2714,11 @@ pub trait PromptQueueStore: Send + Sync {
     /// one transaction. Display labels never establish a cloud audience.
     fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
 
+    /// Authenticated, explicitly bound Commander replies in arrival order.
+    /// Includes consumed rows, so a restarted domain runner can finish its action.
+    /// `prompt` is the original button label, not the rendered acknowledgement.
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>>;
+
     /// Queue one Commander message with its hub-authenticated operator stamp
     /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
     /// verified, `Unattributed` otherwise — never from `source` or the
@@ -2864,6 +2869,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// that are at least `older_than_secs` old and never reached the
     /// supervisor (GH #894). Returned oldest first.
     ///
+    /// cas-2961: a same-session worker's direct message to the supervisor
+    /// counts too, including one filed as a supervisor digest, unless it is a
+    /// receipt, informational or quiet row that asked for no response.
+    ///
     /// A row counts when it was never transported, never acknowledged or seen,
     /// and is either still pending or terminated as an undelivered relay.
     /// Rows withdrawn because their premise expired, and rows that already
@@ -2882,6 +2891,20 @@ pub trait PromptQueueStore: Send + Sync {
     /// escalation re-checks each candidate under its write). A row that is
     /// gone is no longer undelivered.
     fn supervisor_relay_still_undelivered(&self, prompt_id: i64) -> Result<bool>;
+
+    /// cas-2961: same-session workers that `sender_agent_id` messaged at or
+    /// after `since` and that have not written to anyone since, by name.
+    fn unanswered_worker_messages(
+        &self,
+        factory_session: &str,
+        sender_agent_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<String>>;
+
+    /// cas-2961: return a still-unread supervisor digest row to ordinary
+    /// delivery, so the escalation that found it stranded wakes the
+    /// supervisor once with the whole message. Returns whether it changed.
+    fn release_stranded_supervisor_digest(&self, prompt_id: i64) -> Result<bool>;
 
     /// Relay-watchdog alerts of `factory_session` (cas-e829): for each alert
     /// row, the supervisor relay it is about and whether that relay's problem
@@ -5511,6 +5534,18 @@ fn alarm_needs_response_on_conn(conn: &Connection, prompt_id: i64) -> Result<boo
     )?)
 }
 
+/// The commit a worker's `tip: <sha>` return-contract line reports, lowercased,
+/// when it is 7 to 40 hex digits. Only an exact prefix of the parked anchor
+/// lets CAS file the ready as a repeat; anything else keeps the wake.
+fn reported_tip(prompt: &str) -> Option<String> {
+    prompt.lines().find_map(|line| {
+        let sha = line.trim().strip_prefix("tip:")?.split_whitespace().next()?;
+        let sha = sha.trim_end_matches([';', ',', '.']);
+        ((7..=40).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| sha.to_ascii_lowercase())
+    })
+}
+
 /// CAS-authored metadata only: request fields cannot choose this row kind.
 /// Preserve bodies and provenance while routing duplicate/routine events to
 /// the existing per-turn digest instead of another transport or body slot.
@@ -5640,7 +5675,14 @@ fn supervisor_delivery_kind(
                 let rows = stmt.query_map(params![worker, agent_id, attribute("task_id")], |row|
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                if rows.len() == 1 && let Some(head) = &rows[0].1 {
+                // cas-2961: only a ready reporting the parked tip itself
+                // repeats the parked delivery. One naming another tip, or none,
+                // may be new work: binding it to the parked anchor digested
+                // message 2868195 (PR #4200) and stranded it for 8 h.
+                if rows.len() == 1 && let Some(head) = &rows[0].1
+                    && head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit())
+                    && reported_tip(prompt).is_some_and(|tip| head.to_ascii_lowercase().starts_with(&tip))
+                {
                     boundary = Some((rows[0].0.clone(), head.clone()));
                 }
             }
@@ -7276,6 +7318,43 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(pending.is_some())
     }
 
+    fn unanswered_worker_messages(
+        &self,
+        factory_session: &str,
+        sender_agent_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        if !agents_table_exists(&conn)? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT w.name FROM prompt_queue q
+               JOIN agents w ON w.factory_session = q.factory_session AND w.role = 'worker'
+                AND (w.name = q.target OR w.id = q.target)
+              WHERE q.factory_session = ?1 AND q.origin_agent_id = ?2 AND q.created_at >= ?3
+                AND NOT EXISTS (SELECT 1 FROM prompt_queue r
+                    WHERE r.factory_session = q.factory_session AND r.origin_agent_id = w.id AND r.id > q.id)
+              ORDER BY w.name",
+        )?;
+        Ok(stmt
+            .query_map(params![factory_session, sender_agent_id, since.to_rfc3339()], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?)
+    }
+
+    fn release_stranded_supervisor_digest(&self, prompt_id: i64) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Ok(conn.execute(
+                "UPDATE prompt_queue SET kind = NULL
+                 WHERE id = ? AND kind = 'supervisor_digest' AND origin_kind = 'registered_agent'
+                   AND processed_at IS NULL AND transport_delivered_at IS NULL AND acked_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)",
+                [prompt_id],
+            )? > 0)
+        })
+    }
+
     fn undelivered_supervisor_lifecycle_relays(
         &self,
         factory_session: &str,
@@ -7299,12 +7378,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let stale_cutoff =
             (now - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
         let alias_slots = vec!["?"; aliases.len()].join(", ");
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        // cas-2961: a worker's direct message is escalated like a relay,
+        // including one CAS filed as a digest. Rows the sender marked as
+        // needing no response (receipt, informational, quiet) stay out.
+        let worker_rows = if agents_table_exists(&conn)? {
+            "OR (q.origin_kind = 'registered_agent'
+                 AND COALESCE(q.kind, '') NOT IN ('receipt', 'informational', 'notice_digest', 'worker_peer_copy')
+                 AND instr(q.prompt, '<cas-message-quiet/>') = 0
+                 AND EXISTS (SELECT 1 FROM agents w WHERE w.id = q.origin_agent_id
+                     AND w.role = 'worker' AND w.factory_session IS q.factory_session))"
+        } else {
+            ""
+        };
         let sql = format!(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.factory_session = ?
-               AND q.source LIKE 'lifecycle-wake:%'
-               {NOT_NOTICE_DIGEST_Q_SQL}
+               AND ((q.source LIKE 'lifecycle-wake:%' {NOT_NOTICE_DIGEST_Q_SQL}) {worker_rows})
                AND lower(q.target) IN ({alias_slots})
                AND (q.created_at <= ? OR q.highest_stage = 'abandoned')
                AND q.created_at >= ?
@@ -7333,7 +7424,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         values.push(Box::new(cutoff));
         values.push(Box::new(stale_cutoff));
         values.push(Box::new(limit as i64));
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(&sql)?;
         Ok(stmt
             .query_map(
@@ -9462,6 +9552,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(outcome)
     }
 
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT r.id, r.source, r.target,
+                    json_extract(r.attribution_json, '$.reply_text'),
+                    r.created_at, r.processed_at, r.summary, r.priority,
+                    r.acked_at, r.urgent, r.factory_session, r.origin_agent_id,
+                    r.origin_kind, r.operator_label, r.operator_device_id,
+                    r.operator_device_label, r.operator_scopes, r.operator_verified,
+                    r.recipient_device_id, r.kind, r.attachments
+             FROM prompt_queue r JOIN prompt_queue a ON a.id = ?1
+             WHERE a.target = 'operator' AND a.kind = 'ask' AND a.origin_kind = 'daemon'
+               AND r.factory_session = a.factory_session AND r.id > a.id
+               AND r.source LIKE 'commander:%' AND r.origin_kind = 'paired_device'
+               AND r.operator_verified = 1
+               AND json_extract(r.attribution_json, '$.in_reply_to') = a.id
+               AND json_type(r.attribution_json, '$.reply_text') = 'text'
+             ORDER BY r.id",
+        )?;
+        let rows = stmt.query_map(params![ask_id], Self::prompt_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     fn latest_verified_operator_message(
         &self,
         factory_session: &str,
@@ -10448,6 +10561,9 @@ impl SqlitePromptQueueStore {
             } else {
                 ""
             };
+            let project_hold_sql = if crate::project_hold::held_on_connection(&conn) {
+                crate::project_hold::inbox_exclusion_sql()
+            } else { String::new() };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
@@ -10553,6 +10669,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10600,6 +10717,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10642,6 +10760,11 @@ impl SqlitePromptQueueStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
             let mut prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            // A hold is a temporary policy wait, not evidence of surfacing.
+            // Filter before receipts, budget accounting or acknowledgement.
+            if crate::project_hold::held_on_connection(&tx) {
+                prompts.retain(|row| !crate::project_hold::is_action_relay(&row.prompt));
+            }
             if named_read {
                 for prompt in &mut prompts {
                     Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;
@@ -21891,12 +22014,29 @@ mod cas_bf890_notice_digest_tests {
         let director_id = store.enqueue_urgent_with_outcome("director", "lead-sup", &director_body,
             Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
         let ready = format!(
-            "READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
+            "READY TO MERGE\ntip: {}\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
+            "a".repeat(9),
             task.id
         );
         let ready_id = store
             .enqueue_worker_action_with_outcome(
                 "w", "lead-sup", &ready, "w", SESSION, None, None, false, &worker,
+            )
+            .unwrap()
+            .id();
+        // cas-2961: a ready that names no tip may be a new delivery; it keeps its wake.
+        let tipless = store
+            .enqueue_worker_action_with_outcome(
+                "w", "lead-sup", &ready.replace(&format!("tip: {}\n", "a".repeat(9)), ""), "w", SESSION, None, None, false, &worker,
+            )
+            .unwrap()
+            .id();
+        assert!(selected(&store).contains(&tipless), "a tipless ready keeps its wake");
+        // A tip too short to be a commit cannot prefix-match and silence it.
+        // As a newer ready from the same worker, it also carries the tipless one.
+        let garbage = store
+            .enqueue_worker_action_with_outcome(
+                "w", "lead-sup", &ready.replace(&"a".repeat(9), "aaa"), "w", SESSION, None, None, false, &worker,
             )
             .unwrap()
             .id();
@@ -21965,7 +22105,7 @@ mod cas_bf890_notice_digest_tests {
         };
         let mut selected_ids = selected(&store);
         selected_ids.sort_unstable();
-        assert_eq!(selected_ids, vec![first, fresh, blocker, verdict]);
+        assert_eq!(selected_ids, vec![first, garbage, fresh, blocker, verdict]);
         let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
         assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director_id, ready_id, duplicate]);
         let evidence = store

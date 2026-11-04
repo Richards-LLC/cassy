@@ -7,6 +7,403 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-04
+
+### Fixed — Worker spawn admission
+
+- **Choose free worker branch names** — Isolated MCP spawns reserve generated
+  names against local and origin factory refs before queueing work. Explicit
+  collisions give a clear refusal before task binding or worktree creation.
+- **Explain Codex account refusals** — Spawn errors name a missing default home,
+  a logged-out account or a mismatched configuration directory and retain the
+  account-selection diagnostics that explain why a named login was not chosen.
+
+### Fixed — Merge queue
+
+- **Concurrent deliveries no longer conflict on the changelog** — Was: every
+  delivery inserted its section at the top of `CHANGELOG.md`'s
+  `## [Unreleased]`, so GitHub's merge queue, which ignores the local
+  changelog merge driver, dequeued the second of any two queued pull requests
+  as conflicting. Now: each delivery writes its own `changelog.d/<task-id>.md`
+  fragment, the close gate credits that fragment (and points a direct
+  `CHANGELOG.md` entry at it), the release gate checks fragment format, and
+  `scripts/release.sh` folds the fragments into the version section and deletes
+  them.
+
+### Fixed — Worker replies reach an idle supervisor
+
+- **A worker's ready for new work wakes the supervisor** — Was: when a
+  worker's task was parked at a tip that had already landed, its next
+  `status: ready` was filed as a digest of that old delivery, even when it
+  named a new tip or none. Nothing woke the supervisor; one such reply sat
+  unread for 8 hours overnight. → Now: CAS treats a ready as a repeat only
+  when its `tip:` line names the parked commit itself (7 to 40 hex
+  characters). Every other ready wakes an idle supervisor with the whole
+  message.
+- **Unread worker messages raise an alarm** — Was: only Cassy's own task
+  relays were escalated when the supervisor never received them. → Now: a
+  worker's message to the supervisor still unread after about 10 minutes,
+  including one filed as a digest, gets one wake and one operator notice.
+  Receipts, informational and quiet messages, and bare acknowledgements, are
+  left alone.
+- **End-of-turn warning for an uncovered worker** — Was: the stop warning
+  appeared only when the supervisor had no pending reminder at all, so any
+  unrelated reminder silenced it. → Now: when a supervisor ends a turn after
+  messaging a worker that holds open work, and no event reminder covers that
+  worker or its task, the stop hook names the worker once. It never blocks.
+
+### Changed — Factory write roots
+
+- **Agents can write their Claude memory** — Each project's Claude Code
+  memory folder (`<claude dir>/projects/<project>/memory`, under the active
+  Claude config) is now a built-in
+  write root, like Downloads, so supervisors and workers keep auto-memory
+  without any configuration; the first write creates the folder. Transcripts
+  and other files beside it stay refused, and a symlinked project or `memory`
+  folder pointing elsewhere is not granted.
+
+### Changed — Hosted Commander tailnets
+
+- **Reach any Tailscale tailnet from hosted Commander** — Was: hosted
+  Commander could load media, sockets and pages only from the team tailnets
+  named in `hub-web/hosted-tailnets.json`, so a friend's or teammate's
+  tailnet was blocked until it was added. Now: by operator decision ("ts.net
+  for now", review after 2026-12-04), `allow_any_tailnet` admits any
+  `*.ts.net` machine; ordinary websites stay blocked, and setting the field to
+  false restores the named list.
+
+### Fixed — Factory message destinations
+
+- **Honor explicit message destinations** — `cas factory message` resolves the
+  selected session's store and queue tag independently of inherited factory
+  variables. Conflicting explicit project or store selectors refuse before
+  enqueueing; success reports the session stored with the message.
+
+### Fixed — Hotfix QA decisions
+
+- **Ask before reverting a failed QA walk** — A failed fast-lane walk now
+  sends one Commander question with Revert and Fix-forward choices. Revert
+  opens the existing revert PR; Fix-forward returns the task without one.
+  No answer within fifteen minutes defaults to Revert, including after a
+  service restart; repeated closes preserve the original question and deadline.
+
+### Fixed — Operator control of rule encoding
+
+- **Reserve rule encoding chores for the operator** — Agent and supervisor rule
+  writes no longer create implementation chores from enforceable tags. Their
+  replies name the operator command; operator writes still reuse one chore per
+  rule, and existing chores remain visible in the project backlog.
+
+### Fixed — Project holds
+
+- **Keep parked delivery checks active during a hold** — Operator task lists
+  and startup hide parked invitations while internal ownership, re-close and
+  recovery checks retain every delivery. READY TO MERGE generation stops during
+  the hold, so lifting it creates no stale alert backlog.
+
+### Fixed — Policy hygiene
+
+- **Expire superseded policy memories** — Explicit superseded tags and expiry
+  remove memories from session context, including pinned and AI-selected
+  entries. Updates persist their expiry while retaining the historical record.
+- **Report rule drift without changing policy** — Compare rule source with
+  generated harness files and an explicit peer snapshot, including status,
+  content, scope and Cloud sync settings.
+- **Keep stakeholder instructions with their evidence** — Attributed rules
+  retain verbatim words and scope; attributed hard rules need a review date.
+  Stakeholder constraint memories require an expiry. Ordinary rule updates retain
+  stored provenance; explicit attribution clearing records its resulting history.
+
+### Added — Rule traceability
+
+- **Keep rule-driven code tied to its reason** — Code and tests can cite a rule
+  with its verbatim scope. Worker close checks declared causal sites and cited
+  rule coverage; `cas rules refs <id>` lists tracked references for review.
+- **Ask for rule markers only for stakeholder rules** — Was: citing any rule,
+  such as a release-flow rule in a repair task, refused close until code carried
+  its marker, while a bulleted `- Rule-driven sites:` declaration went
+  unchecked. → Now: only stakeholder rules need markers, and bulleted or quoted
+  declarations in the brief or close receipt are checked; a malformed one
+  refuses with its line.
+- **List a changed rule's cited sites for cleanup** — Was: retiring or
+  narrowing a rule left its cited code and tests behind for someone to find. →
+  Now: retiring, superseding, clearing attribution on or changing the scope of a
+  rule files one linked cleanup chore listing each affected `path:line` and
+  recorded scope, as does an expired stakeholder `review_after`. Nothing is
+  deleted automatically.
+
+### Fixed — Model evaluation evidence
+
+- **Run-backed measurements** — Evaluation receipts now require matching machine-readable measurements in the run log. Both proof files stay inside the owning task artifacts directory, and missing prerequisite evidence explains how to re-record it.
+
+### Added — Model-owned plan boundaries
+
+- **Compact verifier guidance** — Boundary review now follows its installed
+  reference, keeping procedure out of the verifier prompt while preserving
+  blocking site reports and approved-plan exceptions. Plan-fit, rule-citation
+  and epic procedures also move to references to fit the verifier prompt budget.
+- **Reserve meaning for the model in a plan** — An optional plan boundary now
+  flags added literal collections, regexes and exact-string assertions in
+  reserved areas. The verifier names blocking interpretation code and checks
+  approved exceptions; plans without a boundary keep their current behavior.
+
+### Fixed — Worker startup guidance
+
+- **Preserve worker scope and startup headroom** — Restored the protected task,
+  scope and layer-boundary instructions while retaining plan-metric receipts;
+  shorter startup prose keeps the worker guidance within its byte budget.
+
+### Added — Epic governance
+
+- **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
+
+### Fixed — Shared stakeholder asks
+
+- **Name the supervisor who owns an ask** — MCP task creation and staffing check
+  the source before changing local work. Slack threads reuse existing claims;
+  GitHub issue and pull-request aliases share an advisory source claim across
+  independent task cards. Conflicts name the owner, task and source. A deliberate
+  second GitHub task needs a recorded supervisor reason; source claims release
+  when the work ends, even while that supervisor stays online.
+
+### Fixed — Commander mirror
+
+- **Stop posting a supervisor answer twice on long sessions** — Was: once a
+  long Claude transcript outgrew the 4 MiB window the mirror reads, a turn
+  whose first message fell outside it got a new key from its next message and
+  appeared in Commander again minutes later. Now: the mirror reads from a turn
+  boundary, so a turn keeps the key it was first mirrored under, and a very
+  long newest turn is read back to its first message.
+
+### Fixed — Verification
+
+- **Keep approved deliveries moving beside sibling merges** — Was: a target
+  advance discarded a pre-merge approval, and a fast-lane fix could wait for the
+  batch verdict. → Now: one shared reviewed-file rule preserves approvals across
+  unrelated siblings and append-only/generated updates, while changed reviewed
+  content requires review. Eligible hotfixes close on their own pre-merge PASS
+  and trusted post-merge receipt; ineligible fixes retain normal batch gates.
+  Timeout and missing-approval messages name supervisor recovery commands.
+
+- **Review before publishing factory deliveries** — Was: required verification
+  ran after a merge published. → Now: the same verifier reviews an immutable
+  candidate first; PASS publishes its exact tree and closes with that approval,
+  while FAIL or an unresolved verdict holds only that delivery. Tier zero and
+  batch tier one exemptions stay unchanged. An unconfirmed push retains the
+  source and restores its own local merge without discarding operator edits.
+
+- **Compare deliveries with the epic's plan** — Was: a narrower task card could
+  pass while planned fields or outcome targets were missed. → Now: verifiers
+  report `PLAN-FIT`, name each omission or missed target, reject known misses
+  and request a supervisor decision about scope or an authorized plan revision.
+
+- **Keep verdicts when a sibling lands on the epic** — Was: a merged
+  delivery's verification bound the supervisor checkout's HEAD as delivered
+  work, so the first unrelated merge into the epic refused the finished
+  verdict as "delivered commit(s) no longer reachable". Now: only the
+  delivery is bound; unrelated merges keep the verdict, and a later change to
+  a delivered file still asks for a fresh review.
+
+### Fixed — Session handoffs
+
+- **Show newer Slack context before a saved handoff** — Was: startup could
+  resume an older thread while missing later posts in its channel. → Now:
+  startup reads the handoff's Slack references through Violet and lists newer
+  human posts with author names above the handoff. Reads and excerpts are
+  capped; unavailable or incomplete checks leave a short notice and startup
+  continues.
+
+### Fixed — Factory plan outcomes
+
+- **Keep missed plan targets out of merges** — Supervisor instructions now require the plan's measured target, hold only dependent work when it is missed, and keep independent deliveries shipping. Briefs carry the plan section and metric through worker close; characterization protects only behaviour the plan keeps.
+
+### Added — Operator project holds
+
+- **Stop dispatch and merge invitations for a project** — Was: Ready tasks and
+  merge prompts stayed actionable during an operator's full stop. → Now: Only
+  the operator can set or lift a project hold, with a reason and an audit of who
+  acted and when. Startup leads with the hold, action lists and relays wait,
+  and worker spawning and merges refuse until the operator lifts it.
+
+### Added — Measured phase outcomes
+
+- **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
+
+### Fixed — Rule version history
+
+- **Snapshot the rule saved by each change** — Was: an update's version stored
+  the previous wording. → Now: each new lifecycle version records the persisted
+  result in the same transaction. Restoring without a version selects the previous
+  lifecycle state, so deleting then restoring still reactivates the rule. Existing
+  history rows are left unchanged; the first edit or delete after an upgrade
+  captures any missing live state as a new baseline version before the change.
+
+### Fixed — Phase dependency gates
+
+- **Sequential phase work stays free** — A dependency between a phase's children no longer holds those children against their own phase's unmet outcome. External prerequisite phases keep their measured gates.
+
+### Added — Model evaluation proof
+
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
+
+### Fixed — Release-batch closes after request_changes
+
+- **Close a merged delivery that went through request_changes** — A release
+  verdict listing such a delivery answered "Keeps its own review", and its
+  close, even with a supervisor override, kept waiting for batch evidence.
+  The verdict now covers the merged delivery, and the task closes with the
+  merge as its commit receipt. A supervisor override with a reason waives
+  deferred batch evidence and records it on the task. "Keeps its own review"
+  now says which review each delivery waits on and how to satisfy it.
+
+### Fixed — Concurrent hotfix PRs
+
+- **Start new work beside an earlier PR** — A worker whose branch still holds
+  an earlier PR, open or squash-merged, now starts a fresh task on its own
+  `factory/<worker>-<task>` branch from the target instead of refusing, and
+  assignment no longer calls that worker stale. Each hotfix gets its own PR
+  at once; resumed tasks still refuse work they cannot claim, and workers
+  still cannot push other workers' branches.
+
+### Fixed — Parked delivery conflict repair
+
+- **Fix your own merge conflict without a supervisor round-trip** — A parked
+  delivery the merge queue dropped for a conflict, or whose target moved into
+  a conflict, refused its own worker's start until the supervisor ran
+  request_changes. Start now checks the parked tip against the current target
+  and lets the assigned worker resume when it truly conflicts; a clean park
+  still waits for review. Merging the target in keeps earlier test receipts
+  when the resolution touches only CHANGELOG.md or generated hub-web files.
+  Any other conflicted file voids them, even one resolved by taking a side
+  whole, and so does any commit of the delivery's own after the receipt,
+  including after it has merged. Only the target as published on origin
+  counts as already-proven work; a moved local target branch no longer
+  hides an unpublished commit.
+
+### Fixed — Commander supervisor answers
+
+- **Mirror the supervisor's answer, not its progress line** — When a Claude
+  supervisor narrated a step before running tools, Commander received that
+  progress line as the turn's answer and the real answer never arrived. The
+  mirror now waits for the turn's final text. A supervisor whose transcript
+  cannot be found is named in a warning instead of being skipped silently.
+
+### Added — hotfix fast lane
+
+- **Ship small frontend hotfixes on unit tests and typecheck** — A project
+  that opts in with `[fast_lane]` merges an eligible delivery (inside the
+  configured paths, outside the deny list, at most 10 files and 300 lines,
+  Tier 1, a bug, finding or `hotfix` task) once its named merge checks pass.
+  Hermetic e2e, the production build and the journey walk become a
+  post-merge receipt due within 30 minutes that blocks close. A failed check
+  is rerun once, a failure the hotfix caused opens a revert PR, and an
+  ineligible delivery is refused from the lane with the reason recorded.
+  Lane state is recorded only by Cassy, so a task note cannot put a delivery
+  on the lane, and a check whose result on the previous commit is unknown
+  counts as caused by the hotfix. See `docs/qa/fast-lane.md`.
+
+### Fixed — Codex worker recycle and context reset
+
+- **Keep each worker's own launch recipe** — The daemon that receives every
+  agent's session start no longer stamps its own harness, account, model and
+  effort on another worker's row, which had recorded Codex workers as Claude
+  on a Claude account. Recycling a row already damaged this way relaunches on
+  Codex without the Claude account, and clear_context recycles it instead of
+  searching Claude project folders.
+
+### Fixed — QA evidence from deployments
+
+- **Close user-facing work with evidence from a deployment** — The QA
+  evidence gate now accepts per-deployment origin patterns such as
+  `https://<project>-*-<team>.vercel.app` in `qa.deployed_origins`, so
+  projects with no local build that can sign in can close from preview or
+  production walks. Its refusals now name the current setting and the
+  `cas config set qa.deployed_origins` command, rather than leaving a
+  supervisor override as the only route.
+
+### Fixed — Commander messages to the supervisor
+
+- **An erased pane draft no longer holds Commander messages** — Typing in the
+  supervisor pane and then erasing it with Backspace now counts as an empty
+  composer, so an operator's Commander message reaches an idle supervisor at
+  once instead of waiting for the next typed prompt (one measured case: 107 s).
+- **A held message says why** — While a real unsent pane draft holds a
+  Commander message, Commander labels it "Held: your pane draft is unsent" and
+  the supervisor pane border shows that a Commander message is waiting.
+- **Send order across Commander and the pane** — When a typed pane prompt
+  starts the turn, Commander messages sent before it are named as earlier and
+  listed oldest first, so they are answered first.
+
+### Fixed — Commander work events
+
+- **Drop work-event answers for disconnected clients** — Was: a finished
+  work-event page or detail waited in the daemon until some Commander client
+  reconnected. Now: an answer whose client has gone is dropped on the next
+  loop pass, and a reconnecting client asks again.
+
+### Fixed — Usage-limit notices
+
+- **A repeated usage-limit report repeats the original notice** — Was: when
+  the factory re-reported a worker's usage limit, for example after a daemon
+  restart, it read provider usage again and rebuilt the text, so the reset
+  countdown and account detail could differ from the notice the supervisor
+  already had. → Now: the stored notice comes back unchanged, with no second
+  provider usage read. Rows left by the removed automatic account switch are
+  still re-described under the report-only policy, never replayed.
+- **Removed dead worker resume code** — Was: the worker spawn path still
+  carried a session-resume option from the removed automatic switch, though
+  every caller passed none. → Now: the option and its launch rewrite are
+  gone; worker startup briefs are unchanged.
+
+### Fixed — Write-root guard
+
+- **Allow read-only scripts that mention the write-roots key** — Was: a
+  read-only script that named `factory.write_roots` in a string and used an
+  unrelated `set(...)` was refused as operator-only. → Now: `set` written as
+  a function call no longer counts as the config verb. Config writes are read
+  with the CLI parser, so options and their values (`--store here`) cannot
+  hide the key, and escaped, variable-held and wrapped forms stay refused.
+
+### Fixed — Worker isolation check
+
+- **Accept a detached QA worktree** — Was: `coordination my_context` called an
+  independent QA worker's own linked worktree, detached at its bound commit, a
+  shared trunk and asked for a respawn. → Now: a detached HEAD in a dedicated
+  linked worktree reports an OK binding; the shared checkout, detached or on
+  trunk, and plain directories inside it still raise the misbinding alarm.
+
+### Security — Hosted Commander
+
+- **Content-Security-Policy on hub.petrastella.io** — Hosted Commander now
+  sends a CSP. Images, media, live connections and visual pages may come only
+  from the team's Tailscale tailnets listed in `hub-web/hosted-tailnets.json`
+  or a loopback hub, with no blanket `https:` source. Composer image previews
+  (`blob:`), the pairing cloud and the GitHub release check stay allowed.
+  Scripts, styles and workers stay same-origin. The release deploy redeploys when only that list changes and
+  verifies that the live site serves the policy before keeping the deployment.
+- **Hubs on any serve port, and no referrer** — The hosted policy admits team
+  tailnet hubs on any port (`:*`), so a hub started with a non-default
+  `--tailscale-serve-port` keeps its health check, sockets, media and visual
+  pages. Hosted Commander also sends `Referrer-Policy: no-referrer`, as
+  hub-served Commander does.
+
+### Fixed — Commander worker timeline on a phone
+
+- **Worker name and terminal button line up** — In a worker's timeline at
+  390 px, the worker's name in the terminal note no longer breaks at its
+  hyphen, and the "Open the supervisor's raw output" button now lines up with
+  the note's text instead of sitting 8 px to its left.
+
+### Added
+
+### Fixed — Release report counts
+
+- **Stop counting upgrade notes as changes** — Was: bullets under `### Upgrade
+  notes` counted as shipped changes, with titles cut from their sentences. →
+  Now: upgrade, migration and operator-guidance notes stay in the report prose
+  but are left out of the change count and map, and the counting note names
+  them. v3.84.0 now counts 13 changes: 8 added, 3 changed and 2 fixed.
+
 ### Fixed — Commander supervisor startup
 
 - **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
@@ -40,10 +437,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Steady Most recent session marker** — Each sibling conversation reserves
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
+- **A proper confirm sheet for slash commands** — Was: confirming `/finish`,
+  `/exit` or `/clear` showed Cancel and the command as full-width stacked rows,
+  and the keyboard could not move between them. → Now: the two actions are
+  content-width and right-aligned, with Cancel first and the command last, and
+  stack only on a phone. Arrows and Tab move between them, Enter or Space
+  chooses, Esc returns to the composer, and Cancel starts focused so a stray
+  Enter never ends a session.
+
+### Fixed — Reminders to self
+
+- **Accept the documented `target=self`** — `coordination action=remind
+  target=self` now reminds the caller, as the parameter docs describe, instead
+  of failing with "No active agent found with name or ID 'self'".
 
 ### Added — Commander account usage
 
 - **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.
+
+### Fixed — Peer artifact fetch
+
+- **Scoped fetch instructions** — Peer artifact attachments now carry their owning task and sharing project and print a working fetch command. Older pointers ask the sender for the task or a fresh share.
+
+### Fixed — Merge queue notifications
+
+- **Route ejections to the delivery owner once** — Merge queue ejections use the
+  worker's recorded factory session for supervisor and worker notices. Watchers
+  leave deliveries from another machine to their owning daemon, and repeated
+  snapshots keep the same occurrence after a poll or restart.
 
 ## [3.100.0] - 2026-11-03
 

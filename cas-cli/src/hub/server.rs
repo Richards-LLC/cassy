@@ -3708,7 +3708,9 @@ fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8
     };
     auth.as_ref().is_some_and(|(_, context)| {
         context.has(Scope::PaneRead)
-            && (context.device_id != message.device_id || message.state == "delivered")
+            && (context.device_id != message.device_id
+                || message.state == "delivered"
+                || message.pane_hold.is_some())
     })
 }
 
@@ -4956,6 +4958,7 @@ mod machine_protocol_tests {
                 target: "supervisor".into(),
                 text: "Question".into(),
                 state: "sending".into(),
+                pane_hold: None,
                 stamped: true,
                 reply_to: None,
                 device_id: "phone".into(),
@@ -4970,7 +4973,11 @@ mod machine_protocol_tests {
         let mut delivered: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         delivered["OperatorMessage"]["state"] = serde_json::json!("delivered");
         let delivered = serde_json::to_vec(&delivered).unwrap();
-        assert!(operator_message_allowed(&Some((store.clone(), sender)), &delivered));
+        assert!(operator_message_allowed(&Some((store.clone(), sender.clone())), &delivered));
+        // cas-062b: the sender also learns its turn is held behind its pane draft.
+        let mut held: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        held["OperatorMessage"]["pane_hold"] = serde_json::json!("Held: your pane draft is unsent");
+        assert!(operator_message_allowed(&Some((store.clone(), sender)), &serde_json::to_vec(&held).unwrap()));
         let no_read = AuthContext::test_fixture("phone", "https://controller.example", Default::default());
         assert!(!operator_message_allowed(&Some((store, no_read)), &delivered));
 

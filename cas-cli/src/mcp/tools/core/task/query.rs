@@ -942,6 +942,12 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         use cas_types::TaskSortOptions;
 
+        let project_hold = cas_store::project_hold::notice(&self.cas_root);
+        if req.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("awaiting_merge"))
+            && let Some(ref hold) = project_hold
+        {
+            return Ok(Self::success(hold.clone()));
+        }
         let scope = req.scope.trim().to_ascii_lowercase();
         if scope == "global" {
             return Err(Self::error(
@@ -973,6 +979,9 @@ impl CasCore {
         let suppressed_ids: std::collections::BTreeSet<_> =
             suppressed.iter().map(|task| task.id.clone()).collect();
         filtered.extend(suppressed);
+        if project_hold.is_some() {
+            filtered.retain(|task| task.status != TaskStatus::AwaitingMerge);
+        }
         let mut exclusions = Vec::new();
         if let Some(ref epic_id) = req.epic {
             let subtasks = task_store.get_subtasks(epic_id).map_err(|e| McpError {
@@ -1066,6 +1075,9 @@ impl CasCore {
         if filtered.is_empty() {
             let mut output = format!("No tasks found matching filters.\n{scope_note}.");
             append_list_filter_report(&mut output, &exclusions, hidden_quarantined, hidden_foreign);
+            if let Some(hold) = project_hold {
+                output = format!("{hold}\n\n{output}");
+            }
             return Ok(Self::success(output));
         }
 
@@ -1107,6 +1119,9 @@ impl CasCore {
         }
         append_list_filter_report(&mut output, &exclusions, hidden_quarantined, hidden_foreign);
 
+        if let Some(hold) = project_hold {
+            output = format!("{hold}\n\n{output}");
+        }
         Ok(Self::success(output))
     }
 }

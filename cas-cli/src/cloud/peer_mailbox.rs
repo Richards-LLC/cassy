@@ -449,7 +449,7 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
             repo = message.project_id,
         )
     };
-    let attachments = render_attachments(&attachments);
+    let attachments = render_attachments(&attachments, &message.project_id);
     format!(
         "{envelope}\n{origin}\nReply with coordination action=message \
          target={name}@{machine} summary=\"<one line>\" message=\"<reply>\" \
@@ -467,6 +467,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
 pub enum PeerAttachment {
     Artifact {
         id: String,
+        /// Owning task for bounded fetch; absent on older v1 pointers.
+        task_id: Option<String>,
         name: Option<String>,
         sha256: Option<String>,
         /// The durable cloud location, readable from any machine.
@@ -491,9 +493,12 @@ impl PeerAttachment {
             line.push_str(&format!(" {key}=\"{}\"", escape(value)));
         };
         match self {
-            Self::Artifact { id, name, sha256, url } => {
+            Self::Artifact { id, task_id, name, sha256, url } => {
                 attribute("kind", "artifact");
                 attribute("id", id);
+                if let Some(task_id) = task_id {
+                    attribute("task_id", task_id);
+                }
                 if let Some(name) = name {
                     attribute("name", name);
                 }
@@ -536,6 +541,7 @@ impl PeerAttachment {
         match take("kind")?.as_str() {
             "artifact" => Some(Self::Artifact {
                 id: take("id")?,
+                task_id: take("task_id"),
                 name: take("name"),
                 sha256: take("sha256"),
                 url: take("url"),
@@ -564,6 +570,7 @@ pub fn resolve_attachment(cas_root: &Path, raw: &str) -> Result<PeerAttachment, 
     {
         return Ok(PeerAttachment::Artifact {
             id: artifact.id,
+            task_id: Some(artifact.task_id),
             name: Some(artifact.name),
             sha256: Some(artifact.sha256),
             url: artifact.cloud_url,
@@ -645,16 +652,23 @@ pub fn split_attachments(mut body: &str) -> (Vec<PeerAttachment>, &str) {
     (attachments, body)
 }
 
-fn render_attachments(attachments: &[PeerAttachment]) -> String {
+fn render_attachments(attachments: &[PeerAttachment], project_id: &str) -> String {
     let mut out = String::new();
     for attachment in attachments {
         match attachment {
-            PeerAttachment::Artifact { id, name, sha256, url } => out.push_str(&format!(
-                "Attachment: published artifact {id}{}{}{}.\n",
-                name.as_deref().map(|name| format!(" ({name})")).unwrap_or_default(),
-                sha256.as_deref().map(|sha| format!(", sha256 {sha}")).unwrap_or_default(),
-                url.as_deref().map(|url| format!(", at {url}")).unwrap_or_default(),
-            )),
+            PeerAttachment::Artifact { id, task_id, name, sha256, url } => {
+                out.push_str(&format!(
+                    "Attachment: published artifact {id}{}{}{}, shared from project {project_id}.\n",
+                    name.as_deref().map(|name| format!(" ({name})")).unwrap_or_default(),
+                    sha256.as_deref().map(|sha| format!(", sha256 {sha}")).unwrap_or_default(),
+                    url.as_deref().map(|url| format!(", at {url}")).unwrap_or_default(),
+                ));
+                if let Some(task_id) = task_id {
+                    out.push_str(&format!("Fetch: artifact action=fetch task_id={task_id} id={id}\n"));
+                } else {
+                    out.push_str("Owning task unavailable in this older pointer; ask the sender to re-share the artifact or provide its task_id.\n");
+                }
+            }
             PeerAttachment::File { path, relative, commit, machine } => {
                 let at = commit.as_deref().map(|commit| format!(" at commit {commit}")).unwrap_or_default();
                 let access = if Path::new(path).is_file() {

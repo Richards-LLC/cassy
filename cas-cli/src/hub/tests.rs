@@ -3230,6 +3230,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
             target: "supervisor".into(),
             text: "private prompt".into(),
             state: "acknowledged".into(),
+            pane_hold: None,
             stamped: true,
             reply_to: None,
             device_id: "phone-7".into(),

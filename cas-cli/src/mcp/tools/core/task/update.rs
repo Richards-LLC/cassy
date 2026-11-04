@@ -525,10 +525,20 @@ fn clean_idle_assignment_note(
     let tip = git.ref_sha("HEAD").ok()?;
     let target = git.ref_sha(target_branch).ok()?;
     if !git.is_ancestor(&tip, &target) {
-        return None;
+        // cas-dd0e: the branch still holds an earlier PR (open, or squash-
+        // merged so its commits never reach the target). This fresh task
+        // starts on its own branch beside it, so staleness is not a reason
+        // to make it wait.
+        return Some(format!(
+            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch holds work \
+             outside {target_branch}. `task start` will leave it unchanged and cut \
+             factory/{name}-{task_id} from the target.",
+            name = worker.name,
+            task_id = task.id,
+        ));
     }
-    // cas-ff6c: start refuses another task's per-task branch rather than
-    // resetting it, so promise the cut start will ask for.
+    // cas-ff6c/cas-dd0e: start never resets another task's per-task branch;
+    // a fresh task gets its own branch beside it.
     if let Some(owner_task) =
         crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch).filter(|owner_task| {
             *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
@@ -536,8 +546,8 @@ fn clean_idle_assignment_note(
     {
         return Some(format!(
             "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \
-             {target_branch}. That branch belongs to {owner_task}, so `task start` will ask the \
-             worker to cut factory/{name}-{task_id} from the target first.",
+             {target_branch}. That branch belongs to {owner_task}, so `task start` will leave it \
+             unchanged and cut factory/{name}-{task_id} from the target.",
             name = worker.name,
             task_id = task.id,
         ));
@@ -1777,6 +1787,19 @@ impl CasCore {
 
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
+        let _source_admission = if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty())
+            || changes.contains(&"external_ref")
+        {
+            let admission = self.task_source_admission_for(&task,
+                supervisor_override.then_some(proof_scope_fix_reason.unwrap_or(""))).await?;
+            if !admission.notice.is_empty() { warnings.push(admission.notice.clone()); }
+            if let Some(grant) = &admission.override_grant {
+                task.deliverables.source_claim_override = Some(grant.clone());
+                task.notes.push_str(&admission.notice);
+                changes.push("source_claim_override");
+            }
+            Some(admission)
+        } else { None };
         let mut assignee_override_audit = None;
 
         if let Some(ref assignee_raw) = req.assignee {
@@ -1992,6 +2015,21 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            if new_status == TaskStatus::InProgress && task.status != TaskStatus::InProgress {
+                crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                if let Some(epic) = req.epic.as_deref().filter(|epic| !epic.trim().is_empty()) {
+                    crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, epic)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                }
+            }
+            if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+                && new_status != task.status
+            {
+                crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                    new_status != TaskStatus::InProgress)
+                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            }
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
@@ -2535,11 +2573,24 @@ impl CasCore {
         };
         // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
         // pushed below matches the persisted row.
+        // Parent/dependency edits above can change which phase this transition
+        // depends on. Re-evaluate against the final graph before persisting status.
+        if let Some((_, status)) = lifecycle_status_change
+            && matches!(status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
+        {
+            crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
+                status != TaskStatus::InProgress)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        crate::epic_design_review::observe(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task updated, but epic design review trigger could not be evaluated: {error}")))?;
 
         if changes.contains(&"labels") {
             crate::quality_ledger::bug_labelled(

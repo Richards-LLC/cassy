@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  phone-worker-timeline-note:
+    title: The phone worker timeline keeps the worker's name whole and its raw-output button on the note's text edge
+    tasks: [cas-c74f]
+    invariants: [HUB-J25-PHONE-TIMELINE-TEXT]
+    journeys: [HUB-J25]
   compatible-claude-and-visible-api-errors:
     title: Native Claude wins over stale PATH installs and API failures reach the first Commander reply
     tasks: [cas-d8e0]
@@ -31,6 +36,11 @@ bug_families:
     tasks: [cas-2453]
     invariants: [HUB-J26-WORKER-BRIEF-PRIVATE]
     journeys: [HUB-J26]
+  commander-pane-draft-hold:
+    title: An erased pane draft never holds a Commander message, a live draft says so, and earlier Commander sends come before a typed prompt
+    tasks: [cas-062b]
+    invariants: [HUB-J5-DRAFT-HOLD]
+    journeys: [HUB-J5]
   supervisor-pty-sender-gate:
     title: Only verified operator input bypasses the busy supervisor turn gate
     tasks: [cas-aa152]
@@ -207,6 +217,10 @@ invariants:
   HUB-J5-DIALOG-HOLD:
     statement: Commander sends no body or submit into native confirmation footers; assistant dialog prose above the composer does not hold input and retained words submit once after readiness returns.
     check: Run supervisor_single_turn_tests::non_claude_commander_send_waits_through_dialogs and cas_bf20_verified_commander_send_wakes_an_idle_supervisor through the real queue and private PTY.
+  HUB-J5-DRAFT-HOLD:
+    statement: 'A Commander send to an idle supervisor is typed at once unless the operator''s own pane draft is live; a draft erased with Backspace is not live. While a live draft holds it, Commander labels it "Held: your pane draft is unsent" and the supervisor pane border says a Commander message is waiting. Commander sends made before a typed pane prompt are named as earlier and listed oldest first in that turn.'
+    check: 'Run supervisor_single_turn_tests::cas_062b_commander_send_waits_only_for_a_live_pane_draft, pane::tests::cases::composer_erased_with_backspace_is_clean_cas_062b, factory_inbox_surfacing::cas_062b_commander_messages_sent_before_a_typed_prompt_come_first, prompt_queue_jobs::tests::cas_062b_a_turn_parked_behind_the_pane_draft_publishes_its_hold and the conversation-view receipt test. On a candidate, type and erase a pane draft, then send from Commander and compare created_at with transport_delivered_at.'
+    bug: {task: cas-062b}
   HUB-J5-SENDER-TURN-GATE:
     statement: Only verified paired-device operator input bypasses a busy Codex supervisor turn gate; ordinary origins retain wake eligibility during tools and idle states, independent of body size, and gated messages remain explicitly readable.
     check: Run supervisor_single_turn_tests::cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle through real queue dispatch and PTY capture with unresolved native tool calls and completed turns. Walk paired Commander sends and unverified ingress during a running native tool on the epic candidate.
@@ -239,6 +253,10 @@ invariants:
     statement: Refusals of one command share one conversation row that names the reason and the attempts, the row clears once that command is accepted, a command error raises no Attention event, and an error after the daemon's receipt stays uncertain rather than refused.
     check: Run the refused-row case in supervisor-commands.test.ts and the command-error case in attention.test.ts, then on a disposable real harness resend /usage during a turn and read one row with the attempt count and no new Attention event.
     bug: {task: cas-d959}
+  HUB-J27-CONFIRM-SHEET:
+    statement: A confirmed command's sheet shows content-width Cancel then the command, right-aligned on desktop and stacked only on a phone; Cancel starts focused, arrows and Tab rove inside it, Enter or Space chooses, and Esc returns to the composer without sending.
+    check: Run the keyboard confirmation case in supervisor-commands.test.ts, then the HUB-J27 Finish-cancel stage at 1440 and 390 px, which reads the action boxes and the focus path, and confirm Exit by ArrowRight and Enter.
+    bug: {task: cas-c009}
   HUB-J27-OBSERVED-OUTCOME:
     statement: Submission is distinct from observed native execution, a model chooser is distinct from selection, and uncertain mutations never replay automatically.
     check: Run the receipt controller tests and HUB-J27; verify native Claude/Codex outcomes against the supervisor-built candidate, correlate Finish with its own completed turn and Exit with the authenticated ended receipt, and inspect durable audit rows.
@@ -591,6 +609,10 @@ invariants:
     statement: An unpinned conversation measures its selected supervisor's staffed active epic before unrelated project history within the existing bounded status budget, including after the last active worker parks.
     check: Run focused_epic_tests::cas_9d2a_unpinned_status_projects_staffed_epic_before_historical_epics through the native HTTP status endpoint with 297 epics, 35 current delivery anchors and no focus; require the current epic's first Git read and merged verdicts both during active work and after parking (cas-c5fa), one batched ancestry pass per release, and merged/total, merges/hour and last merge on the first refresh. Compare the native Team header with status and task-store/Git evidence on the same candidate. This ancestry-based display never substitutes for close-gate content and lost-work proofs.
     bug: {task: cas-9d2a}
+  HUB-J25-PHONE-TIMELINE-TEXT:
+    statement: 'In a worker timeline, the worker''s name in the terminal note reads on one line and the raw-output button''s edge meets the note''s text, at 1280 and 390 px.'
+    check: 'Run the HUB-J25 worker timeline parts in whole-picture.journey.ts; the open stage measures the name''s line count and the button-to-text offset.'
+    bug: {task: cas-c74f}
   HUB-J25-GOAL:
     statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
       follow one worker's live timeline from Tasks & progress, without a terminal
@@ -1080,6 +1102,7 @@ journeys:
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE
+  - HUB-J5-DRAFT-HOLD
   - HUB-J5-LONG-CODEX-ROLLOUT
   - HUB-J5-QUIET-RECEIPT-POLL
   - HUB-J12-SERVE-OWNERSHIP
@@ -2443,6 +2466,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-J25-PHONE-TIMELINE-TEXT
   - HUB-J25-TYPED-TOOL-EVIDENCE
   - HUB-J25-LIVE-PHASE
   traffic:
@@ -2540,7 +2564,7 @@ journeys:
   - Busy prompts and operator drafts refuse injection.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-REFUSAL-ROW]
+  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

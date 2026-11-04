@@ -243,7 +243,6 @@ impl SqliteEventStore {
         .map_err(Into::into)
     }
 
-    /// Parse a row into an Event
     /// Newest events of `event_types` authored by `session_ids`, at or
     /// before `until` and at or after `floor`, newest first (cas-8f88 work
     /// events). `floor` bounds the scan through `idx_events_created`; the
@@ -293,6 +292,7 @@ impl SqliteEventStore {
         Ok(events)
     }
 
+    /// Parse a row into an Event
     fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         let event_type_str: String = row.get("event_type")?;
         let entity_type_str: String = row.get("entity_type")?;

@@ -414,6 +414,28 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         panic!("peer message lost its artifact pointer");
     };
     assert_eq!(attached_id, id);
+    let message = serde_json::from_value(serde_json::json!({
+        "id": "peer-proof", "project_id": "github.com/source/blue",
+        "recipient_agent_id": "recipient", "sender_agent_id": "source",
+        "sender_name": "peer", "body": sent, "created_at": "2026-11-03T12:00:00Z",
+        "scope": "user"
+    })).unwrap();
+    let prompt = cas::cloud::peer_mailbox::render_prompt(&message);
+    // pin: the attachment must identify the sharing project for cross-project recipients.
+    assert!(prompt.contains("shared from project github.com/source/blue"), "{prompt}");
+    let fetch_args = prompt.lines()
+        .find_map(|line| line.strip_prefix("Fetch: artifact "))
+        .expect("peer artifact must advertise a usable fetch command");
+    let mut advertised_fetch = req("fetch");
+    for arg in fetch_args.split_whitespace() {
+        match arg.split_once('=') {
+            Some(("task_id", value)) => advertised_fetch.task_id = Some(value.into()),
+            Some(("id", value)) => advertised_fetch.id = Some(value.into()),
+            _ => {}
+        }
+    }
+    assert_eq!(advertised_fetch.task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(advertised_fetch.id.as_deref(), Some(id));
     let synced = open_task_store(&peer.path().join(".cas"))
         .unwrap()
         .get(&task.id)
@@ -666,9 +688,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             .get(&task.id)
             .is_err()
     );
-    let mut foreign_fetch = req("fetch");
-    foreign_fetch.task_id = Some(task.id.clone());
-    foreign_fetch.id = Some(attached_id.clone());
+    let foreign_fetch = advertised_fetch;
     let fetched = extract_text(
         foreign_service
             .artifact(Parameters(foreign_fetch.clone()))

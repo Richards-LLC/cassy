@@ -7,6 +7,18 @@ use crate::mcp::tools::types::defaults::{
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RuleCreateRequest {
+    /// Name of the stakeholder whose instruction this rule represents.
+    #[serde(default)]
+    pub stakeholder: Option<String>,
+    /// Stakeholder's words, preserved verbatim (required with attribution).
+    #[serde(default)]
+    pub stakeholder_quote: Option<String>,
+    /// Scope of that instruction, separate from the interpreted rule.
+    #[serde(default)]
+    pub stakeholder_scope: Option<String>,
+    /// Review deadline (RFC3339); required for attributed hard rules.
+    #[serde(default)]
+    pub review_after: Option<String>,
     /// Rule content
     #[schemars(description = "The rule content/instruction")]
     pub content: String,

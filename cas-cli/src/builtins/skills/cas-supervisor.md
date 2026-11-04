@@ -15,7 +15,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate writes except small status/config updates; read-only Q&A is allowed.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope.** Clear reviews, proof gaps and merges before noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
-- **Merge once ready.** On `READY TO MERGE`, a task in `awaiting_merge`, or a worker's `status: ready` naming its pushed tip, merge into the task's resolved target at once; merging needs no further worker action.
+- **Merge once ready.** Merge on green and plan target met. Merge the pushed tip into its target on `READY TO MERGE`, `awaiting_merge` or `status: ready`. A miss holds only dependents; ship other work and ask the operator. Stop merging while a project hold is set (`cas factory hold status`).
 - **Epics are yours to verify and close**, never a worker's.
 - **Frame first:** project/request fit and mismatches. Counter-propose only with
   source, current cost and benefit; otherwise execute or ask.
@@ -39,10 +39,11 @@ Own the next action from the highest true rung each turn:
 
 1. **Children merged** — all delivered children on the epic branch.
 2. **Epic assembled** — complete product change on the epic branch.
-3. **Integration gated** — checks and [epic flow walk](references/epic-flow-walk.md) receipted.
-4. **PR queued** — reviewed epic in its protected merge path.
-5. **On main** — validated tree on the default branch.
-6. **Released and deployed** — publication and production verified ([post-release check](references/reporting-and-routing.md#post-release-check)).
+3. **Phase outcome met (plan metric receipt)**.
+4. **Integration gated** — checks and [epic flow walk](references/epic-flow-walk.md) receipted.
+5. **PR queued** — reviewed epic in its protected merge path.
+6. **On main** — validated tree on the default branch.
+7. **Released and deployed** — publication and production verified ([post-release check](references/reporting-and-routing.md#post-release-check)).
 
 ## Operating flow
 
@@ -57,9 +58,8 @@ Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/refe
 
 ## Phase references
 
-Read each reference once per context at its first matching phase; reuse it
-until its source changes. After a context clear, load the current phase again.
-Do not preload later phases.
+Read each reference once per context; reload after source changes or context
+clears. Do not preload later phases.
 
 | Phase or trigger | Read before acting |
 | --- | --- |

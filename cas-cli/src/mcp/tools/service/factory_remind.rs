@@ -381,7 +381,12 @@ impl CasService {
         })?;
 
         // Resolve target: if provided, look up agent by name/ID; otherwise self-reminder
-        let (target_id, target_display) = if let Some(ref target_name) = req.target {
+        // The documented `target: "self"` is the same self-reminder as an omitted target.
+        let explicit_target = req
+            .target
+            .as_deref()
+            .filter(|target| !target.trim().eq_ignore_ascii_case("self"));
+        let (target_id, target_display) = if let Some(target_name) = explicit_target {
             let (id, name) = self.resolve_reminder_target(target_name, &owner_id)?;
             (Some(id), Some(name))
         } else {
@@ -1022,14 +1027,19 @@ mod tests {
             1
         );
 
-        for message in [
-            "Retry capped cargo check after build admission",
-            "Retry capped build check",
-            "Deadline: check task X before 5 PM",
+        // An omitted target and the documented `target: "self"` both remind the caller.
+        for (message, target) in [
+            ("Retry capped cargo check after build admission", None),
+            ("Retry capped build check", None),
+            ("Deadline: check task X before 5 PM", Some("self")),
         ] {
-            let self_request = serde_json::from_value(serde_json::json!({
+            let mut self_request = serde_json::json!({
                 "action": "remind", "remind_message": message, "remind_delay_secs": 60
-            })).unwrap();
+            });
+            if let Some(target) = target {
+                self_request["target"] = target.into();
+            }
+            let self_request = serde_json::from_value(self_request).unwrap();
             service.factory_remind(self_request).await
                 .unwrap_or_else(|error| panic!("legitimate timer {message:?} refused: {error}"));
         }

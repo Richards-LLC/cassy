@@ -331,6 +331,19 @@ impl FactoryDaemon {
         }
     }
 
+    /// One loop pass for WebSocket clients: hand finished work-event answers
+    /// to their clients, then flush buffered frames.
+    ///
+    /// cas-e1d3: answers are collected on every pass, connected or not. An
+    /// answer whose client has gone is dropped rather than held until some
+    /// client reconnects; a reconnecting client asks again. Nothing waits.
+    pub(super) async fn serve_ws_clients(&mut self) {
+        self.deliver_work_events();
+        if !self.ws_clients.is_empty() {
+            self.flush_ws_client_output().await;
+        }
+    }
+
     /// Probe the stream for clients that follow it, and hand finished
     /// work-event answers and change notices to their clients (cas-ff22).
     pub(super) fn deliver_work_events(&mut self) {

@@ -207,6 +207,9 @@ fn enqueue_worker_attention_relay_for_episode(
         operator_page_episode,
     } = event
     {
+        if cas_store::project_hold::is_held(cas_dir) {
+            return WorkerAttentionRelayOutcome::NotApplicable;
+        }
         if let Some(episode) = operator_page_episode {
             page_operator_for_idle_supervisor(cas_dir, next_step, *episode);
         }
@@ -644,15 +647,38 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
+    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let factory_session = if worker.is_empty() {
+        std::env::var("CAS_FACTORY_SESSION").ok()
+    } else {
+        // Tasks replicate between machines; agent registrations do not. A
+        // foreign worker missing here belongs to its own daemon, never the
+        // watcher process's ambient supervisor. Retain retired registrations
+        // so the existing dead-owner successor/operator recovery still works.
+        let Ok(agents) = agent_store.list(None) else {
+            return WorkerAttentionRelayOutcome::Pending;
+        };
+        let session = agents
+            .into_iter()
+            .filter(|agent| {
+                agent.role == cas_types::AgentRole::Worker
+                    && (agent.id == worker || agent.name == worker)
+            })
+            .max_by_key(|agent| (agent.id == worker, agent.registered_at))
+            .and_then(|agent| agent.factory_session)
+            .filter(|session| !session.trim().is_empty());
+        let Some(session) = session else {
+            return WorkerAttentionRelayOutcome::Pending;
+        };
+        Some(session)
+    };
     crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
         task_id: task_id.into(), pr_number, failed_run_id,
         occurrence: occurrence.into(), failing_job: failing_job.map(str::to_string),
     }, chrono::Utc::now());
 
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let kind = if worker.is_empty() {
         "Epic PR"
@@ -1798,6 +1824,19 @@ mod worker_attention_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "ready-work-blocker-test");
+        let hold_path = cas_dir.join(cas_store::project_hold::STATE_FILE);
+        std::fs::create_dir_all(hold_path.parent().unwrap()).unwrap();
+        std::fs::write(&hold_path, r#"{"active":{"reason":"Review plan","operator":"fixture","set_at":"2026-11-03T14:00:00Z"},"history":[]}"#).unwrap();
+        let held = enqueue_worker_attention_relay(&cas_dir,
+            &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step: crate::ui::factory::director::SupervisorActionableState::AssignReadyWork {
+                    task_ids: vec!["cas-ready".into()], idle_workers: vec!["calm-owl".into()],
+                }, occurrence: "held-episode".into(), actionable_idle_secs: 600,
+                operator_page_episode: Some(chrono::Utc::now()),
+            });
+        assert!(matches!(held, WorkerAttentionRelayOutcome::NotApplicable));
+        assert!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().is_empty());
+        std::fs::remove_file(hold_path).unwrap();
         let outcome = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
@@ -2961,13 +3000,20 @@ mod worker_attention_tests {
 
     #[test]
     fn merge_queue_ejection_relays_to_supervisor_and_worker_once_and_notes_task() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",
             "merge-queue-ejection-test",
         )]);
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "merge-queue-ejection-test");
+        register_supervisor(&cas_dir, "delivery-owner");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut watcher = Agent::new_with_role("watcher-id".into(), "watcher".into(), AgentRole::Supervisor);
+        watcher.factory_session = Some("merge-queue-ejection-test".into());
+        agents.register(&watcher).unwrap();
+        let mut worker = Agent::new_with_role("worker-id".into(), "fast-jaguar-59".into(), AgentRole::Worker);
+        worker.factory_session = Some("delivery-owner".into());
+        agents.register(&worker).unwrap();
         let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-fc35".to_string(), "parked delivery".to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;
@@ -2983,6 +3029,7 @@ mod worker_attention_tests {
             "merge-group-run:32386300052",
             Some("Fast Validation — CI tiers › Test release publication guards"),
         );
+        env.set("CAS_FACTORY_SESSION", "another-watcher");
         let replay = enqueue_merge_queue_ejection_relay(
             &cas_dir,
             "cas-fc35",
@@ -3007,6 +3054,8 @@ mod worker_attention_tests {
             2,
             "one supervisor relay plus one worker inbox row"
         );
+        assert!(rows.iter().all(|row| row.factory_session.as_deref() == Some("delivery-owner")),
+            "both notices must carry the delivery owner session: {rows:?}");
         // cas-fd0a: one typed wake naming the PR and the failing job.
         assert!(rows.iter().any(|row| row.target == "supervisor"
             && row.prompt.contains("failed merge_group run 32386300052")
@@ -3044,6 +3093,35 @@ mod worker_attention_tests {
             outcomes,
             [cas_store::CheckOutcome::Fail, cas_store::CheckOutcome::Pass]
         );
+    }
+
+    #[test]
+    fn cas_160f_unregistered_or_sessionless_worker_cannot_wake_ambient_supervisor() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "local-watcher")]);
+        for sessionless in [false, true] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            register_supervisor(&cas_dir, "local-watcher");
+            if sessionless {
+                env.remove("CAS_FACTORY_SESSION");
+                let worker = Agent::new_with_role("worker-id".into(), "foreign-worker".into(), AgentRole::Worker);
+                let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+                agents.register(&worker).unwrap();
+                assert!(agents.get("worker-id").unwrap().factory_session.is_none());
+                env.set("CAS_FACTORY_SESSION", "local-watcher");
+            }
+            let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            tasks.add(&cas_types::Task::new("cas-foreign".into(), "Synced delivery".into())).unwrap();
+            let result = enqueue_merge_queue_ejection_relay(
+                &cas_dir, "cas-foreign", "foreign-worker", 1464, Some(41665277909),
+                "merge-group-run:41665277909", None,
+            );
+            assert!(matches!(result, WorkerAttentionRelayOutcome::Pending), "foreign ownership must remain pending: {result:?}");
+            assert!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().is_empty());
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("supervisor-id", 10).unwrap().is_empty());
+            assert!(tasks.get("cas-foreign").unwrap().notes.is_empty());
+            assert!(cas_store::quality_events_for_task(&cas_dir, "cas-foreign").unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -4228,10 +4306,7 @@ impl FactoryDaemon {
             }
 
             // Flush pending WebSocket client output
-            if !self.ws_clients.is_empty() {
-                self.deliver_work_events();
-                self.flush_ws_client_output().await;
-            }
+            self.serve_ws_clients().await;
 
             // GH #1196: an operator send can tell from loop.json that no
             // Commander client is connected.

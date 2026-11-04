@@ -156,8 +156,11 @@ disposable provider instead.
 
 The fixture's local `systemd-run` adapter executes the real reaper/daemon under
 its private HOME and registered containment, instead of the operator's user
-manager on Linux. Its recorded process group and start fingerprint bound cleanup
-to the owned launch. On macOS the hub uses its native direct process-session
+manager on Linux. Linux cleanup signals only processes carrying the fixture's
+private HOME, each checked against its start fingerprint, stopping the recorded
+reaper's daemon first. It removes HOME only after all of them have exited, even
+for a launch caught before the adapter records it, because a daemon writes its
+lifecycle log into HOME while it tears down. On macOS the hub uses its native direct process-session
 launch, so that Linux adapter and its `/proc` fingerprint are not invoked.
 Cleanup captures that owned hub's descendant PIDs and `ps` start fingerprints
 before stopping it, retaining those identities across reparenting. It never

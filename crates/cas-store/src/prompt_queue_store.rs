@@ -21929,12 +21929,20 @@ mod cas_bf890_notice_digest_tests {
         let director_id = store.enqueue_urgent_with_outcome("director", "lead-sup", &director_body,
             Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
         let ready = format!(
-            "READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
+            "READY TO MERGE\ntip: {}\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
+            "a".repeat(9),
             task.id
         );
         let ready_id = store
             .enqueue_worker_action_with_outcome(
                 "w", "lead-sup", &ready, "w", SESSION, None, None, false, &worker,
+            )
+            .unwrap()
+            .id();
+        // cas-2961: a ready that names no tip may be a new delivery; it keeps its wake.
+        let tipless = store
+            .enqueue_worker_action_with_outcome(
+                "w", "lead-sup", &ready.replace(&format!("tip: {}\n", "a".repeat(9)), ""), "w", SESSION, None, None, false, &worker,
             )
             .unwrap()
             .id();
@@ -22003,7 +22011,7 @@ mod cas_bf890_notice_digest_tests {
         };
         let mut selected_ids = selected(&store);
         selected_ids.sort_unstable();
-        assert_eq!(selected_ids, vec![first, fresh, blocker, verdict]);
+        assert_eq!(selected_ids, vec![first, tipless, fresh, blocker, verdict]);
         let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
         assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director_id, ready_id, duplicate]);
         let evidence = store

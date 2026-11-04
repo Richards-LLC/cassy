@@ -24,6 +24,7 @@
 //! ```
 
 mod context;
+mod handoff_updates;
 pub(crate) mod delivery_provenance;
 pub(crate) mod handlers;
 pub(crate) mod operation_lessons;

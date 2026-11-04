@@ -490,6 +490,120 @@ fn hostname() -> String {
     Agent::get_or_generate_machine_id()
 }
 
+/// Two independently created cards still share the stakeholder source claim.
+#[tokio::test]
+async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    cloud.live(&alpha, "alpha-sup");
+    let create = |title: &str, source: &str| -> TaskCreateRequest {
+        serde_json::from_value(serde_json::json!({
+            "title":title,"description":"Trace the observed failure and fix it.",
+            "task_type":"task","priority":2,"risk":"concurrency","external_ref":source,
+        })).unwrap()
+    };
+    alpha.core.cas_task_create(Parameters(create("Repair callback dispatch", "https://github.com/Acme/Widget/issues/42"))).await.unwrap();
+    let alpha_task = open_task_store(&alpha.cas_dir).unwrap().list(None).unwrap().pop().unwrap();
+    let mut proof = create("Portable source audit receipt", "https://github.com/acme/widget/pull/42");
+    proof.execution_note = Some("no-code".into());
+    alpha.core.cas_task_create(Parameters(proof)).await.expect("no-code external_ref is a proof artifact, not an ask");
+    for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+        for entry in ["create", "assign", "start", "spawn", "claim", "transfer"] {
+            let beta = machine(&cloud.url, PROJECT, "beta-sup");
+            let agents = open_agent_store(&beta.cas_dir).unwrap();
+            let mut actor = agents.get(&beta.agent_id).unwrap();
+            actor.role = role;
+            agents.update(&actor).unwrap();
+            cloud.live(&beta, "beta-sup");
+            let source = "https://github.com/acme/widget/pull/42/files?view=all#discussion";
+            beta.put_task("cas-other", TaskType::Task);
+            let tasks = open_task_store(&beta.cas_dir).unwrap();
+            let mut task = tasks.get("cas-other").unwrap();
+            if role == AgentRole::Supervisor && entry == "start" { task.task_type = TaskType::Epic; }
+            task.external_ref = Some(source.into());
+            tasks.update(&task).unwrap();
+            let response = match entry {
+                "create" => beta.core.cas_task_create(Parameters(create("Correct stale scheduler routing", source))).await.map(extract_text).map_err(|error| error.message.to_string()),
+                "assign" => beta.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({"id":task.id,"assignee":"new-worker"})).unwrap())).await.map(extract_text).map_err(|error| error.message.to_string()),
+                "start" => start(&beta.core, &task.id, false).await,
+                "claim" => beta.core.cas_task_claim(Parameters(TaskClaimRequest {task_id:task.id.clone(),duration_secs:600,reason:None})).await.map(extract_text).map_err(|error|error.message.to_string()),
+                "transfer" => beta.core.cas_task_transfer(Parameters(serde_json::from_value::<TaskTransferRequest>(serde_json::json!({"task_id":task.id,"to_agent":"new-worker"})).unwrap())).await.map(extract_text).map_err(|error|error.message.to_string()),
+                _ => factory(&factory_service(&beta), serde_json::json!({"action":"spawn_workers","count":1,"task_id":task.id})).await,
+            }.expect_err("a live source owner must refuse before local mutation");
+            assert!(response.contains("alpha-sup"), "{role}/{entry}: {response}");
+            assert!(response.contains(&alpha_task.id) && response.contains(&hostname()), "the owner must include supervisor, machine and task: {response}");
+            // pin: the refusal must retain the caller's ask URL, including its alias.
+            assert!(response.contains(source), "{role}/{entry}: {response}");
+            let saved = tasks.get(&task.id).unwrap();
+            assert_eq!(saved.status, TaskStatus::Open, "{role}/{entry}");
+            assert!(saved.assignee.is_none(), "{role}/{entry}");
+            assert_eq!(tasks.list(None).unwrap().len(), 1, "{role}/{entry}");
+            assert!(cas::store::open_spawn_queue_store(&beta.cas_dir).unwrap().peek(10).unwrap().is_empty());
+        }
+    }
+    // Heartbeats keep a created ask claimed before a worker takes its task lease.
+    let renewed = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    assert_eq!(renewed.renewed, 1, "{renewed:?}");
+    let delegated = machine(&cloud.url, PROJECT, "delegated-supervisor");
+    delegated.put_task("cas-split", TaskType::Epic);
+    delegated.child_of("cas-share", "cas-split");
+    let tasks = open_task_store(&delegated.cas_dir).unwrap();
+    let mut share = tasks.get("cas-share").unwrap();
+    share.external_ref = Some("https://github.com/acme/widget/issues/42".into());
+    tasks.update(&share).unwrap();
+    let now = Utc::now();
+    cas_store::insert_epic_split(&delegated.cas_dir, &cas_store::EpicSplit {
+        id:"split-source".into(), epic_id:"cas-split".into(), local_agent_id:delegated.agent_id.clone(),
+        peer_agent_id:alpha.agent_id.clone(), peer_name:"alpha-sup".into(), peer_machine:hostname(),
+        direction:cas_store::SplitDirection::Incoming, mine:vec![share.id.clone()], theirs:vec![],
+        state:cas_store::SplitState::Accepted, reason:Some("agreed child delegation".into()), message_id:None,
+        expires_at:now+Duration::minutes(30), created_at:now, decided_at:Some(now), decided_by:Some(delegated.agent_id.clone()),
+        cleanup_pending:false, expiry_notice_pending:false,
+    }).unwrap();
+    delegated.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({"id":share.id,"assignee":"delegated-worker"})).unwrap())).await.expect("the binding epic split retains source delegation authority");
+    let beta = machine(&cloud.url, PROJECT, "deliberate-second");
+    // Environment role alone must never authorize a source override.
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let agents = open_agent_store(&beta.cas_dir).unwrap();
+    let source = "https://github.com/acme/widget/issues/42";
+    for (role, reason, allowed) in [
+        (AgentRole::Worker, "separate agreed diagnostic", false),
+        (AgentRole::Standard, "separate agreed diagnostic", false),
+        (AgentRole::Director, "separate agreed diagnostic", false),
+        (AgentRole::Supervisor, " ", false),
+        (AgentRole::Supervisor, "peer agreed to an independent diagnostic", true),
+    ] {
+        let mut actor = agents.get(&beta.agent_id).unwrap();
+        actor.role = role;
+        agents.update(&actor).unwrap();
+        let request = serde_json::from_value(serde_json::json!({"action":"create","title":"Independent diagnostic", "description":"Trace the independent diagnostic agreed with the source owner.","risk":"concurrency","external_ref":source,"supervisor_override":true,"reason":reason})).unwrap();
+        let result = factory_service(&beta).task(Parameters(request)).await;
+        assert_eq!(result.is_ok(), allowed, "{role}/{reason}: {result:?}");
+    }
+    let second = open_task_store(&beta.cas_dir).unwrap().list(None).unwrap().pop().unwrap();
+    let grant = second.deliverables.source_claim_override.as_ref().expect("durable reasoned override");
+    assert_eq!(grant.supervisor_id, beta.agent_id);
+    assert!(second.notes.contains(&grant.reason) && second.notes.contains(&alpha_task.id));
+    beta.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({"id":second.id,"assignee":"second-worker"})).unwrap())).await.expect("the recorded override permits staffing this task");
+
+    let alpha_agents = open_agent_store(&alpha.cas_dir).unwrap();
+    let mut supervisor = alpha_agents.get(&alpha.agent_id).unwrap();
+    supervisor.role = AgentRole::Supervisor;
+    alpha_agents.update(&supervisor).unwrap();
+    let key: Vec<String> = serde_json::from_str(supervisor.metadata.get(cas::cloud::peer_claims::META_SOURCE_CLAIMS).unwrap()).unwrap();
+    alpha.core.cas_task_cancel(Parameters(TaskCancelRequest {id:alpha_task.id.clone(),reason:"source work superseded".into(),superseded_by:None})).await.unwrap();
+    let after_cancel = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    assert_eq!(after_cancel.renewed, 0, "{after_cancel:?}");
+    assert!(cloud.active_lock(&key[0]).is_none(), "a terminal task releases its source while the supervisor stays live");
+    let successor = machine(&cloud.url, PROJECT, "successor");
+    successor.core.cas_task_create(Parameters(create("Continue source after cancellation", source))).await.expect("a live supervisor cannot retain the closed task's source");
+    // Numeric aliases in different repositories must remain independent.
+    let other = machine(&cloud.url, PROJECT, "other-sup");
+    other.core.cas_task_create(Parameters(create("Independent repository callback", "https://github.com/acme/other/issues/42"))).await.unwrap();
+}
+
 /// Acceptance: B's start of a task A holds is refused with A's identity; once
 /// A releases it, B starts it. The claim key is scoped to the repository.
 #[tokio::test]

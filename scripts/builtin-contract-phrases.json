@@ -109,6 +109,14 @@
         {
           "text": "references/worker-recovery.md#supervisor-restart",
           "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
+        },
+        {
+          "text": "Merge on green and plan target met.",
+          "reason": "Audit finding 5: green CI alone cannot authorize a merge below the plan target."
+        },
+        {
+          "text": "Phase outcome met (plan metric receipt)",
+          "reason": "Audit finding 6: the exit ladder requires measured outcome evidence."
         }
       ],
       "absent": [
@@ -291,6 +299,10 @@
         {
           "text": "target=supervisor task_id=<task-id> blocker=true",
           "reason": "Correlate the required-review wait with the authenticated blocker dispatch; kind=status|ready cannot be combined with blocker=true."
+        },
+        {
+          "text": "cite the plan section and its metric receipt at close",
+          "reason": "Audit finding 13: workers report the governing outcome alongside task completion."
         }
       ],
       "absent": [
@@ -488,6 +500,14 @@
         {
           "text": "../../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "Never use `characterization-first` on behaviour the plan replaces; use it only to protect what stays.",
+          "reason": "Audit finding 7: characterization must not freeze behaviour the plan replaces."
+        },
+        {
+          "text": "link the plan section and its metric",
+          "reason": "Audit finding 13: frozen scope must still expose the governing plan and metric."
         }
       ],
       "absent": [
@@ -705,6 +725,10 @@
         {
           "text": "git merge-base --is-ancestor <delivered-tip> <target-tip>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker failure recovery reference and merge check are linked."
+        },
+        {
+          "text": "A missed plan metric is never non-blocking.",
+          "reason": "Audit finding 14: a missed phase target cannot close as a follow-up."
         }
       ],
       "absent": [
@@ -3120,6 +3144,10 @@
         {
           "text": "supervisor exit stops every worker",
           "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
+        },
+        {
+          "text": "Phase outcome met (plan metric receipt)",
+          "reason": "Audit finding 6: the Codex checklist requires the same measured outcome as the shared checklist."
         }
       ],
       "absent": [
@@ -3260,6 +3288,10 @@
         {
           "text": "system action=preflight",
           "reason": "EPIC resumption uses the same active-MCP evidence route as session startup (GH #1253)."
+        },
+        {
+          "text": "Phase outcome met (plan metric receipt)",
+          "reason": "Audit finding 6: completion requires a plan metric receipt."
         }
       ],
       "absent": [
@@ -3502,6 +3534,10 @@
         {
           "text": "supervisor exit stops every worker",
           "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the routes that keep workers: MCP reconnect and restart_supervisor."
+        },
+        {
+          "text": "Phase outcome met (plan metric receipt)",
+          "reason": "Audit finding 6: epic close checks the measured phase outcome."
         }
       ],
       "absent": [
@@ -4379,16 +4415,8 @@
       ],
       "contains": [
         {
-          "text": "git diff \"$BASE\" HEAD | grep -nE ",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
-        },
-        {
           "text": "git merge-base HEAD <target-branch>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
-        },
-        {
-          "text": "ast-grep",
-          "reason": "Retain the load-bearing policy term from verifier mirrors document the current close contract."
         },
         {
           "text": "stranded_branch_override",
@@ -4425,6 +4453,14 @@
         {
           "text": "reproduced silent failure of this task's own behaviour",
           "reason": "GH1341: realistic silent failure is a separate rejection condition regardless of its assigned impact rating."
+        },
+        {
+          "text": "PLAN-FIT:",
+          "reason": "The verifier summary exposes this named plan-conformance verdict to the supervisor; card criteria alone cannot approve a narrowed delivery (cas-9e74)."
+        },
+        {
+          "text": "MODEL-BOUNDARY:",
+          "reason": "The verifier emits this named optional boundary verdict for the supervisor; this pins a report label, not an expected model reply (cas-1f48)."
         }
       ],
       "absent": [
@@ -4471,6 +4507,14 @@
         {
           "text": "status=supervisor_call",
           "reason": "Route NOT EXERCISED scope questions to the supervisor without resolving the verification dispatch as a failed check."
+        },
+        {
+          "text": "git diff \"$BASE\" HEAD | grep -nE ",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "ast-grep",
+          "reason": "Retain the load-bearing policy term from verifier mirrors document the current close contract."
         }
       ],
       "absent": [],

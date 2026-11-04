@@ -171,9 +171,7 @@ fn safety_checks(
         })
         .collect();
     for origin in &qa.deployed_origins {
-        let host = url::Url::parse(origin)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned));
+        let host = crate::qa_evidence::deployed_origins::host(origin);
         if let Some(forbidden) = host.as_deref().and_then(|host| safety.forbids_host(host)) {
             checks.push(PreflightCheck {
                 name: format!("host guard {forbidden}"),

@@ -63,7 +63,16 @@ the other fields are optional and apply to the actions described here.
 - `sort`: `created`, `updated`, `importance`, or `title` for `list`.
 - `sort_order`: `asc` or `desc` for `list` (default: `desc`).
 - `valid_from`: optional RFC3339 start timestamp for `remember`.
-- `valid_until`: optional RFC3339 expiry timestamp for `remember`.
+- `valid_until`: RFC3339 expiry timestamp. Required on `remember` for a
+  stakeholder constraint tagged `stakeholder:<name>,constraint` or
+  `stakeholder-constraint:<name>`; ordinary memories may omit it.
+- Supersession: update the old note's tags to include
+  `superseded,superseded-by:<replacement-id>`, retaining its other tags. This
+  expires it and removes it from session context, including pinned context;
+  explicit retrieval still returns its historical words. Never broaden an
+  earlier stakeholder instruction into a standing rule. Attributed rules store
+  `stakeholder`, `stakeholder_quote` (verbatim), `stakeholder_scope`, and a
+  `review_after` for a hard rule.
 - `personal`: set `true` on `remember` to skip team auto-promotion. An
   explicit `team_id` takes precedence.
 

@@ -230,7 +230,7 @@ pub fn connect_error(code: &str) -> VioletError {
 
 /// Resolve the production connect configuration before any network activity.
 #[cfg(feature = "mcp-proxy")]
-pub(super) fn connect_config(
+pub(crate) fn connect_config(
     cas_root: Option<&std::path::Path>,
 ) -> Result<cmcp_core::config::Config, VioletError> {
     use cmcp_core::config::VIOLET_SERVER;
@@ -342,7 +342,7 @@ impl ProxyHub {
 /// The identity this one-shot process presents to the proxy policy: the
 /// factory role it was spawned with, if any, otherwise a plain session.
 #[cfg(feature = "mcp-proxy")]
-fn cli_caller(cas_root: Option<&std::path::Path>) -> cmcp_core::ProxyCaller {
+pub(crate) fn cli_caller(cas_root: Option<&std::path::Path>) -> cmcp_core::ProxyCaller {
     if let Some(agent) = cas_root.and_then(|root| {
         let session = std::env::var("CAS_SESSION_ID").ok()
             .or_else(|| crate::agent_id::read_session_for_mcp(root).ok())?;

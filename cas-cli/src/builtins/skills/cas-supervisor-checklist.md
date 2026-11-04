@@ -67,7 +67,7 @@ Read `cas-supervisor` for authoritative task acceptance and the inbox/typed-wake
 
 Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporting-and-routing.md).
 
-**Forward motion:** place the session on the six-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
+**Forward motion:** place the session on the seven-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
 
 **Closure first:** run the [closure pass](../cas-supervisor/references/workflow.md#wall-clock-is-a-resource) before new noncritical dispatch. For a revised delivery, use [correction proof](../cas-supervisor/references/correction-proof.md) to decide what must rerun and share one immutable candidate.
 
@@ -87,6 +87,7 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 - Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error. `EPIC CLOSE CHECK INCOMPLETE` is resumable: retry the same close until it completes.
 - Confirm task deliverables exist on the epic branch
+- **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved.
 - Run the closeout once, in order: freeze scope; one full review and the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck) together; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
 - Require the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 

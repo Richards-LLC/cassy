@@ -2714,6 +2714,11 @@ pub trait PromptQueueStore: Send + Sync {
     /// one transaction. Display labels never establish a cloud audience.
     fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
 
+    /// Authenticated, explicitly bound Commander replies in arrival order.
+    /// Includes consumed rows, so a restarted domain runner can finish its action.
+    /// `prompt` is the original button label, not the rendered acknowledgement.
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>>;
+
     /// Queue one Commander message with its hub-authenticated operator stamp
     /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
     /// verified, `Unattributed` otherwise — never from `source` or the
@@ -9462,6 +9467,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(outcome)
     }
 
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT r.id, r.source, r.target,
+                    json_extract(r.attribution_json, '$.reply_text'),
+                    r.created_at, r.processed_at, r.summary, r.priority,
+                    r.acked_at, r.urgent, r.factory_session, r.origin_agent_id,
+                    r.origin_kind, r.operator_label, r.operator_device_id,
+                    r.operator_device_label, r.operator_scopes, r.operator_verified,
+                    r.recipient_device_id, r.kind, r.attachments
+             FROM prompt_queue r JOIN prompt_queue a ON a.id = ?1
+             WHERE a.target = 'operator' AND a.kind = 'ask' AND a.origin_kind = 'daemon'
+               AND r.factory_session = a.factory_session AND r.id > a.id
+               AND r.source LIKE 'commander:%' AND r.origin_kind = 'paired_device'
+               AND r.operator_verified = 1
+               AND json_extract(r.attribution_json, '$.in_reply_to') = a.id
+               AND json_type(r.attribution_json, '$.reply_text') = 'text'
+             ORDER BY r.id",
+        )?;
+        let rows = stmt.query_map(params![ask_id], Self::prompt_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     fn latest_verified_operator_message(
         &self,
         factory_session: &str,
@@ -10448,6 +10476,9 @@ impl SqlitePromptQueueStore {
             } else {
                 ""
             };
+            let project_hold_sql = if crate::project_hold::held_on_connection(&conn) {
+                crate::project_hold::inbox_exclusion_sql()
+            } else { String::new() };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
@@ -10553,6 +10584,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10600,6 +10632,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {project_hold_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -10642,6 +10675,11 @@ impl SqlitePromptQueueStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
             let mut prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            // A hold is a temporary policy wait, not evidence of surfacing.
+            // Filter before receipts, budget accounting or acknowledgement.
+            if crate::project_hold::held_on_connection(&tx) {
+                prompts.retain(|row| !crate::project_hold::is_action_relay(&row.prompt));
+            }
             if named_read {
                 for prompt in &mut prompts {
                     Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;

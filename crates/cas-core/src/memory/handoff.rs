@@ -58,21 +58,10 @@ pub fn handoff_role(entry: &Entry) -> String {
     normalize_role(tagged)
 }
 
-/// Whether a handoff is history rather than the current one: superseded by a
-/// newer handoff (or marked so by hand before this existed), archived, or past
-/// its validity.
+/// Whether explicit supersession, archive state or validity makes a handoff history.
+/// Prose can describe an older policy without retiring the current instruction.
 pub fn is_superseded(entry: &Entry) -> bool {
-    entry.archived
-        || entry.is_expired()
-        || entry
-            .tags
-            .iter()
-            .any(|tag| tag.trim().eq_ignore_ascii_case(SUPERSEDED_TAG))
-        || entry
-            .content
-            .trim_start()
-            .get(..SUPERSEDED_TAG.len())
-            .is_some_and(|lead| lead.eq_ignore_ascii_case(SUPERSEDED_TAG))
+    entry.archived || entry.is_expired()
 }
 
 /// The current handoff for `role` among `entries`: the newest handoff of that
@@ -202,10 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn superseded_and_legacy_superseded_handoffs_are_never_current() {
+    fn only_explicit_supersession_removes_a_handoff_from_selection() {
         let mut marked = handoff("marked", 1, &["handoff"], "newest but superseded");
         mark_superseded(&mut marked, "later", Utc::now() - Duration::seconds(1));
-        let entries = vec![
+        let mut entries = vec![
             handoff("keep", 30, &["handoff"], "the current one"),
             marked,
             handoff(
@@ -219,6 +208,11 @@ mod tests {
                 ..handoff("archived", 3, &["handoff"], "archived")
             },
         ];
+        assert_eq!(
+            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            Some("legacy")
+        );
+        entries[2].tags.push("superseded-by:later".into());
         assert_eq!(
             current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
             Some("keep")

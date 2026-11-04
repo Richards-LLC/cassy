@@ -346,16 +346,20 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
     assert!(refused.contains("deferred evidence"), "{refused}");
     let request = serde_json::from_value(serde_json::json!({
         "action":"close", "id":"cas-bq01", "supervisor_override":true,
-        "reason":"authorized close override cannot erase deferred evidence"
+        "reason":"release reviewed outside Cassy"
     }))
     .unwrap();
+    // cas-bc15: a live supervisor's reasoned override waives the deferred
+    // evidence, and the waiver stays on the task's record.
     let overridden = extract_text(fx.supervisor.task(Parameters(request)).await.unwrap());
-    assert_ne!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::Closed,
-        "{overridden}"
+    let task = tasks.get("cas-bq01").unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{overridden}");
+    assert!(
+        task.notes.contains("supervisor_override waived deferred batch evidence")
+            && task.notes.contains("release reviewed outside Cassy"),
+        "{}",
+        task.notes
     );
-    assert!(overridden.contains("deferred evidence"), "{overridden}");
 }
 
 #[tokio::test]

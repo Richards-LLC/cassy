@@ -38,6 +38,21 @@ impl Config {
                 self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
             ),
             "viktor.enabled" => Some(self.viktor_enabled().to_string()),
+            key if key.starts_with("fast_lane.") => {
+                let lane = self.fast_lane.clone().unwrap_or_default();
+                match key {
+                    "fast_lane.enabled" => Some(lane.enabled.to_string()),
+                    "fast_lane.paths" => Some(lane.paths.join(",")),
+                    "fast_lane.deny" => Some(lane.deny.join(",")),
+                    "fast_lane.max_files" => Some(lane.max_files.to_string()),
+                    "fast_lane.max_lines" => Some(lane.max_lines.to_string()),
+                    "fast_lane.merge_checks" => Some(lane.merge_checks.join(",")),
+                    "fast_lane.receipt_checks" => Some(lane.receipt_checks.join(",")),
+                    "fast_lane.receipt_statuses" => Some(lane.receipt_statuses.join(",")),
+                    "fast_lane.receipt_window_mins" => Some(lane.receipt_window_mins.to_string()),
+                    _ => None,
+                }
+            }
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",
@@ -134,6 +149,8 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
+            "factory.design_review_bug_threshold" => Some(factory.design_review_bug_threshold.to_string()),
+            "factory.design_review_window_hours" => Some(factory.design_review_window_hours.to_string()),
             "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
             "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),

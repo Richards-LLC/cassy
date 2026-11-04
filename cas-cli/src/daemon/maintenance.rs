@@ -409,6 +409,11 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
+    // cas-56266: an expired stakeholder review lists the rule's cited sites.
+    if let Err(error) = crate::rule_refs::file_expired_review_cleanups(&config.cas_root) {
+        errors.push(format!("Rule review cleanup failed: {error:#}"));
+    }
+
     // cas-e193: telemetry retention is not an auto_prune opt-in. Its window
     // is config-driven (0 disables) and only ever removes telemetry types.
     match run_event_telemetry_retention(&config.cas_root) {

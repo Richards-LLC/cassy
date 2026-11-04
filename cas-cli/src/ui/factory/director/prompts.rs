@@ -675,6 +675,10 @@ pub(crate) fn prompt_is_still_deliverable(
     data: &DirectorData,
     repo_root: &Path,
 ) -> bool {
+    if prompt.retract_task.as_deref().is_some_and(|id|
+        crate::phase_outcome::merge_hold(&repo_root.join(".cas"), id).is_some()) {
+        return false;
+    }
     let epic_is_current = prompt
         .retract_epic
         .as_deref()
@@ -1132,6 +1136,9 @@ pub(crate) fn refresh_ci_merge_signal(
     let Some(original) = prompt.merge_alert.clone() else {
         return prompt_is_still_deliverable(prompt, data, repo_root);
     };
+    if crate::phase_outcome::merge_hold(cas_dir, &original.task_id).is_some() {
+        return false;
+    }
     let task = cas_dir
         .join("cas.db")
         .is_file()

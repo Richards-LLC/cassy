@@ -18,6 +18,22 @@ CI owns fast-row proof; local receipts are pre-push feedback. Park reads
 exact-tip capped test receipts, never runs checks. For changelog scope and
 format, follow [Changelog at park](#changelog-at-park).
 
+## Rule-driven sites
+
+For an existing stakeholder rule cited in the task or newest supervisor brief, put a
+`cas-rule: <id> scope: <JSON-quoted verbatim scope>` comment beside each causal
+code/test site. Declare the sites in the brief or close reason as one JSON line:
+
+```text
+Rule-driven sites: [{"rule_id":"<id>","path":"src/file.rs","anchor":"<exact trimmed source line>"}]
+```
+
+Each cited stakeholder rule needs a marker; a process-rule citation needs none.
+Every declared anchor needs its adjacent marker, bulleted lines included.
+When present, `stakeholder.scope` is the expected scope, exactly as recorded.
+Inspect `cas rules refs <id> --json`; the verifier checks causal changes omitted
+from the declaration. This does not require citations on unrelated edits.
+
 ## Clean-tree receipt
 
 Run `git status --porcelain` and `git rev-parse HEAD`. Empty porcelain and HEAD
@@ -52,9 +68,10 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the
-   target and SHA. The merge closes the task: Cassy dispatches verification at
-   the merge, a PASS closes it and tells you once, a FAIL reopens it to you with
-   findings. In `qa.mode=batch` a Tier 1 delivery opens no dispatch and waits for
+   target and SHA. The required task verifier reviews the candidate before publication, outside
+   the target lock. PASS publishes the reviewed tree and closes with the same
+   approval; FAIL or an unresolved verdict holds only that delivery. There is
+   no post-merge verifier or worker close retry. In `qa.mode=batch` a Tier 1 delivery opens no dispatch and waits for
    the release verdict, which the supervisor records; you have nothing to do. Do not re-close or block on that verification. While it is pending, follow
    [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
 4. For a protected target, follow its PR flow. Ask for an epic merge rather than
@@ -96,8 +113,8 @@ checks the entry format.
 - `commit_receipt=<sha>` names this task's immutable, non-empty delivered commit.
   Close validates ancestry against the target; use it for squash/cherry-pick
   identity drift. Forward a rejected receipt with the exact guard error.
-- `completion_receipt=<json>` requests transactional close after the current
-  source tip is merged. Fields: `task_id`, `worker_agent_id`, `repo_selector`,
+- `completion_receipt=<json>` requests transactional delivery of the current
+  unpublished source tip for candidate verification before publication. Fields: `task_id`, `worker_agent_id`, `repo_selector`,
   `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`,
   `proof_reference`, `scope_summary`, optional `artifact_path`. The artifact must
   exist under the configured task artifacts directory. Identity and Git are
@@ -181,7 +198,7 @@ Record applicable evidence and the reason for each inapplicable surface:
 | User-visible change | Release-note impact and the project's publication rubric. |
 
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
-criterion evidence, safety facts and deferred proof ownership. Read actual tool
+criterion evidence, the linked plan section and its metric receipt, safety facts and deferred proof ownership. A missed plan metric is never non-blocking. Read actual tool
 rejections as state; forward verification-required guidance once to the supervisor.
 
 To wait blocked on a pending verification dispatch without waking the

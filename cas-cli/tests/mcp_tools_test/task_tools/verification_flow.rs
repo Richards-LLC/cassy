@@ -371,7 +371,7 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
 }
 
 #[tokio::test]
-async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060() {
+async fn orphaned_factory_task_requires_candidate_before_a_verdict_cas_9060() {
     let mut env = TestEnvGuard::temp_home();
     let (_temp, _worker, root, task_id, worker_dir) =
         delivered_worktree_fixture(&mut env, "factory/orphaned-review").await;
@@ -429,31 +429,15 @@ async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060()
     );
     task.deliverables.factory_branch_anchor = Some(head.clone());
     tasks.update(&task).unwrap();
-    supervisor
+    let error = supervisor
         .cas_verification_add(Parameters(request()))
         .await
-        .expect("parked review must mint its exact boundary without task close");
-    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        dispatch.state,
-        cas::types::VerificationDispatchState::Resolved
-    );
-    assert_eq!(dispatch.owner_agent_id, "restarted-review-owner");
-    let proof = dispatch.repository.unwrap();
-    assert_eq!(proof.head_commit, head);
-    assert_eq!(proof.anchor_commits, vec![head]);
-    let verdict = open_verification_store(&root)
-        .unwrap()
-        .get_latest_for_task(&task_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
-    assert_eq!(
-        verdict.provenance,
-        cas::types::VerificationProvenance::SupervisorDirect
-    );
+        .expect_err("a factory restart cannot mint a source-only approval");
+    // pin: recovery must prepare the candidate through the public merge action.
+    assert!(error.message.contains("worktree_merge"), "{error}");
+    assert!(cas_store::get_latest_verification_dispatch(&root, &task_id).unwrap().is_none());
+    assert!(open_verification_store(&root).unwrap().get_latest_for_task(&task_id).unwrap().is_none());
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
 }
 
 /// cas-5c7a closed external ops while the supervisor checkout carried other
@@ -1027,6 +1011,88 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
     assert!(closed.contains("Closed task:"), "{closed}");
 }
 
+/// cas-a32c: the primary checkout sits on `main`, ahead of the epic the
+/// delivery merged into (cas-3388/cas-7a33 bound main's merge of PR #1465).
+/// The post-merge dispatch bound that checkout HEAD as a "delivered" anchor,
+/// so the first unrelated sibling merge into the epic refused the verdict as
+/// "delivered commit(s) no longer reachable". The lane itself merged main.
+#[tokio::test]
+async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let branch = "factory/test-agent";
+    let (temp, _service, cas_dir, task_id, lane) =
+        delivered_worktree_fixture(&mut test_env, branch).await;
+    let repo = temp.path();
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = 'a32c-fixture'\n[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"per_task\"\nevidence_gate = false\nindependent_pass = false\n",
+    )
+    .unwrap();
+    let commit_on = |path: &std::path::Path, file: &str, message: &str| {
+        std::fs::write(path.join(file), format!("{message}\n")).unwrap();
+        proof_boundary_git(path, &["add", file]);
+        proof_boundary_git(path, &["commit", "-q", "-m", message]);
+    };
+    let epic = "epic/a32c";
+    proof_boundary_git(repo, &["branch", epic, "main"]);
+    // main moves; the lane merges it; then main moves again (PR #1465).
+    commit_on(repo, "upstream-one.txt", "upstream one");
+    proof_boundary_git(lane.path(), &["merge", "-q", "--no-ff", "main", "-m", "merge main"]);
+    let tip = head_of(lane.path());
+    commit_on(repo, "upstream-two.txt", "upstream two");
+    let on_epic = |work: &dyn Fn()| {
+        proof_boundary_git(repo, &["checkout", "-q", epic]);
+        work();
+        proof_boundary_git(repo, &["checkout", "-q", "main"]);
+    };
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut parked = tasks.get(&task_id).unwrap();
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.deliverables.factory_branch_anchor = Some(tip.clone());
+    parked.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:a32c-fixture".into(),
+        target_branch: epic.into(),
+    });
+    tasks.update(&parked).unwrap();
+    // Option A reviews before publication, still with an unrelated primary HEAD.
+    let worktrees = open_worktree_store(&cas_dir).unwrap();
+    let mut row = worktrees.get(parked.worktree_id.as_deref().unwrap()).unwrap();
+    row.parent_branch = epic.into();
+    worktrees.update(&row).unwrap();
+    proof_boundary_git(repo, &["config", "user.name", "CAS Test"]);
+    proof_boundary_git(repo, &["config", "user.email", "cas@example.test"]);
+    let origin = TempDir::new().unwrap();
+    proof_boundary_git(origin.path(), &["init", "-q", "--bare"]);
+    proof_boundary_git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    proof_boundary_git(repo, &["push", "-q", "origin", "main", epic, branch]);
+    test_env.set_current_dir(repo);
+    let supervisor = registered_supervisor(&cas_dir, "a32c-supervisor").await;
+    supervisor.worktree_merge(branch, false, Some(&task_id), false, Some(false), false, None)
+        .await.expect_err("prepare candidate before publication");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch");
+    let proof = dispatch.repository.as_ref().expect("proof");
+    assert!(proof.anchor_commits.is_empty(), "the immutable candidate binds the whole review without incidental checkout anchors");
+    assert_ne!(proof.head_commit, head_of(repo), "review the candidate, not the primary checkout");
+    proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, &proof.head_commit]);
+
+    // An unrelated sibling lands on the epic while the verifier reviews.
+    on_epic(&|| {
+        commit_on(repo, "sibling.txt", "sibling delivery");
+        proof_boundary_git(repo, &["push", "-q", "origin", epic]);
+    });
+    supervisor
+        .cas_verification_add(Parameters(approve(&task_id, dispatch.id.clone())))
+        .await
+        .expect("an unrelated sibling merge must not void the verdict");
+    let merged = supervisor.worktree_merge(branch, false, Some(&task_id), false, Some(false), false, None).await;
+    proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, epic]);
+    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().unwrap().id,
+        dispatch.id, "the sibling keeps the same review: {merged:?}");
+}
+
 /// Commit one file on the worker's lane, merge it to main and record the
 /// delivery's start and anchor on the task. Returns the delivered tip.
 fn merge_delivery_of(
@@ -1091,8 +1157,9 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
     assert!(notes.contains("VERIFICATION TIER 0"), "{notes}");
 
     let (text, notes, dispatched) = close_delivery_of("src/lib.rs", "factory/tier-one").await;
-    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
-    assert!(dispatched, "{text}");
+    // pin: a required factory review must precede publication, never be created by close.
+    assert!(text.contains("PRE-MERGE APPROVAL MISSING"), "{text}");
+    assert!(!dispatched, "close cannot add a post-merge review: {text}");
     assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
 }
 
@@ -1200,7 +1267,7 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
     assert!(recorded.contains("Release verdict"), "{recorded}");
     assert!(recorded.contains("Closed 3: "), "{recorded}");
-    assert!(recorded.contains(&format!("Keeps its own review: {}", named[5])), "{recorded}");
+    assert!(recorded.contains(&format!("- {}: Tier 2:", named[5])), "{recorded}");
     assert!(recorded.contains("Still held (2):"), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
@@ -1229,10 +1296,12 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
             ),
         )
         .unwrap();
-        // ...and then its own verifier, whose dispatch the verdict cannot satisfy.
+        // Its own verifier must have approved before publication; this release
+        // verdict cannot manufacture that approval or a post-merge dispatch.
         let probed = close(id, &tips[index]).await;
-        assert!(probed.contains("VERIFICATION REQUIRED"), "{probed}");
-        assert!(dispatched(id), "{probed}");
+        // pin: missing pre-merge approval is the required recovery contract.
+        assert!(probed.contains("PRE-MERGE APPROVAL MISSING"), "{probed}");
+        assert!(!dispatched(id), "{probed}");
         assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
     }
 
@@ -1247,6 +1316,99 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     ).unwrap();
     let held = close(current, &tips[2]).await;
     assert!(held.contains("VERIFICATION TIMED OUT"), "a later cycle cannot reuse the old release verdict: {held}");
+}
+
+/// cas-bc15 (pulse-card cas-e068): request_changes retired a merged delivery's
+/// anchor, so a release verdict listing it answered "Keeps its own review" and
+/// a close citing the merge still waited on batch evidence, even overridden.
+#[tokio::test]
+async fn release_verdict_closes_a_merged_delivery_after_request_changes_cas_bc15() {
+    let mut env = TestEnvGuard::temp_home();
+    let branch = "factory/release-rework";
+    let (temp, worker, cas_dir, reworked, lane) = delivered_worktree_fixture(&mut env, branch).await;
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n[qa]\nmode = \"batch\"\n",
+    )
+    .unwrap();
+    let waived = extract_task_id(&extract_text(
+        worker.cas_task_create(Parameters(simple_task_req("src/waived.rs"))).await.unwrap(),
+    ))
+    .unwrap()
+    .to_string();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    for (id, path) in [(&reworked, "src/reworked.rs"), (&waived, "src/waived.rs")] {
+        if id == &waived {
+            worker.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.expect("start");
+        }
+        let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, id, path, branch);
+        cas_store::defer_qa_batch_evidence(&cas_dir, id, &tip).unwrap();
+        // request_changes after the merge: the park's anchor becomes history.
+        for status in [TaskStatus::AwaitingMerge, TaskStatus::InProgress] {
+            let mut task = tasks.get(id).unwrap();
+            task.status = status;
+            tasks.update(&task).unwrap();
+        }
+        let task = tasks.get(id).unwrap();
+        assert_eq!(task.deliverables.factory_branch_anchor, None);
+        assert_eq!(task.deliverables.historical_factory_branch_anchors.last(), Some(&tip));
+    }
+    let staging = head_of(temp.path());
+    let close = async |core: &cas::mcp::CasCore, id: &str, overridden: bool| {
+        let mut request = close_request(id, "merged delivery");
+        request.commit_receipt = Some(staging.clone());
+        request.supervisor_override = overridden.then_some(true);
+        extract_text(core.cas_task_close(Parameters(request)).await.expect("close"))
+    };
+
+    let report = temp.path().join("RELEASE-REVIEW.md");
+    std::fs::write(&report, format!("# Release review\n{reworked} PASS\n")).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    let artifact = cas::artifacts::publish(
+        &cas::artifacts::PublishContext {
+            store: &artifacts,
+            roots: cas::artifacts::paths::PublishRoots::new(&cas_dir, &temp.path().join("artifacts"), &reworked),
+            task_id: reworked.clone(),
+            cloud: None,
+        },
+        &report,
+    )
+    .unwrap()
+    .artifact
+    .id;
+    let supervisor_core = registered_supervisor(&cas_dir, "close-supervisor").await;
+    let supervisor = CasService::new(registered_supervisor(&cas_dir, "release-supervisor").await, None);
+    let verdict: cas_mcp::types::VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "batch_receipt", "verification_type": "release", "task_ids": [reworked],
+        "staging_sha": staging, "ledger_artifact_id": artifact,
+        "ledger_path": report, "ledger_author": "release-reviewer",
+    }))
+    .unwrap();
+    let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
+    assert!(!recorded.contains("Keeps its own review"), "{recorded}");
+    assert!(recorded.contains(&format!("commit_receipt={staging}")), "{recorded}");
+
+    // Adversarial probe: rework merged after the review is outside its staging.
+    let rework = merge_delivery_of(temp.path(), lane.path(), &cas_dir, &reworked, "src/rework.rs", branch);
+    let mut request = close_request(&reworked, "unreviewed rework");
+    request.commit_receipt = Some(head_of(temp.path()));
+    let refused = extract_text(worker.cas_task_close(Parameters(request)).await.expect("close"));
+    assert_ne!(tasks.get(&reworked).unwrap().status, TaskStatus::Closed, "{refused}");
+    let mut task = tasks.get(&reworked).unwrap();
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.historical_factory_branch_anchors.retain(|head| head != &rework);
+    tasks.update(&task).unwrap();
+
+    let closed = close(&worker, &reworked, false).await;
+    assert_eq!(tasks.get(&reworked).unwrap().status, TaskStatus::Closed, "{closed}");
+
+    let waiting = close(&supervisor_core, &waived, false).await;
+    assert_ne!(tasks.get(&waived).unwrap().status, TaskStatus::Closed, "{waiting}");
+    let closed = close(&supervisor_core, &waived, true).await;
+    let task = tasks.get(&waived).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    assert!(task.notes.contains("supervisor_override waived the release verdict"), "{}", task.notes);
+    assert!(task.notes.contains("supervisor_override waived deferred batch evidence"), "{}", task.notes);
 }
 
 /// cas-5200 negative: a receipt that is NOT on the target keeps today's

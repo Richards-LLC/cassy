@@ -413,6 +413,16 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.design_review_bug_threshold" | "factory.design_review_window_hours" => {
+                let number: u32 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer for {key}: {value}")))?;
+                let maximum = if key == "factory.design_review_bug_threshold" { 1000 } else { 8760 };
+                if !(1..=maximum).contains(&number) {
+                    return Err(MemError::Parse(format!("{key} must be between 1 and {maximum}")));
+                }
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                if key == "factory.design_review_bug_threshold" { factory.design_review_bug_threshold = number; }
+                else { factory.design_review_window_hours = number; }
+            }
             "factory.supervisor_message_debounce_secs" => {
                 let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_debounce_secs: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_debounce_secs = number;
@@ -768,16 +778,10 @@ impl Config {
                     .map(str::trim)
                     .filter(|raw| !raw.is_empty())
                 {
-                    let origin = crate::qa_evidence::url_origin(raw).ok_or_else(|| {
-                        MemError::Parse(format!(
-                            "qa.deployed_origins: {raw:?} is not an http(s) origin"
-                        ))
-                    })?;
-                    if crate::qa_evidence::is_local_origin(&origin) {
-                        return Err(MemError::Parse(format!(
-                            "qa.deployed_origins: {origin} is local; a local build needs no deployed origin"
-                        )));
-                    }
+                    let origin = crate::qa_evidence::deployed_origins::normalize(raw)
+                        .map_err(|problem| {
+                            MemError::Parse(format!("qa.deployed_origins: {problem}"))
+                        })?;
                     origins.push(origin);
                 }
                 qa.deployed_origins = origins;
@@ -1247,6 +1251,26 @@ impl Config {
                 } else {
                     Some(value.trim().to_string())
                 };
+            }
+            "fast_lane.enabled" | "fast_lane.paths" | "fast_lane.deny" | "fast_lane.max_files"
+            | "fast_lane.max_lines" | "fast_lane.merge_checks" | "fast_lane.receipt_checks"
+            | "fast_lane.receipt_statuses" | "fast_lane.receipt_window_mins" => {
+                let lane = self.fast_lane.get_or_insert_with(Default::default);
+                let list = || value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+                let count = || value.trim().parse::<usize>().ok().filter(|count| *count > 0)
+                    .ok_or_else(|| MemError::Parse(format!("Expected a positive integer for {key}")));
+                match key {
+                    "fast_lane.enabled" => lane.enabled = value.trim().parse()
+                        .map_err(|_| MemError::Parse("Expected true or false for fast_lane.enabled".into()))?,
+                    "fast_lane.paths" => lane.paths = list(),
+                    "fast_lane.deny" => lane.deny = list(),
+                    "fast_lane.max_files" => lane.max_files = count()?,
+                    "fast_lane.max_lines" => lane.max_lines = count()?,
+                    "fast_lane.merge_checks" => lane.merge_checks = list(),
+                    "fast_lane.receipt_checks" => lane.receipt_checks = list(),
+                    "fast_lane.receipt_statuses" => lane.receipt_statuses = list(),
+                    _ => lane.receipt_window_mins = count()? as u32,
+                }
             }
             // Release section
             "release.claude_account_allowlist" => {

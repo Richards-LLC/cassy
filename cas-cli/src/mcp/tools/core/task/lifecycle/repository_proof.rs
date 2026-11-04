@@ -366,6 +366,82 @@ fn head_is_ahead_of_integration_base(
     !base.is_empty() && base != head
 }
 
+/// Bound on the first-parent walk that finds where a delivery joined the target.
+const DELIVERY_BASE_WALK_LIMIT: &str = "500";
+
+fn changed_paths(root: &Path, from: &str, to: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    // Rename detection would report only the new path of a renamed delivered
+    // file, letting a sibling that moves and edits it pass unnoticed.
+    let output = git_output(
+        root,
+        &["diff", "--name-only", "--no-renames", "-z", from, to, "--"],
+    )?;
+    Ok(output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+/// Share cas-a32c's overlap rule between landed and pre-merge proofs.
+pub(crate) fn delivery_paths_changed(root: &Path, base: &str, head: &str, from: &str, to: &str) -> Result<Vec<String>, String> {
+    Ok(reviewed_overlap(&changed_paths(root, base, head)?, &changed_paths(root, from, to)?))
+}
+
+fn reviewed_overlap(delivered: &std::collections::BTreeSet<String>, moved: &std::collections::BTreeSet<String>) -> Vec<String> {
+    delivered.intersection(moved)
+        .filter(|path| !crate::factory_worker_check::append_only_or_generated(path))
+        .cloned().collect()
+}
+
+/// cas-a32c: the delivered files that changed between the bound and current
+/// target heads. Each delivery's files are what it changed relative to the
+/// target as it stood just before the delivery joined it: the first commit on
+/// the bound head's first-parent line that does not contain the anchor.
+/// Known limit: when the bound head is the anchor itself (a parked-branch
+/// proof), that commit is the anchor's parent, so only the tip commit's files
+/// count.
+fn delivered_files_changed_since(
+    root: &Path,
+    bound_head: &str,
+    current_head: &str,
+    anchors: &[&String],
+) -> Result<Vec<String>, String> {
+    let moved = changed_paths(root, bound_head, current_head)
+        .map_err(|error| format!("cannot compare the bound and current heads: {error}"))?;
+    if moved.is_empty() {
+        return Ok(Vec::new());
+    }
+    let line = git_output(
+        root,
+        &["rev-list", "--first-parent", "--max-count", DELIVERY_BASE_WALK_LIMIT, bound_head],
+    )
+    .map_err(|error| format!("cannot walk the bound head: {error}"))?;
+    let line = String::from_utf8_lossy(&line).into_owned();
+    let mut touched = std::collections::BTreeSet::new();
+    for anchor in anchors {
+        let before = line
+            .lines()
+            .map(str::trim)
+            .find(|commit| !commit.is_empty() && !commit_is_reachable_from(root, anchor, commit))
+            .ok_or_else(|| {
+                format!(
+                    "cannot find where delivered commit {anchor} joined the target within \
+                     {DELIVERY_BASE_WALK_LIMIT} first-parent commits"
+                )
+            })?;
+        let base = git_output(root, &["merge-base", before, anchor])
+            .map(|base| String::from_utf8_lossy(&base).trim().to_string())
+            .map_err(|error| format!("cannot find delivered commit {anchor}'s base: {error}"))?;
+        let delivered = changed_paths(root, &base, anchor)
+            .map_err(|error| format!("cannot list delivered commit {anchor}'s files: {error}"))?;
+        // Supervisor decision (cas-a32c): concurrent deliveries all append to
+        // the changelog and regenerate bundles; only reviewed code counts.
+        touched.extend(reviewed_overlap(&delivered, &moved));
+    }
+    Ok(touched.into_iter().collect())
+}
+
 fn commit_exists(worktree_root: &Path, commit: &str) -> bool {
     git_output(worktree_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
@@ -570,11 +646,21 @@ pub(crate) fn evaluate_repository_proof(
     // A rewritten or dropped delivery is held by neither and is refused.
     let mut parked_refs: Vec<String> = Vec::new();
     let mut missing: Vec<&String> = Vec::new();
+    let mut delivered: Vec<&String> = Vec::new();
     for anchor in &proof.anchor_commits {
         if !commit_exists(&validation_root, anchor) {
             missing.push(anchor);
             continue;
         }
+        // cas-a32c: a target-bound proof reviewed the target tree at its
+        // bound head. An anchor that head never contained (an older dispatch
+        // bound the supervisor checkout's HEAD) was not part of that review.
+        if proof.target_branch.is_some()
+            && !commit_is_reachable_from(&validation_root, anchor, &proof.head_commit)
+        {
+            continue;
+        }
+        delivered.push(anchor);
         if commit_is_reachable_from(&validation_root, anchor, &current.head_commit) {
             continue;
         }
@@ -604,6 +690,44 @@ pub(crate) fn evaluate_repository_proof(
                 current_head = current.head_commit,
             ),
         });
+    }
+
+    if proof.target_branch.is_some() {
+        if delivered.is_empty() {
+            return Err(TaskLifecycleGateError::RepositoryProof {
+                message: format!(
+                    "repository proof changed after dispatch; request a fresh verification cycle \
+                     (dispatch bound head {bound}, current head {current_head}; the bound head \
+                     contains none of the delivered commits)",
+                    bound = proof.head_commit,
+                    current_head = current.head_commit,
+                ),
+            });
+        }
+        // cas-a32c: later merges into the target may land beside the delivery,
+        // never on top of it. A change to a delivered file needs a fresh review.
+        let touched =
+            delivered_files_changed_since(&validation_root, &proof.head_commit, &current.head_commit, &delivered)
+                .map_err(|message| TaskLifecycleGateError::RepositoryProof {
+                    message: format!(
+                        "repository proof changed after dispatch; request a fresh verification cycle \
+                         (dispatch bound head {bound}, current head {current_head}; {message})",
+                        bound = proof.head_commit,
+                        current_head = current.head_commit,
+                    ),
+                })?;
+        if !touched.is_empty() {
+            return Err(TaskLifecycleGateError::RepositoryProof {
+                message: format!(
+                    "repository proof changed after dispatch; request a fresh verification cycle \
+                     (dispatch bound head {bound}, current head {current_head}; later merges changed \
+                     delivered file(s): {files})",
+                    bound = proof.head_commit,
+                    current_head = current.head_commit,
+                    files = touched.join(", "),
+                ),
+            });
+        }
     }
 
     Ok(RepositoryProofStatus::DeliveredContentIntact {
@@ -983,6 +1107,90 @@ mod tests {
         let proof: RepositoryProofBoundary =
             serde_json::from_value(legacy).expect("pre-cas-5c33 dispatch rows still parse");
         assert!(proof.anchor_commits.is_empty());
+    }
+
+    /// cas-a32c: a target-bound proof survives sibling merges beside the
+    /// delivery, including another entry in a shared changelog, ignores an
+    /// anchor its bound head never contained (the old checkout-HEAD anchor),
+    /// and refuses a later merge that renames and edits a delivered file.
+    #[test]
+    fn target_proof_keeps_sibling_merges_and_refuses_changes_to_delivered_files() {
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        let commit = |file: &str, body: &str| {
+            std::fs::write(path.join(file), body).expect("write");
+            git(path, &["add", "-A"]);
+            git(path, &["commit", "-q", "-m", file]);
+        };
+        let log = |entries: &[&str]| format!("# Changelog\n\n## Unreleased\n\n{}\n## 1.0\n\n- first\n", entries.join(""));
+        git(path, &["init", "-q", "-b", "main"]);
+        commit("CHANGELOG.md", &log(&[]));
+        git(path, &["branch", "epic"]);
+        commit("upstream.txt", "main moves on\n");
+        let stray = head(path);
+        git(path, &["checkout", "-q", "-b", "lane", "epic"]);
+        commit("delivered.txt", "one\ntwo\nthree\nfour\nfive\nsix\n");
+        commit("CHANGELOG.md", &log(&["- delivered\n"]));
+        let tip = head(path);
+        git(path, &["checkout", "-q", "epic"]);
+        git(path, &["merge", "-q", "--no-ff", "lane", "-m", "merge lane"]);
+        let proof = capture_repository_proof_at_target(path, "epic", vec![tip, stray])
+            .expect("target proof");
+
+        commit("sibling.txt", "sibling\n");
+        commit("CHANGELOG.md", &log(&["- sibling\n", "- delivered\n"]));
+        assert!(
+            matches!(
+                evaluate_repository_proof(&proof).expect("siblings beside the delivery"),
+                RepositoryProofStatus::DeliveredContentIntact { .. }
+            ),
+            "unrelated sibling merges, even in the shared changelog, keep the verdict"
+        );
+
+        git(path, &["mv", "delivered.txt", "moved.txt"]);
+        commit("moved.txt", "one\ntwo\nthree\nfour\nfive\nsix, edited\n");
+        let refused = evaluate_repository_proof(&proof).expect_err("delivered file renamed and edited");
+        let TaskLifecycleGateError::RepositoryProof { message } = refused else {
+            panic!("repository proof refusal expected");
+        };
+        assert!(message.contains("delivered file(s): delivered.txt"), "{message}");
+    }
+
+    /// cas-a32c replay: the two refused verdicts, on their real commits. Each
+    /// bound the supervisor checkout's HEAD (e896d6d0, main's merge of PR
+    /// #1465) beside its delivery; the siblings that moved the epic touched
+    /// only CHANGELOG.md among the delivered files. Needs this repository's
+    /// history, so a clone without those commits has nothing to replay.
+    #[test]
+    fn real_cas_3388_and_cas_7a33_verdicts_survive_their_sibling_merges() {
+        let workspace = crate::test_paths::workspace_root();
+        let root = workspace.as_path();
+        let checkout_head = "e896d6d0185ca1d75056418d2e270034b999497c";
+        let cases = [
+            ("cas-3388", "cfaeba1bb00d0b689230abb1a515102ec9ed1bb8", "d0290d7d2e69958d5251e1756dcda5df90a99f19", "517f8dc284a5c921f59670bb4c9594e2c08d8601"),
+            ("cas-7a33", "de145cde07f7ec07cd6f2446637c5b7b6a36c28a", "e2df73ce25ca54c25766b41b96484cb9e9ac913a", "21fa02f0ad08f8f489b93e6d618f5ab9a950e207"),
+        ];
+        let needed = cases.iter().flat_map(|(_, bound, current, anchor)| [*bound, *current, *anchor]);
+        if !needed.chain([checkout_head]).all(|commit| commit_exists(root, commit)) {
+            eprintln!("SKIP cas-a32c replay: this clone lacks the recorded commits");
+            return;
+        }
+        for (task, bound, current, anchor) in cases {
+            let mut proof = capture_repository_proof_at_target(
+                root,
+                bound,
+                vec![anchor.to_string(), checkout_head.to_string()],
+            )
+            .unwrap_or_else(|error| panic!("{task}: {error}"));
+            proof.target_branch = Some(current.to_string());
+            assert!(
+                matches!(
+                    evaluate_repository_proof(&proof).unwrap_or_else(|error| panic!("{task}: {error}")),
+                    RepositoryProofStatus::DeliveredContentIntact { .. }
+                ),
+                "{task}"
+            );
+        }
     }
 
     #[test]

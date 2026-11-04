@@ -63,6 +63,45 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
 }
 
 impl CasService {
+    /// Task creation and staffing reuse the authenticated Slack claim service.
+    /// Workers consume the supervisor's receipt; they never acquire authority.
+    pub(super) async fn refresh_task_source(&self, source: Option<&str>) -> Result<(), McpError> {
+        let Some(source) = source.filter(|source| crate::mcp::tools::core::task::source_claim::is_slack_source(source)) else { return Ok(()); };
+        let Ok(id) = self.inner.get_registered_agent_id_read_only() else { return Ok(()); };
+        let agents = self.inner.open_agent_store()?;
+        if !agents.get(&id).is_ok_and(|agent| agent.role == crate::types::AgentRole::Supervisor) { return Ok(()); }
+        let request: CoordinationRequest = serde_json::from_value(json!({"action":"claim", "external_ref":source}))
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let result = self.external_work(request).await?;
+        let text = result.content.iter().filter_map(|content| content.as_text().map(|text| text.text.as_str())).collect::<Vec<_>>().join("\n");
+        let response: Value = serde_json::from_str(&text)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let receipt = &response["receipt"];
+        if receipt["visible_owner"]["registration_id"].as_str() == Some(id.as_str())
+            && receipt["next_action"] == "proceed"
+            && matches!(response["code"].as_str(), Some("acquired" | "completed"))
+            && receipt["resource"]["state"] == "claimed"
+            && receipt["expires_at"].as_str().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).is_some_and(|at| at > chrono::Utc::now())
+        { return Ok(()); }
+        let owner = receipt["visible_owner"]["label"].as_str()
+            .or(receipt["visible_owner"]["registration_id"].as_str()).unwrap_or("not verified");
+        Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
+            "Task source {source}: owner {owner}; {}. No task or staffing change was applied. Use the existing claim/status/handoff before continuing.",
+            response["guidance"].as_str().or(response["code"].as_str()).unwrap_or("Slack authority unavailable")
+        )))
+    }
+
+    pub(super) async fn refresh_task_sources(&self, ids: &[String]) -> Result<(), McpError> {
+        let tasks = self.inner.open_task_store()?;
+        for id in ids {
+            let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            if task.execution_note.as_deref() == Some("no-code") { continue; }
+            if crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_some() { continue; }
+            self.refresh_task_source(task.external_ref.as_deref()).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn external_work(
         &self,
         request: CoordinationRequest,

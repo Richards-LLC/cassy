@@ -1235,3 +1235,44 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
         );
     }
 }
+
+/// cas-062b: on 2026-11-03 Daniel's Commander message waited 107 s for an
+/// idle supervisor behind a pane draft he had already erased. A live draft
+/// still holds the message, now with a notice outside the composer; once the
+/// draft is erased the next pass types the message once.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_062b_commander_send_waits_only_for_a_live_pane_draft() {
+    if !fixture_child("cas_062b_commander_send_waits_only_for_a_live_pane_draft") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let supervisor = daemon.app.supervisor_name().to_string();
+    let body = "ok slide two still shit, why?";
+    // An idle Claude prompt holding the operator's draft.
+    daemon.app.mux.get_mut(&supervisor).unwrap().feed(
+        "\x1b[2J\x1b[H────────────────────\r\n❯ you ar\r\n────────────────────".as_bytes()
+    ).unwrap();
+    daemon.pane_silent_since.insert(supervisor.clone(), Instant::now() - Duration::from_secs(600));
+    daemon.app.mux.get(&supervisor).unwrap()
+        .deliver_user_input(b"you ar", cas_mux::UserInputKind::KeyStream).await.unwrap();
+    let id = enqueue(&daemon, "commander:Daniel@Chrome-Soundwave", body,
+        cas_store::QueueOrigin::PairedDevice { device_id: "chrome".into() });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while daemon.app.supervisor_draft_hold_notice().is_none() {
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap_or_else(|_| {
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        panic!("the pane shows the hold: {:?}", queue.message_delivery_report(id).unwrap())
+    });
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_none(),
+        "a live draft is never typed over");
+    daemon.app.mux.get(&supervisor).unwrap()
+        .deliver_user_input(b"\x7f\x7f\x7f\x7f\x7f\x7f", cas_mux::UserInputKind::KeyStream).await.unwrap();
+    typed_once(&root, &mut daemon, body).await;
+    assert!(!daemon.app.operator_draft_hold, "the notice ends with the draft");
+}

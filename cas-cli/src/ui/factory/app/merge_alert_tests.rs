@@ -1432,3 +1432,61 @@ fn cas_16e1_not_ready_lane_is_reread_after_the_settled_retry() {
     f.relay();
     assert!(probes(&f) > settled);
 }
+
+#[test]
+fn unmet_phase_suppresses_cached_and_queued_merge_prompts() {
+    let mut f = Fixture::new();
+    let mut ready = f.relay().pop().expect("green parked delivery is actionable");
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut phase = Task::new("cas-reader-phase".into(), "Reader phase".into());
+    phase.task_type = cas_types::TaskType::Epic;
+    store.add(&phase).unwrap();
+    store.add_dependency(&cas_types::Dependency {
+        from_id: "cas-9efb-test".into(), to_id: phase.id.clone(),
+        dep_type: cas_types::DependencyType::Blocks,
+        created_at: chrono::Utc::now(), created_by: None,
+    }).unwrap();
+    crate::phase_outcome::record_note(&f.app.cas_dir, store.as_ref(), &phase.id, "outcome_target", r#"{"stability":{"min":95}}"#).unwrap();
+    crate::phase_outcome::record_note(&f.app.cas_dir, store.as_ref(), &phase.id, "outcome_receipt", &crate::model_eval::fixture_receipt(&f.app.cas_dir, &phase.id, serde_json::json!({"stability":{"min":95}}), serde_json::json!({"stability": 72.7})).to_string()).unwrap();
+    assert!(f.relay().is_empty(), "a cached READY receipt cannot bypass a new outcome miss");
+    assert!(!crate::ui::factory::director::refresh_ci_merge_signal(
+        &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
+    let envelope: crate::prompt_revalidation::MergeRequestEnvelope = serde_json::from_value(serde_json::json!({
+        "task_id":"cas-9efb-test", "branch_tip":git(f.repo.path(), &["rev-parse","HEAD"]),
+        "target_branch":"epic/test", "target_branch_tip":git(f.repo.path(), &["rev-parse","origin/epic/test"]),
+    })).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap();
+    let text = crate::prompt_revalidation::attach_merge_request_envelope("merge delivered work", &envelope);
+    let row_id = queue.enqueue("merge-w", "supervisor", &text).unwrap();
+    let row = queue.peek_all(10).unwrap().into_iter().find(|r| r.id == row_id).unwrap();
+    let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
+        &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
+    assert!(facts.outcome_hold.unwrap().contains("72.7"));
+    crate::phase_outcome::record_note(&f.app.cas_dir, store.as_ref(), &phase.id, "outcome_receipt", &crate::model_eval::fixture_receipt(&f.app.cas_dir, &phase.id, serde_json::json!({"stability":{"min":95}}), serde_json::json!({"stability": 99})).to_string()).unwrap();
+    let facts = crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts(
+        &f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row);
+    assert!(facts.outcome_hold.is_none());
+    assert!(crate::ui::factory::director::refresh_ci_merge_signal(
+        &mut ready, &f.app.director_data, &f.app.cas_dir, f.repo.path()));
+}
+
+#[test]
+fn project_hold_generates_no_ready_backlog_and_next_event_alerts_once() {
+    let mut f = Fixture::new();
+    let hold = f.app.cas_dir.join(cas_store::project_hold::STATE_FILE);
+    std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+    std::fs::write(&hold, serde_json::json!({
+        "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+        "history": []
+    }).to_string()).unwrap();
+    assert!(f.relay().is_empty(), "a held event must not generate READY to enqueue");
+    assert!(f.relay().is_empty(), "repeated held events cannot accumulate a backlog");
+    std::fs::remove_file(hold).unwrap();
+    // Lifting the hold alone creates no event or queued prompt.
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&[]);
+    assert!(prompts.is_empty());
+    let prompts = f.relay();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].is_merge_ready());
+    assert!(f.relay().is_empty(), "the decision is delivered only once");
+}

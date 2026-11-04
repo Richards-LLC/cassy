@@ -23,7 +23,8 @@ Do not re-close after the merge: its verdict closes the task, or reopens it to
 you with findings. For an epic,
 request supervisor merge rather than `gh pr create --base epic/...`.
 A squash/cherry-pick mismatch may need `commit_receipt`; transactional
-`completion_receipt` requires the source tip merged. See [close-gate.md](close-gate.md)
+`completion_receipt` accepts an unpublished source tip and binds its merge candidate
+to the same required verification before publication. See [close-gate.md](close-gate.md)
 for receipt fields. If rejected, forward the exact error and receipt identity;
 never bypass close with `status=closed` or an invented verification record.
 
@@ -34,6 +35,10 @@ its task and branch, then continue that assignment. Checkpoint dirty work before
 changing history. If a task branch has a recorded parked delivery anchor, merge
 the target into it; never rebase it. On other reused checkouts where rebasing is
 allowed, checkpoint before `git rebase <target>`.
+
+A fresh task whose checkout still holds an earlier PR (open, or squash-merged
+so its commits never reach the target) starts on `factory/<name>-<task>` from
+the target. Push that branch for its own PR; leave the earlier branch alone.
 
 ### Returned delivery with a queued successor
 

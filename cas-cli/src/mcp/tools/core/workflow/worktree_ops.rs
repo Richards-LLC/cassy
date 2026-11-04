@@ -680,6 +680,22 @@ fn workflow_run_cancelled(run_id: &str, cwd: &Path, repo: &str, binary: &Path) -
             .is_ok_and(|run| run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled"))
 }
 
+/// cas-5ea7: an eligible fast-lane tip is judged on the lane's merge checks
+/// only; `None` when GitHub cannot be read, so the normal lookup reports it.
+fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) -> Option<BranchCiLookup> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?.canonical;
+    let output = fetch_branch_ci(sha, cwd, &repo, &binary);
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).ok().filter(|_| output.success)?;
+    let sha = sha.to_string();
+    let state = match crate::fast_lane::merge_gate(lane, &crate::fast_lane::check_runs(&response)) {
+        crate::fast_lane::Gate::Green(test_checks) => BranchCiState::Green { sha, url: None, test_checks },
+        crate::fast_lane::Gate::Pending(_) => BranchCiState::CodePending { sha, url: None, waiting_for_rerun: false },
+        crate::fast_lane::Gate::Red { url, .. } => BranchCiState::Red { sha, url },
+    };
+    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true })
+}
+
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
     gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
@@ -4226,6 +4242,9 @@ impl CasCore {
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         if let Some(message) = reason
             .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
         {
@@ -4339,6 +4358,13 @@ impl CasCore {
                     data: None,
                 });
             }
+        }
+
+        if let Some(task_id) = task_id {
+            let tasks = crate::store::open_task_store(&cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
 
         // cas-9c34: the supervisor is acting on this task's merge request,
@@ -4737,6 +4763,32 @@ impl CasCore {
             });
         }
 
+        // The existing task verifier runs on a disposable merge candidate,
+        // outside the target lock. Pending/rejected reviews hold only this lane.
+        // A previously published source is a receipt/reconciliation request,
+        // not another delivery review. This local hint never authorizes a
+        // mutation: the existing fresh containment check below must confirm it.
+        let deferred_contained_review = if let Some(task) = scoped_task.as_deref() {
+            let bound = match cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))? {
+                Some(dispatch) => super::premerge_verification::candidate_for_dispatch(&cas_root, &dispatch)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some(),
+                None => false,
+            };
+            let remote = format!("origin/{}", worktree.parent_branch);
+            let target = if manager.git().has_origin_remote() && manager.git().resolve_commit(&remote).is_some() {
+                remote.as_str()
+            } else { worktree.parent_branch.as_str() };
+            !bound && manager.git().is_ancestor(&worktree.branch, target)
+        } else { false };
+        let premerge_approval = if deferred_contained_review {
+            None
+        } else if let Some(task) = scoped_task.as_deref() {
+            self.prepare_premerge_verification(task, &cwd, &worktree.branch, &worktree.parent_branch)?
+        } else {
+            None
+        };
+
         // All Cassy merges of this target serialize from the first origin
         // refresh through publication and durable delivery state. Waiting for
         // another merge must not block the async executor's worker thread.
@@ -4790,6 +4842,9 @@ impl CasCore {
                     }
                 }
                 Containment::Unverified(message) => return Ok(Self::tool_error(message)),
+                Containment::NotContained if deferred_contained_review => {
+                    return Ok(Self::tool_error("The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation."));
+                }
                 Containment::NotContained => {}
             }
         }
@@ -4984,6 +5039,7 @@ impl CasCore {
         // workers default to preserving the worktree mid-session.
         let mut do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
+        let defer_reviewed_cleanup = premerge_approval.is_some() && transactional_delivery.is_none();
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
@@ -4991,7 +5047,29 @@ impl CasCore {
             .map(|source| source.anchor.as_str())
             .or(parked_source_tip.as_deref())
             .unwrap_or(worktree.branch.as_str());
-        let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
+        // cas-5ea7: an eligible hotfix merges on the lane's merge checks alone;
+        // its deferred checks become the post-merge receipt at close.
+        let fast_lane = scoped_task.as_deref()
+            .and_then(|task| Some((task, crate::fast_lane::configured(&cas_root)?)))
+            .and_then(|(task, lane)| {
+                let head = crate::fast_lane::resolve(&cwd, ci_source)?;
+                let eligibility = crate::fast_lane::evaluate_delivery(&lane, task, &cwd, &worktree.parent_branch, &head);
+                let note = crate::fast_lane::eligibility_note(&lane, &head, &eligibility);
+                Some((lane, head, eligibility, note))
+            });
+        let fast_lane_lookup = fast_lane.as_ref()
+            // No lane-specific CI or trusted receipt without its pre-merge PASS.
+            .filter(|(_, _, eligibility, _)| premerge_approval.is_some()
+                && matches!(eligibility, crate::fast_lane::Eligibility::Eligible { .. }))
+            .and_then(|(lane, head, _, _)| fast_lane_ci(lane, head, &cwd));
+        let fast_lane_head = fast_lane_lookup.as_ref()
+            .and(fast_lane.as_ref())
+            .map(|(_, head, _, _)| head.clone());
+        let fast_lane_notice = fast_lane.as_ref()
+            .map(|(_, _, _, note)| format!("{note}\n\n"))
+            .unwrap_or_default();
+        let branch_ci_lookup = fast_lane_lookup
+            .unwrap_or_else(|| lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -5000,7 +5078,7 @@ impl CasCore {
                 task.id,
             ))
             .unwrap_or_default();
-        let ci_prefix = format!("{unparked_notice}{}",
+        let ci_prefix = format!("{unparked_notice}{fast_lane_notice}{}",
             describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup));
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
@@ -5349,6 +5427,12 @@ impl CasCore {
                     });
                 }
             }
+            if let Some(approval) = premerge_approval.as_ref() {
+                let current = self.open_task_store()?.get(&approval.candidate.task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                approval.validate_for_merge(&cas_root, &current)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
@@ -5366,7 +5450,7 @@ impl CasCore {
                 // intact while every Git merge operation consumes that SHA.
                 manager.merge_preserving_worktree_at(&mut worktree, force, do_cleanup, source_sha)
                     .and_then(|commit| {
-                        if do_cleanup && transactional_delivery.is_none() {
+                        if do_cleanup && transactional_delivery.is_none() && !defer_reviewed_cleanup {
                             if manager.git().resolve_commit(&worktree.branch).as_deref() != Some(source_sha) {
                                 do_cleanup = false;
                                 pushed_source_note.push_str("\nCleanup deferred: source branch advanced after validation; worker worktree and branch retained.");
@@ -5376,6 +5460,8 @@ impl CasCore {
                         }
                         Ok(commit)
                     })
+            } else if defer_reviewed_cleanup {
+                manager.merge_preserving_worktree(&mut worktree, force, do_cleanup)
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
@@ -5460,6 +5546,20 @@ impl CasCore {
             }
         };
 
+        // A reconciled/local-only delivery skipped the Git-merge branch's
+        // freshness check above. Revalidate it under the same target lock before
+        // its publication attempt too; this does not dispatch another review.
+        let reconciled_publication = if reconciled_delivery && let Some(approval) = premerge_approval.as_ref() {
+            approval.confirmed_publication(manager.git())
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+        } else { None };
+        if reconciled_delivery && reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
+            let current = self.open_task_store()?.get(&approval.candidate.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            approval.validate_for_merge(&cas_root, &current)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        }
+
         // cas-5ee0 (GH #137): the merge receipt must tell the truth about push
         // state. Filled in by the transactional branch below (which has to
         // publish *before* its internal close runs, or that close measures a
@@ -5470,11 +5570,11 @@ impl CasCore {
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
-            let target_tip =
+            let target_tip = reconciled_publication.as_ref().map(|(landed, _)| landed.clone()).or_else(||
                 crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                     &cwd,
                     &receipt.target_branch,
-                )
+                ))
                 .ok_or_else(|| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(
@@ -5614,23 +5714,30 @@ impl CasCore {
                         | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
                     )
                 });
-            let push_outcome = match pr_landed_sha {
+            if reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
+                approval.verify_landing(&target_tip)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
+            let push_outcome = if let Some((_, published)) = reconciled_publication.as_ref() {
+                crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha: published.clone() }
+            } else { match pr_landed_sha {
                 Some(sha) => crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha },
-                None => manager
-                    .git()
-                    .publish_branch_to_origin(&receipt.target_branch),
-            };
-            if let Some(error) = protected_default_branch_pr_error(
-                &receipt.source_branch,
-                &receipt.target_branch,
-                &push_outcome,
-                task_id,
-            ) {
+                None => manager.git().publish_branch_to_origin(&receipt.target_branch),
+            } };
+            let protected_error = protected_default_branch_pr_error(
+                &receipt.source_branch, &receipt.target_branch, &push_outcome, task_id,
+            );
+            record_published_merge(manager.git(), None, &receipt.target_branch, &push_outcome);
+            if let Some(approval) = premerge_approval.as_ref()
+                && let Some(held) = approval.finish_publication(manager.git(), &push_outcome, &target_tip)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+            {
+                let push = protected_error.unwrap_or_else(|| describe_target_push_state(&receipt.target_branch, &push_outcome));
+                return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
+            }
+            if let Some(error) = protected_error {
                 return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
             }
-            // cas-3937 review: the delivery close below can be slow too;
-            // record the published merge before it.
-            record_published_merge(manager.git(), None, &receipt.target_branch, &push_outcome);
             post_merge_test_delay().await;
             target_push = Some((receipt.target_branch.clone(), push_outcome));
 
@@ -5765,16 +5872,28 @@ impl CasCore {
             String::new()
         };
 
-        let cleanup_note = worktree_merge_cleanup_note(do_cleanup);
         reconcile_note.push_str(&pushed_source_note);
 
         // cas-5ee0 (GH #137): resolve push state for the non-transactional
         // path (the transactional one already published, before its close).
         // Every success receipt below carries this line — "Merged" alone is
         // not a truthful receipt when origin never saw the merge.
+        let reviewed_attempt = if target_push.is_none() && let Some(approval) = premerge_approval.as_ref() {
+            let landed = manager.git().resolve_commit(&worktree.parent_branch)
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
+            approval.verify_landing(&landed)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            Some(landed)
+        } else { None };
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
             let branch = worktree.parent_branch.clone();
-            let outcome = manager.git().publish_merge_target_with_retry(&branch);
+            // Peer reconciliation would change the reviewed tree. A reviewed
+            // candidate publishes exactly once; a raced push holds its lane.
+            let outcome = if premerge_approval.is_some() {
+                manager.git().publish_branch_to_origin(&branch)
+            } else {
+                manager.git().publish_merge_target_with_retry(&branch)
+            };
             (branch, outcome)
         });
         if transactional_delivery.is_none() {
@@ -5786,18 +5905,37 @@ impl CasCore {
             }
             append_stale_checkout_notes(&mut reconcile_note, &manager);
         }
-        if let Some(error) = protected_default_branch_pr_error(
-            &worktree.branch,
-            &push_branch,
-            &push_outcome,
-            task_id,
-        ) {
+        let protected_error = protected_default_branch_pr_error(
+            &worktree.branch, &push_branch, &push_outcome, task_id,
+        );
+        record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
+        if let (Some(approval), Some(attempted)) = (premerge_approval.as_ref(), reviewed_attempt.as_deref()) {
+            if let Some(held) = approval.finish_publication(manager.git(), &push_outcome, attempted)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+            {
+                let push = protected_error.unwrap_or_else(|| describe_target_push_state(&push_branch, &push_outcome));
+                return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
+            }
+            if defer_reviewed_cleanup && do_cleanup && source_worktree_live {
+                let source = crate::worktree::GitOperations::new(worktree.path.clone());
+                let unchanged = source.current_branch().ok().as_deref() == Some(worktree.branch.as_str())
+                    && source.resolve_commit("HEAD").as_deref() == Some(approval.candidate.source_sha.as_str())
+                    && source.classify_dirty_status(&worktree.path).is_ok_and(|dirty| !dirty.is_blocked());
+                if unchanged {
+                    manager.cleanup_merged_worktree(&mut worktree)
+                        .map_err(|error| worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch))?;
+                    if !is_system_b { worktree_store.update(&worktree)
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?; }
+                } else {
+                    do_cleanup = false;
+                    reconcile_note.push_str("\nCleanup deferred: source checkout changed or has uncommitted work; worktree and branch retained.");
+                }
+            }
+        }
+        if let Some(error) = protected_error {
             return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
-        // cas-3937: from here the merge is a fact; a slow close or verifier
-        // dispatch below must not turn its answer into UNKNOWN.
-        record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
         post_merge_test_delay().await;
         let trunk_notice = if trunk_fallback {
             if push_outcome.is_published() {
@@ -5935,6 +6073,19 @@ impl CasCore {
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
                 // cas-46ea: an unparked task merged from its pushed lane tip
                 // closes the same way as a parked one.
+                if let Some(head) = fast_lane_head.as_deref()
+                    && ci_admission == cas_types::MergeCiAdmission::Green
+                {
+                    let now = chrono::Utc::now();
+                    let note = format!("[{}] {}", now.format("%Y-%m-%d %H:%M"),
+                        crate::fast_lane::merge_note(head, merge_sha, now));
+                    if let Err(error) = self.open_task_store()
+                        .map_err(|error| format!("{error:?}"))
+                        .and_then(|store| store.append_trusted_note(task_id, &note).map_err(|error| error.to_string()))
+                    {
+                        tracing::warn!(%task_id, %error, "fast-lane merge record not saved; the close takes the normal QA path");
+                    }
+                }
                 let lane = observed_source_tip.as_deref().map(|tip| {
                     crate::mcp::tools::core::task::lifecycle::merge_close::MergedLane {
                         repo: &cwd,
@@ -6031,6 +6182,7 @@ impl CasCore {
         } else {
             0
         };
+        let cleanup_note = worktree_merge_cleanup_note(do_cleanup);
         let mut detail = format!(
             "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
@@ -6311,6 +6463,46 @@ mod tests {
             "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n{extra_cases}*) exit 97 ;;\nesac\n"
         ));
         (temp, code_sha, tip)
+    }
+
+    /// cas-5ea7: an eligible fast-lane tip is admitted on its merge checks
+    /// alone, so a red backend job on a frontend-only PR no longer refuses it,
+    /// while a red merge check still does.
+    #[cfg(unix)]
+    #[test]
+    fn fast_lane_admits_on_its_merge_checks_alone_cas_5ea7() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let lane = crate::fast_lane::FastLaneConfig {
+            enabled: true,
+            paths: vec!["**".into()],
+            merge_checks: vec!["PR gate".into()],
+            ..Default::default()
+        };
+        let run = |id: u64, name: &str, conclusion: &str| serde_json::json!({
+            "id": id, "name": name, "status": "completed", "conclusion": conclusion,
+            "html_url": format!("https://github.com/acme/cas/actions/runs/{id}/job/1"),
+        });
+        for (gate, expected_green) in [("success", true), ("failure", false)] {
+            let checks = serde_json::json!({"check_runs": [
+                run(1, "PR gate", gate),
+                run(2, "PostgreSQL contracts", "failure"),
+            ]});
+            let (repo, code_sha, _tip) = delivery_ci_fixture_with(true, &checks.to_string(), "");
+            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+            let normal = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            assert!(matches!(normal, BranchCiState::Red { .. }), "{normal:?}");
+            let state = super::fast_lane_ci(&lane, &code_sha, repo.path()).expect("GitHub readable").state;
+            if expected_green {
+                assert!(
+                    matches!(&state, BranchCiState::Green { test_checks, .. } if test_checks == &["PR gate".to_string()]),
+                    "{state:?}"
+                );
+                assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+            } else {
+                assert!(matches!(state, BranchCiState::Red { .. }), "{state:?}");
+                assert!(admit_branch_ci(&state, false, None).is_err());
+            }
+        }
     }
 
     /// cas-c59e: a newer push cancels the code commit's lane run, and the docs tip

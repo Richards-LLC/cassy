@@ -87,6 +87,7 @@ fn enforces_the_rules(path: &str) -> bool {
         || path.ends_with("qa_evidence_gate.rs")
         || path.ends_with("verification_tools.rs")
         || path.ends_with("worktree_ops.rs")
+        || path.ends_with("workflow/premerge_verification.rs")
 }
 
 /// Whether a QA ledger records an adversarial probe: a row whose cell names one.
@@ -113,11 +114,14 @@ pub(crate) fn tier_for_paths(paths: &[String]) -> Option<(VerificationTier, Stri
 
 /// The delivered tier, measured from the task's recorded start to its anchor.
 /// Commits merged in from the target can only raise the tier, never lower it.
+/// cas-bc15: request_changes retires the anchor; the latest retired one is
+/// still the delivery a release verdict names.
 pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<TierDecision> {
     if task.task_type == TaskType::Epic {
         return None;
     }
-    let tip = task.deliverables.factory_branch_anchor.as_deref()?;
+    let tip = task.deliverables.factory_branch_anchor.as_deref()
+        .or(task.deliverables.historical_factory_branch_anchors.last().map(String::as_str))?;
     let start = task.deliverables.factory_branch_start.as_ref()?.base_sha.as_str();
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -139,10 +143,36 @@ pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<T
 /// own. A rapid-response fix ships alone, and `force-verifier` asks for a dedicated
 /// review, so both keep their own. Unreadable config stays on the per-task path.
 pub(crate) fn release_verdict_owns(cas_root: &std::path::Path, task: &Task, repo: &std::path::Path) -> bool {
-    crate::config::Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch)
-        && !task.labels.iter().any(|label| label == FORCE_VERIFIER_LABEL)
-        && crate::rapid_response::active_for_task_at(cas_root, task, None).is_none()
-        && tier_for_delivery(task, repo).is_some_and(|decision| decision.tier == VerificationTier::Standard)
+    own_review(cas_root, task, repo).is_none()
+}
+
+/// cas-bc15: the review a delivery keeps instead of the release verdict, and
+/// how to satisfy it; `None` when the release verdict owns it.
+pub(crate) fn own_review(cas_root: &std::path::Path, task: &Task, repo: &std::path::Path) -> Option<String> {
+    if !crate::config::Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch) {
+        return Some("qa.mode is not batch, so its own verifier closes it".into());
+    }
+    if crate::fast_lane::owns_review(cas_root, task, repo, None) {
+        return Some("eligible fast lane: its own pre-merge verifier and trusted post-merge receipt".into());
+    }
+    if task.labels.iter().any(|label| label == FORCE_VERIFIER_LABEL) {
+        return Some(format!("the {FORCE_VERIFIER_LABEL} label asks for its own verifier"));
+    }
+    if crate::rapid_response::active_for_task_at(cas_root, task, None).is_some() {
+        return Some("a rapid-response window closes it on its own merge".into());
+    }
+    match tier_for_delivery(task, repo).map(|decision| decision.tier) {
+        Some(VerificationTier::Standard) => None,
+        Some(VerificationTier::Mechanical) => {
+            Some("Tier 0 (docs/tests only): task close passes on CI and the mechanical gates".into())
+        }
+        Some(VerificationTier::Adversarial) => {
+            Some("Tier 2: its own verifier with an adversarial probe, then task close".into())
+        }
+        None => Some(
+            "no measurable delivery (no recorded start or anchor): close it with task close commit_receipt=<merged sha>".into(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +225,7 @@ mod tests {
             "scripts/release-gate.sh",
             "cas-cli/src/mcp/tools/core/task/lifecycle/review_tier.rs",
             "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs",
+            "cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs",
         ] {
             assert_eq!(tier(&[path]), VerificationTier::Adversarial, "{path}");
         }

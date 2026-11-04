@@ -61,6 +61,10 @@ impl MarkdownStore {
             title: Option<String>,
             #[serde(default)]
             source_ids: Vec<String>,
+            #[serde(default)]
+            valid_from: Option<DateTime<Utc>>,
+            #[serde(default)]
+            valid_until: Option<DateTime<Utc>>,
         }
 
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
@@ -93,8 +97,8 @@ impl MarkdownStore {
             stability: 0.5,
             access_count: 0,
             importance: 0.5,
-            valid_from: None,
-            valid_until: None,
+            valid_from: fm.valid_from,
+            valid_until: fm.valid_until,
             review_after: None,
             last_reviewed: None,
             domain: None,
@@ -118,7 +122,7 @@ impl MarkdownStore {
              helpful_count: {}\n\
              harmful_count: {}\n\
              source_ids: {}\n\
-             {}{}\
+             {}{}{}{}\
              ---\n\n\
              {}",
             entry.id,
@@ -137,6 +141,8 @@ impl MarkdownStore {
                 .as_ref()
                 .map(|t| format!("title: {t}\n"))
                 .unwrap_or_default(),
+            entry.valid_from.map(|t| format!("valid_from: {}\n", t.to_rfc3339())).unwrap_or_default(),
+            entry.valid_until.map(|t| format!("valid_until: {}\n", t.to_rfc3339())).unwrap_or_default(),
             entry.content
         );
 
@@ -425,6 +431,8 @@ impl MarkdownRuleStore {
             auto_approve_tools: Option<String>,
             #[serde(default)]
             auto_approve_paths: Option<String>,
+            #[serde(default)]
+            stakeholder: Option<cas_types::StakeholderAttribution>,
         }
 
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
@@ -454,6 +462,7 @@ impl MarkdownRuleStore {
             team_id: None,
             share: None,
             operator_authority: None,
+            stakeholder: fm.stakeholder,
         })
     }
 
@@ -473,7 +482,7 @@ impl MarkdownRuleStore {
              surface_count: {}\n\
              tags: [{}]\n\
              paths: \"{}\"\n\
-             {}{}{}{}\
+             {}{}{}{}{}\
              ---\n\n\
              {}",
             rule.id,
@@ -501,6 +510,9 @@ impl MarkdownRuleStore {
                 .as_ref()
                 .map(|p| format!("auto_approve_paths: \"{p}\"\n"))
                 .unwrap_or_default(),
+            rule.stakeholder.as_ref().map(|attribution| serde_json::to_string(attribution)
+                .map(|json| format!("stakeholder: {json}\n"))).transpose()
+                .map_err(|e| StoreError::Parse(e.to_string()))?.unwrap_or_default(),
             rule.content
         );
 
@@ -552,7 +564,23 @@ impl RuleStore for MarkdownRuleStore {
         if !path.exists() {
             return Err(StoreError::RuleNotFound(rule.id.clone()));
         }
-        self.write_rule(rule)
+        let mut updated = rule.clone();
+        if updated.stakeholder.is_none() {
+            updated.stakeholder = self.get(&rule.id)?.stakeholder;
+        }
+        self.write_rule(&updated)
+    }
+
+    fn update_clearing_stakeholder(
+        &self,
+        rule: &Rule,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        self.get(&rule.id)?;
+        let mut cleared = rule.clone();
+        cleared.stakeholder = None;
+        self.write_rule(&cleared)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
@@ -611,6 +639,49 @@ impl RuleStore for MarkdownRuleStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn memory_validity_survives_markdown_round_trip() {
+        let temp = TempDir::new().unwrap();
+        let store = MarkdownStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let mut entry = Entry::new("policy".into(), "Old policy".into());
+        entry.valid_from = Some(Utc::now() - chrono::Duration::days(1));
+        entry.valid_until = Some(Utc::now());
+        store.add(&entry).unwrap();
+        let saved = store.get(&entry.id).unwrap();
+        assert_eq!(saved.valid_from, entry.valid_from);
+        assert_eq!(saved.valid_until, entry.valid_until);
+    }
+
+    #[test]
+    fn stakeholder_attribution_survives_rule_store_reads_and_updates() {
+        let temp = TempDir::new().unwrap();
+        let sqlite_dir = temp.path().join("sqlite");
+        fs::create_dir(&sqlite_dir).unwrap();
+        let stores: Vec<Box<dyn RuleStore>> = vec![
+            Box::new(crate::SqliteRuleStore::open(&sqlite_dir).unwrap()),
+            Box::new(MarkdownRuleStore::open(&temp.path().join("markdown")).unwrap()),
+        ];
+        for store in stores {
+            store.init().unwrap();
+            let mut rule = Rule::new("rule-evidence".into(), "Prompt changes via PR".into());
+            store.add(&rule).unwrap();
+            assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
+            rule.stakeholder = Some(cas_types::StakeholderAttribution {
+                name: "Ben".into(), quote: "  Review PROMPT changes via PR.\nKeep shipping.  ".into(), scope: "Prompt changes only".into(),
+            });
+            store.update(&rule).unwrap();
+            assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+            assert_eq!(store.list().unwrap()[0].stakeholder, rule.stakeholder);
+            let mut absent = rule.clone();
+            absent.stakeholder = None;
+            store.update(&absent).unwrap();
+            assert_eq!(store.get(&rule.id).unwrap().stakeholder, rule.stakeholder);
+            store.update_clearing_stakeholder(&absent, None, Some("explicit clear")).unwrap();
+            assert!(store.get(&rule.id).unwrap().stakeholder.is_none());
+        }
+    }
 
     #[test]
     fn rule_surface_count_round_trips_through_markdown_store() {

@@ -94,6 +94,12 @@ impl CasCore {
             data: None,
         })?;
 
+        if dep_type == DependencyType::ParentChild {
+            crate::epic_design_review::observe(&self.cas_root, &from_task.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                    format!("Parent dependency added, but epic design review trigger could not be evaluated: {error}")))?;
+        }
+
         if let Some(target) = inherited_target {
             from_task.deliverables.work_target = Some(target);
             from_task.updated_at = chrono::Utc::now();

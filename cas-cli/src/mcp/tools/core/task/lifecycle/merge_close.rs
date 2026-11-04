@@ -149,6 +149,57 @@ fn summarize_gate(text: &str) -> String {
     format!("{}…", line.chars().take(LIMIT).collect::<String>())
 }
 
+/// The shared, delivery-bound return path for synchronous close and durable QA decisions.
+pub(crate) fn return_merged_delivery_for_source_fix(
+    cas_root: &std::path::Path, actor: &str, task: &Task,
+    repo: &std::path::Path, target: &str, gate: &str,
+) -> Result<String, String> {
+    let (Some(anchor), Some(merge), Some(branch)) = (
+        task.deliverables.factory_branch_anchor.as_deref(),
+        task.deliverables.green_merge_commit.as_deref(),
+        task.deliverables.parked_branch.as_deref(),
+    ) else { return Ok(String::new()); };
+    if task.status != TaskStatus::AwaitingMerge || task.assignee.is_none() {
+        return Ok(String::new());
+    }
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    let target_tip = super::close_ops::resolve_branch_sha(repo, &format!("origin/{target}"))
+        .or_else(|| super::close_ops::resolve_branch_sha(repo, target));
+    let Some(target_tip) = target_tip.filter(|tip| {
+        super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
+            && super::close_ops::git_commit_is_ancestor(repo, merge, tip)
+    }) else { return Ok(String::new()); };
+    let reason = format!("post_merge_close_gate: delivery {anchor} landed at {merge} (target {target_tip}); source correction required.\n{gate}");
+    (|| -> Result<String, String> {
+        let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
+        let current = store.get(&task.id).map_err(|error| error.to_string())?;
+        if current.status != TaskStatus::AwaitingMerge
+            || current.assignee != task.assignee
+            || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+            || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
+            || current.deliverables.parked_branch != task.deliverables.parked_branch
+            || current.deliverables.work_target != task.deliverables.work_target
+        {
+            return Ok("delivery changed during close; no task transition attempted".into());
+        }
+        // Retire the old auto-close intent before the worker may start a
+        // correction, so recovery cannot re-park the already declined tip.
+        cas_store::clear_pending_observed_delivery_merge(cas_root, &task.id, branch, target, anchor)
+            .map_err(|error| error.to_string())?;
+        cas_store::request_changes_for_parked_delivery(cas_root, &task.id, actor, &reason)
+            .map_err(|error| error.to_string())?;
+        let returned = store.get(&task.id).map_err(|error| error.to_string())?;
+        let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
+            cas_root, &returned, anchor, merge, &reason,
+        ) {
+            Ok(Some(id)) => format!("worker notified (prompt {id})"),
+            Ok(None) => "no live assigned worker to notify".into(),
+            Err(error) => format!("worker notice failed: {error}"),
+        };
+        Ok(format!("Cassy returned task {} Open to its assignee for the source fix; {notice}. Start task {} and re-deliver after fixing the gate; no supervisor request_changes is needed.", task.id, task.id))
+    })()
+}
+
 impl CasCore {
     /// Source-upkeep refusals opt in here at their typed call sites. Only a
     /// published, still-current parked delivery may be returned for a fix;
@@ -156,52 +207,9 @@ impl CasCore {
     pub(super) fn return_merged_delivery_for_source_fix(
         &self, task: &Task, repo: &std::path::Path, target: &str, gate: &str,
     ) -> String {
-        let (Some(anchor), Some(merge), Some(branch)) = (
-            task.deliverables.factory_branch_anchor.as_deref(),
-            task.deliverables.green_merge_commit.as_deref(),
-            task.deliverables.parked_branch.as_deref(),
-        ) else { return String::new(); };
-        if task.status != TaskStatus::AwaitingMerge || task.assignee.is_none() {
-            return String::new();
-        }
-        let target = target.strip_prefix("origin/").unwrap_or(target);
-        let target_tip = super::close_ops::resolve_branch_sha(repo, &format!("origin/{target}"))
-            .or_else(|| super::close_ops::resolve_branch_sha(repo, target));
-        let Some(target_tip) = target_tip.filter(|tip| {
-            super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
-                && super::close_ops::git_commit_is_ancestor(repo, merge, tip)
-        }) else { return String::new(); };
-        let reason = format!("post_merge_close_gate: delivery {anchor} landed at {merge} (target {target_tip}); source correction required.\n{gate}");
         let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
-        let recovery = (|| -> Result<String, String> {
-            let store = self.open_task_store().map_err(|error| error.to_string())?;
-            let current = store.get(&task.id).map_err(|error| error.to_string())?;
-            if current.status != TaskStatus::AwaitingMerge
-                || current.assignee != task.assignee
-                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
-                || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
-                || current.deliverables.parked_branch != task.deliverables.parked_branch
-                || current.deliverables.work_target != task.deliverables.work_target
-            {
-                return Ok("delivery changed during close; no task transition attempted".into());
-            }
-            // Retire the old auto-close intent before the worker may start a
-            // correction, so recovery cannot re-park the already declined tip.
-            cas_store::clear_pending_observed_delivery_merge(&self.cas_root, &task.id, branch, target, anchor)
-                .map_err(|error| error.to_string())?;
-            cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
-                .map_err(|error| error.to_string())?;
-            let returned = store.get(&task.id).map_err(|error| error.to_string())?;
-            let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
-                &self.cas_root, &returned, anchor, merge, &reason,
-            ) {
-                Ok(Some(id)) => format!("worker notified (prompt {id})"),
-                Ok(None) => "no live assigned worker to notify".into(),
-                Err(error) => format!("worker notice failed: {error}"),
-            };
-            Ok(format!("Cassy returned task {} Open to its assignee for the source fix; {notice}. Start task {} and re-deliver after fixing the gate; no supervisor request_changes is needed.", task.id, task.id))
-        })();
-        match recovery {
+        match return_merged_delivery_for_source_fix(&self.cas_root, &actor, task, repo, target, gate) {
+            Ok(detail) if detail.is_empty() => String::new(),
             Ok(detail) => format!("\n\n{detail}"),
             Err(error) => format!("\n\nCassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id),
         }
@@ -480,7 +488,6 @@ impl CasCore {
     /// recorded first. Tier 0, Tier 2 and `force-verifier` deliveries keep their
     /// own path. Returns the report for the receipt's response.
     pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
-        use super::review_tier::release_verdict_owns;
         let recording_verdict = receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA;
         let (mut closed, mut already, mut own_review, mut held) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let Ok(store) = self.open_task_store() else {
@@ -506,14 +513,15 @@ impl CasCore {
                     continue;
                 }
             };
-            if !release_verdict_owns(&self.cas_root, &task, &repo) {
+            if let Some(review) = super::review_tier::own_review(&self.cas_root, &task, &repo) {
                 if recording_verdict {
-                    own_review.push(task_id.as_str());
+                    own_review.push(format!("- {task_id}: {review}"));
                 }
                 continue;
             }
-            let anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap_or_default();
-            let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, anchor) {
+            // cas-bc15: after request_changes the retired anchor is the delivery.
+            let anchor = crate::qa_batch::delivery_anchor(&repo, &task).unwrap_or_default();
+            let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {
                 Ok(Some(verdict)) => verdict,
                 Ok(None) if recording_verdict => {
                     hold("this verdict does not cover the delivery's current anchor; review it again");
@@ -529,6 +537,10 @@ impl CasCore {
                 CassyMergeClose::Closed { .. } => closed.push(task_id.as_str()),
                 CassyMergeClose::AlreadyClosed => already.push(task_id.as_str()),
                 CassyMergeClose::Held(text) => hold(&text),
+                CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&format!(
+                    "this verdict covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
+                    verdict.staging_sha
+                )),
                 CassyMergeClose::NotEligible => {
                     hold("not parked, or merged under a CI override; it needs its own close")
                 }
@@ -542,7 +554,7 @@ impl CasCore {
             report.push_str(&format!("\nAlready closed: {}.", already.join(", ")));
         }
         if !own_review.is_empty() {
-            report.push_str(&format!("\nKeeps its own review: {}.", own_review.join(", ")));
+            report.push_str(&format!("\nKeeps its own review ({}):\n{}", own_review.len(), own_review.join("\n")));
         }
         if !held.is_empty() {
             report.push_str(&format!("\nStill held ({}):\n{}", held.len(), held.join("\n")));

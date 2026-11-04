@@ -1492,7 +1492,7 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
 }
 
 #[tokio::test]
-async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_close() {
+async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let cas_dir = f.dir.path().join(".cas");
@@ -1500,7 +1500,7 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     config.set("verification.enabled", "true").unwrap();
     config.save(&cas_dir).unwrap();
     // CasCore caches config for its lifetime: enable verification before
-    // the first close, so the merged close exercises dispatch preparation.
+    // the first close, so the merged close cannot skip verification implicitly.
     assert!(f.core.load_config().verification_enabled());
     close(&f).await;
     let old = cas_store::create_verification_dispatch_bound(
@@ -1531,7 +1531,7 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         cas_types::VerificationDispatchState::Invalidated
     );
     // A merge fact is retained even when its tree discarded the delivery.
-    // The integration gate must still refuse; a verifier must still be able to report.
+    // The integration gate must still refuse without opening a post-merge review.
     git(
         f.dir.path(),
         &[
@@ -1553,20 +1553,8 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
         .unwrap()
         .unwrap();
-    assert_ne!(
-        dispatch.id, old.id,
-        "merged re-delivery needs a new exact boundary before content refusal"
-    );
-    assert_eq!(
-        dispatch.state,
-        cas_types::VerificationDispatchState::Pending
-    );
-    let proof = dispatch
-        .repository
-        .as_ref()
-        .expect("bind the merged target, never infer an unbound pass");
-    assert_eq!(proof.head_commit, git(f.dir.path(), &["rev-parse", "main"]));
-    assert_eq!(proof.target_branch.as_deref(), Some("main"));
+    assert_eq!(dispatch.id, old.id, "close cannot create a post-merge review");
+    assert_eq!(dispatch.state, cas_types::VerificationDispatchState::Invalidated);
     let repeated = close_output(&f).await;
     assert!(repeated.contains("DELIVERY CONTENT DROPPED"), "{repeated}");
     assert_eq!(
@@ -1577,7 +1565,6 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         dispatch.id,
         "retry must keep the same exact dispatch"
     );
-    assert!(proof.anchor_commits.contains(&f.final_tip));
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -1593,34 +1580,17 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     let invalid = text(reviewed_close(format!("reviewed-drop: {} -- not a replacement", f.final_tip)).await.unwrap());
     assert!(invalid.contains("DELIVERY REVIEW REJECTED") && invalid.contains("must differ from anchor"), "{invalid}");
     let reason = format!("reviewed-drop: {replacement} -- replace footer; keep the \"reviewed\" spacing.");
-    let pending = text(reviewed_close(reason.clone()).await.unwrap());
-    assert!(pending.contains("VERIFICATION REQUIRED") && !pending.contains("DELIVERY CONTENT DROPPED"), "{pending}");
-    supervisor.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-        "task_id":TASK,"dispatch_id":dispatch.id,"status":"approved","summary":"Independent review recorded; integration proof remains a separate close obligation"
-    })).unwrap())).await.expect("the legitimate independent verdict must be recordable");
-    let after_verdict = close_output(&f).await;
-    assert!(
-        after_verdict.contains("DELIVERY CONTENT DROPPED"),
-        "{after_verdict}"
-    );
-    assert_ne!(
-        open_task_store(&cas_dir).unwrap().get(TASK).unwrap().status,
-        TaskStatus::Closed,
-        "a dispatch never waives the content gate"
-    );
     let reviewed = text(reviewed_close(reason).await.unwrap());
+    // Existing explicit supervisor override authority remains audited; it adds
+    // no post-merge dispatch and does not pretend an independent check ran.
+    assert!(reviewed.contains("Closed task:"), "{reviewed}");
     let closed = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
-    assert_eq!(closed.status, TaskStatus::Closed, "{reviewed}");
+    assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains(&replacement) && closed.notes.contains("reviewed delivery content supersession accepted"), "{}", closed.notes);
-
-    // The override is an intervention and the independent verdict is a check.
+    let retained = cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().unwrap();
+    assert_eq!(retained.id, old.id);
+    assert_eq!(retained.state, cas_types::VerificationDispatchState::Invalidated);
     let ledger = cas_store::quality_events_for_task(&cas_dir, TASK).unwrap();
-    let interventions: Vec<_> = ledger.iter().filter_map(|event| match event.payload {
-        cas_store::QualityPayload::Intervention { intervention, .. } => Some(intervention),
-        _ => None,
-    }).collect();
-    assert!(interventions.contains(&cas_store::InterventionKind::OverrideClose), "{ledger:?}");
     assert!(ledger.iter().any(|event| matches!(&event.payload,
-        cas_store::QualityPayload::CheckRun { check_id, outcome: cas_store::CheckOutcome::Pass, .. } if check_id == "task_verifier")),
-        "{ledger:?}");
+        cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }

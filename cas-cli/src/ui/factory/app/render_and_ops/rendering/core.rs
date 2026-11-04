@@ -1134,7 +1134,7 @@ impl FactoryApp {
                 self.supervisor_name,
                 role_tag("supervisor", self.supervisor_cli)
             );
-            let block = Block::default()
+            let mut block = Block::default()
                 .title(title)
                 .title_style(
                     Style::default()
@@ -1144,6 +1144,19 @@ impl FactoryApp {
                 .borders(Borders::ALL)
                 .border_type(border_type)
                 .border_style(Style::default().fg(border_color));
+            // cas-062b: on the border, never in the composer, so the
+            // operator knows a Commander message is queued, not ignored.
+            if let Some(notice) = self.supervisor_draft_hold_notice() {
+                block = block.title_bottom(
+                    Line::from(Span::styled(
+                        notice,
+                        Style::default()
+                            .fg(palette.status_warning)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .right_aligned(),
+                );
+            }
 
             let inner = block.inner(layout.supervisor_area);
             let lines: Vec<Line> = (0..inner.height)

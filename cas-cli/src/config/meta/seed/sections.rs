@@ -91,4 +91,8 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     registry
         .section_descriptions
         .insert("viktor", "Machine-wide managed Viktor upstream");
+    registry.section_descriptions.insert(
+        "fast_lane",
+        "Hotfix fast lane: merge on unit tests, post-merge receipt",
+    );
 }

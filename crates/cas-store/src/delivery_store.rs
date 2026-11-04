@@ -567,6 +567,38 @@ pub fn create_worker_delivery_with_dispatch_for_lease(
     owner_agent_id: &str,
     deadline_at: DateTime<Utc>,
 ) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
+    create_worker_delivery_with_dispatch_for_lease_bound(
+        root, receipt, state, actor_agent_id, expected_lease_epoch, owner_agent_id, deadline_at, None,
+    )
+}
+
+/// Accept an unpublished delivery with its candidate proof in the same lease-
+/// checked transaction as the receipt and dispatch. No second review is added.
+pub fn create_worker_delivery_with_dispatch_for_lease_at_repository(
+    root: &Path,
+    receipt: &WorkerCompletionReceipt,
+    state: WorkerDeliveryState,
+    actor_agent_id: &str,
+    expected_lease_epoch: u64,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+    repository: &cas_types::RepositoryProofBoundary,
+) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
+    create_worker_delivery_with_dispatch_for_lease_bound(
+        root, receipt, state, actor_agent_id, expected_lease_epoch, owner_agent_id, deadline_at, Some(repository),
+    )
+}
+
+fn create_worker_delivery_with_dispatch_for_lease_bound(
+    root: &Path,
+    receipt: &WorkerCompletionReceipt,
+    state: WorkerDeliveryState,
+    actor_agent_id: &str,
+    expected_lease_epoch: u64,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+    repository: Option<&cas_types::RepositoryProofBoundary>,
+) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
     let mut conn = open(root)?;
     conn.execute_batch(crate::agent_store::AGENT_SCHEMA)?;
     conn.execute_batch(crate::verification_store::VERIFICATION_SCHEMA)?;
@@ -606,6 +638,9 @@ pub fn create_worker_delivery_with_dispatch_for_lease(
         // lease to match. It is an exact replay of a boundary this session
         // already persisted, which a lease-less retry may always re-read.
         if let Some(replay) = exact_receipt_replay_with_conn(&tx, receipt, actor_agent_id)? {
+            if repository.is_some() && replay.1.repository.as_ref() != repository {
+                return Err(StoreError::Parse("immutable delivery candidate proof mismatch".into()));
+            }
             return Ok(replay);
         }
         return Err(StoreError::Parse(
@@ -613,10 +648,11 @@ pub fn create_worker_delivery_with_dispatch_for_lease(
                 .to_string(),
         ));
     }
-    let boundary = VerificationProofBoundary::delivery(
+    let mut boundary = VerificationProofBoundary::delivery(
         receipt.id.clone(),
         worker_delivery_transaction_id(&receipt.id),
     );
+    boundary.repository = repository.cloned();
     let dispatch = crate::verification_store::create_verification_dispatch_bound_with_conn(
         &tx,
         &receipt.task_id,
@@ -1489,7 +1525,13 @@ mod tests {
         };
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let deadline = Utc::now() + chrono::Duration::minutes(10);
-        let (first, first_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+        let proof = cas_types::RepositoryProofBoundary {
+            repository_root: root.path().to_string_lossy().into_owned(),
+            worktree_root: root.path().join("candidate").to_string_lossy().into_owned(),
+            head_commit: "c".repeat(40), state_digest: "immutable candidate".into(),
+            target_branch: None, anchor_commits: Vec::new(),
+        };
+        let (first, first_dispatch) = create_worker_delivery_with_dispatch_for_lease_at_repository(
             root.path(),
             &receipt,
             WorkerDeliveryState::AwaitingVerification,
@@ -1497,6 +1539,7 @@ mod tests {
             lease.epoch,
             "verifier-owner",
             deadline,
+            &proof,
         )
         .unwrap();
         assert!(
@@ -1511,7 +1554,7 @@ mod tests {
         );
         let after_first = delivery_boundary_counts(root.path(), &receipt.id);
 
-        let (replay, replay_dispatch) = create_worker_delivery_with_dispatch_for_lease(
+        let (replay, replay_dispatch) = create_worker_delivery_with_dispatch_for_lease_at_repository(
             root.path(),
             &receipt,
             WorkerDeliveryState::AwaitingVerification,
@@ -1519,10 +1562,18 @@ mod tests {
             lease.epoch,
             "verifier-owner",
             deadline,
+            &proof,
         )
         .expect("exact replay by the persisting session re-reads its boundary");
         assert_eq!(replay.id, first.id);
         assert_eq!(replay_dispatch.id, first_dispatch.id);
+        assert_eq!(replay_dispatch.repository.as_ref(), Some(&proof));
+        let mut changed = proof.clone();
+        changed.state_digest = "a different candidate".into();
+        assert!(create_worker_delivery_with_dispatch_for_lease_at_repository(
+            root.path(), &receipt, WorkerDeliveryState::AwaitingVerification,
+            "worker-session", lease.epoch, "verifier-owner", deadline, &changed,
+        ).is_err(), "an exact receipt cannot substitute another candidate after lease release");
         assert_eq!(
             delivery_boundary_counts(root.path(), &receipt.id),
             after_first

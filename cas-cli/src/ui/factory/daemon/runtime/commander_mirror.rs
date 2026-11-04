@@ -287,17 +287,24 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         }
                     }
                 }
+                let mut answered = false;
                 if value.get("type").and_then(Value::as_str) == Some("assistant")
                     && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
                 {
                     if let Some(text) = text_blocks(value, "/message/content", "text") {
                         final_text = Some(text);
+                        answered = true;
                     }
                 }
+                // cas-ce9d: Claude writes one end_turn response as a
+                // thinking-only line and then its text line, both marked
+                // end_turn. Ending on the thinking line mirrored the turn's
+                // earlier progress text and dropped the answer, so only an
+                // end_turn line carrying text (or turn_duration) ends it.
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
                     && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
-                    && value.get("isSidechain").and_then(Value::as_bool) != Some(true))
+                    && answered)
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
                 if finished && let Some(text) = final_text.take()
@@ -465,6 +472,8 @@ pub(crate) struct MirrorScanState {
     turns: super::quality_turns::Scanner,
     cursors: HashMap<String, TranscriptCursor>,
     resolution_misses: HashMap<String, (TranscriptSource, Option<i64>, Instant, Duration)>,
+    /// Supervisors already warned about for this source (cas-ce9d).
+    unresolved_warned: HashMap<String, TranscriptSource>,
     codex_ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
     receipt_next_poll: HashMap<i64, Instant>,
     published_inputs: HashSet<i64>,
@@ -475,6 +484,8 @@ pub(crate) struct MirrorScanState {
     transcript_reads: usize,
     #[cfg(test)]
     resolution_scans: usize,
+    #[cfg(test)]
+    unresolved_warnings: usize,
     #[cfg(test)]
     receipt_reads: usize,
     #[cfg(test)]
@@ -653,6 +664,7 @@ pub(super) fn scan_supervisor_replies(
         .cursors
         .retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
     state.resolution_misses.retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
+    state.unresolved_warned.retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
     for agent in supervisors {
         // Supervisor registration persists its own harness under
         // `supervisor_cli`; `worker_cli` names the default child harness.
@@ -704,6 +716,24 @@ pub(super) fn scan_supervisor_replies(
             });
         let Some(path) = path else {
             state.cursors.remove(&agent.id);
+            // cas-ce9d: name an unreadable supervisor once per source rather
+            // than leaving its pane answers silently unmirrored. An unbound
+            // Codex rollout is expected while the pane boots.
+            if !unbound_codex && state.unresolved_warned.get(&agent.id) != Some(&source) {
+                tracing::warn!(
+                    supervisor = %agent.name,
+                    session_id,
+                    cli = cli.backend().name(),
+                    account = account.as_deref().unwrap_or("(default)"),
+                    project = %project_path.display(),
+                    "commander mirror: supervisor transcript not found; its pane answers cannot reach Commander"
+                );
+                state.unresolved_warned.insert(agent.id.clone(), source.clone());
+                #[cfg(test)]
+                {
+                    state.unresolved_warnings += 1;
+                }
+            }
             if unbound_codex && !miss_held {
                 let delay = state.resolution_misses.get(&agent.id)
                     .filter(|(prior, floor, _, _)| prior == &source && *floor == startup_id)
@@ -714,6 +744,7 @@ pub(super) fn scan_supervisor_replies(
             continue;
         };
         state.resolution_misses.remove(&agent.id);
+        state.unresolved_warned.remove(&agent.id);
         let Ok(metadata) = std::fs::metadata(&path) else {
             state.cursors.remove(&agent.id);
             continue;
@@ -1306,6 +1337,8 @@ mod tests {
     fn claude_thinking_only_end_turn_preserves_the_later_pane_answer() {
         let values = vec![
             serde_json::json!({"timestamp":"2026-09-29T16:11:33Z","type":"user","uuid":"prompt-alpha","message":{"content":"[cas #2 operator Daniel@Desktop verified 0s first] ALPHA"}}),
+            // cas-ce9d: a progress line earlier in the turn is not its answer.
+            serde_json::json!({"timestamp":"2026-09-29T16:11:35Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Now a read-only look."}],"stop_reason":"tool_use"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:37Z","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal work"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:38Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replied ALPHA"}],"stop_reason":"end_turn"}}),
             serde_json::json!({"timestamp":"2026-09-29T16:11:39Z","type":"system","subtype":"turn_duration"}),
@@ -1688,6 +1721,32 @@ mod tests {
         assert_eq!(payload.reply_to, history.iter().find(|row| row.source == "terminal").map(|row| row.id));
         assert_eq!(payload.message, "**Ready**\n- Next step is clear.");
         assert_eq!(payload.device_id, "*");
+    }
+
+    /// cas-ce9d: a supervisor whose transcript cannot be found is named in a
+    /// warning once per source, never skipped in silence every second.
+    #[test]
+    fn unresolvable_supervisor_transcript_warns_once_cas_ce9d() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let queue = SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        let agents = SqliteAgentStore::open(&root).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = Agent::new_with_role("sup-id".into(), "sup".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some("factory-1".into());
+        supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+        supervisor.metadata.insert(
+            "supervisor_account_dir".into(),
+            temp.path().join(".claude-other").to_string_lossy().into_owned(),
+        );
+        agents.register(&supervisor).unwrap();
+        let mut state = MirrorScanState::default();
+        for _ in 0..3 {
+            scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, std::slice::from_ref(&supervisor), &mut state);
+        }
+        assert_eq!(state.unresolved_warnings, 1);
     }
 
     #[test]

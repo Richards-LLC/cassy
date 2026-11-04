@@ -258,7 +258,12 @@ that produces it:
    all of the following:
    - a `reason` of at least 20 characters;
    - an http(s) `origin` that is not local and is listed in
-     `qa.deployed_origins`, otherwise "wrong origin";
+     `qa.deployed_origins`, otherwise "wrong origin". An entry may be a
+     per-deployment pattern with one `*` beside literal text in the leftmost
+     host label, on a host of three or more labels
+     (`https://<project>-*-<team>.vercel.app`). The `*` matches letters,
+     digits and hyphens only, so it never crosses into another domain
+     (cas-f426);
    - a `deployed_sha` that is the delivered head or a descendant of it,
      otherwise "stale";
    - a `deployment_proof` file in the bundle, fresh like every listed
@@ -269,6 +274,10 @@ that produces it:
    scanned for credentials (session JWTs, bearer tokens, API tokens,
    cookie/authorization header values, a saved storage state). A hit is
    refused, naming the file and the kind of secret but never the value.
+   An uncited bundle's refusal, and a visual-QA run against an undeclared
+   remote origin, both name this route: the current `qa.deployed_origins`
+   value (or that it is empty), the `cas config set qa.deployed_origins`
+   command, and the `deployed` declaration (cas-f426).
 6. **Critique.** `critique_score` has the five dimensions, each 0–5. It must
    meet the floor: distinctiveness, fit and hierarchy each ≥ 4, and no
    dimension at 0.

@@ -272,6 +272,7 @@ pub fn handle_session_start(
     // over-budget payload degrades to counts + remediation command instead of
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
+    let context = crate::hooks::handoff_updates::inject(context, cas_root);
     let context = resume_context_delta(cas_root, input, context);
     let mut assembler = SessionContextAssembler::new(context);
     if !lane_handoff.is_empty() {
@@ -585,6 +586,11 @@ pub fn handle_session_start(
     // are treated as "no mismatch".
     // ========================================================================
     let context = build_worker_worktree_assertion(&input.cwd, context);
+
+    // Operator project holds lead every startup, including resume deltas.
+    let context = cas_store::project_hold::notice(cas_root)
+        .map(|hold| format!("## Project hold\n{hold}\n\n{context}"))
+        .unwrap_or(context);
 
     let output = if context.is_empty() {
         HookOutput::empty()

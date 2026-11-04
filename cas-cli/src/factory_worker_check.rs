@@ -1106,8 +1106,12 @@ fn receipt_range_changed_paths(
     Some(paths)
 }
 
-fn append_only_or_generated(path: &str) -> bool {
-    path == "CHANGELOG.md" || path.starts_with("hub-web/dist/")
+/// Append-only shared files (the changelog and its fragments) and generated
+/// bundles. Concurrent deliveries all touch them, so neither a conflict-only
+/// repair (cas-2bdf) nor a sibling merge after dispatch (cas-a32c) is a change
+/// to reviewed code.
+pub(crate) fn append_only_or_generated(path: &str) -> bool {
+    path == "CHANGELOG.md" || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
 }
 
 /// The local target and its `origin/` tracking ref, when they resolve.

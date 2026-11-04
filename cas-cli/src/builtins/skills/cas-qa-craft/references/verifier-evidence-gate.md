@@ -1,9 +1,9 @@
 # Verifier evidence gate
 
-The task-verifier reads this file when a task, or any child of an epic, has a
-non-empty `demo_statement`, and for any acceptance criterion that states a
-measurable claim (see Measurable claims below). It runs before the verifier
-reads the close reason. Workers produce the evidence; the verifier consumes it.
+The task-verifier applies Code review procedure and Quality checklist to every
+review. Demo-statement and measurable-claim sections apply when the task, or a
+child of its epic, has that requirement; those evidence gates run before the
+close reason is read. Workers produce evidence; the verifier consumes it.
 
 ## Demo-statement evidence mode
 

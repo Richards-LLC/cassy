@@ -90,6 +90,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         await page.keyboard.press("Escape");
         await expect(dialog).toBeHidden();
         await expect(input).toBeFocused();
+        await expect(input).toHaveValue("/finish");
+        await input.fill("");
         expect(mutations()).toHaveLength(2);
       });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {

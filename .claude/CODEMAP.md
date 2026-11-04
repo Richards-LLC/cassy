@@ -58,6 +58,7 @@
 
 ## Factory runtime and terminals
 
+- `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
 - `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` - checkout-grouped cleanup intents, persisted readiness and immutable retirement snapshots.
 - `crates/cas-pty/src/pty.rs` - private startup-brief files, harness argv construction and owned PTY lifetimes.

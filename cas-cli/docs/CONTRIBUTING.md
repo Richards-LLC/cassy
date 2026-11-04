@@ -162,6 +162,13 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+`cas factory message --session <name> --project-dir <project>` uses the
+destination session's store and queue session, even from another factory's
+shell with inherited `CAS_ROOT` and `CAS_FACTORY_SESSION`. Either selector
+can be used alone. Explicit `--project-dir` and `--cas-root` must resolve to
+the selected session's store; conflicts fail before enqueueing. The success
+line and JSON `session` field name the session written to the queue.
+
 Planning recall at task creation and worker spawn requires matching content terms;
 weak incidental matches stay silent. Each recalled item and operation lesson is
 shown at most once in a harness session. Spawn lessons tagged for a harness are

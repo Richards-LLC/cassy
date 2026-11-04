@@ -71,7 +71,7 @@ mod director;
 pub(crate) use director::effective_stall_threshold_secs;
 #[cfg(test)]
 pub(crate) use director::delivery_marked_ready;
-pub(crate) use director::{enqueue_external_message, external_response_hint};
+pub(crate) use director::{enqueue_external_message, enqueue_external_message_for_session, external_response_hint};
 pub(crate) mod cgroup;
 mod input;
 mod layout;

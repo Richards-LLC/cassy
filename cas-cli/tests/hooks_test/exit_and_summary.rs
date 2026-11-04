@@ -34,6 +34,15 @@ fn test_exit_blocked_with_claimed_task() {
     let task_store =
         open_task_store_local(&temp.path().join(".cas")).expect("task store should open");
     assert_eq!(task_store.get(&task_id).unwrap().status, TaskStatus::InProgress);
+
+    // A re-claimed task cannot ride the handoff saved before its new lease.
+    open_agent_store(&temp.path().join(".cas"))
+        .unwrap()
+        .release_lease(&task_id, &agent_id)
+        .unwrap();
+    claim_task(&temp, &task_id, &agent_id);
+    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
+    assert_stop_blocked(&stop_output, &["entry_type: handoff"], None);
 }
 
 /// Test that Stop is allowed when all tasks are closed

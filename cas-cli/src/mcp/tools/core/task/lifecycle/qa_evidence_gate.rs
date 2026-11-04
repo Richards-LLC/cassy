@@ -317,9 +317,9 @@ fn task_qa_notes<'a>(
         return original;
     }
     std::borrow::Cow::Owned(format!(
-        "{}\nqa-bundle: {}",
+        "{}\n\n{}",
         task.notes,
-        replacement.display()
+        crate::qa_evidence::bundle_citation_note(replacement.display())
     ))
 }
 
@@ -687,7 +687,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         None
     };
     let resolved_notes = match restored {
-        Some(bundle) => format!("{notes}\nqa-bundle: {}", bundle.display()),
+        Some(bundle) => format!("{notes}\n\n{}", crate::qa_evidence::bundle_citation_note(bundle.display())),
         None => notes.to_string(),
     };
     let ctx = EvidenceContext {

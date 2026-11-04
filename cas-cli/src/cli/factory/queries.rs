@@ -798,12 +798,11 @@ pub(super) fn execute_message(
     use cas_store::{EventStore, SqliteEventStore};
     use cas_types::{EventEntityType, EventType};
 
-    let project_dir = resolve_project_dir(project_dir)?;
-    let session = resolve_session(session_name, &project_dir)?;
-    let cas_root = cas_root_override
-        .map(std::path::Path::to_path_buf)
-        .map(Ok)
-        .unwrap_or_else(|| cas_root_for_session(&session))?;
+    let discovery_project = resolve_project_dir(project_dir)?;
+    let session = resolve_session(session_name, &discovery_project)?;
+    // The destination session owns both the store and queue tag. Inherited
+    // factory variables describe the sender and must not redirect this write.
+    let cas_root = message_root_for_session(&session, project_dir, cas_root_override)?;
 
     let resolved_target = if target == "supervisor" {
         session.metadata.supervisor.name.clone()
@@ -855,12 +854,13 @@ pub(super) fn execute_message(
         })?.id()
     } else {
         anyhow::ensure!(options.is_empty(), "--option requires --kind ask");
-        crate::ui::factory::enqueue_external_message(
+        crate::ui::factory::enqueue_external_message_for_session(
             &cas_root,
             from,
             &resolved_target,
             message,
             no_wrap,
+            Some(&session.name),
         )?
     };
 
@@ -929,6 +929,36 @@ pub(super) fn execute_message(
     ))
     .render(&mut fmt)?;
     Ok(())
+}
+
+fn message_root_for_session(
+    session: &SessionInfo,
+    project_dir: Option<&std::path::Path>,
+    cas_root_override: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf> {
+    let session_root = if let Some(root) = session.metadata.cas_root.as_ref() {
+        std::path::PathBuf::from(root)
+    } else {
+        let project = session.metadata.project_dir.as_ref().ok_or_else(|| {
+            anyhow!("Session '{}' has no project_dir or cas_root; cannot resolve message destination", session.name)
+        })?;
+        crate::store::find_cas_root_ignoring_env(std::path::Path::new(project))?
+    };
+    let session_root = session_root.canonicalize()?;
+    // Compare stores, rather than directory strings, so symlinks and worktrees
+    // that share the destination's store are valid explicit selectors.
+    if let Some(project) = project_dir {
+        let root = crate::store::find_cas_root_ignoring_env(project)?.canonicalize()?;
+        anyhow::ensure!(root == session_root,
+            "--project-dir '{}' conflicts with session '{}' (store '{}'). Use the session's project directory.",
+            project.display(), session.name, session_root.display());
+    }
+    if let Some(root) = cas_root_override {
+        anyhow::ensure!(root.canonicalize()? == session_root,
+            "--cas-root '{}' conflicts with session '{}' (store '{}'). Use the session's Cassy root.",
+            root.display(), session.name, session_root.display());
+    }
+    Ok(session_root)
 }
 
 fn resolve_project_dir(project_dir: Option<&std::path::Path>) -> Result<std::path::PathBuf> {

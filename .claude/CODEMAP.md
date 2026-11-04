@@ -64,6 +64,7 @@
 
 ## Factory runtime and terminals
 
+- `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 

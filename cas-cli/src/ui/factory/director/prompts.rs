@@ -819,6 +819,20 @@ pub(crate) fn enqueue_external_message(
     message: &str,
     no_wrap: bool,
 ) -> anyhow::Result<i64> {
+    let session = std::env::var("CAS_FACTORY_SESSION").ok();
+    enqueue_external_message_for_session(cas_root, from, target, message, no_wrap, session.as_deref())
+}
+
+/// The CLI resolves its destination explicitly; bridge callers retain their
+/// process-local session through `enqueue_external_message` above.
+pub(crate) fn enqueue_external_message_for_session(
+    cas_root: &std::path::Path,
+    from: &str,
+    target: &str,
+    message: &str,
+    no_wrap: bool,
+    factory_session: Option<&str>,
+) -> anyhow::Result<i64> {
     let message = crate::prompt_revalidation::strip_assignment_envelopes(message);
     let payload = if no_wrap {
         message.to_string()
@@ -826,8 +840,8 @@ pub(crate) fn enqueue_external_message(
         format!("{}\n\n{}", message.trim_end(), external_response_hint(cas_root, from))
     };
     let queue = crate::store::open_prompt_queue_store(cas_root)?;
-    Ok(match std::env::var("CAS_FACTORY_SESSION").ok() {
-        Some(session) => queue.enqueue_with_session(from, target, &payload, &session)?,
+    Ok(match factory_session {
+        Some(session) => queue.enqueue_with_session(from, target, &payload, session)?,
         None => queue.enqueue(from, target, &payload)?,
     })
 }

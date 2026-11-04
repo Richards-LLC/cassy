@@ -1016,6 +1016,7 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
 async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let mut env = TestEnvGuard::temp_home();
     for outcome in ["success", "failure", "ineligible"] {
+    env.set("CAS_AGENT_ROLE", "worker");
     let f = fixture(&mut env);
     let paths = if outcome == "ineligible" { "frontend/**" } else { "crates/**" };
     std::fs::write(
@@ -1028,6 +1029,12 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let tasks = open_task_store(&f.cas_dir()).unwrap();
     let mut bug = tasks.get(ID).unwrap();
     bug.task_type = cas_types::TaskType::Bug;
+    bug.proof_targets = vec!["widget gear".into()];
+    bug.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: bug.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: LANE.into(),
+        base_sha: git(f.dir.path(), &["rev-parse", "main"]),
+    });
     bug.notes.push_str("\n✅ DECISION no journey impact: isolated widget function with no browser route\n");
     tasks.update(&bug).unwrap();
 

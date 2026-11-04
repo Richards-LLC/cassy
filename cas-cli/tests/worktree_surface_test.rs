@@ -2474,7 +2474,7 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 #[tokio::test]
 async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
     let mut env = test_env();
-    for verdict in ["approved", "rejected"] {
+    for verdict in ["timed_out", "approved", "rejected"] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(
             fixture.cas_root.join("config.toml"),
@@ -2529,6 +2529,16 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             &fixture.repo.root,
             &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
         );
+        if verdict == "timed_out" {
+            cas_store::timeout_verification_dispatch(&fixture.cas_root, &task.id,
+                dispatch.deadline_at + chrono::Duration::seconds(1)).unwrap().unwrap();
+            let held = fixture.service.factory(Parameters(merge)).await.unwrap_err().message.to_string();
+            // pin: expired candidate guidance must name registered-supervisor re-dispatch and the merge continuation command, not ask the worker to finish an expired verdict.
+            assert!(held.contains("supervisor") && held.contains("Re-dispatch")
+                && held.contains("factory action=worktree_merge") && held.contains(&dispatch.id), "{held}");
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
+            continue;
+        }
         let recorded = fixture
             .service
             .verification(Parameters(verification_req(serde_json::json!({

@@ -1011,19 +1011,6 @@ impl Mux {
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
     ) -> Result<PaneId> {
-        self.add_worker_resuming(name, cwd, cas_root, supervisor_name, teams, spec, None)
-    }
-
-    pub fn add_worker_resuming(
-        &mut self,
-        name: &str,
-        cwd: PathBuf,
-        cas_root: Option<&PathBuf>,
-        supervisor_name: &str,
-        teams: Option<&TeamsSpawnConfig>,
-        spec: Option<WorkerSpec>,
-        resume_session: Option<&str>,
-    ) -> Result<PaneId> {
         // Check if pane with this name already exists
         if self.panes.contains_key(name) {
             return Err(Error::pty(format!("Pane '{name}' already exists")));
@@ -1053,7 +1040,7 @@ impl Mux {
         let fleet_size = self.worker_count() + 1;
         // Consume the override: a later recycle must not reuse an old task.
         let startup_prompt = self.worker_startup_prompts.remove(name);
-        let pane = Pane::worker_resuming(
+        let pane = Pane::worker_with_startup_prompt(
             name,
             cwd,
             cas_root,
@@ -1070,7 +1057,6 @@ impl Mux {
             teams,
             self.factory_session.as_deref(),
             Some(fleet_size),
-            resume_session,
             startup_prompt.as_deref(),
         )?;
         let id = pane.id().to_string();

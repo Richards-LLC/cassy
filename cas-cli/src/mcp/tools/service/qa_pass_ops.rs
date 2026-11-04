@@ -38,6 +38,7 @@ impl CasService {
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        super::mutation_receipt::batch_receipt_committed(&receipt.id, &receipt.staging_sha);
         // cas-6048: the peer machine's close gate learns it through task sync.
         crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;

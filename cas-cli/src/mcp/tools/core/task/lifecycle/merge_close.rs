@@ -494,7 +494,20 @@ impl CasCore {
             return "\nNo delivery was closed: the task store is unreadable; retry task close.".to_string();
         };
         for task_id in receipt.task_heads.keys() {
-            let mut hold = |reason: &str| held.push(format!("- {task_id}: {}", summarize_gate(reason)));
+            // A close can outlive the batch response's post-commit grace.
+            // Persist each result as it happens, including a selector refusal.
+            let record = |outcome: &str| {
+                let note = format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {}: {}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"), receipt.id,
+                    crate::mcp::tools::truncate_str(outcome, 4000));
+                if let Err(error) = store.append_note(task_id, &note) {
+                    tracing::warn!(%task_id, %error, "batch close outcome not recorded");
+                }
+            };
+            let mut hold = |reason: &str| {
+                record(reason);
+                held.push(format!("- {task_id}: {}", summarize_gate(reason)));
+            };
             let task = match store.get(task_id) {
                 Ok(task) => task,
                 Err(error) => {
@@ -503,6 +516,7 @@ impl CasCore {
                 }
             };
             if task.status == TaskStatus::Closed {
+                record("already closed");
                 already.push(task_id.as_str());
                 continue;
             }
@@ -514,6 +528,7 @@ impl CasCore {
                 }
             };
             if let Some(review) = super::review_tier::own_review(&self.cas_root, &task, &repo) {
+                record(&format!("keeps its own review: {review}"));
                 if recording_verdict {
                     own_review.push(format!("- {task_id}: {review}"));
                 }
@@ -534,8 +549,14 @@ impl CasCore {
                 }
             };
             match self.close_after_release_verdict(task_id, &verdict).await {
-                CassyMergeClose::Closed { .. } => closed.push(task_id.as_str()),
-                CassyMergeClose::AlreadyClosed => already.push(task_id.as_str()),
+                CassyMergeClose::Closed { notice } => {
+                    record(&format!("closed; {notice}"));
+                    closed.push(task_id.as_str());
+                }
+                CassyMergeClose::AlreadyClosed => {
+                    record("already closed");
+                    already.push(task_id.as_str());
+                }
                 CassyMergeClose::Held(text) => hold(&text),
                 CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&format!(
                     "this verdict covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",

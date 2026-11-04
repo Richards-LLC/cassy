@@ -534,7 +534,7 @@ impl CasService {
                     .map(|commit| commit.description.clone())
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                if receipt.action() != "worktree_merge" {
+                if !matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
                     let watcher_receipt = receipt.clone();
                     let tool = tool_name.to_string();
                     tokio::spawn(async move {
@@ -588,7 +588,7 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
-                } else if commit.is_some() && receipt.action() == "worktree_merge" {
+                } else if commit.is_some() && matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
                     // cas-3937 review: committed, still running; keep its result.
                     self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
@@ -769,6 +769,8 @@ impl CasService {
     /// after its push) keeps running. When it finishes, its result is
     /// appended to the task named by its `task_id` argument, so a close that
     /// a gate refused, or that failed, after the early answer is visible.
+    /// Batch receipts record the continuation on every listed task; individual
+    /// close results are also persisted as BATCH_CLOSE_OUTCOME notes.
     fn record_post_commit_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
@@ -776,18 +778,32 @@ impl CasService {
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
         start: std::time::Instant,
     ) -> tokio::task::JoinHandle<()> {
-        let task_id = arguments
-            .and_then(|args| args.get("task_id"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_string);
+        let mut task_ids: Vec<String> = if receipt.action() == "batch_receipt" {
+            arguments
+                .and_then(|args| args.get("task_ids"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        } else {
+            arguments
+                .and_then(|args| args.get("task_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        };
+        task_ids.sort();
+        task_ids.dedup();
         let service = self.clone();
         tokio::spawn(async move {
             let joined = handle.await;
-            log_post_commit("factory", &receipt, "finished in the background");
-            let Some(task_id) = task_id else {
-                return;
-            };
+            let tool = if receipt.action() == "batch_receipt" { "verification" } else { "factory" };
+            log_post_commit(tool, &receipt, "finished in the background");
             // cas-3937 review: the close's own outcome, not the merge
             // answer's first line (always its CI block).
             let recorded_close = receipt
@@ -813,18 +829,25 @@ impl CasService {
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
-                let status = store
-                    .get(&task_id)
-                    .map(|task| task.status.to_string())
-                    .unwrap_or_else(|error| format!("unreadable ({error})"));
-                let note = format!(
-                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                    elapsed.as_secs_f64(),
-                );
-                store
-                    .append_note(&task_id, &note)
-                    .map_err(|error| format!("{task_id}: {error}"))
+                let mut failures = Vec::new();
+                for task_id in task_ids {
+                    let status = store
+                        .get(&task_id)
+                        .map(|task| task.status.to_string())
+                        .unwrap_or_else(|error| format!("unreadable ({error})"));
+                    let note = format!(
+                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                        elapsed.as_secs_f64(),
+                    );
+                    if let Err(error) = store.append_note(&task_id, &note) {
+                        failures.push(format!("{task_id}: {error}"));
+                    }
+                }
+                if !failures.is_empty() {
+                    return Err(failures.join("; "));
+                }
+                Ok::<_, String>(())
             })
             .await;
             match recorded {

@@ -2474,21 +2474,27 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 #[tokio::test]
 async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
     let mut env = test_env();
-    for verdict in ["approved", "rejected"] {
+    for verdict in ["timed_out", "approved", "rejected"] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(
             fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n",
         )
         .unwrap();
+        if verdict == "approved" {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(fixture.cas_root.join("config.toml")).unwrap()
+                .write_all(b"[fast_lane]\nenabled=true\npaths=['delivery.txt']\nmerge_checks=['PR gate']\n").unwrap();
+        }
         let tasks = open_task_store(&fixture.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
-        task.depth = TaskDepth::Deep;
-        task.status = TaskStatus::AwaitingMerge;
+        task.depth = if verdict == "approved" { TaskDepth::Light } else { TaskDepth::Deep };
+        task.status = if verdict == "approved" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        if verdict == "approved" { task.task_type = TaskType::Bug; }
         task.labels = vec!["force-verifier".into()];
         task.acceptance_criteria = "Review this candidate before publishing it.".into();
-        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
-        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        task.deliverables.factory_branch_anchor = (verdict != "approved").then(|| fixture.tip.clone());
+        task.deliverables.parked_branch = (verdict != "approved").then(|| fixture.branch.clone());
         tasks.update(&task).unwrap();
         let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
         let mut merge = coord_req("worktree_merge");
@@ -2525,10 +2531,20 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .expect("the first real Git candidate preparation records its elapsed time");
         eprintln!("{timing}");
         assert_ne!(PathBuf::from(&proof.worktree_root), fixture.worker);
-        let candidate_tree = git_stdout(
+        let mut candidate_tree = git_stdout(
             &fixture.repo.root,
             &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
         );
+        if verdict == "timed_out" {
+            cas_store::timeout_verification_dispatch(&fixture.cas_root, &task.id,
+                dispatch.deadline_at + chrono::Duration::seconds(1)).unwrap().unwrap();
+            let held = fixture.service.factory(Parameters(merge)).await.unwrap_err().message.to_string();
+            // pin: expired candidate guidance must name registered-supervisor re-dispatch and the merge continuation command, not ask the worker to finish an expired verdict.
+            assert!(held.contains("supervisor") && held.contains("Re-dispatch")
+                && held.contains("factory action=worktree_merge") && held.contains(&dispatch.id), "{held}");
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
+            continue;
+        }
         let recorded = fixture
             .service
             .verification(Parameters(verification_req(serde_json::json!({
@@ -2539,6 +2555,16 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap();
         assert!(!recorded.is_error.unwrap_or(false), "{}", get_text(&recorded));
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+        if verdict == "approved" {
+            let sibling = fixture.cas_root.join("sibling-target");
+            run_git(&["worktree", "add", sibling.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
+            std::fs::write(sibling.join("independent.txt"), "Sibling delivery\n").unwrap();
+            run_git(&["add", "independent.txt"], &sibling);
+            run_git(&["commit", "-m", "Sibling advances target during review"], &sibling);
+            run_git(&["push", "origin", "epic/rebound"], &sibling);
+            candidate_tree = git_stdout(&fixture.repo.root,
+                &["merge-tree", "--write-tree", "epic/rebound", &fixture.tip]);
+        }
         let continued = fixture.service.factory(Parameters(merge.clone())).await;
         if verdict == "approved" {
             assert_eq!(
@@ -2725,8 +2751,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
             "target" => {
                 let target = fixture.cas_root.join("target-writer");
                 run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
-                std::fs::write(target.join("independent.txt"), "Another delivery\n").unwrap();
-                run_git(&["add", "independent.txt"], &target);
+                std::fs::write(target.join("delivery.txt"), "Sibling changed the reviewed file\n").unwrap();
+                run_git(&["add", "delivery.txt"], &target);
                 run_git(&["commit", "-m", "Independent target progress"], &target);
                 run_git(&["push", "origin", "epic/rebound"], &target);
             }
@@ -2747,6 +2773,12 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
                     run_git(&["checkout", "epic/rebound"], &fixture.repo.root);
+                    if change == "unpublished cleanup" {
+                        std::fs::write(fixture.repo.root.join("independent.txt"), "Sibling retained after rollback\n").unwrap();
+                        run_git(&["add", "independent.txt"], &fixture.repo.root);
+                        run_git(&["commit", "-m", "Unrelated sibling before rejected push"], &fixture.repo.root);
+                        run_git(&["push", "origin", "epic/rebound"], &fixture.repo.root);
+                    }
                     let operator_edit = "Unrelated operator edit\n";
                     std::fs::write(fixture.repo.root.join("README.md"), operator_edit).unwrap();
                     let target_before_push = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);

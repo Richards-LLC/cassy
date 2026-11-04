@@ -38,7 +38,7 @@ For every cited `art-` id used as proof, run `artifact action=fetch task_id=<tas
 
 Use `deliverables.files_changed`, `deliverables.commit_hash` and the target branch. In factory mode follow `verifier-evidence-gate.md` → Delivery checkout: bind the managed checkout to task/dispatch/head; keep durable evidence in task artifacts. Diff against the task's own delivery base, never a fixed commit count:
 
-For a pre-merge dispatch, the bound head is an immutable candidate containing source and target base. Review it against the assigned plan and evidence. PASS continues publication of its exact tree; FAIL or an unresolved verdict holds only that delivery. Do not request a worker close retry or a second post-merge review. Epic assembled-outcome review is unchanged.
+For a pre-merge dispatch, the bound head is an immutable candidate containing source and target base. Review it against the assigned plan and evidence. PASS authorizes publication of unchanged reviewed delivery content; unrelated sibling merges may advance the target when delivered files and their recomputed merge content stay unchanged (append-only changelog and generated bundles are exempt). FAIL or an unresolved verdict holds only that delivery. Do not request a worker close retry or a second post-merge review. Epic assembled-outcome review is unchanged.
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)

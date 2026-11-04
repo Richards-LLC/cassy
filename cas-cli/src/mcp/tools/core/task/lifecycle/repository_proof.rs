@@ -383,6 +383,17 @@ fn changed_paths(root: &Path, from: &str, to: &str) -> Result<std::collections::
         .collect())
 }
 
+/// Share cas-a32c's overlap rule between landed and pre-merge proofs.
+pub(crate) fn delivery_paths_changed(root: &Path, base: &str, head: &str, from: &str, to: &str) -> Result<Vec<String>, String> {
+    Ok(reviewed_overlap(&changed_paths(root, base, head)?, &changed_paths(root, from, to)?))
+}
+
+fn reviewed_overlap(delivered: &std::collections::BTreeSet<String>, moved: &std::collections::BTreeSet<String>) -> Vec<String> {
+    delivered.intersection(moved)
+        .filter(|path| !crate::factory_worker_check::append_only_or_generated(path))
+        .cloned().collect()
+}
+
 /// cas-a32c: the delivered files that changed between the bound and current
 /// target heads. Each delivery's files are what it changed relative to the
 /// target as it stood just before the delivery joined it: the first commit on
@@ -426,12 +437,7 @@ fn delivered_files_changed_since(
             .map_err(|error| format!("cannot list delivered commit {anchor}'s files: {error}"))?;
         // Supervisor decision (cas-a32c): concurrent deliveries all append to
         // the changelog and regenerate bundles; only reviewed code counts.
-        touched.extend(
-            delivered
-                .intersection(&moved)
-                .filter(|path| !crate::factory_worker_check::append_only_or_generated(path))
-                .cloned(),
-        );
+        touched.extend(reviewed_overlap(&delivered, &moved));
     }
     Ok(touched.into_iter().collect())
 }

@@ -88,6 +88,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Verification
 
+- **Keep approved deliveries moving beside sibling merges** — Was: a target
+  advance discarded a pre-merge approval, and a fast-lane fix could wait for the
+  batch verdict. → Now: one shared reviewed-file rule preserves approvals across
+  unrelated siblings and append-only/generated updates, while changed reviewed
+  content requires review. Eligible hotfixes close on their own pre-merge PASS
+  and trusted post-merge receipt; ineligible fixes retain normal batch gates.
+  Timeout and missing-approval messages name supervisor recovery commands.
+
 - **Review before publishing factory deliveries** — Was: required verification
   ran after a merge published. → Now: the same verifier reviews an immutable
   candidate first; PASS publishes its exact tree and closes with that approval,
@@ -99,6 +107,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   pass while planned fields or outcome targets were missed. → Now: verifiers
   report `PLAN-FIT`, name each omission or missed target, reject known misses
   and request a supervisor decision about scope or an authorized plan revision.
+
+- **Keep verdicts when a sibling lands on the epic** — Was: a merged
+  delivery's verification bound the supervisor checkout's HEAD as delivered
+  work, so the first unrelated merge into the epic refused the finished
+  verdict as "delivered commit(s) no longer reachable". Now: only the
+  delivery is bound; unrelated merges keep the verdict, and a later change to
+  a delivered file still asks for a fresh review.
 
 ### Fixed — Session handoffs
 
@@ -141,15 +156,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added — Model evaluation proof
 
 - **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
-
-### Fixed — Verification
-
-- **Keep verdicts when a sibling lands on the epic** — Was: a merged
-  delivery's verification bound the supervisor checkout's HEAD as delivered
-  work, so the first unrelated merge into the epic refused the finished
-  verdict as "delivered commit(s) no longer reachable". Now: only the
-  delivery is bound; unrelated merges keep the verdict, and a later change to
-  a delivered file still asks for a fresh review.
 
 ### Fixed — Release-batch closes after request_changes
 

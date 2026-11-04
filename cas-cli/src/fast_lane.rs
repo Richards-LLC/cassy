@@ -187,6 +187,29 @@ pub fn delivery_changes(repo: &Path, base: &str, head: &str) -> Result<Vec<Chang
         .collect())
 }
 
+/// The trusted lane merge for this exact delivery; worker notes cannot mint it.
+pub fn merged_delivery(task: &Task) -> Option<MergeRecord> {
+    let merge = task.deliverables.green_merge_commit.as_deref()?;
+    merged_record(&task.notes, merge)
+        .filter(|record| task.deliverables.factory_branch_anchor.as_deref() == Some(record.head.as_str()))
+}
+
+/// Eligible hotfixes keep their own review instead of the batch release verdict.
+pub fn owns_review(cas_root: &Path, task: &Task, repo: &Path, candidate: Option<(&str, &str)>) -> bool {
+    let Some(config) = configured(cas_root) else { return false; };
+    let (head, target) = match candidate {
+        // Explicit merges can precede park; the supplied source is authoritative.
+        Some(source_target) => source_target,
+        None => {
+            if merged_delivery(task).is_some() { return true; }
+            let Some(head) = task.deliverables.factory_branch_anchor.as_deref() else { return false; };
+            let Some(target) = task.deliverables.work_target.as_ref() else { return false; };
+            (head, target.target_branch.as_str())
+        }
+    };
+    matches!(evaluate_delivery(&config, task, repo, target, head), Eligibility::Eligible { .. })
+}
+
 /// Eligibility of `head` against its merge base with the live target.
 pub fn evaluate_delivery(lane: &FastLaneConfig, task: &Task, repo: &Path, target: &str, head: &str) -> Eligibility {
     let target = target.strip_prefix("origin/").unwrap_or(target);

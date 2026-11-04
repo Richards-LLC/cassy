@@ -1015,17 +1015,27 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
 #[tokio::test]
 async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let mut env = TestEnvGuard::temp_home();
+    for outcome in ["success", "failure", "ineligible"] {
+    env.set("CAS_AGENT_ROLE", "worker");
     let f = fixture(&mut env);
+    let paths = if outcome == "ineligible" { "frontend/**" } else { "crates/**" };
     std::fs::write(
         f.cas_dir().join("config.toml"),
         format!(
-            "[project]\ncanonical_id=\"{PROJECT}\"\n[verification]\nenabled=false\n[fast_lane]\nenabled=true\npaths=[\"crates/**\"]\nmerge_checks=[\"PR gate\"]\nreceipt_checks=[\"Post-merge receipt\"]\nreceipt_statuses=[\"Vercel\"]\n"
+            "[project]\ncanonical_id=\"{PROJECT}\"\n[verification]\nenabled=true\n[qa]\nmode=\"batch\"\nevidence_gate=false\nindependent_pass=false\n[fast_lane]\nenabled=true\npaths=[\"{paths}\"]\nmerge_checks=[\"PR gate\"]\nreceipt_checks=[\"Post-merge receipt\"]\nreceipt_statuses=[\"Vercel\"]\n"
         ),
     )
     .unwrap();
     let tasks = open_task_store(&f.cas_dir()).unwrap();
     let mut bug = tasks.get(ID).unwrap();
     bug.task_type = cas_types::TaskType::Bug;
+    bug.proof_targets = vec!["widget gear".into()];
+    bug.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: bug.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: LANE.into(),
+        base_sha: git(f.dir.path(), &["rev-parse", "main"]),
+    });
+    bug.notes.push_str("\n✅ DECISION no journey impact: isolated widget function with no browser route\n");
     tasks.update(&bug).unwrap();
 
     let forged = call(&f.worker, serde_json::json!({
@@ -1040,12 +1050,32 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     let notes = f.task().notes;
-    assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
-    assert!(notes.contains("QA evidence is deferred to the post-merge receipt"), "{notes}");
+    if outcome != "ineligible" {
+        assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
+        assert!(notes.contains("QA evidence is deferred to the post-merge receipt"), "{notes}");
+    }
 
     // The lane merge, as worktree_merge records it, behind a GitHub origin
     // that Git rewrites to the local bare repository.
     let repo = f.dir.path();
+    git(repo, &["config", "user.name", "CAS Test"]);
+    git(repo, &["config", "user.email", "cas@example.test"]);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let premerge = CasCore::with_daemon(f.cas_dir(), None, None);
+    premerge.set_agent_id_for_testing("br-supervisor-session".into());
+    let dispatch = if outcome != "ineligible" {
+        premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main")
+            .expect_err("an eligible fast lane needs its pre-merge verifier, rather than the batch verdict");
+        let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
+        f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "gear turns before publication", "confidence": 1.0,
+        })).unwrap())).await.expect("approve before the lane merge");
+        Some(dispatch.id)
+    } else {
+        assert!(premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main").unwrap().is_none());
+        None
+    };
     git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
     git(repo, &["push", "-q", "origin", "main"]);
     let merge = git(repo, &["rev-parse", "HEAD"]);
@@ -1056,10 +1086,12 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     git(repo, &["config", "user.email", "cas@example.test"]);
     tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
     let now = chrono::Utc::now();
+    if outcome != "ineligible" {
     tasks.append_trusted_note(
         ID,
         &format!("[{}] {}", now.format("%Y-%m-%d %H:%M"), crate::fast_lane::merge_note(&tip, &merge, now)),
     ).unwrap();
+    }
 
     let state = f.dir.path().join("gh-state");
     std::fs::create_dir_all(&state).unwrap();
@@ -1090,12 +1122,24 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
 
     receipt("in_progress", None);
     let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    if outcome == "ineligible" {
+        assert!(pending.contains("RELEASE VERDICT"), "an ineligible backend delivery cannot skip the batch verdict: {pending}");
+        assert_ne!(f.task().status, TaskStatus::Closed);
+        continue;
+    }
     assert!(pending.contains("FAST LANE RECEIPT PENDING"), "{pending}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
     let wakes = crate::store::open_reminder_store(&f.cas_dir()).unwrap().list_all_pending().unwrap();
     assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
         && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
 
+    if outcome == "success" {
+        receipt("completed", Some("success"));
+        let closed = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+        assert_eq!(f.task().status, TaskStatus::Closed, "the pre-merge PASS plus trusted receipt closes without a batch verdict: {closed}");
+        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().id, dispatch.unwrap());
+        continue;
+    }
     receipt("completed", Some("failure"));
     let rerun = cassy.close_green_merged_delivery(ID).await.receipt(ID);
     assert!(rerun.contains("rerunning once"), "{rerun}");
@@ -1109,4 +1153,5 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert_eq!(returned.status, TaskStatus::Open, "the hotfix returns to its worker: {reverted}");
     assert!(returned.notes.contains("FAST_LANE_PROOF: revert merge="), "{}", returned.notes);
     git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
+    }
 }

@@ -1020,7 +1020,7 @@ async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_52
 async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c() {
     let mut test_env = TestEnvGuard::temp_home();
     let branch = "factory/test-agent";
-    let (temp, service, cas_dir, task_id, lane) =
+    let (temp, _service, cas_dir, task_id, lane) =
         delivered_worktree_fixture(&mut test_env, branch).await;
     let repo = temp.path();
     std::fs::write(
@@ -1045,7 +1045,6 @@ async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c(
         work();
         proof_boundary_git(repo, &["checkout", "-q", "main"]);
     };
-    on_epic(&|| proof_boundary_git(repo, &["merge", "-q", "--no-ff", branch, "-m", "merge lane"]));
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut parked = tasks.get(&task_id).unwrap();
@@ -1056,23 +1055,42 @@ async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c(
         target_branch: epic.into(),
     });
     tasks.update(&parked).unwrap();
-    let mut request = close_request(&task_id, "delivered");
-    request.commit_receipt = Some(tip.clone());
-    let first = extract_text(service.cas_task_close(Parameters(request)).await.expect("close"));
-    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    // Option A reviews before publication, still with an unrelated primary HEAD.
+    let worktrees = open_worktree_store(&cas_dir).unwrap();
+    let mut row = worktrees.get(parked.worktree_id.as_deref().unwrap()).unwrap();
+    row.parent_branch = epic.into();
+    worktrees.update(&row).unwrap();
+    proof_boundary_git(repo, &["config", "user.name", "CAS Test"]);
+    proof_boundary_git(repo, &["config", "user.email", "cas@example.test"]);
+    let origin = TempDir::new().unwrap();
+    proof_boundary_git(origin.path(), &["init", "-q", "--bare"]);
+    proof_boundary_git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    proof_boundary_git(repo, &["push", "-q", "origin", "main", epic, branch]);
+    test_env.set_current_dir(repo);
+    let supervisor = registered_supervisor(&cas_dir, "a32c-supervisor").await;
+    supervisor.worktree_merge(branch, false, Some(&task_id), false, Some(false), false, None)
+        .await.expect_err("prepare candidate before publication");
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
         .unwrap()
         .expect("dispatch");
-    let anchors = &dispatch.repository.as_ref().expect("proof").anchor_commits;
-    assert_eq!(anchors, &vec![tip.clone()], "the checkout HEAD is not the delivery");
+    let proof = dispatch.repository.as_ref().expect("proof");
+    assert!(proof.anchor_commits.is_empty(), "the immutable candidate binds the whole review without incidental checkout anchors");
+    assert_ne!(proof.head_commit, head_of(repo), "review the candidate, not the primary checkout");
+    proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, &proof.head_commit]);
 
     // An unrelated sibling lands on the epic while the verifier reviews.
-    on_epic(&|| commit_on(repo, "sibling.txt", "sibling delivery"));
-    let supervisor = registered_supervisor(&cas_dir, "a32c-supervisor").await;
+    on_epic(&|| {
+        commit_on(repo, "sibling.txt", "sibling delivery");
+        proof_boundary_git(repo, &["push", "-q", "origin", epic]);
+    });
     supervisor
-        .cas_verification_add(Parameters(approve(&task_id, dispatch.id)))
+        .cas_verification_add(Parameters(approve(&task_id, dispatch.id.clone())))
         .await
         .expect("an unrelated sibling merge must not void the verdict");
+    let merged = supervisor.worktree_merge(branch, false, Some(&task_id), false, Some(false), false, None).await;
+    proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, epic]);
+    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().unwrap().id,
+        dispatch.id, "the sibling keeps the same review: {merged:?}");
 }
 
 /// Commit one file on the worker's lane, merge it to main and record the

@@ -115,6 +115,7 @@
 - `cas-cli/src/builtins/skills/cas-qa-craft/scripts/model-boundary.py`, `scripts/test-model-boundary.py` - approved model-owned plan metadata and added-site signals for independent verifier judgment.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs` - shared evidence grammar, scaffolds, validation and bundles; deployed-origin patterns.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/fast_lane_gate.rs`, `docs/qa/fast-lane.md` - hotfix fast lane: eligibility, merge-check admission, post-merge receipt and revert PR.
+- `cas-cli/src/fast_lane_walk.rs` - durable failed-walk Commander choice, authenticated reply binding, fifteen-minute revert default and project runner.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides.
 - `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - incremental Claude/Codex/Grok turn accounting before optional Commander mirroring; typed actions and authenticated wake provenance.
 - `cas-cli/src/migration/migrations/m292_quality_turns.rs` - append-only quality ledger CHECK upgrade, shared with store-open repair.

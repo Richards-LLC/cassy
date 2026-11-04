@@ -141,6 +141,11 @@ impl CasCore {
         let LaneClose::Merged { lane: config, merge, at } = stage else {
             return ReceiptGate::Passed;
         };
+        match crate::fast_lane_walk::pending(&self.cas_root, task) {
+            Ok(Some(message)) => return ReceiptGate::Hold(message),
+            Ok(None) => {},
+            Err(error) => return ReceiptGate::Hold(format!("FAST LANE QA DECISION UNREADABLE: {error}")),
+        }
         let gh = crate::github_repo::gh_binary();
         let elapsed = (chrono::Utc::now() - *at).num_minutes().max(0);
         let window = i64::from(config.receipt_window_mins);
@@ -236,9 +241,15 @@ impl CasCore {
                         ledger.display(),
                         lane::NO_JOURNEY_IMPACT
                     )),
-                    Walk::Failed(row) => ReceiptGate::Failed(format!(
-                        "FAST LANE QA WALK FAILED on merge {merge}: {row}. Ask the operator to choose between reverting {merge} and fixing forward."
-                    )),
+                    Walk::Failed(row) => {
+                        let decision = self.get_agent_id().map_err(|error| format!("{error:?}"))
+                            .and_then(|owner| crate::fast_lane_walk::ask(
+                                &self.cas_root, task, repo, target, &owner, &row,
+                            ).map_err(|error| error.to_string()));
+                        ReceiptGate::Hold(decision.unwrap_or_else(|error| format!(
+                            "FAST LANE QA WALK FAILED on merge {merge}: {row}. Commander decision could not be recorded ({error}); retry the close."
+                        )))
+                    },
                 }
             }
         }

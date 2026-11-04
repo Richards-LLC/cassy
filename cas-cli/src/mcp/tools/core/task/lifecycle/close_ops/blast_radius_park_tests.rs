@@ -1015,10 +1015,34 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
 #[tokio::test]
 async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let mut env = TestEnvGuard::temp_home();
-    for outcome in ["success", "failure", "ineligible"] {
+    for outcome in ["success", "failure", "ineligible", "oversize", "qa-revert", "qa-fix", "qa-default"] {
     env.set("CAS_AGENT_ROLE", "worker");
     let f = fixture(&mut env);
     let paths = if outcome == "ineligible" { "frontend/**" } else { "crates/**" };
+    let eligible = !matches!(outcome, "ineligible" | "oversize");
+    env.set("CAS_FACTORY_SESSION", "fast-lane-qa-test");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["br-worker-session", "br-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("fast-lane-qa-test".into());
+        agents.update(&agent).unwrap();
+    }
+    let [artifacts, legacy] = crate::config::factory_task_artifact_dirs(
+        &f.cas_dir(), &env.home().join(".cas/artifacts"), ID,
+    );
+    for directory in [&artifacts, &legacy] {
+        assert!(directory.starts_with(env.home()));
+        if directory.exists() { std::fs::remove_dir_all(directory).unwrap(); }
+    }
+    if outcome == "oversize" {
+        for index in 0..10 {
+            std::fs::write(f.worker_path.join(format!("crates/widget/note-{index}.md")), "Hotfix notes\n").unwrap();
+        }
+        git(&f.worker_path, &["add", "crates/widget"]);
+        git(&f.worker_path, &["commit", "-q", "-m", &format!("fix({ID}): over-size delivery")]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    }
+
     std::fs::write(
         f.cas_dir().join("config.toml"),
         format!(
@@ -1050,7 +1074,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     let notes = f.task().notes;
-    if outcome != "ineligible" {
+    if eligible {
         assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
         assert!(notes.contains("QA evidence is deferred to the post-merge receipt"), "{notes}");
     }
@@ -1063,7 +1087,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let premerge = CasCore::with_daemon(f.cas_dir(), None, None);
     premerge.set_agent_id_for_testing("br-supervisor-session".into());
-    let dispatch = if outcome != "ineligible" {
+    let dispatch = if eligible {
         premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main")
             .expect_err("an eligible fast lane needs its pre-merge verifier, rather than the batch verdict");
         let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
@@ -1086,7 +1110,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     git(repo, &["config", "user.email", "cas@example.test"]);
     tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
     let now = chrono::Utc::now();
-    if outcome != "ineligible" {
+    if eligible {
     tasks.append_trusted_note(
         ID,
         &format!("[{}] {}", now.format("%Y-%m-%d %H:%M"), crate::fast_lane::merge_note(&tip, &merge, now)),
@@ -1122,7 +1146,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
 
     receipt("in_progress", None);
     let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
-    if outcome == "ineligible" {
+    if !eligible {
         assert!(pending.contains("RELEASE VERDICT"), "an ineligible backend delivery cannot skip the batch verdict: {pending}");
         assert_ne!(f.task().status, TaskStatus::Closed);
         continue;
@@ -1133,6 +1157,78 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
         && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
 
+    if outcome.starts_with("qa-") {
+        receipt("completed", Some("success"));
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("qa-failure.txt"), "The hotfix journey failed\n").unwrap();
+        std::fs::write(artifacts.join("LEDGER.md"), format!(
+            "# Failed hotfix walk\n\nbuild: {merge}\nscope: hotfix journey\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Q1 | Turn the gear | Gear turns | Journey is broken | FAIL | fixture | qa-failure.txt | {ID} |\n",
+        )).unwrap();
+        let held = if outcome == "qa-fix" {
+            // The worker owns the production walk and may record its FAIL
+            // after the automatic merge close has already waited for it.
+            env.set("CAS_AGENT_ROLE", "worker");
+            let held = call(&f.worker, serde_json::json!({
+                "action": "close", "id": ID, "reason": "post-merge production walk recorded",
+            })).await;
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            held
+        } else {
+            cassy.close_green_merged_delivery(ID).await.receipt(ID)
+        };
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        let asks = queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap()
+            .into_iter().filter(|row| row.kind.as_deref() == Some("ask")).collect::<Vec<_>>();
+        assert_eq!(asks.len(), 1, "a failed QA walk sends one Commander ask: {held}");
+        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&asks[0].prompt).unwrap();
+        assert_eq!(payload.options, ["Revert", "Fix-forward"]);
+        assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "wait for the operator, rather than returning before a choice: {held}");
+        let again = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+        assert_eq!(queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap().into_iter()
+            .filter(|row| row.kind.as_deref() == Some("ask")).count(), 1, "retry reuses the question: {again}");
+        assert!(!std::fs::read_to_string(state.join("calls")).unwrap().contains("pr create"));
+        let attribution = crate::ui::factory::MessageAttribution {
+            device_id: Some("paired-test-device".into()),
+            credential_id: Some("test-credential".into()),
+            operator_label: Some("Fixture operator".into()),
+            operator_verified: outcome != "qa-default",
+            ..Default::default()
+        };
+        let choice = if outcome == "qa-revert" { "Revert" } else { "Fix-forward" };
+        // This is the real Commander enqueue boundary. Its hub-stamped
+        // attribution is fixture input; an unverified reply cannot authorize.
+        crate::ops::fleet::enqueue_commander_message(
+            &f.cas_dir(), "fast-lane-qa-test", "supervisor", choice, None,
+            false, Some(asks[0].id), &attribution,
+        ).unwrap();
+        crate::fast_lane_walk::tick(&f.cas_dir(), chrono::Utc::now()).unwrap();
+        if outcome == "qa-default" {
+            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "a claimed operator identity is not an answer");
+            let deadline = asks[0].created_at + chrono::Duration::minutes(15);
+            crate::fast_lane_walk::tick(&f.cas_dir(), deadline - chrono::Duration::milliseconds(1)).unwrap();
+            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "no early default");
+            crate::fast_lane_walk::tick(&f.cas_dir(), deadline).unwrap();
+        }
+        let returned = f.task();
+        assert_eq!(returned.status, TaskStatus::Open, "the selected action returns ownership to the worker: {}", returned.notes);
+        assert_eq!(returned.assignee.as_deref(), Some(WORKER));
+        let calls = std::fs::read_to_string(state.join("calls")).unwrap();
+        let reverts = calls.lines().filter(|line| line.starts_with("pr create ")).count();
+        assert_eq!(reverts, usize::from(outcome != "qa-fix"), "{outcome}: {calls}");
+        if outcome != "qa-fix" {
+            git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
+            assert!(returned.notes.contains("Revert PR: https://github.com/acme/cas/pull/9"));
+        } else {
+            assert!(!returned.notes.contains("FAST_LANE_PROOF: revert"));
+        }
+        assert!(returned.notes.contains(if outcome == "qa-default" { "fifteen-minute default" } else { "verified Commander reply" }));
+        // A fresh runner reads persisted completion, rather than repeating a
+        // PR or choosing again after a late response / process restart.
+        crate::fast_lane_walk::tick(&f.cas_dir(), asks[0].created_at + chrono::Duration::minutes(16)).unwrap();
+        let after = std::fs::read_to_string(state.join("calls")).unwrap();
+        assert_eq!(after.lines().filter(|line| line.starts_with("pr create ")).count(), reverts);
+        continue;
+    }
     if outcome == "success" {
         receipt("completed", Some("success"));
         let closed = cassy.close_green_merged_delivery(ID).await.receipt(ID);

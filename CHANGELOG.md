@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Hotfix QA decisions
+
+- **Ask before reverting a failed QA walk** — A failed fast-lane walk now
+  sends one Commander question with Revert and Fix-forward choices. Revert
+  opens the existing revert PR; Fix-forward returns the task without one.
+  No answer within fifteen minutes defaults to Revert, including after a
+  service restart; repeated closes preserve the original question and deadline.
+
 ### Fixed — Operator control of rule encoding
 
 - **Reserve rule encoding chores for the operator** — Agent and supervisor rule

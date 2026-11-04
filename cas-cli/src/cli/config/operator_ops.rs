@@ -237,7 +237,8 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     let legacy: Vec<String> = load_operator_policy(cas_root)
         .map(|policy| policy.roots.iter().map(|root| root.path.display().to_string()).collect())
         .unwrap_or_default();
-    // cas-f0ea0: the user-level roots and the Downloads folder apply too.
+    // cas-f0ea0: the user-level roots and the Downloads folder apply too, and
+    // (cas-2d9a) this project's Claude memory folder.
     let every_project: Vec<String> = crate::config::operator_policy::effective_write_roots(
         &[],
         &crate::config::operator_policy::user_write_roots(),
@@ -261,7 +262,7 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
     println!("{}", roots.join(","));
     if !every_project.is_empty() {
-        eprintln!("note: user-level and Downloads roots also apply:");
+        eprintln!("note: user-level, Downloads and Claude memory roots also apply:");
         for root in &every_project {
             eprintln!("  {root}");
         }

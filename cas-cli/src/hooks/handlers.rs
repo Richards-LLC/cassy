@@ -289,7 +289,8 @@ pub use handlers_session::{generate_session_title_sync, handle_session_end, hand
 pub(crate) use handlers_state::{
     cleanup_agent_leases, cleanup_agent_leases_for_end, cleanup_orphaned_tasks, clear_session_files,
     current_agent_id,
-    detect_significant_activity, extract_activity_entity_id, get_exit_blockers, track_session_file,
+    detect_significant_activity, extract_activity_entity_id, get_exit_blockers, session_handoff,
+    track_session_file,
 };
 pub use handlers_state::{
     get_session_files, handle_subagent_start, handle_subagent_stop, handle_verifier_spawn_cleanup,

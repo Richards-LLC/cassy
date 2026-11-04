@@ -200,7 +200,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
         slug,
         repo_host,
         env,
-        &format!("remote:github.com/org/{repo_host}"),
+        &format!("project:github.com/org/{repo_host}"),
     )
     .await
 }
@@ -221,6 +221,12 @@ async fn arm_delivery_with_selector(
         ],
         &repo.root,
     );
+    // The candidate gate must confirm publication. Keep Git hermetic while
+    // the pinned project identity and GH double still address the intended repo.
+    let origin = repo.root.join(".git/test-origin.git");
+    run_git(&["init", "-q", "--bare", origin.to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", origin.display()),
+        &format!("git@github.com:org/{repo_host}.git")], &repo.root);
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
     // Keep deliberate CI doubles (notably the red-override regression).
     // Other target-CAS fixtures need explicit successful code validation.
@@ -721,7 +727,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 .collect();
             assert_eq!(handoffs.len(), 1, "{row}: background dispatch {} must reach its owner before expiry", dispatch.id);
             let handoff = &handoffs[0];
-            assert_eq!(handoff.target, "supervisor");
+            assert_eq!(handoff.target, format!("{slug}-supervisor"), "the handoff addresses the bound supervisor, not a role alias");
             assert_eq!(handoff.origin, Some(cas_store::QueueOrigin::Daemon));
             assert_eq!(handoff.priority, cas_store::NotificationPriority::High);
             assert!(handoff.created_at < dispatch.deadline_at);
@@ -738,7 +744,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             // A worker retry cannot manufacture approval or publish the lane.
             env.set("CAS_AGENT_ROLE", "worker");
             let retry = delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
-                "action": "close", "id": task.id, "reason": "candidate still under review",
+                "action": "close", "id": task.id, "reason": parked_reason,
             })))).await;
             assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed, "{retry:?}");
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
@@ -886,16 +892,6 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
         "project:github.com/org/slow-close",
     )
     .await;
-    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
-    run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &fixture.repo.root);
-    run_git(
-        &[
-            "config",
-            &format!("url.{}.insteadOf", origin.path().display()),
-            "git@github.com:org/slow-close.git",
-        ],
-        &fixture.repo.root,
-    );
     env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
     let _dir = env.enter_dir(&fixture.repo.root);
 
@@ -1652,10 +1648,6 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         let slug = format!("pendingretry{outcome}");
         let fixture = arm_delivery_with_selector(&slug, &slug, &mut env,
             &format!("project:github.com/org/{slug}")).await;
-        let remote = home.path().join("origin.git");
-        run_git(&["init", "--bare", remote.to_str().unwrap()], &fixture.repo.root);
-        run_git(&["config", &format!("url.{}.insteadOf", remote.display()),
-            &format!("git@github.com:org/{slug}.git")], &fixture.repo.root);
         run_git(&["push", "origin", "--all"], &fixture.repo.root);
         let refusal = run_merge(&fixture).await;
         assert!(refusal.contains("CI PENDING"), "{outcome}: {refusal}");
@@ -1721,7 +1713,8 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
             .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();
         if outcome.starts_with("green") {
-            assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"));
+            assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),
+                "{outcome}: {:?}; task: {:?}", notices, open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap());
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
             if outcome == "green-held" {
                 let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();

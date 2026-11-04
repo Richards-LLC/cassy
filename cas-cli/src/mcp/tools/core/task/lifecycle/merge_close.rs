@@ -152,7 +152,7 @@ fn summarize_gate(text: &str) -> String {
 fn batch_close_note(receipt_id: &str, outcome: &str) -> String {
     format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-        crate::mcp::tools::truncate_str(outcome, 4000))
+        summarize_gate(outcome))
 }
 
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
@@ -520,7 +520,6 @@ impl CasCore {
                 }
             };
             if task.status == TaskStatus::Closed {
-                record("already closed");
                 already.push(task_id.as_str());
                 continue;
             }
@@ -558,7 +557,6 @@ impl CasCore {
                     closed.push(task_id.as_str());
                 }
                 CassyMergeClose::AlreadyClosed => {
-                    record("already closed");
                     already.push(task_id.as_str());
                 }
                 CassyMergeClose::Held(text) => hold(&text),

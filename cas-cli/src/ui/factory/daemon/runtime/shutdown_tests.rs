@@ -1775,6 +1775,11 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         }
         let replacement_pid = daemon.app.mux.pane_process_group_id(NAME).unwrap();
         assert_ne!(replacement_pid, old_pid, "recycle started a new process");
+        for record in crate::ui::factory::process_groups::list(&cas_dir).unwrap() {
+            if record.worker_name == NAME {
+                eprintln!("[DEBUG-CAS-1C2C] test={} replacement={} scope={:?} members={:?}", std::process::id(), replacement_pid, record.cgroup, record.cgroup.as_ref().map(|dir| std::fs::read_to_string(dir.join("cgroup.procs"))));
+            }
+        }
         // The old registration is retired, but the replacement has not
         // registered. A write makes this a changed-DB director snapshot.
         // Under load the bounded first attempt can lose to a busy store: the row is

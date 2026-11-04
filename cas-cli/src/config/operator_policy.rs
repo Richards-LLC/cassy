@@ -510,18 +510,22 @@ pub fn host_downloads_dir() -> Option<PathBuf> {
 }
 
 /// Claude Code's auto-memory folders for the given project directories
-/// (cas-2d9a): `<base>/projects/<slug>/memory` under the shared
-/// `~/.cas/claude-base`, `$CLAUDE_CONFIG_DIR` and `~/.claude`. The project
-/// folder must be a real directory resolving to `<projects>/<slug>`; its
-/// `memory` must be a real directory or not exist yet (the first write creates
-/// it). A symlinked project folder or `memory` grants nothing, and transcripts
-/// and other files beside `memory` stay outside the root.
+/// (cas-2d9a): `<config>/projects/<slug>/memory` under the active Claude
+/// config (`$CLAUDE_CONFIG_DIR`, else `~/.claude`); an account whose
+/// `projects` links into the shared `~/.cas/claude-base` reaches it there.
+/// Inactive configs grant nothing. The project folder must be a real
+/// directory resolving to `<projects>/<slug>`; its `memory` must be a real
+/// directory or not exist yet (the first write creates it). A symlinked
+/// project folder or `memory` grants nothing, and transcripts and other files
+/// beside `memory` stay outside the root.
 pub fn claude_memory_roots(project_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut bases: Vec<PathBuf> = dirs::home_dir()
-        .map(|home| crate::accounts::Provider::Claude.base_dir(&home))
+    let bases: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .filter(|config| config.is_absolute())
         .into_iter()
         .collect();
-    bases.extend(crate::factory_context_reset::claude_config_roots());
     let mut roots = Vec::new();
     for base in &bases {
         // The account-level `projects` link into the shared base is followed;

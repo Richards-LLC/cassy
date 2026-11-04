@@ -1086,23 +1086,31 @@ fn receipt_range_changed_paths(
     if integrated.is_empty() {
         return range_log_paths(repo, &["-m", &range]);
     }
-    // cas-2bdf: commits already on the target are proven by its own gate. Of
-    // the delivery's merges, only resolution paths (those differing from every
-    // parent) are new, and append-only or generated ones do not void a receipt.
-    let selection = |kind: &'static [&'static str]| {
-        let mut args = kind.to_vec();
-        args.extend([range.as_str(), "--not"]);
-        args.extend(integrated.iter().map(String::as_str));
-        args
-    };
-    let own = selection(&["--no-merges"]);
-    let merges = selection(&["--merges", "--diff-merges=dense-combined"]);
-    let mut paths = range_log_paths(repo, &own)?;
-    paths.extend(
-        range_log_paths(repo, &merges)?
-            .into_iter()
-            .filter(|path| !append_only_or_generated(path)),
-    );
+    // cas-2bdf: walk the delivery's own first-parent chain. Once merged, the
+    // delivery is reachable from the target, so reachability cannot separate
+    // it from target work. A merge whose other parents sit on the target's
+    // own first-parent history brought in target work, proven by its gate, so
+    // only that merge's conflicted and resolution paths are new; any other
+    // merge counts in full. Append-only and generated paths do not void.
+    let target_line = target_first_parent_line(repo, &integrated)?;
+    let chain = git_output(repo, &["rev-list", "--first-parent", "--parents", &range])?;
+    let mut paths = Vec::new();
+    for line in chain.lines() {
+        let mut ids = line.split_whitespace();
+        let (Some(commit), Some(first)) = (ids.next(), ids.next()) else { return None };
+        let others = ids.collect::<Vec<_>>();
+        if others.is_empty() {
+            paths.extend(git_paths(repo, &["diff-tree", "-r", "--name-only", "--no-renames", "--no-commit-id", "-z", commit])?);
+        } else if others.iter().all(|parent| target_line.contains(*parent)) {
+            let mut merged = git_paths(repo, &["diff-tree", "--cc", "-r", "--name-only", "--no-renames", "--no-commit-id", "-z", commit])?;
+            for parent in others {
+                merged.extend(merge_conflict_paths(repo, first, parent)?);
+            }
+            paths.extend(merged.into_iter().filter(|path| !append_only_or_generated(path)));
+        } else {
+            paths.extend(git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", first, commit])?);
+        }
+    }
     Some(paths)
 }
 
@@ -1112,6 +1120,48 @@ fn receipt_range_changed_paths(
 /// to reviewed code.
 pub(crate) fn append_only_or_generated(path: &str) -> bool {
     path == "CHANGELOG.md" || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
+}
+
+/// Commits on the target refs' own first-parent history.
+fn target_first_parent_line(repo: &Path, refs: &[String]) -> Option<BTreeSet<String>> {
+    let mut args = vec!["rev-list", "--first-parent"];
+    args.extend(refs.iter().map(String::as_str));
+    Some(git_output(repo, &args)?.lines().map(str::to_owned).collect())
+}
+
+/// Paths `git merge` would report as conflicted for these parents, whatever
+/// side the recorded resolution later took.
+fn merge_conflict_paths(repo: &Path, first: &str, other: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["merge-tree", "--write-tree", "--name-only", first, other])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(0) => Some(Vec::new()),
+        Some(1) => {
+            let text = String::from_utf8(output.stdout).ok()?;
+            Some(text.lines().skip(1).take_while(|line| !line.is_empty()).map(str::to_owned).collect())
+        }
+        _ => None,
+    }
+}
+
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8(output.stdout).ok()).flatten()
+}
+
+fn git_paths(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
+    git_output(repo, args).map(|text| {
+        text.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect()
+    })
 }
 
 /// The local target and its `origin/` tracking ref, when they resolve.
@@ -2554,6 +2604,16 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
         assert!(passing_test_receipts(&root, &repo, &delivered).is_empty());
         assert_eq!(PassingTests::new(&root, &repo, &delivered).with_target("lane").receipts().len(), 1);
+
+        // A Rust conflict resolved by taking one side whole leaves no
+        // resolution diff, but it is still untested code.
+        git(&repo, &["checkout", "-q", "lane"]).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 2; }\n").unwrap();
+        fixture_commit_as(&repo, "target rewrites the delivered function");
+        git(&repo, &["checkout", "-q", "delivery"]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "-X", "theirs", "lane", "-m", "take theirs"]).unwrap();
+        let theirs = fixture_head(&repo);
+        assert!(PassingTests::new(&root, &repo, &theirs).with_target("lane").receipts().is_empty());
     }
 
     #[test]

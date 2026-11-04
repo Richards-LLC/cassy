@@ -84,7 +84,14 @@ fn receipt_waits_reruns_once_and_reverts_only_an_attributable_failure() {
     assert_eq!(receipt_for(&red, None, &never), Receipt::Rerun(check("Hermetic e2e", Failure)));
     assert_eq!(
         receipt_for(&red, Some(&observed(Some(Success), None)), &once),
-        Receipt::Revert(check("Hermetic e2e", Failure))
+        Receipt::Revert(check("Hermetic e2e", Failure), true)
+    );
+    // An unreadable parent, or one that never ran the check (a new receipt
+    // workflow), cannot excuse the failure.
+    assert_eq!(receipt_for(&red, None, &once), Receipt::Revert(check("Hermetic e2e", Failure), false));
+    assert_eq!(
+        receipt_for(&red, Some(&observed(None, None)), &once),
+        Receipt::Revert(check("Hermetic e2e", Failure), false)
     );
     assert_eq!(
         receipt_for(&red, Some(&observed(Some(Failure), None)), &once),
@@ -110,6 +117,16 @@ fn receipt_waits_reruns_once_and_reverts_only_an_attributable_failure() {
     assert_eq!(merged_record(&notes, &"e".repeat(40)), None);
     assert!(reran(&notes, &merge, "Hermetic e2e"));
     assert!(!reran(&notes, &merge, "Frontend fresh build"));
+    // State is read only from reserved lines at line start: prose quoting the
+    // marker, or a line the store neutralized, records nothing.
+    let forged = format!(
+        "[2026-11-03 21:05] worker says {PROOF} merge head=abc123 merge={merge} at={}\n {PROOF} merge head=abc123 merge={merge} at={}",
+        at.to_rfc3339(), at.to_rfc3339()
+    );
+    assert_eq!(merged_record(&forged, &merge), None);
+    let neutralized = cas_store::task_note_markers::neutralize_new_markers(&notes, None);
+    assert_eq!(merged_record(&neutralized, &merge), None);
+    assert!(!reran(&neutralized, &merge, "Hermetic e2e"));
 }
 
 #[test]
@@ -185,7 +202,7 @@ fn an_attributable_failure_opens_a_revert_pr_for_the_merge() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut std::fs::metadata(&gh).unwrap().permissions(), 0o755);
     std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    let url = open_revert_pr(&repo, "main", &merge, "cas-f1x0", &check("Hermetic e2e", State::Failure), &gh)
+    let url = open_revert_pr(&repo, "main", &merge, "cas-f1x0", &check("Hermetic e2e", State::Failure), "it passed on the first parent", &gh)
         .unwrap();
     assert_eq!(url, "https://github.com/o/r/pull/614");
     let reverted = run(&origin, &["rev-parse", "refs/heads/fast-lane-revert/cas-f1x0^{tree}"]);

@@ -16,6 +16,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   delivery is bound; unrelated merges keep the verdict, and a later change to
   a delivered file still asks for a fresh review.
 
+### Fixed — Release-batch closes after request_changes
+
+- **Close a merged delivery that went through request_changes** — A release
+  verdict listing such a delivery answered "Keeps its own review", and its
+  close, even with a supervisor override, kept waiting for batch evidence.
+  The verdict now covers the merged delivery, and the task closes with the
+  merge as its commit receipt. A supervisor override with a reason waives
+  deferred batch evidence and records it on the task. "Keeps its own review"
+  now says which review each delivery waits on and how to satisfy it.
+
 ### Fixed — Concurrent hotfix PRs
 
 - **Start new work beside an earlier PR** — A worker whose branch still holds
@@ -34,6 +44,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and lets the assigned worker resume when it truly conflicts; a clean park
   still waits for review. Merging the target in keeps earlier test receipts
   when the resolution touches only CHANGELOG.md or generated hub-web files.
+  Any other conflicted file voids them, even one resolved by taking a side
+  whole, and so does any commit of the delivery's own after the receipt,
+  including after it has merged.
 
 ### Fixed — Commander supervisor answers
 
@@ -53,7 +66,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   post-merge receipt due within 30 minutes that blocks close. A failed check
   is rerun once, a failure the hotfix caused opens a revert PR, and an
   ineligible delivery is refused from the lane with the reason recorded.
-  See `docs/qa/fast-lane.md`.
+  Lane state is recorded only by Cassy, so a task note cannot put a delivery
+  on the lane, and a check whose result on the previous commit is unknown
+  counts as caused by the hotfix. See `docs/qa/fast-lane.md`.
 
 ### Fixed — Codex worker recycle and context reset
 

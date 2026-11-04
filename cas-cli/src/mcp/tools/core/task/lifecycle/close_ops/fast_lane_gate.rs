@@ -91,13 +91,32 @@ fn follow_up(notes: &mut CloseNoteTracker<'_>, task: &mut Task, key: &str, title
     }
     match lane::file_follow_up(notes.store, task, title.to_string(), description.to_string()) {
         Ok(id) => {
-            notes.record(task, &lane::follow_up_note(key, &id));
+            record_proof(notes, task, &lane::follow_up_note(key, &id));
             id
         }
         Err(error) => {
             notes.record(task, &format!("FAST LANE WARNING: the {key} follow-up task could not be filed ({error})."));
             format!("not filed: {error}")
         }
+    }
+}
+
+/// Lane state goes through the store's trusted append, the only writer that
+/// keeps a reserved `FAST_LANE_PROOF:` line; the task is then reread so the
+/// close snapshot carries it.
+fn record_proof(notes: &mut CloseNoteTracker<'_>, task: &mut Task, note: &str) {
+    let formatted = format!("[{}] {note}", chrono::Utc::now().format("%Y-%m-%d %H:%M"));
+    let reread = notes
+        .store
+        .append_trusted_note(&task.id, &formatted)
+        .and_then(|_| notes.store.get(&task.id));
+    match reread {
+        Ok(current) => {
+            task.notes = current.notes;
+            task.updated_at = current.updated_at;
+            notes.persisted_bytes = task.notes.len();
+        }
+        Err(error) => notes.record(task, &format!("FAST LANE WARNING: lane state was not recorded ({error}).")),
     }
 }
 
@@ -154,7 +173,7 @@ impl CasCore {
             }
             Receipt::Rerun(check) => match lane::rerun(repo, &check, &gh) {
                 Ok(()) => {
-                    notes.record(task, &lane::rerun_note(merge, &check));
+                    record_proof(notes, task, &lane::rerun_note(merge, &check));
                     self.arm_fast_lane_wake(&task.id, merge);
                     ReceiptGate::Hold(format!(
                         "FAST LANE RECEIPT: {} failed on merge {merge}; its failed jobs are rerunning once ({}).",
@@ -167,22 +186,25 @@ impl CasCore {
                     check.name
                 )),
             },
-            Receipt::Revert(check) => {
-                let marker = format!("FAST LANE REVERT merge={merge}");
-                let opened = match task.notes.lines().find(|line| line.contains(&marker)) {
-                    Some(line) => Ok(line.rsplit(' ').next().unwrap_or_default().to_string()),
-                    None => lane::open_revert_pr(repo, target, merge, &task.id, &check, &gh),
+            Receipt::Revert(check, parent_green) => {
+                let why = if parent_green {
+                    "it passed on the merge's first parent, so the hotfix caused it"
+                } else {
+                    "its result on the merge's first parent is unknown or unreadable, so it counts as caused by the hotfix"
+                };
+                let opened = match lane::reverted(&task.notes, merge) {
+                    Some(url) => Ok(url),
+                    None => lane::open_revert_pr(repo, target, merge, &task.id, &check, why, &gh).inspect(|url| {
+                        record_proof(notes, task, &lane::revert_note(merge, &check.name, url));
+                    }),
                 };
                 match opened {
-                    Ok(url) => {
-                        notes.record(task, &format!("{marker} check=\"{}\": revert PR {url}", check.name));
-                        ReceiptGate::Failed(format!(
-                            "FAST LANE REVERT: {} failed on merge {merge} after one rerun and passed on its first parent, so the hotfix caused it. Revert PR: {url}. Merge it once its merge checks pass and tell the operator; the hotfix returns to its worker to fix forward.",
-                            check.name
-                        ))
-                    }
+                    Ok(url) => ReceiptGate::Failed(format!(
+                        "FAST LANE REVERT: {} failed on merge {merge} after one rerun; {why}. Revert PR: {url}. Merge it once its merge checks pass and tell the operator; the hotfix returns to its worker to fix forward.",
+                        check.name
+                    )),
                     Err(error) => ReceiptGate::Hold(format!(
-                        "FAST LANE REVERT NEEDED: {} failed on merge {merge} after one rerun and passed on its first parent, but the revert PR could not be opened ({error}). Revert {merge} by hand, then retry the close.",
+                        "FAST LANE REVERT NEEDED: {} failed on merge {merge} after one rerun; {why}, but the revert PR could not be opened ({error}). Revert {merge} by hand, then retry the close.",
                         check.name
                     )),
                 }

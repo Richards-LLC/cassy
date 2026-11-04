@@ -218,9 +218,26 @@ pub fn eligibility_note(lane: &FastLaneConfig, head: &str, eligibility: &Eligibi
     }
 }
 
+/// Lane state lives only on reserved `FAST_LANE_PROOF:` lines. The task store
+/// neutralizes reserved lines in untrusted writes and caller notes refuse
+/// them, so only Cassy's trusted append can record a lane merge, rerun,
+/// revert or follow-up.
+pub const PROOF: &str = "FAST_LANE_PROOF:";
+
+fn proofs(notes: &str) -> impl DoubleEndedIterator<Item = &str> {
+    notes.lines().filter_map(|line| line.strip_prefix(PROOF)).map(str::trim)
+}
+
+fn field<'a>(proof: &'a str, name: &str) -> Option<&'a str> {
+    proof.split_whitespace().find_map(|token| token.strip_prefix(name))
+}
+
 /// Recorded by `worktree_merge` when it admitted `head` on the lane.
 pub fn merge_note(head: &str, merge: &str, at: DateTime<Utc>) -> String {
-    format!("{MERGED} head={head} merge={merge} at={}: post-merge receipt owed.", at.to_rfc3339())
+    format!(
+        "Fast lane: {head} merged as {merge}; its post-merge receipt is owed.\n{PROOF} merge head={head} merge={merge} at={}",
+        at.to_rfc3339()
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,41 +246,49 @@ pub struct MergeRecord {
     pub at: DateTime<Utc>,
 }
 
-/// The lane merge recorded for `merge`, if this delivery merged on the lane.
+/// The lane merge Cassy recorded for `merge`, if this delivery merged on the lane.
 pub fn merged_record(notes: &str, merge: &str) -> Option<MergeRecord> {
-    notes.lines().rev().find_map(|line| {
-        let rest = &line[line.find(MERGED)? + MERGED.len()..];
-        let field = |name: &str| {
-            rest.split_whitespace()
-                .find_map(|token| token.strip_prefix(name))
-                .map(|value| value.trim_end_matches(':'))
-        };
-        (field("merge=")? == merge).then_some(())?;
+    proofs(notes).rev().find_map(|proof| {
+        let proof = proof.strip_prefix("merge ")?;
+        (field(proof, "merge=")? == merge).then_some(())?;
         Some(MergeRecord {
-            head: field("head=")?.to_string(),
-            at: DateTime::parse_from_rfc3339(field("at=")?).ok()?.with_timezone(&Utc),
+            head: field(proof, "head=")?.to_string(),
+            at: DateTime::parse_from_rfc3339(field(proof, "at=")?).ok()?.with_timezone(&Utc),
         })
     })
 }
 
 pub fn rerun_note(merge: &str, check: &Check) -> String {
     format!(
-        "{RERUN} merge={merge} check=\"{}\" run={}: rerunning the failed jobs once.",
+        "Fast lane: rerunning the failed jobs of {} once.\n{PROOF} rerun merge={merge} check=\"{}\" run={}",
+        check.name,
         check.name,
         check.run_id.as_deref().unwrap_or("unknown")
     )
 }
 
 pub fn reran(notes: &str, merge: &str, check: &str) -> bool {
-    notes.contains(&format!("{RERUN} merge={merge} check=\"{check}\""))
+    let key = format!("rerun merge={merge} check=\"{check}\" ");
+    proofs(notes).any(|proof| proof.starts_with(&key))
 }
 
 pub fn follow_up_note(key: &str, task_id: &str) -> String {
-    format!("{FOLLOW_UP} {key}: filed {task_id}.")
+    format!("Fast lane: filed follow-up {task_id} ({key}).\n{PROOF} follow-up key=\"{key}\" task={task_id}")
 }
 
 pub fn followed_up(notes: &str, key: &str) -> bool {
-    notes.contains(&format!("{FOLLOW_UP} {key}: filed "))
+    let key = format!("follow-up key=\"{key}\" ");
+    proofs(notes).any(|proof| proof.starts_with(&key))
+}
+
+pub fn revert_note(merge: &str, check: &str, url: &str) -> String {
+    format!("Fast lane: opened revert PR {url} after {check} failed.\n{PROOF} revert merge={merge} url={url}")
+}
+
+/// The revert PR already opened for `merge`.
+pub fn reverted(notes: &str, merge: &str) -> Option<String> {
+    let key = format!("revert merge={merge} url=");
+    proofs(notes).find_map(|proof| proof.strip_prefix(&key).map(str::to_string))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,8 +407,9 @@ pub enum Receipt {
     Passed { excused: Vec<Check> },
     /// A receipt check failed for the first time: rerun it once.
     Rerun(Check),
-    /// Still red after its rerun and green on the first parent.
-    Revert(Check),
+    /// Still red after its rerun, and green (`true`) or unknown (`false`) on
+    /// the first parent: an unknown parent counts as caused by the hotfix.
+    Revert(Check, bool),
     /// A receipt status (the production build) failed; production is unchanged.
     Return(Check),
 }
@@ -410,9 +436,10 @@ pub fn receipt(
                     return Receipt::Rerun(check.clone());
                 }
                 match parent.and_then(|parent| find(&parent.checks, name)).map(|check| check.state) {
-                    Some(State::Success) => return Receipt::Revert(check.clone()),
+                    Some(State::Success) => return Receipt::Revert(check.clone(), true),
                     Some(State::Pending) => waiting.push(format!("{name} on the first parent is running")),
-                    _ => excused.push(check.clone()),
+                    Some(State::Failure) => excused.push(check.clone()),
+                    None => return Receipt::Revert(check.clone(), false),
                 }
             }
             Some(check) if check.state == State::Success => {}
@@ -509,6 +536,7 @@ pub fn open_revert_pr(
     merge: &str,
     task_id: &str,
     failed: &Check,
+    reason: &str,
     binary: &Path,
 ) -> Result<String, String> {
     let target = target.strip_prefix("origin/").unwrap_or(target);
@@ -532,7 +560,7 @@ pub fn open_revert_pr(
         git(&tree, &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")], GIT_WRITE)?;
         let title = format!("Revert hotfix merge {}", &merge[..merge.len().min(12)]);
         let body = format!(
-            "Automatic fast-lane revert. `{}` failed on merge {merge} after one rerun and passed on its first parent.\n\nFailing run: {}",
+            "Automatic fast-lane revert. `{}` failed on merge {merge} after one rerun; {reason}.\n\nFailing run: {}",
             failed.name,
             failed.url.as_deref().unwrap_or("unavailable")
         );

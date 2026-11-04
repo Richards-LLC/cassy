@@ -402,9 +402,24 @@ pub struct ExitBlockers {
     pub claimed_tasks: Vec<Task>,
     /// Subtasks of claimed epics that must be closed
     pub epic_subtasks: Vec<Task>,
+    /// Epic each entry of `epic_subtasks` belongs to, by task ID
+    pub subtask_epics: std::collections::HashMap<String, String>,
 }
 
 impl ExitBlockers {
+    /// Drop the task blockers `handoff` names, by task ID or, for an epic
+    /// subtask, by its epic's ID. A session whose handoff names its work in
+    /// flight may end with those tasks still open for the next session
+    /// (cas-c9ec); active children still block.
+    pub fn retain_unhanded(&mut self, handoff: &str) {
+        let named = |id: &str| names_task_id(handoff, id);
+        self.claimed_tasks.retain(|task| !named(&task.id));
+        let epics = &self.subtask_epics;
+        self.epic_subtasks.retain(|task| {
+            !named(&task.id) && !epics.get(&task.id).is_some_and(|epic| named(epic))
+        });
+    }
+
     /// Check if there are any blockers preventing exit
     pub fn has_blockers(&self) -> bool {
         !self.active_children.is_empty()
@@ -499,8 +514,35 @@ impl ExitBlockers {
             }
         }
 
+        if !self.claimed_tasks.is_empty() || !self.epic_subtasks.is_empty() {
+            let prefix = crate::harness_policy::own_tool_prefix();
+            lines.push(format!("  Or, when the operator asked you to finish, keep them open: name each task ID (or its epic's) in {prefix}memory action: remember entry_type: handoff, then stop."));
+        }
+
         lines.join("\n")
     }
+}
+
+/// Whether `text` names task `id` as a whole token (`cas-ab12` is not named
+/// by `cas-ab123`).
+fn names_task_id(text: &str, id: &str) -> bool {
+    let is_id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    !id.is_empty()
+        && text.match_indices(id).any(|(at, _)| {
+            !text[..at].chars().next_back().is_some_and(is_id_char)
+                && !text[at + id.len()..].chars().next().is_some_and(is_id_char)
+        })
+}
+
+/// Content of this session's current handoff memory, if it saved one.
+pub(crate) fn session_handoff(cas_root: &std::path::Path, session_id: &str) -> Option<String> {
+    use cas_core::memory::handoff;
+    let entries = open_store(cas_root).ok()?.list_by_session(session_id).ok()?;
+    entries
+        .into_iter()
+        .filter(|entry| handoff::is_handoff(entry) && !handoff::is_superseded(entry))
+        .max_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)))
+        .map(|entry| entry.content)
 }
 
 /// Check for blockers that would prevent agent from exiting
@@ -591,6 +633,9 @@ pub(crate) fn get_exit_blockers(
             for subtask in subtasks {
                 // Include all non-closed subtasks - agent must complete the entire epic
                 if !subtask.is_terminal() && !claimed_ids.contains(subtask.id.as_str()) {
+                    blockers
+                        .subtask_epics
+                        .insert(subtask.id.clone(), epic_id.clone());
                     blockers.epic_subtasks.push(subtask);
                 }
             }

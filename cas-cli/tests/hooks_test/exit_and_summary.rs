@@ -21,11 +21,12 @@ fn test_exit_blocked_with_claimed_task() {
 
     assert_stop_blocked(&stop_output, &["remaining work", "Cannot exit"], None);
 
-    // cas-c9ec: /finish records a handoff. One that omits the task still
-    // blocks; one that names it lets the session end with the task intact.
-    save_handoff(&temp, session_id, "Shipped nothing yet; the blocking task is in flight.");
+    // cas-c9ec: /finish records a handoff. One that omits the task (a longer
+    // ID sharing its prefix is not a mention) still blocks; one that names it
+    // lets the session end with the task intact.
+    save_handoff(&temp, session_id, &format!("Shipped {task_id}0; nothing else in flight."));
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-    assert_stop_blocked(&stop_output, &["Cannot exit", "entry_type: handoff"], None);
+    assert_stop_blocked(&stop_output, &["entry_type: handoff"], None);
 
     save_handoff(&temp, session_id, &format!("In flight: {task_id}, next: rerun its tests."));
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));

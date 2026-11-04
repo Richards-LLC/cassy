@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Hosted Commander tailnets
+
+- **Reach any Tailscale tailnet from hosted Commander** — Was: hosted
+  Commander could load media, sockets and pages only from the team tailnets
+  named in `hub-web/hosted-tailnets.json`, so a friend's or teammate's
+  tailnet was blocked until it was added. Now: by operator decision ("ts.net
+  for now", review after 2026-12-04), `allow_any_tailnet` admits any
+  `*.ts.net` machine; ordinary websites stay blocked, and setting the field to
+  false restores the named list.
+
 ### Fixed — Factory message destinations
 
 - **Honor explicit message destinations** — `cas factory message` resolves the

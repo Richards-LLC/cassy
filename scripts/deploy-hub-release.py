@@ -204,25 +204,50 @@ def live_snapshot(vercel, deployment):
         return dict(pool.map(download, files.items()))
 
 
-def hosted_csp(tailnets):
-    """Hosted Commander's policy: the hub-served one, with each team tailnet named.
+# A wildcard host is allowed only as a Tailscale machine name: *.ts.net
+# (cas-5d51) or *.<tailnet>.ts.net (cas-7a33).
+TAILNET_WILDCARD = re.compile(r"(https|wss)://\*\.(?:[a-z0-9-]+\.)?ts\.net:\*")
+
+
+def refuse_blanket_sources(name, sources):
+    """No directive may carry a bare https:, wss: or * source (cas-1b35), or a
+    wildcard host other than a Tailscale machine name."""
+    blanket = [
+        source for source in sources
+        if re.fullmatch(r"(https?|wss?):|\*", source)
+        or ("*" in source.split(":*")[0].split("//", 1)[-1] and not TAILNET_WILDCARD.fullmatch(source))
+    ]
+    if blanket:
+        raise RuntimeError(f"{name} would carry a blanket source: {' '.join(blanket)}")
+
+
+def hosted_csp(tailnets, allow_any_tailnet=False):
+    """Hosted Commander's policy: the hub-served one, with the team tailnets.
 
     A hub-served Commander keeps img-src and media-src 'self' (its media proxy
     is same-origin). Hosted Commander's media, sockets and visual pages come
-    from the selected machine hub, so every team tailnet is listed explicitly.
-    No directive may carry a bare https:, wss: or * source (cas-1b35).
+    from the selected machine hub, so every team tailnet is listed explicitly,
+    or, while allow_any_tailnet is set, any tailnet as *.ts.net (cas-5d51,
+    operator decision Nov 4 2026: "ts.net for now"; anyone can create a
+    tailnet, so this admits any Tailscale machine but no ordinary website).
     A hub can serve on any --tailscale-serve-port, so tailnet sources carry
     :*. CSP3 "port-part matches" returns Matches for a * port, the scheme's
     default port included, so no bare-port form is needed.
     """
+    if not isinstance(allow_any_tailnet, bool):
+        raise RuntimeError(f"allow_any_tailnet in {TAILNETS} must be true or false")
     if not isinstance(tailnets, list) or not tailnets:
         raise RuntimeError(f"{TAILNETS} must list at least one tailnet")
     for name in tailnets:
         if not isinstance(name, str) or not TAILNET.fullmatch(name):
             raise RuntimeError(f"invalid tailnet {name!r} in {TAILNETS}: use the <tailnet> of <machine>.<tailnet>.ts.net")
     names = sorted(set(tailnets))
-    https = [f"https://*.{name}.ts.net:*" for name in names]
-    wss = [f"wss://*.{name}.ts.net:*" for name in names]
+    if allow_any_tailnet:
+        https = ["https://*.ts.net:*"]
+        wss = ["wss://*.ts.net:*"]
+    else:
+        https = [f"https://*.{name}.ts.net:*" for name in names]
+        wss = [f"wss://*.{name}.ts.net:*" for name in names]
     directives = [
         ("default-src", ["'none'"]),
         ("script-src", ["'self'"]),
@@ -243,16 +268,16 @@ def hosted_csp(tailnets):
         ("manifest-src", ["'self'"]),
     ]
     for name, sources in directives:
-        blanket = [source for source in sources if re.fullmatch(r"(https?|wss?):|\*", source)]
-        if blanket:
-            raise RuntimeError(f"{name} would carry a blanket source: {' '.join(blanket)}")
+        refuse_blanket_sources(name, sources)
     return "; ".join(f"{name} {' '.join(sources)}" for name, sources in directives)
 
 
 def release_csp(repo, tag):
     """The policy the tag's own tailnet list produces; a release without one cannot deploy."""
     config = json.loads(command(["git", "-C", str(repo), "show", f"{tag}:{TAILNETS}"]))
-    return hosted_csp(config.get("tailnets") if isinstance(config, dict) else None)
+    if not isinstance(config, dict):
+        return hosted_csp(None)
+    return hosted_csp(config.get("tailnets"), config.get("allow_any_tailnet", False))
 
 
 def verify_origin(origin, snapshot, deadline=None, csp=None):

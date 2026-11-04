@@ -1674,6 +1674,10 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     const NAME: &str = "long-history-codex";
     const OLD: &str = "OLD SESSION TRANSCRIPT: prior delivery\r\n";
     const NEW: &str = REPLACEMENT_STARTUP;
+    // Native nextest cases and the scrubbed whole-module child run in parallel.
+    // Containment scopes use session + worker name, so each process needs its
+    // own session even though its registry and HOME are already isolated.
+    let factory_session = format!("{SESSION}-{}", std::process::id());
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -1682,15 +1686,16 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     env.set_current_dir(dir.path());
 
     let mut daemon = daemon(&cas_dir);
+    daemon.session_name = factory_session.clone();
     register_idle_worker(&cas_dir, NAME);
     let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
     if register_replacement {
         // The daemon fixture otherwise has no factory session and refuses
         // phantom teardown before it can ever enqueue the shutdown.
-        daemon.app.set_factory_session_name_for_test(SESSION);
+        daemon.app.set_factory_session_name_for_test(&factory_session);
         let agents = open_agent_store(&cas_dir).unwrap();
         let mut old_registration = agents.get(&format!("agent-{NAME}")).unwrap();
-        old_registration.factory_session = Some(SESSION.into());
+        old_registration.factory_session = Some(factory_session.clone());
         agents.update(&old_registration).unwrap();
         let mut held =
             cas_types::Task::new("cas-recycled-held".into(), "Resume after recycle".into());
@@ -1700,12 +1705,12 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         let peer = "roster-peer";
         register_idle_worker(&cas_dir, peer);
         let mut registration = agents.get(&format!("agent-{peer}")).unwrap();
-        registration.factory_session = Some(SESSION.into());
+        registration.factory_session = Some(factory_session.clone());
         agents.update(&registration).unwrap();
         daemon.app.adopt_worker_pane_for_test(idle_worker_pane(peer, cas_mux::SupervisorCli::Codex));
         // This is how a zero-worker boot precedes later dynamic spawns.
         let metadata = crate::ui::factory::create_metadata(
-            SESSION, std::process::id(), daemon.app.supervisor_name(), &[], None,
+            &factory_session, std::process::id(), daemon.app.supervisor_name(), &[], None,
             Some(dir.path().to_str().unwrap()), None,
         );
         crate::ui::factory::SessionManager::new().save_metadata(&metadata).unwrap();
@@ -1736,7 +1741,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         .enqueue_recycle(
             NAME,
             Some(&serde_json::to_string(&spec).unwrap()),
-            Some(SESSION),
+            Some(&factory_session),
         )
         .unwrap();
     daemon.enqueue_spawn_requests().unwrap();
@@ -1842,7 +1847,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             .unwrap();
         let mut replacement = cas_types::Agent::new(session, NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
-        replacement.factory_session = Some(SESSION.into());
+        replacement.factory_session = Some(factory_session.clone());
         open_agent_store(&cas_dir)
             .unwrap()
             .register(&replacement)
@@ -1854,7 +1859,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         // also remain harmless after same-name registration.
         crate::ui::factory::app::queue_phantom_worker_teardowns(
             &cas_dir,
-            SESSION,
+            &factory_session,
             &[old_generation],
         );
         let controls = consume_queued_shutdowns(&mut daemon).await;
@@ -1866,7 +1871,10 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             held.status,
             held.assignee,
         );
-        assert!(crate::mcp::daemon::pid_alive(replacement_pid));
+        assert!(
+            wait_until(Duration::from_secs(5), || crate::mcp::daemon::pid_alive(replacement_pid)),
+            "replacement pid {replacement_pid} did not become live before the deadline; controls={controls:?}"
+        );
         let held = tasks.get("cas-recycled-held").unwrap();
         assert_eq!(held.status, cas_types::TaskStatus::InProgress);
         assert_eq!(held.assignee.as_deref(), Some(NAME));
@@ -1903,7 +1911,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         let store_worker = super::store_worker::StoreWorker::start();
         daemon.flush_epic_focus_write(&store_worker);
         assert!(store_worker.wait_idle(Duration::from_secs(5)));
-        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(&factory_session)).unwrap().unwrap();
         let mut names: Vec<_> = session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec![NAME, "roster-peer"]);
@@ -1924,7 +1932,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             .unwrap();
         retired.status = cas_types::AgentStatus::Shutdown;
         agents.update(&retired).unwrap();
-        crate::ui::factory::app::queue_phantom_worker_teardowns(&cas_dir, SESSION, &[target]);
+        crate::ui::factory::app::queue_phantom_worker_teardowns(&cas_dir, &factory_session, &[target]);
         consume_queued_shutdowns(&mut daemon).await;
         assert!(daemon.app.mux.pane_process_group_id(NAME).is_none());
         assert!(!crate::mcp::daemon::pid_alive(replacement_pid));
@@ -1934,7 +1942,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
         );
         daemon.flush_epic_focus_write(&store_worker);
         assert!(store_worker.wait_idle(Duration::from_secs(5)));
-        let session = crate::ui::factory::SessionManager::new().find_session(Some(SESSION)).unwrap().unwrap();
+        let session = crate::ui::factory::SessionManager::new().find_session(Some(&factory_session)).unwrap().unwrap();
         assert_eq!(session.metadata.workers.iter().map(|worker| worker.name.as_str()).collect::<Vec<_>>(), vec!["roster-peer"]);
     } else {
         assert_eq!(

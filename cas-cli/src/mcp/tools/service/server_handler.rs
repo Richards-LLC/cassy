@@ -775,7 +775,7 @@ impl CasService {
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
         start: std::time::Instant,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let task_id = arguments
             .and_then(|args| args.get("task_id"))
             .and_then(serde_json::Value::as_str)
@@ -832,7 +832,7 @@ impl CasService {
                 Ok(Err(error)) => warn!(error = %error, "MCP post-commit outcome not recorded"),
                 Err(error) => warn!(error = %error, "MCP post-commit outcome recorder ended abnormally"),
             }
-        });
+        })
     }
 
     fn record_late_close_outcome(
@@ -1438,6 +1438,108 @@ mod tests {
         let text = format!("{answered:?}");
         assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
         assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
+    }
+
+    /// The real receipt handler must release its response budget once its
+    /// immutable verdict exists, even while subsequent close work is held.
+    #[tokio::test(start_paused = true)]
+    async fn batch_receipt_returns_committed_before_slow_followup_cas_343c() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='batch-response'\n[qa]\nmode='batch'\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(repo)
+                .env("GIT_AUTHOR_NAME", "implementer").env("GIT_AUTHOR_EMAIL", "impl@example.test")
+                .env("GIT_COMMITTER_NAME", "implementer").env("GIT_COMMITTER_EMAIL", "impl@example.test")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "delivery").unwrap();
+        git(&["add", "README.md"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-qm", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            let mut task = cas_types::Task::new(id.into(), "receipt delivery".into());
+            task.assignee = Some("implementer".into());
+            task.origin_project = Some("batch-response".into());
+            task.deliverables.factory_branch_anchor = Some(head.clone());
+            tasks.add(&task).unwrap();
+        }
+        let supervisor = cas_types::Agent::new_with_role("batch-recorder".into(), "batch-recorder".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let ledger = repo.join("LEDGER.md");
+        std::fs::write(&ledger, "cas-batch-a PASS\ncas-batch-b PASS\n").unwrap();
+        let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &artifacts,
+            roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), "cas-batch-a"),
+            task_id: "cas-batch-a".into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact.id;
+        let arguments = serde_json::json!({"action":"batch_receipt", "verification_type":"release",
+            "task_ids":["cas-batch-a","cas-batch-b"], "staging_sha":head,
+            "ledger_artifact_id":artifact, "ledger_path":ledger, "ledger_author":"independent-reviewer"});
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let sender = service.clone();
+        let (release, held) = tokio::sync::oneshot::channel();
+        let (finished, continued) = tokio::sync::oneshot::channel();
+        let answered = service.call_with_deadline_and_grace(
+            "verification", arguments.as_object(), std::time::Duration::from_secs(55),
+            std::time::Duration::ZERO, async move {
+                let recorded = sender.verification(Parameters(request)).await?;
+                held.await.unwrap();
+                finished.send(()).unwrap();
+                Ok(recorded)
+            }).await.expect("the persisted batch must answer before its held continuation");
+        let text = format!("{answered:?}");
+        let receipts = cas_store::list_qa_batch_receipts(&root, "batch-response").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(text.contains("COMMITTED") && text.contains(&receipts[0].id), "{text}");
+        assert_eq!(receipts[0].task_heads.len(), 2);
+        release.send(()).unwrap();
+        continued.await.expect("post-commit work must survive the early answer");
+    }
+
+    #[tokio::test]
+    async fn batch_close_failure_is_recorded_on_every_delivery_cas_343c() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        let tasks = core.open_task_store().unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            tasks.add(&cas_types::Task::new(id.into(), "held delivery".into())).unwrap();
+        }
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"batch_receipt", "task_ids":["cas-batch-a", "cas-batch-b", "cas-batch-a"]});
+        let receipt = mutation_receipt::Receipt::new("verification", "batch_receipt", None);
+        let handler = tokio::spawn(async {
+            Err(rmcp::ErrorData { code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: "committed selector failed".into(), data: None })
+        });
+        service.record_post_commit_outcome(handler, receipt, arguments.as_object(), std::time::Instant::now()).await.unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, cas_types::TaskStatus::Open);
+            assert!(task.notes.contains("POST_COMMIT_OUTCOME") && task.notes.contains("committed selector failed"), "{}", task.notes);
+            assert_eq!(task.notes.matches("POST_COMMIT_OUTCOME").count(), 1);
+        }
     }
 
     /// cas-24d8: a close that committed only an intermediate write (a gate

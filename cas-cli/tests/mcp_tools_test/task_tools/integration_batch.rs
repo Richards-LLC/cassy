@@ -334,11 +334,17 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
     env.remove("GIT_COMMITTER_DATE");
     std::fs::write(cas_dir.join("config.toml"),
         "[verification]\nenabled=true\n[code_review]\nowner=\"worker\"\n[qa]\nmode='per_task'\nindependent_pass=false\n").unwrap();
+    // cas-c744/cas-e051: this is an already-published legacy squash. Close
+    // must not fabricate the post-merge approval the old dbab fixture expected.
     let first = close(worker.clone(), Some(&receipt)).await;
-    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
-    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
-        .unwrap()
-        .unwrap();
+    assert!(first.contains("PRE-MERGE APPROVAL MISSING"), "{first}");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().is_none());
+    // Seed the historical dispatch explicitly: new close attempts no longer
+    // create it, but an old rejected verdict must remain auditable on retry.
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_dir, TASK, "legacy-worker", &format!("batch-supervisor-{}", std::process::id()),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    ).unwrap();
     let service = CasService::new(supervisor.clone(), None);
     let rejected = service.verification(Parameters(serde_json::from_value(serde_json::json!({
         "action":"add", "task_id":TASK, "status":"rejected", "summary":"Ledger evidence incomplete; code unchanged",
@@ -375,22 +381,14 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
             None,
         )
         .unwrap();
-    let retried = close(worker.clone(), Some(&receipt)).await;
-    assert!(retried.contains("VERIFICATION REQUIRED"), "{retried}");
-    let next = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
-        .unwrap()
-        .unwrap();
-    assert_ne!(dispatch.id, next.id);
-    service.verification(Parameters(serde_json::from_value(serde_json::json!({
-        "action":"add", "task_id":TASK, "status":"approved", "summary":"Corrected ledger; unchanged delivery verified",
-        "dispatch_id":next.id
-    })).unwrap())).await.unwrap();
-    let closed = close(worker, Some(&receipt)).await;
-    assert_eq!(
-        tasks.get(TASK).unwrap().status,
-        TaskStatus::Closed,
-        "{closed}"
-    );
+    let retried = close(worker, Some(&receipt)).await;
+    assert!(retried.contains("PRE-MERGE APPROVAL MISSING"), "{retried}");
+    let next = cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().unwrap();
+    assert_eq!(dispatch.id, next.id, "retry cannot dispatch a post-merge verifier");
+    assert_eq!(cas_store::get_verification_for_dispatch(&cas_dir, &dispatch.id).unwrap().unwrap().status,
+        cas::types::VerificationStatus::Rejected, "the old rejection is retained");
+    assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{retried}");
+    assert_eq!(git(repo, &["rev-parse", "main"]), receipt, "retry cannot rewrite the published squash");
     assert_eq!(git(repo, &["rev-parse", "factory/test-agent"]), head);
     assert_eq!(
         tasks

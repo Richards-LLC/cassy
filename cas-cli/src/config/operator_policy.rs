@@ -509,6 +509,46 @@ pub fn host_downloads_dir() -> Option<PathBuf> {
     Some(downloads_dir_for(DownloadsHost::Linux, &home, user_dirs.as_deref()))
 }
 
+/// Claude Code's auto-memory folders for the given project directories
+/// (cas-2d9a): `<base>/projects/<slug>/memory` under the shared
+/// `~/.cas/claude-base`, `$CLAUDE_CONFIG_DIR` and `~/.claude`. Only a real
+/// `memory` directory directly inside its project folder counts. A `memory`
+/// symlink, or one resolving anywhere else, grants nothing, and transcripts
+/// and other files beside it stay outside the root.
+pub fn claude_memory_roots(project_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| crate::accounts::Provider::Claude.base_dir(&home))
+        .into_iter()
+        .collect();
+    bases.extend(crate::factory_context_reset::claude_config_roots());
+    let mut roots = Vec::new();
+    for base in &bases {
+        for dir in project_dirs {
+            let slug = crate::factory_context_reset::claude_project_slug(&dir.to_string_lossy());
+            let project = base.join("projects").join(slug);
+            let memory = project.join("memory");
+            let real_dir = std::fs::symlink_metadata(&memory).is_ok_and(|meta| meta.is_dir());
+            if let (true, Ok(project), Ok(resolved)) =
+                (real_dir, project.canonicalize(), memory.canonicalize())
+                && resolved == project.join("memory")
+                && !roots.contains(&resolved)
+            {
+                roots.push(resolved);
+            }
+        }
+    }
+    roots
+}
+
+/// The directories whose Claude memory belongs to this hook call's project:
+/// the owning project root and the agent's checkout (a worker's worktree).
+fn memory_project_dirs(cas_root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = cas_root.parent().map(Path::to_path_buf).into_iter().collect();
+    dirs.extend(std::env::var_os("CAS_CLONE_PATH").map(PathBuf::from));
+    dirs.extend(std::env::current_dir().ok());
+    dirs
+}
+
 /// `[factory] write_roots` from the user-level `~/.cas/config.toml`, which
 /// apply to every project (cas-f0ea0). Unreadable config grants nothing.
 pub fn user_write_roots() -> Vec<String> {
@@ -523,7 +563,8 @@ pub fn user_write_roots() -> Vec<String> {
 
 /// Every write root in effect for a project (cas-f0ea0): its own
 /// `[factory] write_roots` (`project`), the user-level roots (`user`) and the
-/// built-in Downloads folder, deduplicated in that order. Each passes
+/// built-in Downloads folder, then the project's Claude memory folders
+/// ([`claude_memory_roots`]), deduplicated in that order. Each but the memory folders passes
 /// [`resolve_project_write_root`] for the project; user-level and built-in
 /// roots must also pass it for the user store. A missing Downloads folder is
 /// skipped quietly; other unsafe or unresolved entries are skipped with a warning.
@@ -542,6 +583,13 @@ pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Pat
             Err(error) => {
                 tracing::warn!(root = %raw, %error, "ignoring user-level write root");
             }
+        }
+    }
+    // cas-2d9a: built in like Downloads. It lives under ~/.cas/claude-base,
+    // which a configured root may not name, so it skips that resolution.
+    for root in claude_memory_roots(&memory_project_dirs(cas_root)) {
+        if !roots.contains(&root) {
+            roots.push(root);
         }
     }
     roots

@@ -38,6 +38,8 @@ For every cited `art-` id used as proof, run `artifact action=fetch task_id=<tas
 
 Use `deliverables.files_changed`, `deliverables.commit_hash` and the target branch. In factory mode follow `verifier-evidence-gate.md` → Delivery checkout: bind the managed checkout to task/dispatch/head; keep durable evidence in task artifacts. Diff against the task's own delivery base, never a fixed commit count:
 
+For a pre-merge dispatch, the bound head is an immutable candidate containing source and target base. Review it against the assigned plan and evidence. PASS continues publication of its exact tree; FAIL or an unresolved verdict holds only that delivery. Do not request a worker close retry or a second post-merge review. Epic assembled-outcome review is unchanged.
+
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
 git diff --name-status "$BASE" HEAD
@@ -47,49 +49,11 @@ If the branch is already merged (`$BASE` equals `HEAD`), inspect the recorded co
 
 Before running a candidate `serve` or any stateful command, isolate it in a disposable fixture project and HOME, as `verifier-evidence-gate.md` requires under Candidate fixture isolation.
 
-### Step 4: Read every changed file in full
+### Steps 4–7: Code and evidence checks
 
-Run `rule action=list` for the project rules. Read each changed file completely.
+Read and apply **Code review procedure** in `skills/cas-qa-craft/references/verifier-evidence-gate.md`: read every changed file, run structural commands, trace impact/wiring/co-changes and honor `execution_note`. These remain blocking completeness checks, before Phase 2. If the reference is missing, record `status=error` naming it and stop.
 
 **Rule-reference:** follow `verifier-evidence-gate.md` → Rule-reference procedure for stakeholder rules: reject omitted `Rule-driven sites:` or missing adjacent `cas-rule:` markers; unrelated markers do not count. Verify verbatim `stakeholder.scope`; never expand it to unrelated work.
-
-In the changed code, reject:
-
-- TODO/FIXME/XXX/HACK markers, and `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `throw new Error('Not implemented')`;
-- temporal shortcuts ("for now", "temporarily", "placeholder") that leave an acceptance-criteria item undone;
-- new `@ts-ignore`, `#[allow(dead_code)]`, `# type: ignore` without a stated reason;
-- code that duplicates existing functionality (search before approving).
-
-### Step 5: Structural checks with receipts
-
-Run commands, do not just opine. Use `ast-grep` on changed files, for example `ast-grep --lang rust -p '$EXPR.unwrap()' <file>`, `ast-grep --lang typescript -p '$EXPR as any' <file>`, `ast-grep --lang typescript -p 'catch ($ERR) {}' <file>`. If `ast-grep` is unavailable or cannot parse the language, fall back to:
-
-```bash
-rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|except:' <changed_file>
-```
-
-Back every finding with a command output or an exact line reference.
-
-To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
-
-### Step 6: Impact, wiring and co-changes (blocking when missing)
-
-- A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
-- Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
-- Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
-- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
-
-### Step 7: Honor the task's `execution_note`
-
-- `test-first`: the delivery must add or change at least one test case, in a new or an existing file, and the task must record a run in which that case failed before the fix. Never require a new test file or a number of tests: a few tests that each prove one behaviour are the target. Added cases show in:
-
-  ```bash
-  git diff "$BASE" HEAD | grep -nE '^\+.*(#\[(tokio::)?test|fn test_|\b(it|test)\(|def test_)'
-  ```
-
-  A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
-- `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
-- `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
 
 ## Phase 2: Quality (only when Phase 1 passes)
 
@@ -98,15 +62,7 @@ Standards review; keep acceptance-criterion and scope findings on the Spec axis.
 Skip mechanically enforced rules and let documented repo decisions override
 smell heuristics.
 
-Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
-
-- correctness: edge cases, error propagation, races;
-- design: follows existing patterns, sensible abstraction;
-- performance: redundant work, unbounded queries, quadratic loops;
-- security: input validation at boundaries, parameterized queries, secrets;
-- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
-
-Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
+Apply **Quality checklist** in the same `verifier-evidence-gate.md` reference, retaining its evidence requirements and the rejection threshold below.
 
 ## Recording the verdict
 

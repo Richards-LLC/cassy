@@ -1,8 +1,9 @@
 # Verifier evidence gate
 
-The task-verifier follows this reference for evidence, plan fit, rule citations
-and epic verification. Demo and measurable-claim gates run before reading the
-close reason. Workers produce the evidence; the verifier consumes it.
+The task-verifier applies Code review procedure and Quality checklist to every
+review. Demo-statement and measurable-claim sections apply when the task, or a
+child of its epic, has that requirement; those evidence gates run before the
+close reason is read. Workers produce evidence; the verifier consumes it.
 
 ## Demo-statement evidence mode
 
@@ -118,6 +119,60 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 ## Rule candidates
 
 On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.
+
+## Code review procedure
+
+### Step 4: Read every changed file in full
+
+Run `rule action=list` for the project rules. Read each changed file completely. In the changed code, reject:
+
+- TODO/FIXME/XXX/HACK markers, and `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `throw new Error('Not implemented')`;
+- temporal shortcuts ("for now", "temporarily", "placeholder") that leave an acceptance-criteria item undone;
+- new `@ts-ignore`, `#[allow(dead_code)]`, `# type: ignore` without a stated reason;
+- code that duplicates existing functionality (search before approving).
+
+### Step 5: Structural checks with receipts
+
+Run commands, do not just opine. Use `ast-grep` on changed files, for example `ast-grep --lang rust -p '$EXPR.unwrap()' <file>`, `ast-grep --lang typescript -p '$EXPR as any' <file>`, `ast-grep --lang typescript -p 'catch ($ERR) {}' <file>`. If `ast-grep` is unavailable or cannot parse the language, fall back to:
+
+```bash
+rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|except:' <changed_file>
+```
+
+Back every finding with a command output or an exact line reference.
+
+To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
+
+### Step 6: Impact, wiring and co-changes (blocking when missing)
+
+- A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
+- Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
+- Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
+- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
+
+### Step 7: Honor the task's `execution_note`
+
+- `test-first`: the delivery must add or change at least one test case, in a new or an existing file, and the task must record a run in which that case failed before the fix. Never require a new test file or a number of tests: a few tests that each prove one behaviour are the target. Added cases show in:
+
+  ```bash
+  git diff "$BASE" HEAD | grep -nE '^\+.*(#\[(tokio::)?test|fn test_|\b(it|test)\(|def test_)'
+  ```
+
+  A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
+- `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
+- `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
+
+## Quality checklist
+
+Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
+
+- correctness: edge cases, error propagation, races;
+- design: follows existing patterns, sensible abstraction;
+- performance: redundant work, unbounded queries, quadratic loops;
+- security: input validation at boundaries, parameterized queries, secrets;
+- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
+
+Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
 
 ## Plan conformance
 

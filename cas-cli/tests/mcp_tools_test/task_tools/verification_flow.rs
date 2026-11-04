@@ -371,7 +371,7 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
 }
 
 #[tokio::test]
-async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060() {
+async fn orphaned_factory_task_requires_candidate_before_a_verdict_cas_9060() {
     let mut env = TestEnvGuard::temp_home();
     let (_temp, _worker, root, task_id, worker_dir) =
         delivered_worktree_fixture(&mut env, "factory/orphaned-review").await;
@@ -429,31 +429,15 @@ async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060()
     );
     task.deliverables.factory_branch_anchor = Some(head.clone());
     tasks.update(&task).unwrap();
-    supervisor
+    let error = supervisor
         .cas_verification_add(Parameters(request()))
         .await
-        .expect("parked review must mint its exact boundary without task close");
-    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        dispatch.state,
-        cas::types::VerificationDispatchState::Resolved
-    );
-    assert_eq!(dispatch.owner_agent_id, "restarted-review-owner");
-    let proof = dispatch.repository.unwrap();
-    assert_eq!(proof.head_commit, head);
-    assert_eq!(proof.anchor_commits, vec![head]);
-    let verdict = open_verification_store(&root)
-        .unwrap()
-        .get_latest_for_task(&task_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
-    assert_eq!(
-        verdict.provenance,
-        cas::types::VerificationProvenance::SupervisorDirect
-    );
+        .expect_err("a factory restart cannot mint a source-only approval");
+    // pin: recovery must prepare the candidate through the public merge action.
+    assert!(error.message.contains("worktree_merge"), "{error}");
+    assert!(cas_store::get_latest_verification_dispatch(&root, &task_id).unwrap().is_none());
+    assert!(open_verification_store(&root).unwrap().get_latest_for_task(&task_id).unwrap().is_none());
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
 }
 
 /// cas-5c7a closed external ops while the supervisor checkout carried other
@@ -1091,8 +1075,9 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
     assert!(notes.contains("VERIFICATION TIER 0"), "{notes}");
 
     let (text, notes, dispatched) = close_delivery_of("src/lib.rs", "factory/tier-one").await;
-    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
-    assert!(dispatched, "{text}");
+    // pin: a required factory review must precede publication, never be created by close.
+    assert!(text.contains("PRE-MERGE APPROVAL MISSING"), "{text}");
+    assert!(!dispatched, "close cannot add a post-merge review: {text}");
     assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
 }
 
@@ -1229,10 +1214,12 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
             ),
         )
         .unwrap();
-        // ...and then its own verifier, whose dispatch the verdict cannot satisfy.
+        // Its own verifier must have approved before publication; this release
+        // verdict cannot manufacture that approval or a post-merge dispatch.
         let probed = close(id, &tips[index]).await;
-        assert!(probed.contains("VERIFICATION REQUIRED"), "{probed}");
-        assert!(dispatched(id), "{probed}");
+        // pin: missing pre-merge approval is the required recovery contract.
+        assert!(probed.contains("PRE-MERGE APPROVAL MISSING"), "{probed}");
+        assert!(!dispatched(id), "{probed}");
         assert_ne!(open_task_store(&cas_dir).unwrap().get(id).unwrap().status, TaskStatus::Closed);
     }
 

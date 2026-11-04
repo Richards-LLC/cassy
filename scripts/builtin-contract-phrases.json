@@ -4415,16 +4415,8 @@
       ],
       "contains": [
         {
-          "text": "git diff \"$BASE\" HEAD | grep -nE ",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
-        },
-        {
           "text": "git merge-base HEAD <target-branch>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
-        },
-        {
-          "text": "ast-grep",
-          "reason": "Retain the load-bearing policy term from verifier mirrors document the current close contract."
         },
         {
           "text": "stranded_branch_override",
@@ -4515,6 +4507,14 @@
         {
           "text": "status=supervisor_call",
           "reason": "Route NOT EXERCISED scope questions to the supervisor without resolving the verification dispatch as a failed check."
+        },
+        {
+          "text": "git diff \"$BASE\" HEAD | grep -nE ",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "ast-grep",
+          "reason": "Retain the load-bearing policy term from verifier mirrors document the current close contract."
         }
       ],
       "absent": [],

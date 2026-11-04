@@ -720,7 +720,11 @@ impl CasCore {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
-                    let retry_note = if existing.status == VerificationStatus::Approved
+                    let retry_note = if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some()
+                    {
+                        self.continue_premerge_after_verdict(&proof_dispatch, existing.status).unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+                    } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
                         && proof_dispatch.delivery_transaction_id.is_none()
                     {
@@ -1048,7 +1052,11 @@ impl CasCore {
         let cassy_merged = task.deliverables.green_merge_commit.is_some()
             && task.deliverables.effective_merge_ci_admission()
                 != cas_types::MergeCiAdmission::Override;
-        let close_retry = if verification.status == VerificationStatus::SupervisorCall {
+        let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        let close_retry = if candidate.is_some() {
+            self.continue_premerge_after_verdict(&proof_dispatch, verification.status).unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+        } else if verification.status == VerificationStatus::SupervisorCall {
             format!(
                 "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",
                 crate::mcp::tools::core::guidance::caller_prefix(),
@@ -1334,6 +1342,24 @@ impl CasCore {
             &caller.metadata,
         ) {
             return Err(refuse("the supervisor's task work is halted".into()));
+        }
+        // Factory review authority is prepared on its merge candidate. A
+        // restart or an omitted id must not mint a source-only/post-merge pass.
+        let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+            .map_err(|error| refuse(error.to_string()))?;
+        let candidate = latest.as_ref().map(|dispatch| super::premerge_verification::candidate_for_dispatch(&self.cas_root, dispatch))
+            .transpose().map_err(&refuse)?.flatten();
+        let factory_delivery = task.task_type != cas_types::TaskType::Epic
+            && task.execution_note.as_deref() != Some("no-code")
+            && (task.deliverables.factory_branch_start.is_some()
+                || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")));
+        if candidate.is_some() || factory_delivery {
+            cas_store::timeout_verification_dispatch(&self.cas_root, &task.id, chrono::Utc::now())
+                .map_err(|error| refuse(error.to_string()))?;
+            return cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .map_err(|error| refuse(error.to_string()))?
+                .filter(|dispatch| dispatch.state != cas_types::VerificationDispatchState::Invalidated)
+                .ok_or_else(|| refuse("run worktree_merge to prepare the current candidate, then record its exact dispatch_id".into()));
         }
         let context = task
             .deliverables

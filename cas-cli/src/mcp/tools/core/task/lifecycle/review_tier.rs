@@ -87,6 +87,7 @@ fn enforces_the_rules(path: &str) -> bool {
         || path.ends_with("qa_evidence_gate.rs")
         || path.ends_with("verification_tools.rs")
         || path.ends_with("worktree_ops.rs")
+        || path.ends_with("workflow/premerge_verification.rs")
 }
 
 /// Whether a QA ledger records an adversarial probe: a row whose cell names one.
@@ -195,6 +196,7 @@ mod tests {
             "scripts/release-gate.sh",
             "cas-cli/src/mcp/tools/core/task/lifecycle/review_tier.rs",
             "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs",
+            "cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs",
         ] {
             assert_eq!(tier(&[path]), VerificationTier::Adversarial, "{path}");
         }

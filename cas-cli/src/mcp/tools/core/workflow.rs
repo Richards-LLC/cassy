@@ -2,6 +2,7 @@ mod loop_tools;
 pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
+pub(crate) mod premerge_verification;
 pub(crate) use worktree_ops::check_runs_still_running;
 pub(crate) use worktree_ops::retry_ci_status;
 pub(crate) use worktree_ops::delivery_ci_pending;

@@ -180,11 +180,8 @@ fn stale_owner_temp(path: &Path) -> Result<bool> {
 /// their own copy. Review checkouts live outside that tree. Restore inherited
 /// flag arrays outside Git so Cargo keeps the same artifact identity, including
 /// its own target/cfg selection and environment override precedence.
-fn inherit_worker_rustflags(cas: &Path, directory: &Path) -> Result<()> {
-    let source = cas
-        .parent()
-        .context("project root missing")?
-        .join(".cargo/config.toml");
+fn inherit_worker_rustflags(repo: &Path, directory: &Path) -> Result<()> {
+    let source = repo.join(".cargo/config.toml");
     let mut inherited = toml::Table::new();
     match fs::read_to_string(source) {
         Ok(text) => {
@@ -246,6 +243,24 @@ pub fn create(
     dispatch_id: Option<&str>,
     head: &str,
 ) -> Result<Checkout> {
+    create_inner(cas, repo, task_id, dispatch_id, head, false)
+}
+
+/// Candidate preparation shares the review checkout's ownership, lease and GC.
+pub(crate) fn create_candidate(cas: &Path, repo: &Path, task_id: &str, head: &str) -> Result<Checkout> {
+    create_inner(cas, repo, task_id, None, head, true)
+}
+
+fn task_repository(cas: &Path, task_id: &str) -> Result<PathBuf> {
+    let task = crate::store::open_task_store(cas)?.get(task_id)?;
+    match task.deliverables.work_target.as_ref() {
+        Some(target) => crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas, target)
+            .map(|context| context.repo_root).map_err(anyhow::Error::msg),
+        None => Ok(cas.parent().context("project root missing")?.to_path_buf()),
+    }
+}
+
+fn create_inner(cas: &Path, repo: &Path, task_id: &str, dispatch_id: Option<&str>, head: &str, candidate: bool) -> Result<Checkout> {
     let cas = cas.canonicalize()?;
     ensure!(component(task_id), "invalid scratch task id");
     crate::store::open_task_store(&cas)?.get(task_id)?;
@@ -264,7 +279,7 @@ pub fn create(
     ensure!(
         Path::new(&common).canonicalize()?
             == Path::new(&git(
-                cas.parent().context("project root missing")?,
+                &task_repository(&cas, task_id)?,
                 &["rev-parse", "--path-format=absolute", "--git-common-dir"]
             )?)
             .canonicalize()?,
@@ -332,18 +347,14 @@ pub fn create(
             "review checkout has source changes; preserve them before retrying"
         );
     } else {
-        git(
-            repo,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                path.to_str().context("non-UTF-8 scratch path")?,
-                head,
-            ],
-        )?;
+        if candidate {
+            git(repo, &["worktree", "add", "--detach", "--no-checkout", path.to_str().context("non-UTF-8 scratch path")?, head])?;
+            git(&path, &["reset", "--hard", head])?;
+        } else {
+            git(repo, &["worktree", "add", "--detach", path.to_str().context("non-UTF-8 scratch path")?, head])?;
+        }
     }
-    inherit_worker_rustflags(&cas, &directory)?;
+    inherit_worker_rustflags(&task_repository(&cas, task_id)?, &directory)?;
     // Successful reuse starts a new idle grace period; admission retries can
     // return to a checkout long after its original creation.
     let mut record = owner(&cas, &directory)?;
@@ -765,7 +776,7 @@ fn reclaim(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "live or unverifiable review output"
     );
-    let repo = cas.parent().context("project root missing")?;
+    let repo = task_repository(cas, &record.task_id)?;
     let checkout = directory.join("repo");
     let _lane = if checkout.exists() {
         Some(
@@ -775,7 +786,7 @@ fn reclaim(
     } else {
         None
     };
-    let registrations = git(repo, &["worktree", "list", "--porcelain", "-z"])?;
+    let registrations = git(&repo, &["worktree", "list", "--porcelain", "-z"])?;
     let registered: Vec<_> = registrations
         .split('\0')
         .filter_map(|line| line.strip_prefix("worktree "))
@@ -793,7 +804,7 @@ fn reclaim(
             "review checkout head or ownership changed"
         );
         let expected = git(
-            repo,
+            &repo,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?;
         ensure!(
@@ -948,10 +959,10 @@ fn reclaim(
             );
             // Git rechecks dirtiness itself. Never force removal of existing
             // source: ignored Cargo output is already disposable without it.
-            git(repo, &["worktree", "remove", path])?;
+            git(&repo, &["worktree", "remove", path])?;
         } else {
             // Only a vanished checkout permits forced stale-registration removal.
-            git(repo, &["worktree", "remove", "--force", path])?;
+            git(&repo, &["worktree", "remove", "--force", path])?;
         }
     }
     fs::remove_dir_all(directory)?;

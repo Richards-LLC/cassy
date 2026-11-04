@@ -111,18 +111,30 @@ pub(super) fn no_action_reply(text: &str) -> bool {
 }
 
 fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
+    transcript_window(path, TRANSCRIPT_TAIL_BYTES).map(|(values, _)| values)
+}
+
+/// The last `bytes` of a transcript, and whether that cut off earlier lines.
+fn transcript_window(path: &Path, bytes: u64) -> std::io::Result<(Vec<Value>, bool)> {
     let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
-    let start = size.saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    let start = size.saturating_sub(bytes);
     file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::new();
-    file.take(TRANSCRIPT_TAIL_BYTES).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(text
-        .lines()
-        .skip(usize::from(start > 0))
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect())
+    let mut buffer = Vec::new();
+    file.take(bytes).read_to_end(&mut buffer)?;
+    let text = String::from_utf8_lossy(&buffer);
+    Ok((
+        text.lines()
+            .skip(usize::from(start > 0))
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect(),
+        start > 0,
+    ))
+}
+
+/// Stub replaced by the fix (cas-aa62, red).
+fn claude_transcript_window(path: &Path) -> std::io::Result<Vec<Value>> {
+    transcript_tail(path)
 }
 
 /// Read consumed text/image input without treating queue bookkeeping, file
@@ -935,6 +947,44 @@ fn mirror_supervisor_replies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-aa62: a Claude turn whose first input fell before the 4 MiB tail
+    /// was re-keyed by its next visible input (a queued_command) and mirrored
+    /// a second time. A cut turn is either dropped (later turns follow it, so
+    /// it was mirrored whole) or read back to its first input (it is newest).
+    #[test]
+    fn cut_tail_window_never_rekeys_a_claude_turn() {
+        let at = |second: u32| format!("2026-11-03T22:0{second}:00Z");
+        let prompt = |id: &str, text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"user","uuid":id,"promptId":id,
+            "message":{"role":"user","content":text}});
+        let queued = |id: &str, text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"attachment","uuid":id,
+            "attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":text}});
+        let answer = |text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"assistant","message":{"role":"assistant",
+            "stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+        let filler = serde_json::json!({"timestamp":at(2),"type":"progress",
+            "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)});
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let write = |values: &[Value]| std::fs::write(&path,
+            values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let keys = || completed_turns(&claude_transcript_window(&path).unwrap(),
+            cas_mux::SupervisorCli::Claude).into_iter().map(|turn| turn.key).collect::<Vec<_>>();
+
+        let cut_turn = vec![
+            prompt("first-input", "Ship the hotfix?", 1), filler,
+            queued("second-input", "Also check CI", 3), answer("Shipped.", 4),
+        ];
+        write(&cut_turn);
+        assert_eq!(keys(), ["first-input"], "the newest turn is read back to its first input");
+
+        let mut followed = cut_turn;
+        followed.extend([prompt("next-input", "Next?", 5), answer("Next done.", 6)]);
+        write(&followed);
+        assert_eq!(keys(), ["next-input"], "a cut turn behind later turns was already mirrored whole");
+    }
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};
     use cas_types::{Agent, AgentRole};
 

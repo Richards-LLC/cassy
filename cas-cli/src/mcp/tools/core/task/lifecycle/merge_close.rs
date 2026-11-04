@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn batch_hold_note_is_bounded_and_not_a_bundle_citation_cas_dd05() {
-        // Minimized cas-6faf hold; only the machine-specific artifact root is normalized.
+        // Condensed cas-6faf refusal and command hint with a fixture artifact root.
         let hold = "PARK REFUSED: more than one close gate failed.\n\nTASK CLOSE REJECTED: cas-6faf is user-facing and its QA evidence bundle is not cited. Next: produce the bundle, then `task action=notes id=cas-6faf notes=\"qa-bundle: /proof/cas-6faf/qa/bundle.json\"`.";
         for outcome in [hold.to_string(), "Unreadable qa-bundle: /suggested/bundle.json".into(), format!("{hold}{}", " long detail".repeat(100))] {
             let note = batch_close_note("qab-fixture", &outcome);

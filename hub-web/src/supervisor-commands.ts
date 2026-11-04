@@ -47,8 +47,10 @@ export class SlashCommands {
     input.addEventListener("keydown", event => {
       if (event.isComposing) return;
       if (event.key === "Escape" && !this.panel.hidden) { event.preventDefault(); this.close(); }
-      if (event.key === "ArrowDown" && !this.panel.hidden) {
-        event.preventDefault(); this.panel.querySelector<HTMLButtonElement>("[data-supervisor-command]")?.focus();
+      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !this.panel.hidden) {
+        const listed = [...this.panel.querySelectorAll<HTMLButtonElement>("[data-supervisor-command]")];
+        const target = event.key === "ArrowDown" ? listed[0] : listed.at(-1);
+        if (target) { event.preventDefault(); target.focus(); }
       }
       if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && this.submit()) {
         event.preventDefault();
@@ -56,6 +58,16 @@ export class SlashCommands {
     }, { capture: true, signal: this.events.signal });
     this.panel.addEventListener("keydown", event => {
       if (event.key === "Escape") { event.preventDefault(); this.close(); input.focus(); return; }
+      // cas-c009: the confirmation's actions are one roving group; Tab and
+      // every arrow cycle inside it while it is open.
+      const actions = [...this.panel.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button:not(:disabled)')];
+      const at = actions.indexOf(document.activeElement as HTMLButtonElement);
+      if (at >= 0) {
+        const step = event.key === "ArrowRight" || event.key === "ArrowDown" || (event.key === "Tab" && !event.shiftKey) ? 1
+          : event.key === "ArrowLeft" || event.key === "ArrowUp" || (event.key === "Tab" && event.shiftKey) ? -1 : 0;
+        if (step) { event.preventDefault(); actions[(at + step + actions.length) % actions.length]?.focus(); }
+        return;
+      }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       const buttons = [...this.panel.querySelectorAll<HTMLButtonElement>("[data-supervisor-command]")];
       const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -105,14 +117,19 @@ export class SlashCommands {
     if (!command.confirm) { void this.run(command.id, false); return; }
     this.panel.hidden = false; this.panel.replaceChildren();
     const confirmation = document.createElement("div"); confirmation.setAttribute("role", "alertdialog");
-    confirmation.setAttribute("aria-label", `${command.label} · ${this.options.label()}`);
     const subject = document.createElement("strong"); subject.textContent = this.options.label();
+    subject.id = `${this.panel.id}-subject`; confirmation.setAttribute("aria-labelledby", subject.id);
     const consequence = document.createElement("p"); consequence.textContent = command.confirm;
-    const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancel";
+    consequence.id = `${this.panel.id}-consequence`; confirmation.setAttribute("aria-describedby", consequence.id);
+    // cas-c009: content-width actions, Cancel first and the command last.
+    const actions = document.createElement("div"); actions.className = "supervisor-command-actions";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "Cancel";
     cancel.onclick = () => { this.close(); this.input.focus(); };
-    const confirm = document.createElement("button"); confirm.type = "button"; confirm.dataset.commandConfirm = command.id;
+    const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "primary"; confirm.dataset.commandConfirm = command.id;
     confirm.textContent = command.label; confirm.onclick = () => { void this.run(command.id, true); };
-    confirmation.append(subject, consequence, cancel, confirm); this.panel.append(confirmation); cancel.focus();
+    actions.append(cancel, confirm); confirmation.append(subject, consequence, actions); this.panel.append(confirmation);
+    // Every confirmed command can end or reset the session: a stray Enter cancels.
+    cancel.focus();
   }
   private async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     if (this.pending) return;

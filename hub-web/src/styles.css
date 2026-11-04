@@ -3535,8 +3535,19 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-command-palette > button:hover { background: var(--bg-hover); }
 .supervisor-command-palette small { color: var(--ink-mid); }
 .supervisor-command-palette button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
-.supervisor-command-palette [role="alertdialog"] button,
 .supervisor-command-receipt button { min-height: 44px; margin: var(--space-1); }
+/* cas-c009: the confirmation's actions follow .dialog-actions: content-width
+   pills, right-aligned, Cancel (secondary) then the command (primary). A
+   phone stacks them full width, the command above Cancel. */
+.supervisor-command-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.supervisor-command-palette .supervisor-command-actions button {
+  flex: none; width: auto; min-width: 6rem; min-height: 44px; margin: 0;
+  padding: 0 var(--space-4); border-radius: var(--radius-pill); white-space: nowrap;
+}
+@media (max-width: 500px) {
+  .supervisor-command-actions { flex-direction: column-reverse; align-items: stretch; }
+  .supervisor-command-palette .supervisor-command-actions button { width: 100%; }
+}
 .supervisor-command-receipts { margin: var(--space-4); }
 .supervisor-command-receipt { border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); background: var(--bg-panel); color: var(--ink-mid); }
 .supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }

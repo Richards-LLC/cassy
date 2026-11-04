@@ -382,6 +382,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Steady Most recent session marker** — Each sibling conversation reserves
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
+- **A proper confirm sheet for slash commands** — Was: confirming `/finish`,
+  `/exit` or `/clear` showed Cancel and the command as full-width stacked rows,
+  and the keyboard could not move between them. → Now: the two actions are
+  content-width and right-aligned, with Cancel first and the command last, and
+  stack only on a phone. Arrows and Tab move between them, Enter or Space
+  chooses, Esc returns to the composer, and Cancel starts focused so a stray
+  Enter never ends a session.
 
 ### Fixed — Reminders to self
 

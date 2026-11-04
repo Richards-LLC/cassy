@@ -511,10 +511,11 @@ pub fn host_downloads_dir() -> Option<PathBuf> {
 
 /// Claude Code's auto-memory folders for the given project directories
 /// (cas-2d9a): `<base>/projects/<slug>/memory` under the shared
-/// `~/.cas/claude-base`, `$CLAUDE_CONFIG_DIR` and `~/.claude`. Only a real
-/// `memory` directory directly inside its project folder counts. A `memory`
-/// symlink, or one resolving anywhere else, grants nothing, and transcripts
-/// and other files beside it stay outside the root.
+/// `~/.cas/claude-base`, `$CLAUDE_CONFIG_DIR` and `~/.claude`. The project
+/// folder must be a real directory resolving to `<projects>/<slug>`; its
+/// `memory` must be a real directory or not exist yet (the first write creates
+/// it). A symlinked project folder or `memory` grants nothing, and transcripts
+/// and other files beside `memory` stay outside the root.
 pub fn claude_memory_roots(project_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut bases: Vec<PathBuf> = dirs::home_dir()
         .map(|home| crate::accounts::Provider::Claude.base_dir(&home))
@@ -523,21 +524,37 @@ pub fn claude_memory_roots(project_dirs: &[PathBuf]) -> Vec<PathBuf> {
     bases.extend(crate::factory_context_reset::claude_config_roots());
     let mut roots = Vec::new();
     for base in &bases {
+        // The account-level `projects` link into the shared base is followed;
+        // nothing below it is (cas-2d9a review).
+        let Ok(projects) = base.join("projects").canonicalize() else {
+            continue;
+        };
         for dir in project_dirs {
             let slug = crate::factory_context_reset::claude_project_slug(&dir.to_string_lossy());
-            let project = base.join("projects").join(slug);
-            let memory = project.join("memory");
-            let real_dir = std::fs::symlink_metadata(&memory).is_ok_and(|meta| meta.is_dir());
-            if let (true, Ok(project), Ok(resolved)) =
-                (real_dir, project.canonicalize(), memory.canonicalize())
-                && resolved == project.join("memory")
-                && !roots.contains(&resolved)
-            {
-                roots.push(resolved);
+            let project = base.join("projects").join(&slug);
+            let real_project = std::fs::symlink_metadata(&project).is_ok_and(|meta| meta.is_dir());
+            if !real_project || project.canonicalize().ok() != Some(projects.join(&slug)) {
+                continue;
+            }
+            let memory = projects.join(&slug).join("memory");
+            // A real folder, or none yet: the first write may create it. A
+            // symlink (dangling or not) or a file named `memory` grants nothing.
+            let grantable = match std::fs::symlink_metadata(&memory) {
+                Ok(meta) => meta.is_dir(),
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            };
+            if grantable && !roots.contains(&memory) {
+                roots.push(memory);
             }
         }
     }
     roots
+}
+
+/// [`claude_memory_roots`] for this hook call's project. The guard lets these
+/// roots be created by the first write, unlike configured roots.
+pub fn project_claude_memory_roots(cas_root: &Path) -> Vec<PathBuf> {
+    claude_memory_roots(&memory_project_dirs(cas_root))
 }
 
 /// The directories whose Claude memory belongs to this hook call's project:
@@ -587,7 +604,7 @@ pub fn effective_write_roots(project: &[String], user: &[String], cas_root: &Pat
     }
     // cas-2d9a: built in like Downloads. It lives under ~/.cas/claude-base,
     // which a configured root may not name, so it skips that resolution.
-    for root in claude_memory_roots(&memory_project_dirs(cas_root)) {
+    for root in project_claude_memory_roots(cas_root) {
         if !roots.contains(&root) {
             roots.push(root);
         }

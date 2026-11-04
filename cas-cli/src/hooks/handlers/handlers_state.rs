@@ -404,19 +404,27 @@ pub struct ExitBlockers {
     pub epic_subtasks: Vec<Task>,
     /// Epic each entry of `epic_subtasks` belongs to, by task ID
     pub subtask_epics: std::collections::HashMap<String, String>,
+    /// When this session's current lease on each claimed task was taken
+    pub claimed_since: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 impl ExitBlockers {
-    /// Drop the task blockers `handoff` names, by task ID or, for an epic
-    /// subtask, by its epic's ID. A session whose handoff names its work in
-    /// flight may end with those tasks still open for the next session
-    /// (cas-c9ec); active children still block.
-    pub fn retain_unhanded(&mut self, handoff: &str) {
-        let named = |id: &str| names_task_id(handoff, id);
-        self.claimed_tasks.retain(|task| !named(&task.id));
+    /// Drop the task blockers a handoff saved at `saved` names, by task ID
+    /// or, for an epic subtask, by its epic's ID. A session whose handoff
+    /// names its work in flight may end with those tasks still open for the
+    /// next session (cas-c9ec). A handoff older than the current lease on a
+    /// task, or on its epic, does not count: a re-claimed task needs a new
+    /// one. Active children still block.
+    pub fn retain_unhanded(&mut self, handoff: &str, saved: chrono::DateTime<chrono::Utc>) {
+        let since = &self.claimed_since;
+        let handed = |id: &str, lease: &str| {
+            names_task_id(handoff, id) && since.get(lease).is_none_or(|taken| saved >= *taken)
+        };
+        self.claimed_tasks.retain(|task| !handed(&task.id, &task.id));
         let epics = &self.subtask_epics;
         self.epic_subtasks.retain(|task| {
-            !named(&task.id) && !epics.get(&task.id).is_some_and(|epic| named(epic))
+            let epic = epics.get(&task.id).map_or("", String::as_str);
+            !handed(&task.id, epic) && !handed(epic, epic)
         });
     }
 
@@ -534,15 +542,18 @@ fn names_task_id(text: &str, id: &str) -> bool {
         })
 }
 
-/// Content of this session's current handoff memory, if it saved one.
-pub(crate) fn session_handoff(cas_root: &std::path::Path, session_id: &str) -> Option<String> {
+/// Content and save time of this session's current handoff memory, if any.
+pub(crate) fn session_handoff(
+    cas_root: &std::path::Path,
+    session_id: &str,
+) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
     use cas_core::memory::handoff;
     let entries = open_store(cas_root).ok()?.list_by_session(session_id).ok()?;
     entries
         .into_iter()
         .filter(|entry| handoff::is_handoff(entry) && !handoff::is_superseded(entry))
         .max_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)))
-        .map(|entry| entry.content)
+        .map(|entry| (entry.content, entry.created))
 }
 
 /// Check for blockers that would prevent agent from exiting
@@ -591,6 +602,9 @@ pub(crate) fn get_exit_blockers(
                             epic_ids.insert(task.id.clone());
                         }
 
+                        blockers
+                            .claimed_since
+                            .insert(task.id.clone(), lease.acquired_at);
                         blockers.claimed_tasks.push(task);
                     }
                 }

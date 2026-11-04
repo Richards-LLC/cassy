@@ -77,8 +77,8 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                 // A recorded handoff (the /finish step) that names the work
                 // in flight lets the session end with those tasks intact.
                 if blockers.has_blockers() {
-                    if let Some(handoff) = session_handoff(cas_root, &input.session_id) {
-                        blockers.retain_unhanded(&handoff);
+                    if let Some((handoff, saved)) = session_handoff(cas_root, &input.session_id) {
+                        blockers.retain_unhanded(&handoff, saved);
                     }
                 }
                 blockers

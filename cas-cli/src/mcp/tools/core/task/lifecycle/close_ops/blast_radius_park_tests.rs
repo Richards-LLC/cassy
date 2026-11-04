@@ -1175,6 +1175,47 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
         let again = cassy.close_green_merged_delivery(ID).await.receipt(ID);
         assert_eq!(queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap().into_iter()
             .filter(|row| row.kind.as_deref() == Some("ask")).count(), 1, "retry reuses the question: {again}");
+        assert!(!std::fs::read_to_string(state.join("calls")).unwrap().contains("pr create"));
+        let attribution = crate::ui::factory::MessageAttribution {
+            device_id: Some("paired-test-device".into()),
+            credential_id: Some("test-credential".into()),
+            operator_label: Some("Fixture operator".into()),
+            operator_verified: outcome != "qa-default",
+            ..Default::default()
+        };
+        let choice = if outcome == "qa-revert" { "Revert" } else { "Fix-forward" };
+        // This is the real Commander enqueue boundary. Its hub-stamped
+        // attribution is fixture input; an unverified reply cannot authorize.
+        crate::ops::fleet::enqueue_commander_message(
+            &f.cas_dir(), "fast-lane-qa-test", "supervisor", choice, None,
+            false, Some(asks[0].id), &attribution,
+        ).unwrap();
+        crate::fast_lane_walk::tick(&f.cas_dir(), chrono::Utc::now()).unwrap();
+        if outcome == "qa-default" {
+            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "a claimed operator identity is not an answer");
+            let deadline = asks[0].created_at + chrono::Duration::minutes(15);
+            crate::fast_lane_walk::tick(&f.cas_dir(), deadline - chrono::Duration::milliseconds(1)).unwrap();
+            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "no early default");
+            crate::fast_lane_walk::tick(&f.cas_dir(), deadline).unwrap();
+        }
+        let returned = f.task();
+        assert_eq!(returned.status, TaskStatus::Open, "the selected action returns ownership to the worker: {}", returned.notes);
+        assert_eq!(returned.assignee.as_deref(), Some(WORKER));
+        let calls = std::fs::read_to_string(state.join("calls")).unwrap();
+        let reverts = calls.lines().filter(|line| line.starts_with("pr create ")).count();
+        assert_eq!(reverts, usize::from(outcome != "qa-fix"), "{outcome}: {calls}");
+        if outcome != "qa-fix" {
+            git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
+            assert!(returned.notes.contains("Revert PR: https://github.com/acme/cas/pull/9"));
+        } else {
+            assert!(!returned.notes.contains("FAST_LANE_PROOF: revert"));
+        }
+        assert!(returned.notes.contains(if outcome == "qa-default" { "fifteen-minute default" } else { "verified Commander reply" }));
+        // A fresh runner reads persisted completion, rather than repeating a
+        // PR or choosing again after a late response / process restart.
+        crate::fast_lane_walk::tick(&f.cas_dir(), asks[0].created_at + chrono::Duration::minutes(16)).unwrap();
+        let after = std::fs::read_to_string(state.join("calls")).unwrap();
+        assert_eq!(after.lines().filter(|line| line.starts_with("pr create ")).count(), reverts);
         continue;
     }
     if outcome == "success" {

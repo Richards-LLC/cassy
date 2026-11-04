@@ -564,6 +564,16 @@ pub fn open_revert_pr(
 ) -> Result<String, String> {
     let target = target.strip_prefix("origin/").unwrap_or(target);
     let branch = format!("fast-lane-revert/{task_id}");
+    let title = format!("Revert hotfix merge {}", &merge[..merge.len().min(12)]);
+    // Recover a PR opened before the action receipt was persisted. An older
+    // delivery's revert on the same task branch is never reused.
+    if let Ok(existing) = gh(binary, repo, &["pr", "view", &branch, "--json", "url,title,state,baseRefName"], PROBE)
+        && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&existing)
+        && existing["state"].as_str() == Some("OPEN")
+        && existing["title"].as_str() == Some(title.as_str())
+        && existing["baseRefName"].as_str() == Some(target)
+        && let Some(url) = existing["url"].as_str().filter(|url| !url.is_empty())
+    { return Ok(url.to_string()); }
     git(repo, &["fetch", "--quiet", "origin", target], GIT_WRITE)?;
     let scratch = tempfile::Builder::new()
         .prefix("fast-lane-revert-")
@@ -580,10 +590,19 @@ pub fn open_revert_pr(
         }
         revert.push(merge);
         git(&tree, &revert, GIT_WRITE)?;
-        git(&tree, &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")], GIT_WRITE)?;
-        let title = format!("Revert hotfix merge {}", &merge[..merge.len().min(12)]);
+        if let Err(error) = git(&tree, &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")], GIT_WRITE) {
+            // A crash after pushing but before creating the PR may leave the
+            // identical revert with a different commit timestamp. Reuse only
+            // that same tree and parent; never overwrite unrelated work.
+            git(&tree, &["fetch", "--quiet", "origin", &branch], GIT_WRITE)?;
+            let expected_tree = git(&tree, &["rev-parse", "HEAD^{tree}"], PROBE)?;
+            let remote_tree = git(&tree, &["rev-parse", "FETCH_HEAD^{tree}"], PROBE)?;
+            let expected_parent = git(&tree, &["rev-parse", "HEAD^"], PROBE)?;
+            let remote_parent = git(&tree, &["rev-parse", "FETCH_HEAD^"], PROBE)?;
+            if expected_tree != remote_tree || expected_parent != remote_parent { return Err(error); }
+        }
         let body = format!(
-            "Automatic fast-lane revert. `{}` failed on merge {merge} after one rerun; {reason}.\n\nFailing run: {}",
+            "Automatic fast-lane revert. `{}` failed on merge {merge}; {reason}.\n\nFailing run: {}",
             failed.name,
             failed.url.as_deref().unwrap_or("unavailable")
         );

@@ -2714,6 +2714,11 @@ pub trait PromptQueueStore: Send + Sync {
     /// one transaction. Display labels never establish a cloud audience.
     fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
 
+    /// Authenticated, explicitly bound Commander replies in arrival order.
+    /// Includes consumed rows, so a restarted domain runner can finish its action.
+    /// `prompt` is the original button label, not the rendered acknowledgement.
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>>;
+
     /// Queue one Commander message with its hub-authenticated operator stamp
     /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
     /// verified, `Unattributed` otherwise — never from `source` or the
@@ -9460,6 +9465,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             self.signal_inbox("operator");
         }
         Ok(outcome)
+    }
+
+    fn verified_operator_replies_to(&self, ask_id: i64) -> Result<Vec<QueuedPrompt>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT r.id, r.source, r.target,
+                    json_extract(r.attribution_json, '$.reply_text'),
+                    r.created_at, r.processed_at, r.summary, r.priority,
+                    r.acked_at, r.urgent, r.factory_session, r.origin_agent_id,
+                    r.origin_kind, r.operator_label, r.operator_device_id,
+                    r.operator_device_label, r.operator_scopes, r.operator_verified,
+                    r.recipient_device_id, r.kind, r.attachments
+             FROM prompt_queue r JOIN prompt_queue a ON a.id = ?1
+             WHERE a.target = 'operator' AND a.kind = 'ask' AND a.origin_kind = 'daemon'
+               AND r.factory_session = a.factory_session AND r.id > a.id
+               AND r.source LIKE 'commander:%' AND r.origin_kind = 'paired_device'
+               AND r.operator_verified = 1
+               AND json_extract(r.attribution_json, '$.in_reply_to') = a.id
+               AND json_type(r.attribution_json, '$.reply_text') = 'text'
+             ORDER BY r.id",
+        )?;
+        let rows = stmt.query_map(params![ask_id], Self::prompt_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     fn latest_verified_operator_message(

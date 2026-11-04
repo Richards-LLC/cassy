@@ -48,6 +48,7 @@ pub mod error;
 pub(crate) mod epic_design_review;
 pub mod extraction;
 pub mod fast_lane;
+pub(crate) mod fast_lane_walk;
 mod light_lane;
 #[doc(hidden)]
 pub use light_lane::run_detached_worker;

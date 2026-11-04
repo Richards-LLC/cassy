@@ -1858,7 +1858,10 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             held.status,
             held.assignee,
         );
-        assert!(crate::mcp::daemon::pid_alive(replacement_pid));
+        assert!(
+            wait_until(Duration::from_secs(5), || crate::mcp::daemon::pid_alive(replacement_pid)),
+            "replacement pid {replacement_pid} did not become live before the deadline; controls={controls:?}"
+        );
         let held = tasks.get("cas-recycled-held").unwrap();
         assert_eq!(held.status, cas_types::TaskStatus::InProgress);
         assert_eq!(held.assignee.as_deref(), Some(NAME));

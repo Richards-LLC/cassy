@@ -226,14 +226,20 @@ describe("supervisor command receipts", () => {
     try {
       const send = vi.fn().mockReturnValue(true);
       const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
-      await session.run("compact", false);
+      await session.run("finish", true);
       const ref = [...session.receipts.keys()][0];
-      await vi.advanceTimersByTimeAsync(2_000);
+      session.receive({ client_ref: ref, command: "finish", phase: "queued", detail: "Waiting for the native turn to end", output: "", interactive: false });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(session.receipts.get(ref)?.phase).toBe("queued");
       expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
+      session.receive({ client_ref: ref, command: "finish", phase: "submitted", detail: "Command submitted", output: "", interactive: false });
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(0);
       expect(send.mock.calls.filter(([message]) => "SupervisorCommandStatus" in message)).toHaveLength(2);
-      session.receive({ client_ref: ref, command: "compact", phase: "observed", detail: "Harness started compact context", output: "", interactive: false });
+      session.receive({ client_ref: ref, command: "finish", phase: "observed", detail: "Harness completed Finish", output: "", interactive: false });
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(send).toHaveBeenCalledTimes(3);
+      expect(send).toHaveBeenCalledTimes(2);
     } finally { vi.useRealTimers(); }
   });
 });

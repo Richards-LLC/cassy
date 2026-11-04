@@ -1,0 +1,4 @@
+title: Finish waits for native turn completion without mistaking background footer repaint for model work
+tasks: [cas-88ca]
+invariants: [HUB-J27-FINISH-NATIVE-TURN]
+journeys: [HUB-J27]

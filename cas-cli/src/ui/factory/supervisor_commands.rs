@@ -54,7 +54,7 @@ impl SupervisorCommandKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SupervisorCommandPhase { Submitted, Observed, Refused, Unconfirmed }
+pub enum SupervisorCommandPhase { Queued, Submitted, Observed, Refused, Unconfirmed }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorCommandReceipt {

@@ -250,6 +250,10 @@ invariants:
   HUB-J27-ALLOWLIST:
     statement: A command requires authenticated control and an active lease; arbitrary strings, foreign references, busy prompts and operator drafts cannot inject input.
     check: Run hub::server::supervisor_commands_require_control_confirmation_and_private_audited_receipts and the supervisor_commands runtime module; verify the closed wire enum and guarded actual PTY bytes, including stale native chooser recovery.
+  HUB-J27-FINISH-NATIVE-TURN:
+    statement: Authenticated confirmed Finish waits for an active native turn instead of being refused or dropped. A completed native turn and empty prompt allow Finish despite background shell footer repaint, while drafts and modals still prevent typing. Queued time does not consume the submitted outcome deadline, and the completed Finish reply reaches the conversation.
+    check: Run finish_accepts_an_idle_supervisor_with_a_repainting_background_shell_cas_88ca and the supervisor command controller tests, then the HUB-J27 queued Finish stage. On the built candidate, send Finish from Commander while a native supervisor is idle with a background shell; read the actual PTY command and completed native turn, the mirrored reply in durable conversation history, and the visible reply.
+    bug: {task: cas-88ca}
   HUB-J27-EXIT-END-CONSISTENCY:
     statement: An authenticated ended session settles its already-submitted Exit even after reconnect, without a not-sent claim or replay; genuine refusals and unrelated commands or sessions stay separate.
     check: Run supervisor-commands.test.ts with rejection, timeout, late-status and session-isolation cases, then the HUB-J27 error-before-ended-catalog stage at desktop and 390px. Batch QA verifies real Claude and Codex Exit against authenticated ended receipts with at least 120 seconds of failure observation allowance.
@@ -2564,6 +2568,7 @@ journeys:
   steps:
   - Type a slash, filter the curated palette, and run Usage by keyboard.
   - Read submission separately from an observed native outcome without repeating a mutation.
+  - Finish waits for the active turn, then its reply reaches the conversation
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
   - Without pane input, read the permission reason; adjacent Raw output stays usable.
   goal: The operator runs only supported supervisor controls and sees truthful harness outcomes.
@@ -2576,9 +2581,10 @@ journeys:
   - cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs
   edge_paths:
   - Busy prompts and operator drafts refuse injection.
+  - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET]
+  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

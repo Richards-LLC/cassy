@@ -94,13 +94,32 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         await input.fill("");
         expect(mutations()).toHaveLength(2);
       });
+      await journey.stage("Finish waits for the active turn, then its reply reaches the conversation", async () => {
+        await input.fill("/finish"); await input.press("Enter");
+        await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
+        await expect.poll(() => mutations().length).toBe(3);
+        const request = mutations()[2].body as { client_ref: string; command: string; confirmed: boolean };
+        expect(request).toMatchObject({ command: "finish", confirmed: true });
+        const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/finish" });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "queued");
+        await expect(receipt).toContainText("Nothing has been typed yet");
+        expect(mutations()).toHaveLength(3);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "submitted");
+        hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
+        await expect(page.locator('.thread [role="log"]')).toContainText("Handoff saved and background monitor stopped.");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        expect(mutations()).toHaveLength(3);
+      });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {
         await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
         await page.locator('[data-supervisor-command="clear"]').click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-        expect(mutations()).toHaveLength(2);
+        expect(mutations()).toHaveLength(3);
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toContainText("Its harness will end");
@@ -108,12 +127,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         await page.keyboard.press("ArrowRight");
         await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
         await page.keyboard.press("Enter");
-        await expect.poll(() => mutations().length).toBe(3);
-        expect(mutations()[2].body).toMatchObject({ command: "exit", confirmed: true });
+        await expect.poll(() => mutations().length).toBe(4);
+        expect(mutations()[3].body).toMatchObject({ command: "exit", confirmed: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       });
       await journey.stage("Remove the stopped session after Exit without claiming an unobserved command result", async () => {
-        const request = mutations()[2].body as { client_ref: string };
+        const request = mutations()[3].body as { client_ref: string };
         const receipt = page.locator(".supervisor-command-receipt").filter({ hasText: "/exit" });
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
@@ -126,7 +145,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
         // The catalog's stop removes navigation, without inferring harness
         // execution from a missing row or displaying an endless command retry.
-        expect(mutations()).toHaveLength(3);
+        expect(mutations()).toHaveLength(4);
       });
     });
   });

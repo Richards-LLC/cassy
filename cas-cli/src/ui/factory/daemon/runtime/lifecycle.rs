@@ -3718,6 +3718,8 @@ impl FactoryDaemon {
             drop(enforced_input);
             drop(store_free_input);
 
+            self.advance_queued_finish();
+
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",
                 self.session_name,

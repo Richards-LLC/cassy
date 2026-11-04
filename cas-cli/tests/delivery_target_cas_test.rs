@@ -781,9 +781,13 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert_eq!(returned.status, TaskStatus::Open);
             assert_eq!(returned.assignee.as_deref(), Some(worker.as_str()));
             assert!(returned.notes.contains(&findings_reason));
-            let findings = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
-                .into_iter().filter(|prompt| prompt.target == worker && prompt.prompt.contains(&findings_reason)).count();
-            assert_eq!(findings, 1, "one worker findings handoff");
+            // The pre-merge verdict wakes its supervisor; worker findings
+            // were emitted by the retired post-merge rejection relay.
+            let notices = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
+                .into_iter().filter(|prompt| prompt.target == format!("{slug}-supervisor")
+                    && prompt.summary.as_deref() == Some("premerge_verification")
+                    && prompt.prompt.contains(&dispatch.id)).count();
+            assert_eq!(notices, 1, "one supervisor verdict handoff");
             continue;
         }
         let merged = if row == "green-approved" {

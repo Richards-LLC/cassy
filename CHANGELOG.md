@@ -16,6 +16,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   delivery is bound; unrelated merges keep the verdict, and a later change to
   a delivered file still asks for a fresh review.
 
+### Fixed — Release-batch closes after request_changes
+
+- **Close a merged delivery that went through request_changes** — A release
+  verdict listing such a delivery answered "Keeps its own review", and its
+  close, even with a supervisor override, kept waiting for batch evidence.
+  The verdict now covers the merged delivery, and the task closes with the
+  merge as its commit receipt. A supervisor override with a reason waives
+  deferred batch evidence and records it on the task. "Keeps its own review"
+  now says which review each delivery waits on and how to satisfy it.
+
 ### Fixed — Concurrent hotfix PRs
 
 - **Start new work beside an earlier PR** — A worker whose branch still holds

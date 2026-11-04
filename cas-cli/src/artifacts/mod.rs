@@ -361,6 +361,8 @@ pub fn mime_for(path: &Path) -> String {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "webm" => "video/webm",
+        // cas-6adaa: MP4 is uploadable, so an .mp4 screencast must say so.
+        "mp4" | "m4v" => "video/mp4",
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
         "xz" => "application/x-xz",

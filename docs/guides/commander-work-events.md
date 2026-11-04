@@ -83,6 +83,11 @@ transcript was rotated, the row was pruned, or the event belongs to another
 session. A failed request is answered with `Error` whose `client_ref` is the
 `request_id`.
 
+An answer is sent only to the client that asked, and only while it is
+connected. The daemon collects finished answers on every loop pass, so an
+answer whose client has disconnected is dropped at once; it is never held for
+a later reconnect. A client that reconnects asks again.
+
 ## Change notices
 
 A daemon that advertises `work_events_live` tells each client that has read a

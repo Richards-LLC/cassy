@@ -1662,3 +1662,30 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
     );
     settle_relays(&mut daemon).await;
 }
+
+/// cas-e1d3: a finished work-event answer whose client is gone is dropped on
+/// the next loop pass, even when no Commander client is connected. It used to
+/// wait in the job runtime until some client reconnected.
+#[tokio::test]
+async fn e1d3_finished_work_event_answer_without_a_client_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    assert!(daemon.ws_clients.is_empty());
+    let refused = daemon.work_events.submit(
+        &mut daemon.queue_jobs,
+        7,
+        "gone-client".into(),
+        super::work_events::WorkEventRequest::Page { before: None, limit: 10, agent: None },
+        cas_dir.clone(),
+        dir.path().to_path_buf(),
+        daemon.session_name.clone(),
+    );
+    assert!(refused.is_none(), "the request is queued");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.work_events.in_flight() > 0 && Instant::now() < deadline {
+        daemon.serve_ws_clients().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(daemon.work_events.in_flight(), 0, "no answer waits for a reconnect");
+}

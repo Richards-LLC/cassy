@@ -1,6 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import { mkdir } from "node:fs/promises";
-import { journeyDay, journeyStamp } from "./clock";
+import { journeyDay, journeyNow, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
 
@@ -196,11 +196,13 @@ const atlas = (): Machine => ({
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
 
-// cas-6faf: the same keyed rows must keep their geometry when recency moves.
+// cas-6faf, cas-b6ed: minute ties hold the badge; later minutes move it in place.
 test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journeyPart, async ({ page, journey }) => {
   const machine = atlas();
   machine.sessions = machine.sessions.slice(0, 2);
   machine.sessions[0]!.supervisor = "thoughtful-chinchilla-84";
+  const firstMinute = Math.floor(journeyNow() / 60_000) * 60_000 - 240_000;
+  for (const sibling of machine.sessions) sibling.last_activity_at = new Date(firstMinute).toISOString();
   const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
   await journey.open();
   await showConversationList(page);
@@ -213,16 +215,53 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
   }));
   const capture = process.env.SESSION_RECENCY_CAPTURE_DIR;
   if (capture) await mkdir(capture, { recursive: true });
-  for (const width of [390, 1280]) {
+  for (const [index, width] of [390, 1280].entries()) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
     await expect(rows).toHaveCount(2);
+    // Advance past each row's activity high-water mark, with a later minute
+    // still in the past. No stage rewinds activity seen by the live list.
+    const minute = firstMinute + index * 120_000;
+    for (const sibling of machine.sessions) sibling.last_activity_at = new Date(minute + 1_000).toISOString();
+    machine.sessions[1]!.last_activity = `supervisor → ready-${width}`;
+    await hub.announceCatalog("atlas");
+    await expect(row("calm-puma-34")).toContainText(`Messaged ready-${width}`);
+    await journey.stage(`Alternating activity holds the badge at ${width}px`, async () => {
+      const before = await rects();
+      await page.evaluate(() => {
+        const changes: { old: string | null; value: string | null }[] = [];
+        const observer = new MutationObserver(records => {
+          for (const record of records) {
+            const value = (record.target as Element).getAttribute("data-most-recent");
+            if (value !== record.oldValue) changes.push({ old: record.oldValue, value });
+          }
+        });
+        observer.observe(document.getElementById("conversation-list")!, { subtree: true, attributes: true, attributeFilter: ["data-most-recent"], attributeOldValue: true });
+        (window as unknown as { recencyProbe: { changes: typeof changes; observer: MutationObserver } }).recencyProbe = { changes, observer };
+      });
+      for (let frame = 0; frame < 8; frame++) {
+        const sibling = machine.sessions[frame % 2]!;
+        sibling.last_activity_at = new Date(minute + 10_000 + frame * 400).toISOString();
+        sibling.last_activity = `supervisor → frame-${width}-${frame}`;
+        await hub.announceCatalog("atlas");
+        await expect(row(sibling.supervisor!)).toContainText(`Messaged frame-${width}-${frame}`);
+      }
+      const changes = await page.evaluate(() => {
+        const probe = (window as unknown as { recencyProbe: { changes: unknown[]; observer: MutationObserver } }).recencyProbe;
+        probe.observer.disconnect();
+        return probe.changes;
+      });
+      expect(changes, "eight alternating catalog frames cause zero badge value changes").toEqual([]);
+      await expect(row("calm-puma-34")).toHaveAccessibleName(/most recent/i);
+      await expect(row("thoughtful-chinchilla-84")).not.toHaveAccessibleName(/most recent/i);
+      expect(await rects()).toEqual(before);
+    });
     const currentKey = await rows.filter({ has: page.locator('.conversation-session-slot:not([aria-hidden="true"])') }).getAttribute("data-thread-key");
     const next = machine.sessions.find(session => `atlas:${session.name}` !== currentKey)!;
     const nextRow = row(next.supervisor!);
     const previousRow = rows.filter({ hasText: machine.sessions.find(session => `atlas:${session.name}` === currentKey)!.supervisor! });
     const before = await rects();
     if (capture) await page.screenshot({ path: `${capture}/initial-${width}.png` });
-    next.last_activity_at = journeyStamp();
+    next.last_activity_at = new Date(minute + 60_000).toISOString();
     await hub.announceCatalog("atlas");
     await expect(nextRow).toHaveAttribute("data-most-recent", "true");
     if (capture) await page.screenshot({ path: `${capture}/moved-${width}.png` });

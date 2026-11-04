@@ -75,6 +75,8 @@ Commander labels each machine's reported Cassy version in its project chip and p
 
 Commander lists running conversations only. Ended and crashed sessions leave navigation without dismissal or attach retries; empty project cards disappear. A machine outage keeps its last-known running conversations while recovery is shown at machine level. Waiting messages to a confirmed stopped session become Not sent, with their words available in Saved messages; running replacements return without a reload.
 
+Project cards keep the Most recent badge on the same session while sibling activity alternates within a whole minute, using stable session identity to break ties. Activity in a later minute moves the badge without shifting rows.
+
 The operator can paste text, screenshots or files into Commander: long text becomes a previewed text attachment, and Send stores files on the session's machine and gives the supervisor readable local paths through the existing durable message lane. Pending files remain through reconnect, with a reminder to send before closing the page. The operator's own sent files appear in their bubble as image previews and named file chips after reload and on other paired devices, without displaying host paths.
 
 The composer also offers a local, lazily loaded emoji tray beside the mic: search or choose a recent emoji, replace the current selection and continue the same draft. Messages, previews and waiting questions preserve Unicode text while selecting native color-emoji fonts.

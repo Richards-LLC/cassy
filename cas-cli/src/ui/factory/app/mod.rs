@@ -221,6 +221,23 @@ pub(crate) struct WorkerSpawnContext {
 #[error("{0}")]
 struct SpawnAdmissionError(String);
 
+#[cfg(test)]
+thread_local! {
+    static SPAWN_AVAILABLE_BYTES_FOR_TEST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_spawn_available_bytes_for_test<T>(available: u64, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SPAWN_AVAILABLE_BYTES_FOR_TEST.set(self.0);
+        }
+    }
+    let _restore = Restore(SPAWN_AVAILABLE_BYTES_FOR_TEST.replace(Some(available)));
+    run()
+}
+
 fn admit_worker_spawn(worktree_path: &Path, min_free_gib: u32) -> anyhow::Result<()> {
     if min_free_gib == 0 {
         return Ok(());
@@ -254,6 +271,8 @@ fn admit_spawn_filesystem(worktree_path: &Path, min_free_gib: u32) -> anyhow::Re
             ))
         })?
         .available_bytes;
+    #[cfg(test)]
+    let available = SPAWN_AVAILABLE_BYTES_FOR_TEST.get().unwrap_or(available);
     let floor = u64::from(min_free_gib) * 1024 * 1024 * 1024;
     if available < floor {
         return Err(SpawnAdmissionError(format!(

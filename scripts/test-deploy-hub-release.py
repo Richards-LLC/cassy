@@ -259,6 +259,30 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.deploy("v9.99.2"), 1)
         self.assertFalse(any(c[:2] == ["vercel", "promote"] for c in self.calls))
 
+    def test_hosted_csp_allows_any_tailnet_by_operator_decision(self):
+        # cas-5d51: Daniel, Nov 4 2026: "ts.net for now". Only the tailnet
+        # sources change; every other directive stays byte-identical.
+        def directives(policy):
+            return dict(part.split(" ", 1) for part in policy.split("; "))
+        named = directives(hub.hosted_csp(["tailf5a734"]))
+        wide = directives(hub.hosted_csp(["tailf5a734"], allow_any_tailnet=True))
+        widened = {
+            directive: sources.replace("https://*.tailf5a734.ts.net:*", "https://*.ts.net:*")
+            .replace("wss://*.tailf5a734.ts.net:*", "wss://*.ts.net:*")
+            for directive, sources in named.items()
+        }
+        self.assertEqual(wide, widened)
+        self.assertIn("https://*.ts.net:* wss://*.ts.net:*", wide["connect-src"])
+        # The repository's own release config carries the decision.
+        repo = SCRIPT.resolve().parents[1]
+        self.assertEqual(hub.release_csp(repo, "HEAD"), hub.hosted_csp(["tailf5a734"], allow_any_tailnet=True))
+        # *.ts.net is the only wildcard host; bare schemes and * stay refused.
+        hub.refuse_blanket_sources("img-src", ["https://*.ts.net:*", "wss://*.tailf5a734.ts.net:*", hub.LOOPBACK])
+        for source in ("https:", "wss:", "*", "https://*.net:*", "https://*:*", "https://*.com",
+                       "wss://*.ts.net.evil.com:*", "https://*.evil.com/ts.net"):
+            with self.subTest(source=source), self.assertRaises(RuntimeError):
+                hub.refuse_blanket_sources("img-src", ["'self'", source])
+
     def test_changed_dist_is_verified_before_alias_and_failed_live_check_restores_previous(self):
         self.fail_at = "immutable"
         self.assertEqual(self.deploy("v9.99.2"), 1)

@@ -783,8 +783,9 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert!(returned.notes.contains(&findings_reason));
             // The pre-merge verdict wakes its supervisor; worker findings
             // were emitted by the retired post-merge rejection relay.
+            let supervisor_name = format!("{slug}-supervisor");
             let notices = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
-                .into_iter().filter(|prompt| prompt.target == format!("{slug}-supervisor")
+                .into_iter().filter(|prompt| prompt.target == supervisor_name
                     && prompt.summary.as_deref() == Some("premerge_verification")
                     && prompt.prompt.contains(&dispatch.id)).count();
             assert_eq!(notices, 1, "one supervisor verdict handoff");

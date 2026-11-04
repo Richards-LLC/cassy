@@ -195,12 +195,19 @@ pub fn merged_delivery(task: &Task) -> Option<MergeRecord> {
 }
 
 /// Eligible hotfixes keep their own review instead of the batch release verdict.
-pub fn owns_review(cas_root: &Path, task: &Task, repo: &Path) -> bool {
+pub fn owns_review(cas_root: &Path, task: &Task, repo: &Path, candidate: Option<(&str, &str)>) -> bool {
     let Some(config) = configured(cas_root) else { return false; };
-    if merged_delivery(task).is_some() { return true; }
-    let Some(head) = task.deliverables.factory_branch_anchor.as_deref() else { return false; };
-    let Some(target) = task.deliverables.work_target.as_ref() else { return false; };
-    matches!(evaluate_delivery(&config, task, repo, &target.target_branch, head), Eligibility::Eligible { .. })
+    let (head, target) = match candidate {
+        // Explicit merges can precede park; the supplied source is authoritative.
+        Some(source_target) => source_target,
+        None => {
+            if merged_delivery(task).is_some() { return true; }
+            let Some(head) = task.deliverables.factory_branch_anchor.as_deref() else { return false; };
+            let Some(target) = task.deliverables.work_target.as_ref() else { return false; };
+            (head, target.target_branch.as_str())
+        }
+    };
+    matches!(evaluate_delivery(&config, task, repo, target, head), Eligibility::Eligible { .. })
 }
 
 /// Eligibility of `head` against its merge base with the live target.

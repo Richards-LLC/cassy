@@ -1062,6 +1062,10 @@ async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c(
     worktrees.update(&row).unwrap();
     proof_boundary_git(repo, &["config", "user.name", "CAS Test"]);
     proof_boundary_git(repo, &["config", "user.email", "cas@example.test"]);
+    let origin = TempDir::new().unwrap();
+    proof_boundary_git(origin.path(), &["init", "-q", "--bare"]);
+    proof_boundary_git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+    proof_boundary_git(repo, &["push", "-q", "origin", "main", epic, branch]);
     test_env.set_current_dir(repo);
     let supervisor = registered_supervisor(&cas_dir, "a32c-supervisor").await;
     supervisor.worktree_merge(branch, false, Some(&task_id), false, Some(false), false, None)
@@ -1075,7 +1079,10 @@ async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c(
     proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, &proof.head_commit]);
 
     // An unrelated sibling lands on the epic while the verifier reviews.
-    on_epic(&|| commit_on(repo, "sibling.txt", "sibling delivery"));
+    on_epic(&|| {
+        commit_on(repo, "sibling.txt", "sibling delivery");
+        proof_boundary_git(repo, &["push", "-q", "origin", epic]);
+    });
     supervisor
         .cas_verification_add(Parameters(approve(&task_id, dispatch.id.clone())))
         .await

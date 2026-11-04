@@ -5058,7 +5058,9 @@ impl CasCore {
                 Some((lane, head, eligibility, note))
             });
         let fast_lane_lookup = fast_lane.as_ref()
-            .filter(|(_, _, eligibility, _)| matches!(eligibility, crate::fast_lane::Eligibility::Eligible { .. }))
+            // No lane-specific CI or trusted receipt without its pre-merge PASS.
+            .filter(|(_, _, eligibility, _)| premerge_approval.is_some()
+                && matches!(eligibility, crate::fast_lane::Eligibility::Eligible { .. }))
             .and_then(|(lane, head, _, _)| fast_lane_ci(lane, head, &cwd));
         let fast_lane_head = fast_lane_lookup.as_ref()
             .and(fast_lane.as_ref())

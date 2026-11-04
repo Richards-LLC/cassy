@@ -152,7 +152,7 @@ pub(crate) fn own_review(cas_root: &std::path::Path, task: &Task, repo: &std::pa
     if !crate::config::Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch) {
         return Some("qa.mode is not batch, so its own verifier closes it".into());
     }
-    if crate::fast_lane::owns_review(cas_root, task, repo) {
+    if crate::fast_lane::owns_review(cas_root, task, repo, None) {
         return Some("eligible fast lane: its own pre-merge verifier and trusted post-merge receipt".into());
     }
     if task.labels.iter().any(|label| label == FORCE_VERIFIER_LABEL) {

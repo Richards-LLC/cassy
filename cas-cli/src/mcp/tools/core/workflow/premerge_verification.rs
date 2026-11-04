@@ -656,7 +656,8 @@ impl CasCore {
             supervisor_harness_from_env, verification_policy, worker_harness_from_env,
         };
         let config = self.load_config();
-        let fast_lane = crate::fast_lane::owns_review(&self.cas_root, task, repo);
+        let fast_lane =
+            crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
         if task.task_type == cas_types::TaskType::Epic
             || (task.depth == cas_types::TaskDepth::Light && !fast_lane)
             || !config.verification_enabled()

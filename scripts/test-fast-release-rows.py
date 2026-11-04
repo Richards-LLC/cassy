@@ -227,6 +227,16 @@ class FastRows(unittest.TestCase):
         self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
         self.assertIn("PASS changelog-and-versions", restored.stdout)
 
+        # cas-f2be: a changelog.d fragment is held to the same format.
+        self.write("changelog.d/README.md", "### Fixed — <area>\n\n- **Title** — What changed.\n")
+        self.write("changelog.d/cas-0001.md", "### Fixed\n\n- Generic note.\n")
+        self.commit()
+        bad_fragment = self.fast()
+        self.assertIn("FAIL changelog-and-versions", bad_fragment.stdout)
+        self.write("changelog.d/cas-0001.md", "### Fixed — Fixture\n\n- **Fragment entry** — It is titled.\n")
+        self.commit()
+        self.assertIn("PASS changelog-and-versions", self.fast().stdout)
+
         for category, accepted in (("Documentation", True), ("Tests", True), ("Bogus", False)):
             with self.subTest(category=category):
                 self.write("CHANGELOG.md", (

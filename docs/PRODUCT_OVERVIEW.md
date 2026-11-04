@@ -22,6 +22,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch in the current conversation by default. Opt in with `factory.restart_worker_between_tasks=true` to recycle between tasks while keeping the name, worktree and launch recipe; automatic restarts default off. MCP results report measured context occupancy at the configured threshold; unavailable harness accounting is labeled unknown. Supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.
 - **QA candidate** - an exact-revision binary for a QA walk. A worker requests one for its own active task, and the factory daemon builds it, one at a time per machine, and messages the worker the hash and receipt. Each revision keeps its own directory, so a later build never replaces a cited one.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI. Shell hooks refuse pattern-based process signals for every factory role, including native subagents inheriting the supervisor role; agents signal the PID they started.
+- **Worker spawn admission** - isolated MCP spawns choose a free factory branch name before queueing or task binding; an explicit colliding name is refused with its branch ref. Account refusals distinguish missing default homes, logged-out accounts and configuration mismatches, with the existing account-selection explanation included.
 - **Bounded waits** - an approved pre-merge verification queues the supervisor to continue the merge with the same proof. Legacy approvals give the worker five minutes to retry close before one supervisor escalation. A dispatch timed out by close shares the daemon's expiry relay; unresolved waits beyond its 24-hour history window retain one deadline alert, and missing local task rows do not erase recent expiries. Native background jobs stay busy while user-work descendants use CPU; unconfirmed, quiet jobs become stalled after the configured stall window even if the harness itself ticks. Without user jobs, harness CPU can still prove inference.
 - **Detached worker commands** - Capped background runs persist worker/task ownership and their exit status and log path. The worker receives one completion wake, with daemon recovery after interrupted delivery. Live runs and candidate builds suppress idle alerts; each completed run starts one idle episode whose alert names the exit, and unchanged episodes stay quiet.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
@@ -66,7 +67,9 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 ## Primary Journeys
 
-Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers and substantive status updates remain visible.
+Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers, substantive status updates and native Claude API errors remain visible; a failed turn appears in the conversation and session preview without waiting for another turn.
+
+Claude factory launches prefer the native installer’s active binary, then its newest installed version, then PATH. Commander checks the same executable before launch. Each launch verifies Claude Code 2.1.280 or newer and refuses with the detected path and version when no compatible client is available. Hub service status gives missing, outdated and unverifiable Claude clients their own install, update or repair action; missing clients remain not installed in doctor and the account picker.
 
 Commander labels each machine's reported Cassy version in its project chip and paired-machine card. A newer published stable release adds a quiet update note; an hourly cached lookup retains its last known release while offline. The Web footer separately identifies the client release and build. Each online supervisor with a known MCP version also shows its own version badge; an upgrade arrow marks a supervisor running an older Cassy than its machine has installed, with reconnect guidance. Unknown versions stay unreported.
 
@@ -121,7 +124,7 @@ Factory turn costs are recorded locally for Claude, Codex and Grok supervisors a
 - Before/after evidence: `cas deliverable capture` captures masked merge-base/head shots or passing journey goals in one bounded run; `cas deliverable pairs` selects complete verified pairs by task or commit provenance. Project defaults live under `[qa.capture]`.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Test value audit: `cas-cli/src/builtins/skills/cas-test-audit/` is a read-only agent procedure (buckets, detector recipes, CI-timing recipes, ledger format); cuts need operator approval and each names a covering test.
-- Release history: `CHANGELOG.md`.
+- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section.
 
 
 

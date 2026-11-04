@@ -460,7 +460,7 @@ mod tests {
             let path = bin.join(name);
             std::fs::write(
                 &path,
-                "#!/bin/sh\nprintf '%s' \"$VIOLET_SLACK_TOKEN_FIXTURE\"\n",
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.316 (Claude Code)'; exit 0; fi\nprintf '%s' \"$VIOLET_SLACK_TOKEN_FIXTURE\"\n",
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -1,4 +1,5 @@
 pub(crate) mod usage_limits;
+mod spawn_names;
 use crate::factory_target_cache::missing_gitdir_checkouts;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
@@ -245,7 +246,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
     let default_codex_home = dirs::home_dir().map(|home| home.join(".codex"));
-    if specs.iter().any(|spec| {
+    let needs_default = specs.iter().any(|spec| {
         spec.cli == cas_mux::SupervisorCli::Codex
             && spec
                 .config_dir
@@ -257,18 +258,31 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
                 .as_deref()
                 .filter(|dir| !dir.trim().is_empty())
                 .is_none()
-    }) && !default_codex_home.as_deref().is_some_and(|home| {
-        home.is_dir()
-            && home.to_str().is_some_and(|home| {
-                crate::capability::probe_account_auth(
-                    cas_mux::SupervisorCli::Codex,
-                    Some(home),
-                    deadline,
-                )
-                .availability
-                    != cas_factory::CapabilityAvailability::Unavailable
-            })
-    }) {
+    });
+    let mut default_evidence = None;
+    let default_problem = if !needs_default { None } else {
+        match default_codex_home.as_deref() {
+            None => Some("the default Codex home cannot be resolved because HOME is unavailable".to_string()),
+            Some(home) => match std::fs::metadata(home) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+                    Some(format!("the default Codex home {} is missing; no account was selected", home.display())),
+                Err(error) => Some(format!("the default Codex home {} is unreadable: {error}", home.display())),
+                Ok(metadata) if !metadata.is_dir() => Some(format!("the default Codex home {} is not a directory", home.display())),
+                Ok(_) => match home.to_str() {
+                    None => Some("the default Codex home path is not valid UTF-8".to_string()),
+                    Some(path) => {
+                        let evidence = crate::capability::probe_account_auth(cas_mux::SupervisorCli::Codex, Some(path), deadline);
+                        let problem = (evidence.availability == cas_factory::CapabilityAvailability::Unavailable)
+                            .then(|| format!("the default Codex home {} is logged out: {}", home.display(),
+                                evidence.reason.as_deref().unwrap_or("Codex reports no authenticated account")));
+                        default_evidence = Some(evidence);
+                        problem
+                    }
+                },
+            },
+        }
+    };
+    if let Some(problem) = default_problem {
         // The default home is already the implicit worker launch target. A
         // named account must still be selected by the caller when that default
         // is absent or logged out; Unknown retains the existing probe policy.
@@ -299,7 +313,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             None => "account registry unreadable".into(),
         };
         return Err(format!(
-            "spawn refused: the default Codex home is absent or logged out. Pass config_dir with the intended CODEX_HOME, \
+            "spawn refused: {problem}. Pass config_dir with the intended CODEX_HOME, \
              or set the project worker config_dir in .cas/config.toml ([factory.defaults] or [[factory.workers]]) \
              for hub/Commander spawns. Registered logged-in Codex homes: {accounts}. \
              No worktree was created and no task was assigned."
@@ -307,7 +321,11 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     }
     preflight_account_auth_with(
         specs,
-        |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+        |cli, account_dir| {
+            if cli == cas_mux::SupervisorCli::Codex && account_dir.is_none()
+                && let Some(evidence) = default_evidence.as_ref() { return evidence.clone(); }
+            crate::capability::probe_account_auth(cli, account_dir, deadline)
+        },
         || installed_codex_version(deadline),
     )
 }
@@ -2625,6 +2643,17 @@ impl CasService {
         req: FactoryRequest,
         provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in_with_name_source(ctx, req, provisioner_build,
+            &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
+    }
+
+    async fn factory_spawn_workers_in_with_name_source(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        provisioner_build: Option<&str>,
+        next_name: &mut (dyn FnMut() -> String + Send),
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -3115,6 +3144,15 @@ impl CasService {
         if worker_names.is_empty() && specs.iter().all(|spec| spec.name.is_some()) {
             worker_names = specs.iter().filter_map(|spec| spec.name.clone()).collect();
         }
+        // Resolve concrete names before binding, while the producer can still
+        // refuse without creating a queue row or pre-assigning a task.
+        if isolate {
+            let requested = if worker_names.is_empty() {
+                specs.iter().map(|spec| spec.name.clone()).collect()
+            } else { worker_names.iter().cloned().map(Some).collect() };
+            worker_names = spawn_names::allocate(self.inner.cas_root.clone(), req.task_id.clone(), requested, next_name)
+                .await.map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        }
 
         // Capture the requesting account separately for each resolved
         // harness; a Claude supervisor's profile must never become a Codex
@@ -3135,6 +3173,8 @@ impl CasService {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
+        let account_error = |error: String| Self::error(ErrorCode::INVALID_PARAMS,
+            format!("{error}{account_selection_notice}{default_sources_notice}"));
 
         // Preserve the existing install refusal when no Codex CLI is on PATH.
         // The account preflight is meaningful only after a binary can probe it.
@@ -3157,14 +3197,14 @@ impl CasService {
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
                 preflight_codex_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    .map_err(&account_error)?;
             }
         }
 
         // Validate the resolved or recommended account before the legacy
         // strict fallback can hide an unusable Codex home behind a generic
         // auth error. This gate precedes queue insertion and worktree creation.
-        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        preflight_account_auth(&specs).map_err(&account_error)?;
 
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
@@ -3180,7 +3220,7 @@ impl CasService {
                 strict_cli,
                 Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
             )
-            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?
+            .map_err(|error| account_error(error.to_string()))?
         };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
@@ -13287,6 +13327,60 @@ mod spawn_lifecycle_tests {
         evidence
     }
 
+    #[tokio::test]
+    async fn isolated_spawn_retries_generated_branch_collisions_before_binding_cas_b088() {
+        use cas_store::SpawnQueueStore;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("base"), "fixture").unwrap();
+        git(&["add", "base"]);
+        git(&["commit", "-m", "fixture"]);
+        let local = "occupied-local";
+        let remote = "occupied-origin";
+        let fresh = "fresh-worker";
+        git(&["branch", &format!("factory/{local}")]);
+        git(&["update-ref", &format!("refs/remotes/origin/factory/{remote}"), "HEAD"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = cas_types::Task::new("cas-spawn-epic".into(), "Spawn collision fixture".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = |name: Option<&str>| serde_json::from_value::<FactoryRequest>(serde_json::json!({
+            "action":"spawn_workers","count":1,"cli":"grok","isolate":true,"worker_names":name
+        })).unwrap();
+        let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
+        let mut candidates = [local, remote, fresh].into_iter();
+        service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
+            &mut || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let queued = queue.peek(10).unwrap();
+        let selected = &queued[0].worker_names[0];
+        let worktree = root.join("worktrees").join(selected);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        crate::worktree::GitOperations::new(repo.to_path_buf()).create_worktree(
+            &worktree, &format!("factory/{selected}"), Some("main"))
+            .expect("the queued generated identity must provision on a fresh branch");
+        assert_eq!(selected, fresh);
+        let explicit = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some(local)), None,
+            &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
+        assert!(explicit.message.contains(&format!("factory/{local}")), "{explicit}");
+        assert_eq!(queue.peek(10).unwrap().len(), 1, "explicit refusal creates no second queue row");
+    }
+
     #[test]
     fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
         let home = tempfile::tempdir().unwrap();
@@ -13432,6 +13526,9 @@ mod spawn_lifecycle_tests {
                 request,
             ))
             .expect_err("direct spawn must refuse the unselected account");
+        // pin: the refusal must retain the account policy's actual selection cause.
+        assert!(direct_error.message.contains("no eligible account"), "{direct_error}");
+        assert!(direct_error.message.contains("missing"), "the missing default home must not be reported as a logged-out selected account: {direct_error}");
         for detail in ["config_dir", logged_in.to_str().unwrap()] {
             assert!(
                 direct_error.message.contains(detail),
@@ -13455,9 +13552,15 @@ mod spawn_lifecycle_tests {
         // its authenticated login never chooses a different registered account.
         let default = env.home().join(".codex");
         std::fs::create_dir_all(&default).unwrap();
+        let logged_out = preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect_err("an existing logged-out default must be distinguished from a missing directory");
+        // pin: filesystem absence and affirmative login-status refusal are distinct user remedies.
+        assert!(logged_out.contains("logged out") && !logged_out.contains("is missing"), "{logged_out}");
         std::fs::write(default.join("auth.json"), "{}").unwrap();
         preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect("authenticated default account remains usable without an explicit selector");
+        preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect("consecutive calls resolve the same authenticated default");
         assert!(
             error.contains("project"),
             "refusal omitted the project worker config_dir remedy: {error}"

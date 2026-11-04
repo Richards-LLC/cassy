@@ -100,13 +100,19 @@ make. The reviewer and QA see each escape, so a vague reason costs a round.
 ## Changelog at park
 
 For a delivery that changes shipped Rust, `hub-web/src`, user-run scripts or
-builtin skills, add or extend a titled entry in `CHANGELOG.md` under
-`## [Unreleased]`, grouped under a category and product area (for example
-`### Fixed — Commander` with a per-delivery `- **Title** — description` line).
+builtin skills, add or extend a titled Unreleased entry, grouped under a
+category and product area (for example `### Fixed — Commander` with a
+per-delivery `- **Title** — description` line). Where the repository has a
+`changelog.d/` directory, write the entry as its own `changelog.d/<task-id>.md`
+fragment and leave `CHANGELOG.md` alone: GitHub's merge queue ignores the
+local changelog merge driver, so two pull requests that both insert at the
+top of `## [Unreleased]` conflict and the later one is dequeued. The release
+cut folds the fragments into the version section. Elsewhere, edit
+`CHANGELOG.md` under `## [Unreleased]`.
 If the delivery is test-only, docs-only or internal QA, record a typed
 decision note with `no changelog: <reason>`. The close gate checks that the
 task's own delivery changed an Unreleased entry; the changelog fast row
-checks the entry format.
+checks the entry format, fragments included.
 
 ## Delivery receipts
 

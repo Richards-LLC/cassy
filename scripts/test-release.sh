@@ -230,7 +230,11 @@ check '[[ "$(git -C "$epic" log -1 --format=%s)" == "alpha work" && -z "$(git -C
 original_notes=docs/release-notes/2026-10-14-v9.100.0-slack.md
 mkdir -p "$epic/docs/release-notes"
 write_valid_draft "$epic/$original_notes"
-git -C "$epic" add "$original_notes"
+# cas-f2be: a per-delivery fragment rides into the version section.
+mkdir -p "$epic/changelog.d"
+printf 'How fragments work.\n' >"$epic/changelog.d/README.md"
+printf '### Fixed — Fragments\n\n- **Fragment entry** — fragment shipped.\n' >"$epic/changelog.d/cas-0001.md"
+git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
@@ -238,8 +242,9 @@ head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd'
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
 check 'grep -q "^version = \"9.100.0\"" "$epic/cas-cli/Cargo.toml" && grep -q "^version = \"9.100.0\"" "$epic/crates/cas-mcp/Cargo.toml"' 'every release crate is bumped'
 check '[[ "$(grep -c "^version = \"9.100.0\"" "$epic/Cargo.lock")" -eq 6 ]] && grep -q "^version = \"0.1.0\"" "$epic/Cargo.lock"' 'Cargo.lock bumps the release packages and nothing else'
-check 'grep -A4 "^## \[9.100.0\] - 2026-10-15" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'CHANGELOG promotes [Unreleased] to the dated version'
+check 'grep -A8 "^## \[9.100.0\] - 2026-10-15" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'CHANGELOG promotes [Unreleased] to the dated version'
 check 'awk "/^## \\[Unreleased\\]/{getline; getline; print; exit}" "$epic/CHANGELOG.md" | grep -q "^## \[9.100.0\]"' '[Unreleased] is left empty'
+check 'sed -n "/^## \[9.100.0\]/,/^## \[9.99.0\]/p" "$epic/CHANGELOG.md" | grep -q "fragment shipped" && [[ "$(git -C "$epic" ls-files changelog.d)" == changelog.d/README.md ]] && [[ -z "$(git -C "$epic" status --porcelain)" ]]' 'cas-f2be: changelog.d fragments fold into the version section and the release commit deletes them'
 check 'grep -q "Live on production — User — Cassy v9.100.0" "$epic/docs/release-notes/2026-10-15-v9.100.0-slack.md"' 'the draft is named and filled for the version'
 check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$head_files" == *slack.md* ]]' 'one commit carries bump, lock, CHANGELOG and draft'
 check '[[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$(git -C "$epic" rev-parse HEAD)" ]]' 'the release commit is pushed'
@@ -299,7 +304,7 @@ rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
 check 'git -C "$epic" merge-base --is-ancestor origin/main HEAD' 'the base branch is merged in'
-check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A4 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
+check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A8 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
 check 'grep -A4 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "beta shipped" && ! grep -A6 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'the landed release section is kept intact'
 check '[[ "$(grep -c "alpha shipped" "$epic/CHANGELOG.md")" -eq 1 && "$(grep -c "^## \[9.100.0\]" "$epic/CHANGELOG.md")" -eq 1 ]]' 'no entry or heading is duplicated'
 check '! grep -q "<<<<<<<\|>>>>>>>" "$epic/CHANGELOG.md" "$epic/Cargo.lock" "$epic/cas-cli/Cargo.toml"' 'no conflict markers remain'

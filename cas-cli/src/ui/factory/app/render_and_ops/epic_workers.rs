@@ -826,6 +826,16 @@ fn stale_spawn_base_notice(
 
 /// Cheap, read-only checks shared by the MCP enqueue path. Provisioning still
 /// fetches and checks again, since refs may change after a request is queued.
+/// Resolve the same repository the provisioner will use, before choosing names.
+pub(crate) fn spawn_worktree_repo_root(
+    cas_dir: &std::path::Path,
+    session_repo_root: &std::path::Path,
+    task_id: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let base = task_id.map(|id| task_epic_base(cas_dir, session_repo_root, id)).unwrap_or(TaskBase::Unresolved);
+    resolve_spawn_worktree_repo(cas_dir, session_repo_root, base.work_target()).map_err(|error| error.to_string())
+}
+
 pub(crate) fn preflight_spawn_base(
     cas_dir: &std::path::Path,
     session_repo_root: &std::path::Path,

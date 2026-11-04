@@ -16,6 +16,11 @@ bug_families:
     tasks: [cas-c74f]
     invariants: [HUB-J25-PHONE-TIMELINE-TEXT]
     journeys: [HUB-J25]
+  compatible-claude-and-visible-api-errors:
+    title: Native Claude wins over stale PATH installs and API failures reach the first Commander reply
+    tasks: [cas-d8e0]
+    invariants: [HUB-J13-COMPATIBLE-CLAUDE, HUB-J4-API-ERROR-VISIBLE]
+    journeys: [HUB-J13, HUB-J4]
   codex-host-sidecar-idleness:
     title: Persistent Codex hosts leave workers idle while their owned tool jobs still count as activity
     tasks: [cas-f3ab]
@@ -183,6 +188,12 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J13-COMPATIBLE-CLAUDE:
+    statement: Commander and factory launches prefer a verified native Claude over stale PATH clients, or refuse with an actionable version error. Hub readiness keeps missing, outdated and unverifiable clients visible with their own repair action.
+    check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME and CAS_TEST_HUB_PATH; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.
+  HUB-J4-API-ERROR-VISIBLE:
+    statement: The first native Claude API failure appears in the conversation and session preview within that turn.
+    check: Run commander_mirror::tests::claude_api_error_reaches_commander_in_one_scan_cas_d8e0 through a real transcript scan and queue; verify the error reply and summary before another turn, and dedupe on replay.
   HUB-J14-POSITIVE-STOP-AND-BIRTH:
     statement: Missing, failed and stale catalogs preserve last-known running sessions; only positive stop evidence retires them. Held sends and drafts belong to a session start identity, and restored messages apply already known stop evidence before replay.
     check: Reproduce dormant omission, catalog failure beyond freshness, same-name replacement during outage, and catalog-before-journal restoration on a disposable real hub. Compare true resume with replacement, and run HUB-J11, HUB-J12 and HUB-J14.
@@ -978,6 +989,7 @@ journeys:
   - hub-web/src/transcript.ts
   invariants:
   - HUB-J4-GOAL
+  - HUB-J4-API-ERROR-VISIBLE
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-IMAGE-INSPECTION
   - HUB-J4-READABLE-PROSE-TABLES
@@ -1667,6 +1679,7 @@ journeys:
   - hub-web/e2e/journeys/real-hub-server.test.mjs
   - cas-cli/src/hub/server.rs
   - cas-cli/src/hub/launch_env.rs
+  - crates/cas-pty/src/claude_binary.rs
   - cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs
   - cas-cli/src/ui/factory/daemon/runtime/supervisor_single_turn_tests.rs
   - hub-web/src/abort-signals.ts
@@ -1709,6 +1722,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-COMPATIBLE-CLAUDE
   - HUB-J13-PROJECT-ACCOUNT-POLICY
   - HUB-J13-ACCOUNT-MANAGEMENT
   - HUB-J13-ACCOUNTS-ENTRY

@@ -363,7 +363,11 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 // earlier progress text and dropped the answer, so only an
                 // end_turn line carrying text (or turn_duration) ends it.
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
-                    && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                    && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+                        // API errors can end with stop_sequence and no duration.
+                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
+                    // `answered` requires primary (non-sidechain) text on this
+                    // record, so a thinking-only end_turn cannot flush progress.
                     && answered)
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
@@ -1014,9 +1018,12 @@ mod tests {
         let queued = |id: &str, text: &str, second| serde_json::json!({
             "timestamp":at(second),"type":"attachment","uuid":id,
             "attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":text}});
+        for api_error in [false, true] {
         let answer = |text: &str, second| serde_json::json!({
-            "timestamp":at(second),"type":"assistant","message":{"role":"assistant",
-            "stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+            "timestamp":at(second),"type":"assistant","isApiErrorMessage":api_error,
+            "message":{"role":"assistant",
+            "stop_reason":if api_error { "stop_sequence" } else { "end_turn" },
+            "content":[{"type":"text","text":text}]}});
         let filler = serde_json::json!({"timestamp":at(2),"type":"progress",
             "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)});
         let dir = tempfile::tempdir().unwrap();
@@ -1037,6 +1044,7 @@ mod tests {
         followed.extend([prompt("next-input", "Next?", 5), answer("Next done.", 6)]);
         write(&followed);
         assert_eq!(keys(), ["next-input"], "a cut turn behind later turns was already mirrored whole");
+        }
     }
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};
     use cas_types::{Agent, AgentRole};
@@ -1434,6 +1442,48 @@ mod tests {
         let values = codex_turn("Question with Example: [cas #8 operator Alice@phone verified 0s first] old\n> [cas #9 operator Alice@phone verified 0s first] quoted\n[cas #42 operator Alice@phone verified 0s first] actual");
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Codex);
         assert_eq!(turns[0].commander_id, Some(42), "only an envelope beginning a row may bind");
+    }
+
+    #[test]
+    fn claude_api_error_reaches_commander_in_one_scan_cas_d8e0() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (temp, root, queue) = terminal_session(vec![]);
+        env.set("CLAUDE_CONFIG_DIR", temp.path().join("account"));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.cc_session_id = Some("failed-turn".into());
+        agent.metadata.insert("supervisor_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let send = queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "hello?", Some("factory-1"),
+            None, None, false, None,
+            &OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+                device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+        ).unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        let directory = temp.path().join("account/projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let error = "API Error: 400 Claude Code 2.1.116 does not support this model; version 2.1.280 or newer is required";
+        let records = [
+            serde_json::json!({"timestamp":at(0),"type":"user","uuid":"input","message":{"content":format!("[cas #{} operator Alice@phone verified 0s first] hello?", send.id())}}),
+            // Real Claude failures use stop_sequence and emit no turn_duration.
+            serde_json::json!({"timestamp":at(1),"type":"assistant","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":error}]}}),
+        ];
+        std::fs::write(directory.join("failed-turn.jsonl"), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
+        );
+        let mut state = MirrorScanState::default();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 1, "the daemon must read the failing supervisor's transcript");
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1, "the first failing turn must be visible immediately");
+        assert_eq!(replies[0].message, error, "conversation pane retains actionable error");
+        assert!(replies[0].summary.contains("API Error: 400"), "session preview must show error");
+        assert_eq!(replies[0].reply_to, Some(send.id()));
+        scan(&mut MirrorScanState::default());
+        assert_eq!(operator_replies(&queue).len(), 1, "daemon replay must not duplicate errors");
     }
 
     #[test]

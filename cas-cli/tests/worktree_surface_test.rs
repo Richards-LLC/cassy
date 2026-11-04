@@ -2525,7 +2525,7 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .expect("the first real Git candidate preparation records its elapsed time");
         eprintln!("{timing}");
         assert_ne!(PathBuf::from(&proof.worktree_root), fixture.worker);
-        let candidate_tree = git_stdout(
+        let mut candidate_tree = git_stdout(
             &fixture.repo.root,
             &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
         );
@@ -2539,6 +2539,16 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             .unwrap();
         assert!(!recorded.is_error.unwrap_or(false), "{}", get_text(&recorded));
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), before);
+        if verdict == "approved" {
+            let sibling = fixture.cas_root.join("sibling-target");
+            run_git(&["worktree", "add", sibling.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
+            std::fs::write(sibling.join("independent.txt"), "Sibling delivery\n").unwrap();
+            run_git(&["add", "independent.txt"], &sibling);
+            run_git(&["commit", "-m", "Sibling advances target during review"], &sibling);
+            run_git(&["push", "origin", "epic/rebound"], &sibling);
+            candidate_tree = git_stdout(&fixture.repo.root,
+                &["merge-tree", "--write-tree", "epic/rebound", &fixture.tip]);
+        }
         let continued = fixture.service.factory(Parameters(merge.clone())).await;
         if verdict == "approved" {
             assert_eq!(
@@ -2725,8 +2735,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
             "target" => {
                 let target = fixture.cas_root.join("target-writer");
                 run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
-                std::fs::write(target.join("independent.txt"), "Another delivery\n").unwrap();
-                run_git(&["add", "independent.txt"], &target);
+                std::fs::write(target.join("delivery.txt"), "Sibling changed the reviewed file\n").unwrap();
+                run_git(&["add", "delivery.txt"], &target);
                 run_git(&["commit", "-m", "Independent target progress"], &target);
                 run_git(&["push", "origin", "epic/rebound"], &target);
             }

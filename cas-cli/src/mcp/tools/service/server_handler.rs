@@ -345,6 +345,9 @@ fn caller_transcript_path(agent: &crate::types::Agent) -> Option<std::path::Path
 /// Closed write, a note append), the caller is answered after at most this
 /// much more post-commit work; the rest finishes in the background.
 const POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+// Receipt validation and persistence are already complete. Give fast closes a
+// short chance to return inline without making a batch wait on selector work.
+const BATCH_RECEIPT_POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
 
@@ -472,6 +475,11 @@ impl CasService {
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        let grace = if tool_name == "verification" && action == "batch_receipt" {
+            grace.min(BATCH_RECEIPT_POST_COMMIT_GRACE)
+        } else {
+            grace
+        };
         // Before spawning the handler: a call in flight is already activity.
         // This universal boundary also covers factory and proxy tool calls.
         record_worker_mcp_activity(&self.inner, tool_name, action);
@@ -1520,14 +1528,16 @@ mod tests {
         let sender = service.clone();
         let (release, held) = tokio::sync::oneshot::channel();
         let (finished, continued) = tokio::sync::oneshot::channel();
+        let started = tokio::time::Instant::now();
         let answered = service.call_with_deadline_and_grace(
             "verification", arguments.as_object(), std::time::Duration::from_secs(55),
-            std::time::Duration::ZERO, async move {
+            std::time::Duration::from_secs(15), async move {
                 let recorded = sender.verification(Parameters(request)).await?;
                 held.await.unwrap();
                 finished.send(()).unwrap();
                 Ok(recorded)
             }).await.expect("the persisted batch must answer before its held continuation");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "receipt waited on the ordinary 15s grace");
         let text = format!("{answered:?}");
         let receipts = cas_store::list_qa_batch_receipts(&root, "batch-response").unwrap();
         assert_eq!(receipts.len(), 1);

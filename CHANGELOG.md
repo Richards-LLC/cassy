@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Factory message destinations
+
+- **Honor explicit message destinations** — `cas factory message` resolves the
+  selected session's store and queue tag independently of inherited factory
+  variables. Conflicting explicit project or store selectors refuse before
+  enqueueing; success reports the session stored with the message.
+
 ### Fixed — Hotfix QA decisions
 
 - **Ask before reverting a failed QA walk** — A failed fast-lane walk now

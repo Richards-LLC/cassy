@@ -3490,3 +3490,108 @@ fn release_precheck_preserves_child_exit_status() {
         .assert().code(7)
         .stderr(predicate::str::is_empty());
 }
+
+mod factory_message_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Fixture {
+        temp: TempDir,
+        a: PathBuf,
+        b: PathBuf,
+        _env: crate::test_env_guard::TestEnvGuard,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut env = crate::test_env_guard::TestEnvGuard::new();
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join(".test-home");
+            std::fs::create_dir_all(&home).unwrap();
+            env.set("HOME", &home);
+            let a = temp.path().join("a");
+            let b = temp.path().join("b");
+            let manager = cas::ui::factory::SessionManager::new();
+            for (project, session, supervisor) in [
+                (&a, "project-a", "supervisor-a"),
+                (&b, "project-b", "supervisor-b"),
+            ] {
+                std::fs::create_dir_all(project).unwrap();
+                cas::store::init_cas_dir(project).unwrap();
+                manager.save_metadata(&cas::ui::factory::create_metadata(
+                    session, std::process::id(), supervisor, &[], None,
+                    Some(project.to_str().unwrap()), Some(32100),
+                )).unwrap();
+            }
+            Self { temp, a, b, _env: env }
+        }
+
+        fn command(&self) -> Command {
+            let mut cmd = cas_cmd(self.temp.path());
+            cmd.current_dir(&self.a)
+                .env("CAS_ROOT", self.a.join(".cas"))
+                .env("CAS_FACTORY_SESSION", "project-a")
+                .env("CAS_CLONE_PATH", &self.a)
+                .args(["factory", "message", "--from", "notifier", "--message", "fixture message"]);
+            cmd
+        }
+    }
+
+    #[test]
+    fn explicit_destination_wins_over_inherited_factory_context() {
+        let fixture = Fixture::new();
+        // Session and project selectors work independently, and both enqueue
+        // paths report the session that a destination daemon can consume.
+        for (session, project, operator, json) in [
+            (true, true, false, false),
+            (true, false, false, true),
+            (false, true, false, true),
+            (true, true, true, true),
+        ] {
+            let mut cmd = fixture.command();
+            if session { cmd.args(["--session", "project-b"]); }
+            if project { cmd.arg("--project-dir").arg(&fixture.b); }
+            if operator {
+                cmd.args(["--target", "operator", "--kind", "status"]);
+            } else {
+                cmd.args(["--target", "supervisor"]);
+            }
+            if json { cmd.arg("--json"); }
+            let output = cmd.assert().success().get_output().stdout.clone();
+            let queue = cas::store::open_prompt_queue_store(&fixture.b.join(".cas")).unwrap();
+            let row = queue.peek_all(20).unwrap().into_iter().max_by_key(|row| row.id)
+                .expect("explicit destination must receive the message");
+            assert_eq!(row.factory_session.as_deref(), Some("project-b"));
+            assert_eq!(row.target, if operator { "operator" } else { "supervisor-b" });
+            if json {
+                let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(report["session"], row.factory_session.unwrap());
+                assert_eq!(report["message_id"], row.id);
+                assert_eq!(report["target"], row.target);
+            } else {
+                let text = String::from_utf8(output).unwrap();
+                assert!(text.contains(&format!("Enqueued message {} for {} (session: project-b)", row.id, row.target)), "{text}");
+            }
+        }
+        assert!(cas::store::open_prompt_queue_store(&fixture.a.join(".cas"))
+            .unwrap().peek_all(20).unwrap().is_empty(), "inherited project must remain untouched");
+    }
+
+    #[test]
+    fn conflicting_explicit_destinations_refuse_before_enqueue() {
+        let fixture = Fixture::new();
+        for flag in ["--project-dir", "--cas-root"] {
+            let conflicting = if flag == "--cas-root" { fixture.a.join(".cas") } else { fixture.a.clone() };
+            fixture.command().args(["--session", "project-b", "--target", "supervisor"])
+                .arg(flag).arg(conflicting)
+                .assert().failure()
+                .stderr(predicate::str::contains("project-b"))
+                .stderr(predicate::str::contains(flag))
+                .stdout(predicate::str::contains("Enqueued").not());
+        }
+        for project in [&fixture.a, &fixture.b] {
+            assert!(cas::store::open_prompt_queue_store(&project.join(".cas"))
+                .unwrap().peek_all(20).unwrap().is_empty());
+        }
+    }
+}

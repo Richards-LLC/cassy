@@ -354,9 +354,8 @@ impl FactoryDaemon {
         let idle = self.supervisor_commands.readiness.take()
             .and_then(|job| futures_util::FutureExt::now_or_never(job)).and_then(Result::ok).flatten();
         let Some(pane) = self.app.mux.supervisor() else { return };
-        if idle == Some(false) || pane.has_exited() || !pane.ready_for_injection()
-            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !idle_prompt(&screen(pane))
-            || (idle.is_none() && !self.output_settled(pane)) { return; }
+        if idle != Some(true) || pane.has_exited() || !pane.ready_for_injection()
+            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !idle_prompt(&screen(pane)) { return; }
         let before = screen(pane);
         let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
         let write = pane.inject_prompt_tracked(Command::Finish.mapping(pane.harness()).expect("queued supported Finish"));
@@ -565,69 +564,69 @@ mod tests {
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::finish_accepts_an_idle_supervisor_with_a_repainting_background_shell_cas_88ca") { return; }
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         for mode in ["idle", "busy", "unknown"] {
-        let mid_turn = mode == "busy";
-        let (root, mut daemon) = fixture().await;
-        let name = daemon.app.supervisor_name().to_owned();
-        let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
-        let mut agent = store.get("single-sup").unwrap();
-        agent.cc_session_id = Some("finish-background".into());
-        store.update(&agent).unwrap();
-        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
-        std::fs::create_dir_all(&projects).unwrap();
-        let at = Utc::now() - chrono::Duration::seconds(2);
-        let start = serde_json::json!({"type":"user","timestamp":at,"message":{"role":"user","content":"Prior work"}});
-        let end = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(1),"message":{"role":"assistant","stop_reason":"end_turn"}});
-        let transcript = projects.join("finish-background.jsonl");
-        std::fs::write(&transcript, if mid_turn { format!("{start}\n") } else { format!("{start}\n{end}\n") }).unwrap();
-        if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
-        let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
-            command: "/bin/sh".into(),
-            args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
-                "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
-            cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
-        }).unwrap();
-        let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor, pty, 24, 80, cas_mux::SupervisorCli::Claude).unwrap();
-        pane.backdate_spawn_for_test(Duration::from_secs(6));
-        daemon.app.mux.add_pane(pane);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let pane = daemon.app.mux.get_mut(&name).unwrap();
-                pane.drain_output();
-                if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
-        if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
-        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
-        let receipt = daemon.dispatch_supervisor_command(
-            Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),
-            owner.clone(),
-        ).await.expect("native turn ended and the prompt is empty: background repaint must not refuse Finish");
-        assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
-        if mid_turn || mode == "unknown" {
+            let mid_turn = mode == "busy";
+            let (root, mut daemon) = fixture().await;
+            let name = daemon.app.supervisor_name().to_owned();
+            let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+            let mut agent = store.get("single-sup").unwrap();
+            agent.cc_session_id = Some("finish-background".into());
+            store.update(&agent).unwrap();
+            let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+            std::fs::create_dir_all(&projects).unwrap();
+            let at = Utc::now() - chrono::Duration::seconds(2);
+            let start = serde_json::json!({"type":"user","timestamp":at,"message":{"role":"user","content":"Prior work"}});
+            let end = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(1),"message":{"role":"assistant","stop_reason":"end_turn"}});
+            let transcript = projects.join("finish-background.jsonl");
+            std::fs::write(&transcript, if mid_turn { format!("{start}\n") } else { format!("{start}\n{end}\n") }).unwrap();
+            if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
+            let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
+                    "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
+                cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+            }).unwrap();
+            let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor, pty, 24, 80, cas_mux::SupervisorCli::Claude).unwrap();
+            pane.backdate_spawn_for_test(Duration::from_secs(6));
+            daemon.app.mux.add_pane(pane);
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !daemon.supervisor_commands.readiness.as_ref().is_some_and(|job| job.is_finished()) { tokio::task::yield_now().await; }
+                loop {
+                    let pane = daemon.app.mux.get_mut(&name).unwrap();
+                    pane.drain_output();
+                    if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
+                    tokio::task::yield_now().await;
+                }
             }).await.unwrap();
-            let pending = daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
-            assert!(matches!(pending, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
-            assert!(std::fs::read(root.path().join("finish-input")).unwrap().is_empty(), "a truly active turn receives no command");
-            if mode == "unknown" { continue; }
-            let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
-            assert!(daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), foreign).await.is_err());
-            // Waiting on a long turn cannot expire the not-yet-submitted command.
-            daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-background".into())).unwrap().started = Instant::now() - REPLAY_WINDOW - Duration::from_secs(1);
-            assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "another-command".into(), owner.clone()).await.is_err());
-            // Replay is caller-owned and cannot create another queued mutation.
-            daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(), owner.clone()).await.unwrap();
-            std::fs::write(&transcript, format!("{start}\n{end}\n")).unwrap();
-        }
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !std::fs::read(root.path().join("finish-input")).unwrap().ends_with(b"\r") {
-                daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
-                tokio::task::yield_now().await;
+            if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
+            let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+            let receipt = daemon.dispatch_supervisor_command(
+                Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),
+                owner.clone(),
+            ).await.expect("native turn ended and the prompt is empty: background repaint must not refuse Finish");
+            assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+            if mid_turn || mode == "unknown" {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !daemon.supervisor_commands.readiness.as_ref().is_some_and(|job| job.is_finished()) { tokio::task::yield_now().await; }
+                }).await.unwrap();
+                let pending = daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
+                assert!(matches!(pending, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+                assert!(std::fs::read(root.path().join("finish-input")).unwrap().is_empty(), "a truly active turn receives no command");
+                if mode == "unknown" { continue; }
+                let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+                assert!(daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), foreign).await.is_err());
+                // Waiting on a long turn cannot expire the not-yet-submitted command.
+                daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-background".into())).unwrap().started = Instant::now() - REPLAY_WINDOW - Duration::from_secs(1);
+                assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "another-command".into(), owner.clone()).await.is_err());
+                // Replay is caller-owned and cannot create another queued mutation.
+                daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(), owner.clone()).await.unwrap();
+                std::fs::write(&transcript, format!("{start}\n{end}\n")).unwrap();
             }
-        }).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&std::fs::read(root.path().join("finish-input")).unwrap()).matches("/finish").count(), 1);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !std::fs::read(root.path().join("finish-input")).unwrap().ends_with(b"\r") {
+                    daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert_eq!(String::from_utf8_lossy(&std::fs::read(root.path().join("finish-input")).unwrap()).matches("/finish").count(), 1);
         }
     }
     #[tokio::test(flavor = "current_thread")]

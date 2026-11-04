@@ -1312,6 +1312,9 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     git(&repo, &["config", "user.email", "fixture@example.invalid"]);
     git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
     let cas = crate::store::init_cas_dir(&repo).unwrap();
+    // Recovery tests preserve unpublished work; disk admission has its own
+    // coverage and must not depend on the runner's available tmpfs space.
+    std::fs::write(cas.join("config.toml"), "[factory]\nspawn_min_free_gib = 0\n").unwrap();
     env.set("CAS_ROOT", &cas);
     // Concurrent test processes (nextest's own run and the whole-module child)
     // run this fixture at once. A Stale row's liveness falls back to a host-wide

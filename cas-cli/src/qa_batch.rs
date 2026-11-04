@@ -479,19 +479,28 @@ fn covering_receipt(
     let Some(anchor) = delivery_anchor(repo, task) else {
         return Ok(None);
     };
-    // Retired history can recover only its exact delivery. Without an active
+    // Retired history can recover only reviewed delivery. Without an active
     // park, a later integrated head may be an unreviewed correction, rather
     // than an umbrella integration receipt for the reviewed work. cas-bc15:
-    // a head inside the receipt's reviewed staging is no such correction,
-    // so a request_changes history no longer strands a merged delivery.
-    let retired = task.deliverables.factory_branch_anchor.is_none() && head != anchor;
+    // request_changes retires anchors, and a close's commit_receipt binds a
+    // new one, so a receipt may name any of them; a retired one covers only a
+    // head inside the receipt's reviewed staging.
+    let active = task.deliverables.factory_branch_anchor.as_ref().and(Some(anchor.as_str()));
+    let retired: Vec<String> = task.deliverables.historical_factory_branch_anchors.iter()
+        .filter_map(|head| commit(repo, head))
+        .collect();
     let receipts = receipts_for_task(root, &project, &task.id).map_err(|e| e.to_string())?;
     for receipt in receipts {
-        if (retired && ancestor(repo, head, &receipt.staging_sha) != Some(true))
+        let Some(reviewed) = receipt.task_heads.get(&task.id) else { continue };
+        let known = *reviewed == anchor || retired.contains(reviewed);
+        let inside_review = active == Some(reviewed.as_str())
+            || head == reviewed
+            || ancestor(repo, head, &receipt.staging_sha) == Some(true);
+        if !known
+            || !inside_review
             || receipt.project_id != project
-            || receipt.task_heads.get(&task.id) != Some(&anchor)
-            || ancestor(repo, &anchor, head) != Some(true)
-            || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)
+            || ancestor(repo, reviewed, head) != Some(true)
+            || ancestor(repo, reviewed, &receipt.staging_sha) != Some(true)
             || !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
                 || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
                     && integration_state(repo, head, target) == Some(true)))

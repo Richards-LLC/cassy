@@ -8113,6 +8113,8 @@ mod workspace_contract_tests {
     /// in its project's Claude auto-memory folder, reached through its
     /// account's `projects` symlink into the shared base. A transcript beside
     /// it stays refused, and a `memory` symlink pointing elsewhere grants nothing.
+    /// The first write may create the folder; a symlinked project folder
+    /// grants no foreign memory.
     #[test]
     fn cas_2d9a_project_claude_memory_is_a_built_in_root() {
         let fixture = tempfile::tempdir().unwrap();
@@ -8124,7 +8126,7 @@ mod workspace_contract_tests {
         let real_memory = projects.join(&slug).join("memory");
         let memory = account.join("projects").join(&slug).join("memory");
         let secret = home.join("secret");
-        for directory in [&worktree, &real_memory, &account, &secret] {
+        for directory in [&worktree, &projects.join(&slug), &account, &secret] {
             std::fs::create_dir_all(directory).unwrap();
         }
         std::os::unix::fs::symlink(&projects, account.join("projects")).unwrap();
@@ -8149,6 +8151,10 @@ mod workspace_contract_tests {
         let write = |path: &Path| {
             tool_input("Write", serde_json::json!({"file_path": path, "content": "x"}), &worktree)
         };
+        // No memory folder yet: the first write creates it.
+        assert_ne!(decision(&write(&memory.join("first.md"))), "deny", "first write creates memory/");
+        assert_eq!(decision(&write(&memory.join("../x.jsonl"))), "deny", "memory/.. escapes the root");
+        std::fs::create_dir_all(&real_memory).unwrap();
         let note = memory.join("note.md");
         assert_ne!(decision(&write(&note)), "deny", "create in the project's memory folder");
         std::fs::write(&note, "x").unwrap();
@@ -8170,6 +8176,16 @@ mod workspace_contract_tests {
         std::os::unix::fs::symlink(&secret, &real_memory).unwrap();
         assert_eq!(decision(&write(&memory.join("key"))), "deny", "a memory symlink grants nothing");
         assert_eq!(decision(&write(&secret.join("key"))), "deny");
+
+        // A project folder symlinked at another directory with a real memory/
+        // grants nothing there; only the account-level projects link is followed.
+        let foreign = home.join("foreign");
+        std::fs::create_dir_all(foreign.join("memory")).unwrap();
+        std::fs::remove_file(&real_memory).unwrap();
+        std::fs::remove_dir_all(projects.join(&slug)).unwrap();
+        std::os::unix::fs::symlink(&foreign, projects.join(&slug)).unwrap();
+        assert_eq!(decision(&write(&memory.join("key"))), "deny", "a symlinked project folder grants nothing");
+        assert_eq!(decision(&write(&foreign.join("memory/key"))), "deny");
     }
 
     /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key

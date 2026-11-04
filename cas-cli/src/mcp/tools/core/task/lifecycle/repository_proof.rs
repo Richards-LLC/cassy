@@ -1088,25 +1088,28 @@ mod tests {
         assert!(proof.anchor_commits.is_empty());
     }
 
-    /// cas-a32c: a target-bound proof survives a sibling merge beside the
-    /// delivery, ignores an anchor its bound head never contained (the old
-    /// checkout-HEAD anchor), and refuses a later change to a delivered file.
+    /// cas-a32c: a target-bound proof survives sibling merges beside the
+    /// delivery, including another entry in a shared changelog, ignores an
+    /// anchor its bound head never contained (the old checkout-HEAD anchor),
+    /// and refuses a later merge that renames and edits a delivered file.
     #[test]
     fn target_proof_keeps_sibling_merges_and_refuses_changes_to_delivered_files() {
         let repo = tempfile::tempdir().expect("repository");
         let path = repo.path();
         let commit = |file: &str, body: &str| {
             std::fs::write(path.join(file), body).expect("write");
-            git(path, &["add", file]);
-            git(path, &["commit", "-q", "-m", body.trim()]);
+            git(path, &["add", "-A"]);
+            git(path, &["commit", "-q", "-m", file]);
         };
+        let log = |entries: &[&str]| format!("# Changelog\n\n## Unreleased\n\n{}\n## 1.0\n\n- first\n", entries.join(""));
         git(path, &["init", "-q", "-b", "main"]);
-        commit("seed.txt", "seed\n");
+        commit("CHANGELOG.md", &log(&[]));
         git(path, &["branch", "epic"]);
         commit("upstream.txt", "main moves on\n");
         let stray = head(path);
         git(path, &["checkout", "-q", "-b", "lane", "epic"]);
-        commit("delivered.txt", "delivered\n");
+        commit("delivered.txt", "one\ntwo\nthree\nfour\nfive\nsix\n");
+        commit("CHANGELOG.md", &log(&["- delivered\n"]));
         let tip = head(path);
         git(path, &["checkout", "-q", "epic"]);
         git(path, &["merge", "-q", "--no-ff", "lane", "-m", "merge lane"]);
@@ -1114,16 +1117,18 @@ mod tests {
             .expect("target proof");
 
         commit("sibling.txt", "sibling\n");
+        commit("CHANGELOG.md", &log(&["- sibling\n", "- delivered\n"]));
         assert!(
             matches!(
-                evaluate_repository_proof(&proof).expect("sibling beside the delivery"),
+                evaluate_repository_proof(&proof).expect("siblings beside the delivery"),
                 RepositoryProofStatus::DeliveredContentIntact { .. }
             ),
-            "an unrelated sibling merge keeps the verdict"
+            "unrelated sibling merges, even in the shared changelog, keep the verdict"
         );
 
-        commit("delivered.txt", "rewritten by a sibling\n");
-        let refused = evaluate_repository_proof(&proof).expect_err("delivered file changed");
+        git(path, &["mv", "delivered.txt", "moved.txt"]);
+        commit("moved.txt", "one\ntwo\nthree\nfour\nfive\nsix, edited\n");
+        let refused = evaluate_repository_proof(&proof).expect_err("delivered file renamed and edited");
         let TaskLifecycleGateError::RepositoryProof { message } = refused else {
             panic!("repository proof refusal expected");
         };

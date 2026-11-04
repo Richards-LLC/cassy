@@ -9738,6 +9738,17 @@ impl CasCore {
                     &mut task,
                     &format!("Release verdict {} covers this delivery at {}.", verdict.id, decision.tip),
                 ),
+                // cas-bc15: a live supervisor's reasoned override waives the
+                // release verdict for this delivery, and the task records it.
+                Ok(None) if supervisor_override => close_notes.record(
+                    &mut task,
+                    &format!(
+                        "[{}] ✅ DECISION supervisor_override waived the release verdict at {}: {}",
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                        decision.tip,
+                        req.reason.as_deref().unwrap_or_default().trim(),
+                    ),
+                ),
                 Ok(None) => {
                     return Ok(Self::tool_error(gate_text::waiting_for_release_verdict(
                         &req.id,

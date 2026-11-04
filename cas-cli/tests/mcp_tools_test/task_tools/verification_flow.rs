@@ -1320,15 +1320,14 @@ async fn release_verdict_closes_a_merged_delivery_after_request_changes_cas_bc15
     assert!(recorded.contains(&format!("commit_receipt={staging}")), "{recorded}");
 
     let closed = close(&worker, &reworked, false).await;
-    let task = tasks.get(&reworked).unwrap();
-    assert_eq!(task.status, TaskStatus::Closed, "staging={staging} anchor={:?} retired={:?}\n{closed}",
-        task.deliverables.factory_branch_anchor, task.deliverables.historical_factory_branch_anchors);
+    assert_eq!(tasks.get(&reworked).unwrap().status, TaskStatus::Closed, "{closed}");
 
     let waiting = close(&supervisor_core, &waived, false).await;
-    assert!(waiting.contains("waiting for batch receipt"), "{waiting}");
+    assert_ne!(tasks.get(&waived).unwrap().status, TaskStatus::Closed, "{waiting}");
     let closed = close(&supervisor_core, &waived, true).await;
     let task = tasks.get(&waived).unwrap();
     assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    assert!(task.notes.contains("supervisor_override waived the release verdict"), "{}", task.notes);
     assert!(task.notes.contains("supervisor_override waived deferred batch evidence"), "{}", task.notes);
 }
 

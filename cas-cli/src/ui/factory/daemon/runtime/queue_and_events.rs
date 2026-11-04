@@ -13506,6 +13506,15 @@ mod tests {
                 assert!(queue.limit_episode(&episode).unwrap().unwrap().0.is_none());
             }
         }
+        // A repeated report replays the stored notice; only a legacy switch row
+        // (one with a request id) is re-described under the report-only policy.
+        let episode = crate::mcp::tools::service::factory_ops::usage_limits::episode_key("provision-test", "codex", "first");
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        db.execute("UPDATE usage_limit_episodes SET detail='stored notice' WHERE episode=?", [&episode]).unwrap();
+        let repeat = || crate::mcp::tools::service::factory_ops::usage_limits::record_usage_limit(&root, "codex", &episode).unwrap();
+        assert_eq!(repeat(), "stored notice");
+        db.execute("UPDATE usage_limit_episodes SET detail='old switch', request_id=73 WHERE episode=?", [&episode]).unwrap();
+        assert!(repeat().contains("No restart queued"), "a legacy switch notice must not be replayed");
         // A queued 3.84 switch must also be inert after upgrading.
         let mut legacy = serde_json::to_value(cas_mux::WorkerSpec::builtin_default()).unwrap();
         legacy["limit_recycle"] = serde_json::json!({

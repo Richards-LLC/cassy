@@ -1389,7 +1389,7 @@ impl PtyConfig {
     /// * `supervisor_name` - For workers, the name of their supervisor (enables `target: supervisor`)
     #[allow(clippy::too_many_arguments)]
     /// Replace the generic startup turn with the assignment prepared by CAS.
-    /// Call only on a worker launch config, before applying a resume selector.
+    /// Call only on a worker launch config.
     pub fn set_worker_startup_prompt(&mut self, backend: &str, prompt: &str) {
         // Config-only builders must remain side-effect free. This private
         // handoff is consumed by spawn, before building the child environment.
@@ -1473,47 +1473,6 @@ impl PtyConfig {
             "Read the complete worker startup brief from the file at the following JSON-quoted path. Follow its contents as this turn's instructions:\n{path}"
         );
         Ok(Some(file.into_temp_path()))
-    }
-
-    /// Continue a copied worker transcript while retaining the launch recipe.
-    pub fn resume_worker_session(&mut self, backend: &str, id: &str) -> Result<()> {
-        match backend {
-            "claude" => {
-                let index = self
-                    .args
-                    .iter()
-                    .position(|arg| arg == "--session-id")
-                    .ok_or_else(|| Error::pty("Claude worker launch has no session selector"))?;
-                self.args[index] = "--resume".into();
-                self.args[index + 1] = id.to_owned();
-                for (key, value) in &mut self.env {
-                    if key == "CAS_SESSION_ID" {
-                        *value = id.to_owned();
-                    }
-                }
-            }
-            "codex" => {
-                // The startup prompt stays the final positional argument.
-                let prompt = self
-                    .args
-                    .pop()
-                    .ok_or_else(|| Error::pty("Codex worker prompt missing"))?;
-                let index = if self.command == "codex" {
-                    0
-                } else {
-                    self.args
-                        .iter()
-                        .position(|arg| arg == "codex")
-                        .map(|i| i + 1)
-                        .ok_or_else(|| Error::pty("Codex executable missing"))?
-                };
-                self.args.insert(index, "resume".into());
-                self.args.push(id.to_owned());
-                self.args.push(prompt);
-            }
-            _ => return Err(Error::pty("Harness does not support worker continuation")),
-        }
-        Ok(())
     }
 
     pub fn claude(
@@ -3632,7 +3591,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
+    async fn worker_startup_brief_stays_out_of_argv_and_child_env() {
         use std::os::unix::fs::PermissionsExt;
 
         let project = tempfile::tempdir().unwrap();
@@ -3685,90 +3644,68 @@ mod tests {
                 "{backend} exposes the assignment in argv: {:?}",
                 config.args
             );
-            let prompt = config.args.last().unwrap().clone();
-            for resume in [false, true] {
-                if resume && !matches!(backend, "claude" | "codex") {
-                    continue;
-                }
-                let mut config = config.clone();
-                if resume {
-                    config
-                        .resume_worker_session(backend, "old-session")
-                        .unwrap();
-                    assert_eq!(config.args.last(), Some(&prompt));
-                    if backend == "codex" {
-                        assert_eq!(config.args[config.args.len() - 2], "old-session");
-                        let index = if command == "nice" { 3 } else { 0 };
-                        assert_eq!(config.args[index], "resume");
-                    } else {
-                        assert!(!config.args.iter().any(|a| a == "--session-id"));
-                        assert_eq!(&config.args[..2], &["--resume", "old-session"]);
-                        assert_eq!(config.env[0].1, "old-session");
-                    }
-                }
-                // Spawn a blocking shell with the actual launch argv. No harness,
-                // account, network, startup timing or signal to another process is needed.
-                config.command = "sh".into();
-                config
-                    .args
-                    .splice(0..0, ["-c".into(), "[ -z \"${CAS_INTERNAL_WORKER_STARTUP_BRIEF+x}\" ] || exit 29; printf 'private-brief-ready\\n'; read -r release".into(), "--".into()]);
-                let mut pty = Pty::spawn("private-brief-probe", config).unwrap();
-                // portable-pty may return between fork and exec. Wait for the
-                // shell itself to prove exec and environment setup completed.
-                let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
-                let mut ready_output = Vec::new();
-                loop {
-                    match next_pty_event_until(&mut pty, deadline).await {
-                        Some(PtyEvent::Output(bytes)) => {
-                            ready_output.extend(bytes);
-                            if String::from_utf8_lossy(&ready_output).contains("private-brief-ready") {
-                                break;
-                            }
-                        }
-                        event => {
-                            pty.kill();
-                            pty.child.wait().unwrap();
-                            panic!("shell did not become ready: {event:?}; {ready_output:?}");
+            // Spawn a blocking shell with the actual launch argv. No harness,
+            // account, network, startup timing or signal to another process is needed.
+            config.command = "sh".into();
+            config
+                .args
+                .splice(0..0, ["-c".into(), "[ -z \"${CAS_INTERNAL_WORKER_STARTUP_BRIEF+x}\" ] || exit 29; printf 'private-brief-ready\\n'; read -r release".into(), "--".into()]);
+            let mut pty = Pty::spawn("private-brief-probe", config).unwrap();
+            // portable-pty may return between fork and exec. Wait for the
+            // shell itself to prove exec and environment setup completed.
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            let mut ready_output = Vec::new();
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Output(bytes)) => {
+                        ready_output.extend(bytes);
+                        if String::from_utf8_lossy(&ready_output).contains("private-brief-ready") {
+                            break;
                         }
                     }
+                    event => {
+                        pty.kill();
+                        pty.child.wait().unwrap();
+                        panic!("shell did not become ready: {event:?}; {ready_output:?}");
+                    }
                 }
-                let path = pty
-                    ._worker_startup_prompt_file
-                    .as_ref()
-                    .unwrap()
-                    .to_path_buf();
-                assert_eq!(
-                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                    0o600
-                );
-                let pid = pty.process_group_id().unwrap();
-                let observed = std::process::Command::new("ps")
-                    .args(["-p", &pid.to_string(), "-o", "command="])
-                    .output()
-                    .unwrap();
-                // pgrep uses pkill's full-command matcher without sending signals.
-                // Restrict it to this test's children on the shared factory host.
-                let matching = std::process::Command::new("pgrep")
-                    .args(["-P", &std::process::id().to_string(), "-f", "pnpm install"])
-                    .output()
-                    .unwrap();
-                pty.kill();
-                let status = pty.child.wait().unwrap();
-                assert_ne!(status.exit_code(), 29, "internal brief leaked into child environment");
-                assert_eq!(matching.status.code(), Some(1), "{:?}", matching);
-                assert!(observed.status.success());
-                let argv = String::from_utf8(observed.stdout).unwrap();
-                assert!(
-                    !argv.contains("pnpm install") && !argv.contains("cas-abcd"),
-                    "{argv}"
-                );
-                assert!(argv.contains(path.to_str().unwrap()), "{argv}");
-                assert!(path.starts_with(worktree.join(".cas")),
-                    "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
-                drop(pty);
-                assert!(!path.exists(), "worker teardown must remove the brief");
             }
+            let path = pty
+                ._worker_startup_prompt_file
+                .as_ref()
+                .unwrap()
+                .to_path_buf();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let pid = pty.process_group_id().unwrap();
+            let observed = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "command="])
+                .output()
+                .unwrap();
+            // pgrep uses pkill's full-command matcher without sending signals.
+            // Restrict it to this test's children on the shared factory host.
+            let matching = std::process::Command::new("pgrep")
+                .args(["-P", &std::process::id().to_string(), "-f", "pnpm install"])
+                .output()
+                .unwrap();
+            pty.kill();
+            let status = pty.child.wait().unwrap();
+            assert_ne!(status.exit_code(), 29, "internal brief leaked into child environment");
+            assert_eq!(matching.status.code(), Some(1), "{:?}", matching);
+            assert!(observed.status.success());
+            let argv = String::from_utf8(observed.stdout).unwrap();
+            assert!(
+                !argv.contains("pnpm install") && !argv.contains("cas-abcd"),
+                "{argv}"
+            );
+            assert!(argv.contains(path.to_str().unwrap()), "{argv}");
+            assert!(path.starts_with(worktree.join(".cas")),
+                "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            drop(pty);
+            assert!(!path.exists(), "worker teardown must remove the brief");
         }
     }
 

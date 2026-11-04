@@ -773,15 +773,16 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 cas::types::VerificationStatus::Rejected);
             assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id,
                 dispatch.id, "retries cannot create a post-merge approval");
+            let findings_reason = format!("rejected {row}");
             supervisor.task(Parameters(task_req(serde_json::json!({
-                "action": "request_changes", "id": task.id, "reason": format!("rejected {row}"),
+                "action": "request_changes", "id": task.id, "reason": findings_reason,
             })))).await.expect("supervisor returns the rejected candidate for repair");
             let returned = task_store.get(&task.id).unwrap();
             assert_eq!(returned.status, TaskStatus::Open);
             assert_eq!(returned.assignee.as_deref(), Some(worker.as_str()));
-            assert!(returned.notes.contains(&format!("rejected {row}")));
+            assert!(returned.notes.contains(&findings_reason));
             let findings = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
-                .into_iter().filter(|prompt| prompt.target == worker && prompt.prompt.contains(&format!("rejected {row}"))).count();
+                .into_iter().filter(|prompt| prompt.target == worker && prompt.prompt.contains(&findings_reason)).count();
             assert_eq!(findings, 1, "one worker findings handoff");
             continue;
         }

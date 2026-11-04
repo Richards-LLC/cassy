@@ -574,8 +574,8 @@ mod tests {
         let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
         std::fs::create_dir_all(&projects).unwrap();
         let at = Utc::now() - chrono::Duration::seconds(2);
-        let start = serde_json::json!({"type":"user","timestamp":at,"message":{"content":"Prior work"}});
-        let end = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(1),"message":{"stop_reason":"end_turn"}});
+        let start = serde_json::json!({"type":"user","timestamp":at,"message":{"role":"user","content":"Prior work"}});
+        let end = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(1),"message":{"role":"assistant","stop_reason":"end_turn"}});
         let transcript = projects.join("finish-background.jsonl");
         std::fs::write(&transcript, if mid_turn { format!("{start}\n") } else { format!("{start}\n{end}\n") }).unwrap();
         let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {

@@ -535,6 +535,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
             "peer lost closure receipt: {}",
             tasks.get(TASK).unwrap().notes
         );
+        tasks.append_note(TASK, "[2026-11-04 19:00] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-prior: waiting for bundle restore").unwrap();
         let closed = close_text(&peer_core, TASK).await;
         assert_eq!(
             tasks.get(TASK).unwrap().status,

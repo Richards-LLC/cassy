@@ -1023,6 +1023,24 @@ mod tests {
         assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
     }
 
+    #[test]
+    fn restored_citation_after_batch_outcome_has_its_own_note_cas_d4310() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project/.cas");
+        let base = temp.path().join("artifacts");
+        let paths = crate::config::resolved_factory_artifact_paths(&root, Some(base.to_str().unwrap()));
+        let [scoped, legacy] = paths.task_dirs("cas-restored");
+        let bundle = scoped.join("qa/bundle.json");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(&bundle, "restored bundle").unwrap();
+        let mut task = Task::new("cas-restored".into(), "restored citation".into());
+        task.notes = format!("[2026-11-04 19:00] qa-bundle: {}\n\n[2026-11-04 19:01] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-old: held", legacy.join("qa/bundle.json").display());
+        let notes = task_qa_notes(&paths, &task, &scoped);
+        assert_eq!(crate::qa_evidence::cited_bundle_path(&notes).as_deref(), bundle.to_str());
+        assert_eq!(cas_store::task_note_markers::note_blocks(&notes).len(), 3,
+            "the restored citation must have its own timestamped note, not join the outcome block");
+    }
+
     /// cas-1b4d: a merged delivery with deferred batch evidence closes inside
     /// an operator's rapid-response window (skip ledgered) and is refused for
     /// its batch receipt without one.

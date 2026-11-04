@@ -32,7 +32,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed — Factory write roots
 
 - **Agents can write their Claude memory** — Each project's Claude Code
-  memory folder (`<claude dir>/projects/<project>/memory`) is now a built-in
+  memory folder (`<claude dir>/projects/<project>/memory`, under the active
+  Claude config) is now a built-in
   write root, like Downloads, so supervisors and workers keep auto-memory
   without any configuration; the first write creates the folder. Transcripts
   and other files beside it stay refused, and a symlinked project or `memory`

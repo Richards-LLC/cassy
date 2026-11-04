@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **Drop work-event answers for disconnected clients** — Was: a finished
+  work-event page or detail waited in the daemon until some Commander client
+  reconnected. Now: an answer whose client has gone is dropped on the next
+  loop pass, and a reconnecting client asks again.
+
 ### Fixed — Write-root guard
 
 - **Allow read-only scripts that mention the write-roots key** — Was: a

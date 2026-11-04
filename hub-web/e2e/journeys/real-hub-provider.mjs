@@ -4,7 +4,7 @@ export function realHubProviderScript(cli) {
 import sys,os,json,subprocess,uuid,tty
 from datetime import datetime,timezone
 if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
-if '--version' in sys.argv: print('2.1.47');sys.exit(0)
+if '--version' in sys.argv: print('2.1.316');sys.exit(0)
 if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
 # Real harnesses consume paste frames without canonical line buffering. A PTY need not map
 # the submit CR to LF, and canonical buffers can truncate a startup prompt.

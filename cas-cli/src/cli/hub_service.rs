@@ -172,6 +172,18 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
                             Some(format!("cas {cli} login {profile}")),
                             None,
                         ),
+                        LaunchError::IncompatibleBinary { minimum_version, detail } => (
+                            "version too old".to_owned(),
+                            None,
+                            Some(format!("update Claude Code (≥ {minimum_version})")),
+                            Some(detail),
+                        ),
+                        LaunchError::UnprobeableBinary { detail } => (
+                            "version check failed".to_owned(),
+                            None,
+                            Some("repair Claude Code installation".to_owned()),
+                            Some(detail),
+                        ),
                         LaunchError::ProbeFailed { detail, .. } =>
                             ("launch check failed".to_owned(), None, None, Some(detail)),
                     };

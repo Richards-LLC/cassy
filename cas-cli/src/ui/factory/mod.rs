@@ -62,7 +62,7 @@ pub(crate) use app::provisioning::{
 pub use app::provisioning::run_internal_provisioner;
 #[doc(hidden)]
 pub use app::provisioning::launch_provisioner_for_test;
-pub(crate) use app::render_and_ops::epic_workers::{enqueue_context_resume_brief, preflight_spawn_base};
+pub(crate) use app::render_and_ops::epic_workers::{enqueue_context_resume_brief, preflight_spawn_base, spawn_worktree_repo_root};
 mod boot;
 mod buffer_backend;
 mod client;

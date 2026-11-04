@@ -13,8 +13,8 @@ TTY) it does what Claude Code does at startup, without an LLM:
 - serve a Unix control socket at `<run dir>/<agent>.sock` that the runner uses
   to call MCP tools as this agent.
 
-Outside a TTY (the factory's `claude --version` / `--help` probes, `cas init`)
-it exits 0 at once.
+Version and help probes report the scripted harness's compatible interface;
+other non-TTY calls from `cas init` exit 0 at once.
 
 Control protocol: one JSON request line, one JSON response line.
   {"op": "tool", "name": "coordination", "arguments": {...}}
@@ -670,13 +670,16 @@ def main():
         return 0
     if len(sys.argv) >= 2 and sys.argv[1] in MACHINE_COMMANDS:
         return machine_main(sys.argv[1:])
+    if sys.argv[1:] == ["--version"]:
+        print("2.1.316 (Claude Code scripted fixture)")
+        return 0
     if sys.argv[1:] == ["--help"]:
         # The scripted harness accepts these arguments. Native worker
         # isolation probes must see them before it will launch the stub.
         print("Scripted Claude harness: --mcp-config --strict-mcp-config --permission-mode --allowedTools --disallowedTools")
         return 0
     if not sys.stdin.isatty():
-        # `claude --version` and `cas init` probes.
+        # Other `cas init` probes.
         return 0
     run_pane()
     return 0

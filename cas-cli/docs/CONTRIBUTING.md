@@ -2113,6 +2113,14 @@ for the inventory and per-test process isolation rules. Run
 `python3 scripts/cas-test-targets.py cas-cli --check` from the repository root
 after adding an integration suite so a missing module cannot silently drop tests.
 
+Hub/doctor/status fixtures that inject a private `HOME` and `PATH` set
+`CAS_TEST_HUB_PATH` to the desired candidate PATH. Hub discovery then uses
+only those supplied absolute entries (plus Claude's native slots under that HOME), without a login
+shell or fixed host directories. Lib tests set this candidate input rather
+than mutating process-global PATH. This narrows discovery; minimum-version
+verification still applies. A fake Claude used to test missing profiles must
+answer `--version` with a compatible version before its normal auth payload.
+
 Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
@@ -3423,8 +3431,12 @@ version change landing on `main` publishes it with no agent in between.
 Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 
 1. On the epic branch, after closeout is complete (one full review, one batch fix,
-   fix-diff re-review, one QA round), write the release entries under
-   `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog format).
+   fix-diff re-review, one QA round), check the release entries: each
+   delivery's `changelog.d/<task-id>.md` fragment plus anything still under
+   `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog format). Deliveries
+   write fragments, not `CHANGELOG.md`, because GitHub's merge queue ignores
+   the local `cas-changelog` merge driver and conflicts two insertions at the
+   top of the section (cas-f2be).
 2. Run `scripts/release.sh --next-version`. It prints the next version (one
    minor step above `main`) and the release-notes draft path
    `docs/release-notes/<date>-v<x.y.z>-slack.md`. Write the Slack draft there
@@ -3433,15 +3445,16 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 3. Run `scripts/release.sh` (in the background with a log: it watches the PR
    until it merges). It merges `main` in when the branch is behind, bumps the
    release crates and `Cargo.lock`, runs `npm ci && npm run build` in `hub-web`
-   so the committed embedded Commander bundle carries that version, promotes `[Unreleased]` to
-   `## [x.y.z] - <date>`, names the draft, commits `release: vx.y.z`, pushes,
+   so the committed embedded Commander bundle carries that version, folds the
+   `changelog.d/` fragments and `[Unreleased]` into `## [x.y.z] - <date>` and
+   deletes the folded fragments, names the draft, commits `release: vx.y.z`, pushes,
    opens the PR to `main`, waits for its Scoped Validation run to go green,
    and only then enables auto-merge. When another release lands first it
    merges it, takes the next version and re-enables auto-merge itself. Exit 5
    is a red PR CI, reported once with the failing tests (the PR never entered
    the queue); exit 4 is a code conflict with `main`; exit 3 is a merge-queue
    ejection. Repair, push, then rerun the command.
-4. Hotfix: branch from `main`, commit the fix and its `[Unreleased]` entry,
+4. Hotfix: branch from `main`, commit the fix and its changelog fragment,
    then `scripts/release.sh --hotfix` (the next patch version). It takes the
    same PR, queue and workflow path.
 5. The merge-queue run also runs `release-prebuild.yml` for a PR that changes

@@ -844,6 +844,7 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
     let shell = bin.join("private-shell");
     crate::test_paths::warm_stub(&shell, &format!("#!/bin/sh\nprintf '__CAS_PATH_BEGIN__{}:/usr/bin:/bin__CAS_PATH_END__'\n", bin.display()));
     env.set("SHELL", &shell);
+    env.set("CAS_TEST_HUB_PATH", std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap());
     let codex = bin.join("codex");
     std::fs::write(&codex, "#!/bin/sh\nprintf 'Logged in using ChatGPT'\n").unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -85,7 +85,12 @@ impl CasCore {
                 lines.push(format!("Rule references: {} need marked code/test sites. Declare Rule-driven sites in the brief or close receipt; each anchor needs its adjacent marker and verbatim scope. Inspect with `cas rules refs <id>`.", ids.into_iter().collect::<Vec<_>>().join(", ")));
             }
         }
-        if receipt_scope::has_unreleased_section_at_head(&repo, "HEAD") {
+        if receipt_scope::has_changelog_fragments_at(&repo, "HEAD") {
+            lines.push(format!(
+                "Changelog: product or developer source needs a titled entry in its own `{}/{id}.md` fragment (not in CHANGELOG.md), or a decision note \"no changelog: <reason>\".",
+                receipt_scope::CHANGELOG_FRAGMENT_DIR,
+            ));
+        } else if receipt_scope::has_unreleased_section_at_head(&repo, "HEAD") {
             lines.push(
                 "Changelog: product or developer source needs a titled `## [Unreleased]` entry, or a decision note \"no changelog: <reason>\"."
                     .to_string(),

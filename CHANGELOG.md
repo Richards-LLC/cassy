@@ -339,6 +339,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   but are left out of the change count and map, and the counting note names
   them. v3.84.0 now counts 13 changes: 8 added, 3 changed and 2 fixed.
 
+### Fixed — Commander supervisor startup
+
+- **Launch a compatible Claude and show failed turns** — Factory and Commander launches prefer the native Claude installation and verify version 2.1.280 or newer before starting. API failures appear in the conversation and session preview on the first failing turn.
+- **Keep Claude readiness fixes visible** — Hub status names missing, outdated
+  and unverifiable Claude clients with their own install, update or repair
+  action. Missing clients keep the existing doctor and account-picker state.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

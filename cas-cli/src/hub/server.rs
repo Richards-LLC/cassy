@@ -811,7 +811,9 @@ fn profile_envelope(
             error: Some(match error {
                 super::launch_env::LaunchError::ProfileMissing { .. } => "profile_missing",
                 super::launch_env::LaunchError::NotLoggedIn { .. } => "not_logged_in",
-                super::launch_env::LaunchError::ProbeFailed { .. } => "cli_probe_failed",
+                super::launch_env::LaunchError::ProbeFailed { .. }
+                | super::launch_env::LaunchError::IncompatibleBinary { .. }
+                | super::launch_env::LaunchError::UnprobeableBinary { .. } => "cli_probe_failed",
                 super::launch_env::LaunchError::MissingBinary { .. } => unreachable!(),
             }),
         },
@@ -1916,18 +1918,30 @@ mod launch_profile_tests {
             body["codex"],
             serde_json::json!({"installed":false,"profiles":[]})
         );
-        let failed = profile_envelope(Ok(Err(
+        let absent_claude = profile_envelope(Ok(Err(
+            super::super::launch_env::LaunchError::MissingBinary { cli: "claude" },
+        )));
+        assert_eq!(serde_json::to_value(absent_claude).unwrap(), body["codex"]);
+        for error in [
             super::super::launch_env::LaunchError::ProbeFailed {
                 cli: "codex",
                 detail: "status probe timed out".into(),
             },
-        )));
-        assert_eq!(
-            serde_json::to_value(failed).unwrap(),
-            serde_json::json!({
-                "installed":true,"profiles":[],"error":"cli_probe_failed"
-            })
-        );
+            super::super::launch_env::LaunchError::IncompatibleBinary {
+                minimum_version: "2.1.280", detail: "Claude Code is 2.1.279".into(),
+            },
+            super::super::launch_env::LaunchError::UnprobeableBinary {
+                detail: "Claude Code --version timed out".into(),
+            },
+        ] {
+            let failed = profile_envelope(Ok(Err(error)));
+            assert_eq!(
+                serde_json::to_value(failed).unwrap(),
+                serde_json::json!({
+                    "installed":true,"profiles":[],"error":"cli_probe_failed"
+                })
+            );
+        }
     }
 }
 
@@ -2069,7 +2083,9 @@ fn launch_session_blocking(
                 super::launch_env::LaunchError::MissingBinary { .. } => "cli_missing",
                 super::launch_env::LaunchError::ProfileMissing { .. } => "profile_missing",
                 super::launch_env::LaunchError::NotLoggedIn { .. } => "not_logged_in",
-                super::launch_env::LaunchError::ProbeFailed { .. } => "cli_probe_failed",
+                super::launch_env::LaunchError::ProbeFailed { .. }
+                | super::launch_env::LaunchError::IncompatibleBinary { .. }
+                | super::launch_env::LaunchError::UnprobeableBinary { .. } => "cli_probe_failed",
             };
             return launch_error(StatusCode::UNPROCESSABLE_ENTITY, code, &error.to_string());
         }

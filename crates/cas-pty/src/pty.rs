@@ -2332,7 +2332,10 @@ pub fn claude_supports_flag(flag: &str) -> bool {
     static OPTIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
     OPTIONS
         .get_or_init(|| {
-            let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
+            let Ok(binary) = crate::claude_binary::current_claude_binary() else {
+                return BTreeSet::new();
+            };
+            let Ok(output) = std::process::Command::new(binary).arg("--help").output() else {
                 return BTreeSet::new();
             };
             if !output.status.success() {
@@ -2693,6 +2696,19 @@ impl Pty {
         {
             return Err(Error::pty(reason.clone()));
         }
+        // Pin Claude before creating the PTY. Both direct and niced launches
+        // must use the verified native client, independent of inherited PATH.
+        // Preserve the logical harness name in config for policy/audit readers.
+        let claude_binary = if config.effective_command() == "claude" {
+            let environment = crate::violet_env::resolved_environment(&config.env, &config.env_remove);
+            let home = environment.get("HOME").map(PathBuf::from)
+                .ok_or_else(|| Error::pty("Cannot launch Claude Code: HOME is unavailable"))?;
+            let paths: Vec<_> = environment.get("PATH")
+                .map(|path| std::env::split_paths(path).collect()).unwrap_or_default();
+            let binary = crate::resolve_claude_binary(&home, &paths)
+                .map_err(|error| Error::pty(error.to_string()))?;
+            Some(binary.to_string_lossy().into_owned())
+        } else { None };
         let worker_startup_prompt_file = config.materialize_worker_startup_brief()?;
         config.apply_worker_credential_policy();
         config.hydrate_violet_environment();
@@ -2741,11 +2757,22 @@ impl Pty {
 
         // Build command. A worker starts inside the credential-store mask
         // when the operator has a store to hide (cas-5b3d).
+        let mut program = config.command.clone();
+        let mut args = config.args.clone();
+        if let Some(binary) = claude_binary {
+            if program == "nice" {
+                if let Some(command) = args.iter_mut().find(|arg| arg.as_str() == "claude") {
+                    *command = binary;
+                }
+            } else {
+                program = binary;
+            }
+        }
         let launch =
-            crate::store_isolation::worker_launch(&config.command, &config.args, &config.env)
+            crate::store_isolation::worker_launch(&program, &args, &config.env)
                 .map_err(Error::pty)?;
         let (program, args) =
-            launch.unwrap_or_else(|| (config.command.clone(), config.args.clone()));
+            launch.unwrap_or((program, args));
         let mut cmd = CommandBuilder::new(program);
         cmd.env_remove(WORKER_STARTUP_BRIEF);
         cmd.args(args);
@@ -4213,6 +4240,72 @@ mod tests {
             descendant_result == "descendant-clear",
             "descendant result was {descendant_result:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0() {
+        use std::os::unix::fs::PermissionsExt;
+        for (native, versions) in [(Some("2.1.316"), false), (Some("2.1.116"), true), (None, false)] {
+            let temp = tempfile::tempdir().unwrap();
+            let stale = temp.path().join("npm/bin/claude");
+            let current = temp.path().join(".local/bin/claude");
+            for (path, version) in [(&stale, Some("2.1.116")), (&current, native)] {
+                let Some(version) = version else { continue };
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version} (Claude Code)'; else printf '%s' \"$0\" > \"$1\"; fi\n")).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let expected = if versions {
+                // A misleading filename must not bypass --version validation.
+                let directory = temp.path().join(".local/share/claude/versions");
+                std::fs::create_dir_all(&directory).unwrap();
+                for (name, version) in [("2.1.316", "2.1.316"), ("2.1.1000", "2.1.1000"), ("9.0.0", "2.1.116")] {
+                    let path = directory.join(name);
+                    std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version} (Claude Code)'; else printf '%s' \"$0\" > \"$1\"; fi\n")).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                directory.join("2.1.1000")
+            } else { current };
+            // A private nice wrapper exercises the production worker argv shape
+            // without depending on anything on the host PATH.
+            let wrapper = temp.path().join("nice");
+            std::fs::write(&wrapper, "#!/bin/sh\nshift 2\nexec \"$@\"\n").unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let marker = temp.path().join("launched");
+            let args = if versions {
+                vec!["-n".into(), "10".into(), "claude".into(), marker.to_string_lossy().into_owned()]
+            } else { vec![marker.to_string_lossy().into_owned()] };
+            let config = PtyConfig {
+                command: if versions { "nice" } else { "claude" }.into(),
+                args,
+                cwd: Some(temp.path().to_path_buf()),
+                env: vec![
+                    ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+                    ("PATH".into(), std::env::join_paths([stale.parent().unwrap(), temp.path()]).unwrap().to_string_lossy().into_owned()),
+                    ("CAS_AGENT_ROLE".into(), "supervisor".into()),
+                ],
+                ..PtyConfig::default()
+            };
+            let result = Pty::spawn("claude-resolution", config);
+            if native.is_none() {
+                let error = match result { Ok(mut pty) => { pty.kill(); panic!("stale CLI must refuse before launch") }, Err(error) => error.to_string() };
+                assert!(error.contains("2.1.280") && error.contains("2.1.116"), "{error}");
+                assert!(!marker.exists());
+                continue;
+            }
+            let mut pty = result.unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(_)) => break,
+                    Some(PtyEvent::Error(error)) => panic!("{error}"),
+                    Some(PtyEvent::Output(_)) => {},
+                    None => panic!("fixture did not exit"),
+                }
+            }
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), expected.to_string_lossy());
+        }
     }
 
     /// Run `script` under `sh -c` in a PTY as `role` and return its output.

@@ -13,8 +13,9 @@
 #      release files (version lines, Cargo.lock, CHANGELOG, draft) itself;
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
-#      [Unreleased] to a dated [x.y.z] section, and names the release-notes
-#      draft docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
+#      [Unreleased] and the changelog.d fragments to a dated [x.y.z]
+#      section, and names the release-notes draft
+#      docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
 #      embedded Commander bundle with the new version;
 #   4. commits "release: v<x.y.z>", pushes, opens the PR to the base branch
 #      (or retitles the open one), waits for the PR's one CI run (Scoped
@@ -342,6 +343,10 @@ prepare() {
         || die "CHANGELOG.md promotion failed"
     place_draft "$version" "$source"
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
+    # Promotion deleted the changelog.d fragments it folded in (cas-f2be).
+    if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
+        git add -- changelog.d
+    fi
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
         -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"

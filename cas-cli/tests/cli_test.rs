@@ -3298,7 +3298,7 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     let sockets = cas::test_paths::short_socket_tempdir();
     let root = sockets.path();
     // The old launch reaches this inert supervisor before its bind fails.
-    fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
+    fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.316; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
     fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
     let path = std::env::join_paths(std::iter::once(bin).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())

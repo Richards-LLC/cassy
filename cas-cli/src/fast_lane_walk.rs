@@ -333,25 +333,26 @@ pub(crate) fn tick(root: &Path, now: DateTime<Utc>) -> Result<()> {
     }
 }
 
-/// One off-loop runner per project, including pending decisions on restart.
+/// Project-locked, off-loop steps resume pending decisions after restart.
+/// Contenders retry each step: if the lease owner exits, another live serve
+/// process takes over without waiting for a new process to be launched.
 pub(crate) fn spawn_runner(root: PathBuf) {
     if crate::fast_lane::configured(&root).is_none() && !directory(&root).exists() {
         return;
     }
-    let lease = match lock(&directory(&root).join("runner")) {
-        Ok(lease) => lease,
-        Err(error) => {
-            if !crate::qa_post_release::lock_contention(&error) {
-                tracing::warn!(%error, "fast-lane QA runner lease failed");
-            }
-            return;
-        }
-    };
     tokio::spawn(async move {
-        let _lease = lease;
         loop {
             let root = root.clone();
-            match tokio::task::spawn_blocking(move || tick(&root, Utc::now())).await {
+            match tokio::task::spawn_blocking(move || -> Result<()> {
+                let _lease = match lock(&directory(&root).join("runner")) {
+                    Ok(lease) => lease,
+                    Err(error) if crate::qa_post_release::lock_contention(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                tick(&root, Utc::now())
+            })
+            .await
+            {
                 Ok(Ok(())) => {}
                 result => tracing::warn!(?result, "fast-lane QA decision tick failed"),
             }

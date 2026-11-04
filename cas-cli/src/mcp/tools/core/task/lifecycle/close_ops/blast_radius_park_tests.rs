@@ -1164,7 +1164,18 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
         std::fs::write(artifacts.join("LEDGER.md"), format!(
             "# Failed hotfix walk\n\nbuild: {merge}\nscope: hotfix journey\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Q1 | Turn the gear | Gear turns | Journey is broken | FAIL | fixture | qa-failure.txt | - |\n",
         )).unwrap();
-        let held = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+        let held = if outcome == "qa-fix" {
+            // The worker owns the production walk and may record its FAIL
+            // after the automatic merge close has already waited for it.
+            env.set("CAS_AGENT_ROLE", "worker");
+            let held = call(&f.worker, serde_json::json!({
+                "action": "close", "id": ID, "reason": "post-merge production walk recorded",
+            })).await;
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            held
+        } else {
+            cassy.close_green_merged_delivery(ID).await.receipt(ID)
+        };
         let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
         let asks = queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap()
             .into_iter().filter(|row| row.kind.as_deref() == Some("ask")).collect::<Vec<_>>();

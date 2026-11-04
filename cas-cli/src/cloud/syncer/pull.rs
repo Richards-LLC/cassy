@@ -1507,7 +1507,7 @@ fn restore_task_proofs(
     if crate::qa_evidence::cited_bundle_path(&local.notes).is_none()
         && let Some(cited) = crate::qa_evidence::cited_bundle_path(&remote.notes)
     {
-        store.append_note(&remote.id, &format!("qa-bundle: {cited}"))?;
+        store.append_note(&remote.id, &crate::qa_evidence::bundle_citation_note(&cited))?;
     }
     if let Some(root) = root {
         crate::qa_pass::sync::import(root, remote, qa)

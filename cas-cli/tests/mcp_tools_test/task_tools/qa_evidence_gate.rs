@@ -458,7 +458,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
         let tasks = cas::store::open_task_store_local(&root).unwrap();
         if newer_local {
             let mut local = published.clone();
-            local.notes.clear();
+            local.notes = "[2026-11-04 18:59] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-local: no producer citation yet".into();
             local.title = "Newer peer merge metadata".into();
             local.deliverables.green_merge_commit = Some(head.clone());
             local.updated_at += chrono::Duration::hours(2);
@@ -517,6 +517,8 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
         if newer_local {
             assert_eq!(tasks.get(TASK).unwrap().title, "Newer peer merge metadata");
         }
+        assert!(cas::qa_evidence::cited_bundle_path(&tasks.get(TASK).unwrap().notes).is_some(),
+            "an owner citation restored by sync must not join the preceding outcome block");
         if team {
             // Team pulls exercise an exact canonical citation; personal
             // pulls retain the original platform alias. Neither source exists.
@@ -535,6 +537,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
             "peer lost closure receipt: {}",
             tasks.get(TASK).unwrap().notes
         );
+        tasks.append_note(TASK, "[2026-11-04 19:00] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-prior: waiting for bundle restore").unwrap();
         let closed = close_text(&peer_core, TASK).await;
         assert_eq!(
             tasks.get(TASK).unwrap().status,

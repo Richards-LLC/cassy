@@ -55,45 +55,9 @@ If the branch is already merged (`$BASE` equals `HEAD`), inspect the recorded co
 
 Before running a candidate `serve` or any stateful command, isolate it in a disposable fixture project and HOME, as `verifier-evidence-gate.md` requires under Candidate fixture isolation.
 
-### Step 4: Read every changed file in full
+### Steps 4–7: Code and evidence checks
 
-Run `rule action=list` for the project rules. Read each changed file completely. In the changed code, reject:
-
-- TODO/FIXME/XXX/HACK markers, and `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `throw new Error('Not implemented')`;
-- temporal shortcuts ("for now", "temporarily", "placeholder") that leave an acceptance-criteria item undone;
-- new `@ts-ignore`, `#[allow(dead_code)]`, `# type: ignore` without a stated reason;
-- code that duplicates existing functionality (search before approving).
-
-### Step 5: Structural checks with receipts
-
-Run commands, do not just opine. Use `ast-grep` on changed files, for example `ast-grep --lang rust -p '$EXPR.unwrap()' <file>`, `ast-grep --lang typescript -p '$EXPR as any' <file>`, `ast-grep --lang typescript -p 'catch ($ERR) {}' <file>`. If `ast-grep` is unavailable or cannot parse the language, fall back to:
-
-```bash
-rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|except:' <changed_file>
-```
-
-Back every finding with a command output or an exact line reference.
-
-To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
-
-### Step 6: Impact, wiring and co-changes (blocking when missing)
-
-- A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
-- Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
-- Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
-- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
-
-### Step 7: Honor the task's `execution_note`
-
-- `test-first`: the delivery must add or change at least one test case, in a new or an existing file, and the task must record a run in which that case failed before the fix. Never require a new test file or a number of tests: a few tests that each prove one behaviour are the target. Added cases show in:
-
-  ```bash
-  git diff "$BASE" HEAD | grep -nE '^\+.*(#\[(tokio::)?test|fn test_|\b(it|test)\(|def test_)'
-  ```
-
-  A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
-- `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
-- `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
+Read and apply **Code review procedure** in `skills/cas-qa-craft/references/verifier-evidence-gate.md`: read every changed file, run structural commands, trace impact/wiring/co-changes and honor `execution_note`. These remain blocking completeness checks, before Phase 2. If the reference is missing, record `status=error` naming it and stop.
 
 ## Phase 2: Quality (only when Phase 1 passes)
 

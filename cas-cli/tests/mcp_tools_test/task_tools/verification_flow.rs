@@ -1069,8 +1069,10 @@ async fn sibling_merge_into_the_epic_keeps_the_merged_delivery_verdict_cas_a32c(
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
         .unwrap()
         .expect("dispatch");
-    let anchors = &dispatch.repository.as_ref().expect("proof").anchor_commits;
-    assert_eq!(anchors, &vec![tip.clone()], "the checkout HEAD is not the delivery");
+    let proof = dispatch.repository.as_ref().expect("proof");
+    assert!(proof.anchor_commits.is_empty(), "the immutable candidate binds the whole review without incidental checkout anchors");
+    assert_ne!(proof.head_commit, head_of(repo), "review the candidate, not the primary checkout");
+    proof_boundary_git(repo, &["merge-base", "--is-ancestor", &tip, &proof.head_commit]);
 
     // An unrelated sibling lands on the epic while the verifier reviews.
     on_epic(&|| commit_on(repo, "sibling.txt", "sibling delivery"));

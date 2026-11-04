@@ -2481,14 +2481,20 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n",
         )
         .unwrap();
+        if verdict == "approved" {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(fixture.cas_root.join("config.toml")).unwrap()
+                .write_all(b"[fast_lane]\nenabled=true\npaths=['delivery.txt']\nmerge_checks=['PR gate']\n").unwrap();
+        }
         let tasks = open_task_store(&fixture.cas_root).unwrap();
         let mut task = tasks.get("cas-e429").unwrap();
-        task.depth = TaskDepth::Deep;
-        task.status = TaskStatus::AwaitingMerge;
+        task.depth = if verdict == "approved" { TaskDepth::Light } else { TaskDepth::Deep };
+        task.status = if verdict == "approved" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        if verdict == "approved" { task.task_type = TaskType::Bug; }
         task.labels = vec!["force-verifier".into()];
         task.acceptance_criteria = "Review this candidate before publishing it.".into();
-        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
-        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        task.deliverables.factory_branch_anchor = (verdict != "approved").then(|| fixture.tip.clone());
+        task.deliverables.parked_branch = (verdict != "approved").then(|| fixture.branch.clone());
         tasks.update(&task).unwrap();
         let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
         let mut merge = coord_req("worktree_merge");

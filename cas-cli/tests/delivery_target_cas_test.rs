@@ -764,12 +764,25 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
             assert!(!cas_git_is_ancestor(&repo.root, &delivery_branch, "main"));
             let declined = task_store.get(&task.id).unwrap();
-            assert_eq!(declined.status, TaskStatus::Open, "{row}: {recorded}");
+            // Candidate rejection holds this unpublished delivery; the
+            // supervisor explicitly returns it for repair (cas-e051).
+            assert_eq!(declined.status, TaskStatus::AwaitingMerge, "{row}: {recorded}");
             assert_eq!(declined.assignee.as_deref(), Some(worker.as_str()));
             assert!(declined.deliverables.green_merge_commit.is_none());
-            assert!(declined.notes.contains(&format!("rejected {row}")));
+            assert_eq!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().unwrap().status,
+                cas::types::VerificationStatus::Rejected);
             assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id,
                 dispatch.id, "retries cannot create a post-merge approval");
+            supervisor.task(Parameters(task_req(serde_json::json!({
+                "action": "request_changes", "id": task.id, "reason": format!("rejected {row}"),
+            })))).await.expect("supervisor returns the rejected candidate for repair");
+            let returned = task_store.get(&task.id).unwrap();
+            assert_eq!(returned.status, TaskStatus::Open);
+            assert_eq!(returned.assignee.as_deref(), Some(worker.as_str()));
+            assert!(returned.notes.contains(&format!("rejected {row}")));
+            let findings = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
+                .into_iter().filter(|prompt| prompt.target == worker && prompt.prompt.contains(&format!("rejected {row}"))).count();
+            assert_eq!(findings, 1, "the worker hears the supervisor's findings exactly once");
             continue;
         }
         let merged = if row == "green-approved" {
@@ -1677,13 +1690,13 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         if outcome == "green-bad-neighbor" {
             std::fs::write(request.with_file_name("broken.json"), "not json").unwrap();
         }
-        if outcome == "green-held" {
-            cas_store::create_verification_dispatch_bound(
+        let held_dispatch = if outcome == "green-held" {
+            Some(cas_store::create_verification_dispatch_bound(
                 &fixture.cas_root, &fixture.task_id, &fixture.supervisor_id,
                 &fixture.supervisor_id, &cas_types::VerificationProofBoundary::task(),
                 chrono::Utc::now() + chrono::Duration::minutes(10), false,
-            ).unwrap();
-        }
+            ).unwrap())
+        } else { None };
         std::fs::write(&response, format!(r#"{{"check_runs":[{{"name":"Fast Validation","status":"completed","conclusion":"{}"}}]}}"#,
             if outcome == "red" { "failure" } else { "success" })).unwrap();
         if outcome == "no-checks" { std::fs::write(&response, r#"{"check_runs":[]}"#).unwrap(); }
@@ -1712,19 +1725,24 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
         // pin: retry notices share the CI watcher's durable lifecycle wake namespace.
         let notices: Vec<_> = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap()
             .peek_all(100).unwrap().into_iter().filter(|p| p.source.starts_with("lifecycle-wake:ci-red-run:") || p.source.starts_with("lifecycle-wake:merge-ci-retry:")).collect();
-        if outcome.starts_with("green") {
+        if outcome.starts_with("green") && held_dispatch.is_none() {
             assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),
-                "{outcome}: {:?}; task: {:?}", notices, open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap());
+                "{outcome}: {notices:?}");
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
-            if outcome == "green-held" {
-                let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();
-                assert_ne!(task.status, TaskStatus::Closed);
-                assert!(task.notes.contains("close held"), "{}", task.notes);
-            }
         } else {
             assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
-            assert_eq!(notices.len(), 1, "{outcome}: red and moved lanes each send one notice");
+            assert_eq!(notices.len(), 1, "{outcome}: stopped lanes each send one notice");
             assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+            if let Some(dispatch) = held_dispatch {
+                // cas-c744: a new pending review holds publication, rather
+                // than allowing the old post-merge close-held scenario.
+                assert!(notices[0].prompt.contains("PRE-MERGE VERIFICATION"), "{notices:?}");
+                assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &fixture.task_id).unwrap().unwrap().id,
+                    dispatch.id, "automatic retry cannot replace the pending review");
+                let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();
+                assert_eq!(task.status, TaskStatus::AwaitingMerge);
+                assert!(task.deliverables.green_merge_commit.is_none());
+            }
         }
     }
 }

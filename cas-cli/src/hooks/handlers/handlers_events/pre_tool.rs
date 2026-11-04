@@ -6096,6 +6096,18 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
                 "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
             ));
         }
+        // cas-b181: config writes judged by the CLI parser, so options and
+        // their values (`set --store here <key>`) cannot hide the key. The
+        // word-position checks below remain for argv the parser rejects.
+        match parsed_operator_config_write(&args) {
+            Some(ParsedConfigWrite::Policy) => return Some(OPERATOR_POLICY_COMMAND_DENIAL.to_string()),
+            Some(ParsedConfigWrite::GuardedKey(key)) => {
+                return Some(format!(
+                    "🚫 OPERATOR-ONLY (cas-0d4f0): {key} relaxes a Cassy guard, so only the operator changes it, from their own terminal, never an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set {key} …` themselves. Ordinary keys stay settable with `cas config set`."
+                ));
+            }
+            None => {}
+        }
         let config = args.iter().position(|arg| arg == "config");
         let refused = config.is_some_and(|at| {
             let rest = &args[at + 1..];
@@ -6125,6 +6137,41 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
         }
     }
     operator_policy_command_textual(command).then(|| OPERATOR_POLICY_COMMAND_DENIAL.to_string())
+}
+
+/// An operator-only `cas config` write, as the CLI parser reads `args` (the
+/// words after `cas`).
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedConfigWrite {
+    /// Write roots set or reset, or a per-task write grant or revocation.
+    Policy,
+    /// Another operator-only key set or reset (cas-0d4f0).
+    GuardedKey(String),
+}
+
+fn parsed_operator_config_write(args: &[String]) -> Option<ParsedConfigWrite> {
+    use crate::cli::{Commands, ConfigCommands};
+    use clap::Parser;
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    let Commands::Config(command) = crate::cli::Cli::try_parse_from(argv).ok()?.command? else {
+        return None;
+    };
+    let key = match command {
+        ConfigCommands::GrantWrite(_) | ConfigCommands::RevokeWrite(_) => {
+            return Some(ParsedConfigWrite::Policy);
+        }
+        ConfigCommands::Set(set) => set.key,
+        ConfigCommands::Reset(reset) => reset.key,
+        _ => return None,
+    };
+    let key = key.trim().to_string();
+    if key == "factory.write_roots" {
+        Some(ParsedConfigWrite::Policy)
+    } else if crate::config::operator_policy::is_operator_only_config_key(&key) {
+        Some(ParsedConfigWrite::GuardedKey(key))
+    } else {
+        None
+    }
 }
 
 /// Replace command substitutions that resolve the `cas` binary
@@ -6247,21 +6294,23 @@ fn is_duration_word(word: &str) -> bool {
     !digits.is_empty() && digits.parse::<f64>().is_ok()
 }
 
-/// The textual catch-all: the command applies `set` to the write-roots key,
-/// or names a grant command, and runs anything that is not a read-only
-/// command. `set` must precede the key, separated only by spaces, quotes,
-/// commas or option words, as in shell text and interpreter argv lists. An
-/// unrelated `set` elsewhere, such as Python's `set(...)` beside a read-only
-/// string that mentions the key, does not name the policy (cas-b181).
+/// The textual catch-all: the command names the write-roots key with a
+/// standalone `set` word, or a grant command, and runs anything that is not
+/// a read-only command. Any separator counts, so option values, escapes and
+/// a key held in a variable are still caught. Only `set` written as a call,
+/// such as Python's `set(text.split())`, is not a config verb (cas-b181).
 fn operator_policy_command_textual(command: &str) -> bool {
-    static SET_KEY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let set_key = SET_KEY.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?:^|[^A-Za-z0-9_.\-])set(?:[\s'",]+-[^\s'",]*)*[\s'",]+factory\.write_roots"#,
-        )
-        .expect("valid set-key pattern")
+    static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let set_word = SET_WORD.get_or_init(|| {
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)")
+            .expect("valid set pattern")
     });
-    let names_policy = set_key.is_match(command)
+    let set_verb = set_word.find_iter(command).any(|found| {
+        let after = &command[found.start()..];
+        let after = &after[after.find("set").map_or(0, |at| at + 3)..];
+        !after.trim_start().starts_with('(')
+    });
+    let names_policy = (command.contains("factory.write_roots") && set_verb)
         || command.contains("grant-write")
         || command.contains("revoke-write");
     if !names_policy {
@@ -9413,6 +9462,13 @@ EOF
             "python3 -c 'import subprocess; subprocess.run([\"cas\", \"config\", \"set\", \"factory.write_roots\", \"/x\"])'",
             "perl -e 'system(\"cas config set factory.write_roots /x\")'",
             "perl -e 'system(\"cas config set --quiet factory.write_roots /x\")'",
+            // Verifier ver-1ab57a0bca7c: an option and its value, an escape
+            // between the words, and the key held in a variable stay refused.
+            "cas config set --store here factory.write_roots /x",
+            "cas config set --store=here factory.write_roots /x",
+            "python3 -c 'import os; os.system(\"cas config set\\tfactory.write_roots /x\")'",
+            "node -e 'require(\"child_process\").execSync(\"cas config set\\\\ factory.write_roots /x\")'",
+            "python3 -c 'import subprocess; k = \"factory.write_roots\"; subprocess.run([\"cas\", \"config\", \"set\", k, \"/x\"])'",
             "python3 - <<'EOF'\nimport os\nos.system('cas config set factory.write_roots /x')\nEOF",
             "echo 'cas config set factory.write_roots /x' | sh",
             "node -e 'require(\"child_process\").execSync(\"cas config grant-write --task t --path /x --reason r\")'",

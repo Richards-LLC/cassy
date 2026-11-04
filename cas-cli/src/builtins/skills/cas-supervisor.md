@@ -15,7 +15,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate writes except small status/config updates; read-only Q&A is allowed.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope.** Clear reviews, proof gaps and merges before noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
-- **Merge once ready.** Merge on green and plan target met. On `READY TO MERGE`, `awaiting_merge` or `status: ready` naming the pushed tip, merge into its target. A miss holds only dependents; ship other work and ask the operator.
+- **Merge once ready.** Merge on green and plan target met. Merge the pushed tip into its target on `READY TO MERGE`, `awaiting_merge` or `status: ready`. A miss holds only dependents; ship other work and ask the operator. Stop merging while a project hold is set (`cas factory hold status`).
 - **Epics are yours to verify and close**, never a worker's.
 - **Frame first:** project/request fit and mismatches. Counter-propose only with
   source, current cost and benefit; otherwise execute or ask.
@@ -58,9 +58,8 @@ Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/refe
 
 ## Phase references
 
-Read each reference once per context at its first matching phase; reuse it
-until its source changes. After a context clear, load the current phase again.
-Do not preload later phases.
+Read each reference once per context; reload after source changes or context
+clears. Do not preload later phases.
 
 | Phase or trigger | Read before acting |
 | --- | --- |

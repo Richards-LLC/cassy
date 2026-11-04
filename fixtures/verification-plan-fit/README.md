@@ -14,8 +14,9 @@ the evaluated prompt, inputs and returned verdicts in the task artifacts.
 | --- | --- |
 | `narrow-reader` | `status=rejected`, `PLAN-FIT: NOT VERIFIED`; individually name `chosen_option`, `assent`, `correction` and `opt_out` (including their confidences), cite the Reader contract, and ask the supervisor whether to restore scope or obtain an authorized plan revision. |
 | `missed-plan-target` | `status=rejected`, `PLAN-FIT: NOT VERIFIED`; cite Selection gate and `eval-receipt.json`, state 87% observed against at least 95% required, and ask the supervisor how to resolve the missed outcome. |
+| `model-owned-keywords` | `status=rejected`, `PLAN-FIT: NOT VERIFIED`, `MODEL-BOUNDARY: NOT VERIFIED`; name `reader.py:1` as blocking interpretation by a keyword list inside the approved Reader boundary, despite the passing card test. |
 
-Both cards are satisfied by their own evidence. Approval, a warning-only
+All cards are satisfied by their own evidence. Approval, a warning-only
 finding, or `status=supervisor_call` for either known miss fails the replay.
 An evaluation process exiting zero is not evidence that its plan target passed.
 The first case's follow-up and the second case's tuning follow-up are deliberately

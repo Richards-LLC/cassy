@@ -76,6 +76,7 @@ pub(crate) mod mcp_cmd;
 pub mod memory;
 mod open;
 mod queue;
+mod rules;
 pub mod retrieval_parity;
 mod setup;
 mod status;
@@ -330,6 +331,10 @@ pub enum Commands {
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
 
+    /// Find source and test sites that cite a rule
+    #[command(subcommand)]
+    Rules(rules::RulesCommands),
+
     /// Share one base folder across every Claude and Codex account
     Accounts(accounts::AccountsArgs),
 
@@ -517,6 +522,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Peers(_)
         | Commands::Coordination(_)
         | Commands::Limits(_)
+        | Commands::Rules(_)
         | Commands::Accounts(_)
         | Commands::StatusLine(_)
         | Commands::Mcp(_)
@@ -855,6 +861,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Peers(_) => "peers".to_string(),
         Commands::Coordination(_) => "coordination".to_string(),
         Commands::Limits(_) => "limits".to_string(),
+        Commands::Rules(_) => "rules".to_string(),
         Commands::Accounts(_) => "accounts".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
         Commands::Hook(_) => "hook".to_string(),
@@ -1000,6 +1007,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Coordination(command) => coordination::execute(command, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
+        Commands::Rules(command) => rules::execute(command, cli),
         Commands::Accounts(args) => accounts::execute(args, cli),
         // cas-e1f4: outside a Cassy project the line still names the account.
         Commands::StatusLine(args) => match cas_root {

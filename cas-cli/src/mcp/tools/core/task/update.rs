@@ -1777,6 +1777,19 @@ impl CasCore {
 
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
+        let _source_admission = if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty())
+            || changes.contains(&"external_ref")
+        {
+            let admission = self.task_source_admission_for(&task,
+                supervisor_override.then_some(proof_scope_fix_reason.unwrap_or(""))).await?;
+            if !admission.notice.is_empty() { warnings.push(admission.notice.clone()); }
+            if let Some(grant) = &admission.override_grant {
+                task.deliverables.source_claim_override = Some(grant.clone());
+                task.notes.push_str(&admission.notice);
+                changes.push("source_claim_override");
+            }
+            Some(admission)
+        } else { None };
         let mut assignee_override_audit = None;
 
         if let Some(ref assignee_raw) = req.assignee {
@@ -1992,6 +2005,14 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            if new_status == TaskStatus::InProgress && task.status != TaskStatus::InProgress {
+                crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                if let Some(epic) = req.epic.as_deref().filter(|epic| !epic.trim().is_empty()) {
+                    crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, epic)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                }
+            }
             if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
                 && new_status != task.status
             {
@@ -2556,6 +2577,10 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        crate::epic_design_review::observe(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Task updated, but epic design review trigger could not be evaluated: {error}")))?;
 
         if changes.contains(&"labels") {
             crate::quality_ledger::bug_labelled(

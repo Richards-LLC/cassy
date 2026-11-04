@@ -1270,3 +1270,23 @@ fn cas_bfa1_round4_quarantined_epic_cannot_authorize_publication() {
         );
     });
 }
+
+/// Reports arriving after a request was queued still stop launch before any
+/// worktree or PTY is created, including non-MCP producers.
+#[test]
+fn design_review_rechecks_queued_spawn_before_provisioning() {
+    with_fixture(|fixture| {
+        let captured = fixture.app.snapshot_worker_spawn(Some("queued-worker"), true, Some("cas-round2-child")).unwrap();
+        let tasks = open_task_store_cached(&fixture.root).unwrap();
+        for index in 0..5 {
+            let mut report = cas_types::Task::new(format!("queued-report-{index}"), format!("Stakeholder report {index}"));
+            report.task_type = cas_types::TaskType::Bug;
+            report.priority = cas_types::Priority(0);
+            report.labels.push("stakeholder-reported".into());
+            tasks.add(&report).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(report.id, "cas-round2-epic".into(), cas_types::DependencyType::ParentChild)).unwrap();
+        }
+        let error = captured.resolve().err().expect("queued spawn must recheck before provisioning");
+        assert!(error.to_string().contains("design review"), "{error}");
+    });
+}

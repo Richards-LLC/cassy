@@ -7,6 +7,85 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Operator control of rule encoding
+
+- **Reserve rule encoding chores for the operator** — Agent and supervisor rule
+  writes no longer create implementation chores from enforceable tags. Their
+  replies name the operator command; operator writes still reuse one chore per
+  rule, and existing chores remain visible in the project backlog.
+
+### Fixed — Project holds
+
+- **Keep parked delivery checks active during a hold** — Operator task lists
+  and startup hide parked invitations while internal ownership, re-close and
+  recovery checks retain every delivery. READY TO MERGE generation stops during
+  the hold, so lifting it creates no stale alert backlog.
+
+### Fixed — Policy hygiene
+
+- **Expire superseded policy memories** — Explicit superseded tags and expiry
+  remove memories from session context, including pinned and AI-selected
+  entries. Updates persist their expiry while retaining the historical record.
+- **Report rule drift without changing policy** — Compare rule source with
+  generated harness files and an explicit peer snapshot, including status,
+  content, scope and Cloud sync settings.
+- **Keep stakeholder instructions with their evidence** — Attributed rules
+  retain verbatim words and scope; attributed hard rules need a review date.
+  Stakeholder constraint memories require an expiry. Ordinary rule updates retain
+  stored provenance; explicit attribution clearing records its resulting history.
+
+### Added — Rule traceability
+
+- **Keep rule-driven code tied to its reason** — Code and tests can cite a rule
+  with its verbatim scope. Worker close checks declared causal sites and cited
+  rule coverage; `cas rules refs <id>` lists tracked references for review.
+- **Ask for rule markers only for stakeholder rules** — Was: citing any rule,
+  such as a release-flow rule in a repair task, refused close until code carried
+  its marker, while a bulleted `- Rule-driven sites:` declaration went
+  unchecked. → Now: only stakeholder rules need markers, and bulleted or quoted
+  declarations in the brief or close receipt are checked; a malformed one
+  refuses with its line.
+- **List a changed rule's cited sites for cleanup** — Was: retiring or
+  narrowing a rule left its cited code and tests behind for someone to find. →
+  Now: retiring, superseding, clearing attribution on or changing the scope of a
+  rule files one linked cleanup chore listing each affected `path:line` and
+  recorded scope, as does an expired stakeholder `review_after`. Nothing is
+  deleted automatically.
+
+### Fixed — Model evaluation evidence
+
+- **Run-backed measurements** — Evaluation receipts now require matching machine-readable measurements in the run log. Both proof files stay inside the owning task artifacts directory, and missing prerequisite evidence explains how to re-record it.
+
+### Added — Model-owned plan boundaries
+
+- **Compact verifier guidance** — Boundary review now follows its installed
+  reference, keeping procedure out of the verifier prompt while preserving
+  blocking site reports and approved-plan exceptions. Plan-fit, rule-citation
+  and epic procedures also move to references to fit the verifier prompt budget.
+- **Reserve meaning for the model in a plan** — An optional plan boundary now
+  flags added literal collections, regexes and exact-string assertions in
+  reserved areas. The verifier names blocking interpretation code and checks
+  approved exceptions; plans without a boundary keep their current behavior.
+
+### Fixed — Worker startup guidance
+
+- **Preserve worker scope and startup headroom** — Restored the protected task,
+  scope and layer-boundary instructions while retaining plan-metric receipts;
+  shorter startup prose keeps the worker guidance within its byte budget.
+
+### Added — Epic governance
+
+- **Pause staffing for a design review** — Was: repeated stakeholder defects could keep generating staffed fixes on the same epic. → Now: five `stakeholder-reported` P0/P1 bugs within 48 hours pause that epic's new starts and spawns and ask its supervisor to review the design against the plan. The threshold and window are configurable; only an operator lift with a reason resumes staffing.
+
+### Fixed — Shared stakeholder asks
+
+- **Name the supervisor who owns an ask** — MCP task creation and staffing check
+  the source before changing local work. Slack threads reuse existing claims;
+  GitHub issue and pull-request aliases share an advisory source claim across
+  independent task cards. Conflicts name the owner, task and source. A deliberate
+  second GitHub task needs a recorded supervisor reason; source claims release
+  when the work ends, even while that supervisor stays online.
+
 ### Fixed — Verification
 
 - **Review before publishing factory deliveries** — Was: required verification
@@ -34,6 +113,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Keep missed plan targets out of merges** — Supervisor instructions now require the plan's measured target, hold only dependent work when it is missed, and keep independent deliveries shipping. Briefs carry the plan section and metric through worker close; characterization protects only behaviour the plan keeps.
 
+### Added — Operator project holds
+
+- **Stop dispatch and merge invitations for a project** — Was: Ready tasks and
+  merge prompts stayed actionable during an operator's full stop. → Now: Only
+  the operator can set or lift a project hold, with a reason and an audit of who
+  acted and when. Startup leads with the hold, action lists and relays wait,
+  and worker spawning and merges refuse until the operator lifts it.
+
 ### Added — Measured phase outcomes
 
 - **Measured phase gates** — Epic and gate tasks can hold measured targets and evaluation receipts. A miss holds dependent starts, closes and merge prompts; independent work keeps shipping. Operator exceptions require a written reason and expire when the measurements change.
@@ -46,6 +133,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   lifecycle state, so deleting then restoring still reactivates the rule. Existing
   history rows are left unchanged; the first edit or delete after an upgrade
   captures any missing live state as a new baseline version before the change.
+
+### Fixed — Phase dependency gates
+
+- **Sequential phase work stays free** — A dependency between a phase's children no longer holds those children against their own phase's unmet outcome. External prerequisite phases keep their measured gates.
+
+### Added — Model evaluation proof
+
+- **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
 
 ## [3.100.0] - 2026-11-03
 

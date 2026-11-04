@@ -8705,6 +8705,12 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
     let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+    // A project hold hides invitations, not the re-close exemption's inputs.
+    std::fs::create_dir_all(env.cas_root.join("operator")).unwrap();
+    std::fs::write(env.cas_root.join(cas_store::project_hold::STATE_FILE), serde_json::json!({
+        "active": {"reason": "Review plan", "operator": "fixture", "set_at": "2026-11-03T14:00:00Z"},
+        "history": []
+    }).to_string()).unwrap();
 
     let msg = format!(
         "MERGE DONE: factory/swift-fox merged to epic. \
@@ -12989,9 +12995,9 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
 }
 
 /// cas-d4fc: a project-level encode chore is visible even without an epic link.
-/// Exercise unified rule dispatch -> live stores -> supervisor status rendering.
+/// cas-70a6: agent writes preserve existing chores and supervisor status rendering.
 #[tokio::test]
-async fn test_epic_status_surfaces_first_occurrence_encode_chore_cas_d4fc() {
+async fn test_epic_status_surfaces_existing_encode_chore_cas_d4fc() {
     let home = TempDir::new().expect("home tempdir");
     let _guard = EnvGuard::set_optional(&[
         ("CAS_FACTORY_MODE", Some("1")),
@@ -13030,10 +13036,22 @@ async fn test_epic_status_surfaces_first_occurrence_encode_chore_cas_d4fc() {
         .unwrap();
     let rules = cas::store::open_rule_store(&env.cas_root).unwrap();
     let rule = rules.list().unwrap().remove(0);
-    env.service.rule(Parameters(serde_json::from_value(serde_json::json!({
+    let tasks = open_task_store(&env.cas_root).unwrap();
+    let mut chore = Task::new(
+        "cas-encode-existing".into(),
+        format!("encode {} as test", rule.id),
+    );
+    chore.task_type = TaskType::Chore;
+    chore.external_ref = Some(format!("rule-encode:{}", rule.id));
+    tasks.add(&chore).unwrap();
+    let before = serde_json::to_value(tasks.get(&chore.id).unwrap()).unwrap();
+    let reply = env.service.rule(Parameters(serde_json::from_value(serde_json::json!({
         "action": "update", "id": rule.id, "tags": "enforceable:test",
         "source_ids": "incident-one,incident-two", "change_note": "observed mechanical failure"
     })).unwrap())).await.unwrap();
+    let text = get_text(&reply);
+    assert!(text.contains("no encode chore created"), "{text}");
+    assert!(text.contains("rule action=update"), "{text}");
     assert_eq!(
         rules.get(&rule.id).unwrap().source_ids,
         vec!["incident-one", "incident-two"]
@@ -13042,14 +13060,15 @@ async fn test_epic_status_surfaces_first_occurrence_encode_chore_cas_d4fc() {
         rules.get(&rule.id).unwrap().status,
         cas::types::RuleStatus::Draft
     );
-    let tasks = open_task_store(&env.cas_root).unwrap();
-    let external_ref = format!("rule-encode:{}", rule.id);
-    let chore = tasks
-        .list(None)
-        .unwrap()
-        .into_iter()
-        .find(|task| task.external_ref.as_deref() == Some(external_ref.as_str()))
-        .expect("first occurrence files an encode chore");
+    assert_eq!(
+        serde_json::to_value(tasks.get(&chore.id).unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        tasks.list(None).unwrap().len(),
+        2,
+        "only the epic and existing chore"
+    );
     let mut req = factory_req("epic_status");
     req.id = Some("cas-rules".into());
     let report = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());

@@ -43,7 +43,9 @@ pub mod consolidation;
 pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
+pub(crate) mod rule_refs;
 pub mod error;
+pub(crate) mod epic_design_review;
 pub mod extraction;
 mod light_lane;
 #[doc(hidden)]
@@ -115,6 +117,7 @@ pub mod qa_traffic;
 pub(crate) mod backlog_hygiene;
 pub mod qa_author_override;
 pub(crate) mod phase_outcome;
+pub(crate) mod model_eval;
 pub(crate) mod qa_batch;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
@@ -513,3 +516,6 @@ pub use types::{
     Agent, ChangeType, CommitLink, Entry, EntryType, Event, FileChange, Prompt, Rule, RuleStatus,
     Session, SessionOutcome, Skill, Spec, Task, TaskStatus, Verification, Worktree, WorktreeStatus,
 };
+
+#[cfg(test)]
+mod project_hold_tests;

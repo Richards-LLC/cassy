@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
+pub mod project_hold;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
@@ -538,6 +539,17 @@ pub trait RuleStore: Send + Sync {
     ) -> Result<()> {
         let _ = (changed_by, change_note);
         self.update(rule)
+    }
+
+    /// Explicitly clear live stakeholder evidence while recording the other update fields.
+    /// Missing evidence on an ordinary update must preserve the stored attribution.
+    fn update_clearing_stakeholder(
+        &self,
+        _rule: &Rule,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse("explicit stakeholder clearing is unavailable for this store".into()))
     }
 
     /// Increment the number of times a rule was actually injected into
@@ -1175,3 +1187,6 @@ pub trait EntityStore: Send + Sync {
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(test)]
+mod project_hold_tests;

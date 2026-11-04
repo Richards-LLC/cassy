@@ -229,6 +229,19 @@ impl RuleStore for SyncingRuleStore {
         Ok(())
     }
 
+    fn update_clearing_stakeholder(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner.update_clearing_stakeholder(rule, changed_by, change_note)?;
+        let stored = self.inner.get(&rule.id)?;
+        self.try_sync(&stored);
+        self.queue_upsert(&stored);
+        Ok(())
+    }
+
     fn increment_surface_count(&self, id: &str) -> Result<()> {
         self.inner.increment_surface_count(id)
     }

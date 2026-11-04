@@ -25,6 +25,47 @@ fn cas_cmd(root: &std::path::Path) -> Command {
 }
 
 #[test]
+fn rule_refs_lists_tracked_sites_and_reports_malformed_markers_cas_4f87() {
+    let repo = TempDir::new().unwrap();
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args).current_dir(root).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["config", "color.grep", "always"]);
+    git(&["config", "grep.column", "true"]);
+    git(&["config", "grep.heading", "true"]);
+    std::fs::create_dir(root.join("src")).unwrap();
+    let scope = "Only Ben's SMS flow; preserve \"drafts\".";
+    let marker = format!("// cas-rule: rule-177 scope: {}", serde_json::to_string(scope).unwrap());
+    std::fs::write(root.join("src/send.rs"), format!("{marker}\nfn send() {{}}\n")).unwrap();
+    std::fs::write(root.join("test.py"), format!("#{}\ndef test_send(): pass\n", marker.trim_start_matches('/'))).unwrap();
+    std::fs::write(root.join("other.rs"), "// cas-rule: rule-178 scope: \"different\"\n").unwrap();
+    git(&["add", "src/send.rs", "test.py", "other.rs"]);
+    // Untracked files and symlinks are not repository source sites.
+    std::fs::write(root.join("untracked.rs"), &marker).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("untracked.rs"), root.join("link.rs")).unwrap();
+        git(&["add", "link.rs"]);
+    }
+    let output = cas_cmd(root).current_dir(root.join("src"))
+        .args(["rules", "refs", "rule-177", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let refs: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let refs = refs.as_array().unwrap();
+    assert_eq!(refs.len(), 2, "{refs:?}");
+    assert_eq!(refs[0]["path"], "src/send.rs");
+    assert_eq!(refs[1]["path"], "test.py");
+    assert!(refs.iter().all(|site| site["rule_id"] == "rule-177" && site["scope"] == scope && site["line"] == 1));
+    std::fs::write(root.join("test.py"), "# cas-rule: rule-177 scope: missing-json-quotes\n").unwrap();
+    cas_cmd(root).current_dir(root).args(["rules", "refs", "rule-177"])
+        .assert().failure().stderr(predicate::str::contains("test.py:1"));
+}
+
+#[test]
 fn test_help() {
     let mut env = crate::test_env_guard::TestEnvGuard::new();
     env.set("COLUMNS", "60");

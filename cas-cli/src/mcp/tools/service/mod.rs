@@ -499,10 +499,11 @@ impl CasService {
                 "check_similar" => this.rule_check_similar(req).await,
                 "observe" => this.rule_observe(req).await,
                 "candidates" => this.inner.cas_rule_candidates().await,
+                "drift" => this.inner.cas_rule_drift(req.peer_snapshot).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar, observe, candidates",
+                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar, observe, candidates, drift",
                         req.action
                     ),
                 )),

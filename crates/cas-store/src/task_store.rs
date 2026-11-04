@@ -1343,7 +1343,6 @@ impl TaskStore for SqliteTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
                 "SELECT id, title, description, design, acceptance_criteria, notes,
@@ -1372,6 +1371,8 @@ impl TaskStore for SqliteTaskStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
+        // Internal ownership, close and recovery checks need every parked row.
+        // Project holds suppress invitations at the presentation boundary.
         Ok(tasks)
     }
 
@@ -1422,6 +1423,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn list_ready(&self) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
+        if crate::project_hold::held_on_connection(&conn) { return Ok(Vec::new()); }
 
         // Ready = open tasks, plus tasks projected Blocked by an open `blocks`
         // edge because those remain startable for parallel preparation. An

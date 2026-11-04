@@ -168,7 +168,9 @@ pub(super) fn read_delivery(
     {
         return (None, None);
     }
-    if crate::phase_outcome::merge_hold(&cas_dir, &task).is_some() {
+    if cas_store::project_hold::is_held(&cas_dir)
+        || crate::phase_outcome::merge_hold(&cas_dir, &task).is_some()
+    {
         return (None, None);
     }
     if let Some(ready) = prior_ready(&cas_dir, &task, &tip) {

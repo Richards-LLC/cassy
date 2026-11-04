@@ -2568,6 +2568,24 @@ impl CasService {
             req.isolate = Some(true);
             req.task_id = ids.first().cloned();
         }
+        let staffing_tasks: Vec<&str> = req.task_ids.as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| req.task_id.as_deref().into_iter().collect());
+        if staffing_tasks.is_empty() {
+            if let Some(epic) = ctx.factory_session.as_deref()
+                .and_then(|session| std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok())
+                .and_then(|raw| serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok())
+                .and_then(|metadata| metadata.pinned_epic_id.or(metadata.epic_id))
+            {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, &epic)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        } else {
+            for task in staffing_tasks {
+                crate::epic_design_review::ensure_staffing_allowed(&self.inner.cas_root, task)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            }
+        }
         let provisioner_build = ctx
             .factory_session
             .as_ref()
@@ -2591,6 +2609,9 @@ impl CasService {
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
 
+        if let Some(hold) = cas_store::project_hold::notice(&self.inner.cas_root) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+        }
         let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
             match factory_provision_build_compatibility(session, provisioner_build) {
                 FactoryProvisionBuildCheck::Compatible => String::new(),
@@ -2849,6 +2870,18 @@ impl CasService {
         let force_peer_claim = req.force.unwrap_or(false);
         let prefix = crate::mcp::tools::core::guidance::caller_prefix();
         let mut peer_notice = String::new();
+        let source_ids = req.task_ids.clone().unwrap_or_else(|| req.task_id.iter().cloned().collect());
+        self.refresh_task_sources(&source_ids).await?;
+        let mut source_admissions = Vec::new();
+        let mut checked_sources = std::collections::HashSet::new();
+        for id in &source_ids {
+            let task = task_store.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            if let Some(key) = task.external_ref.as_deref().and_then(crate::cloud::peer_claims::github_source_key)
+                && !checked_sources.insert(key) { continue; }
+            let admission = self.inner.task_source_admission_for(&task, None).await?;
+            peer_notice.push_str(&admission.notice);
+            source_admissions.push(admission);
+        }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {
                 if !force_peer_claim {
@@ -4445,6 +4478,7 @@ impl CasService {
     pub(super) async fn factory_worker_queue(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
         let worker = req.id.as_deref().or(req.target.as_deref()).ok_or_else(|| Self::error(
             ErrorCode::INVALID_PARAMS, "worker_queue requires id=<worker>"))?;
+        if let Some(ids) = req.task_ids.as_ref() { self.refresh_task_sources(ids).await?; }
         self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
     }
 

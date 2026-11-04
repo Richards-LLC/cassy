@@ -63,6 +63,16 @@ single-child epics distort epic reporting, so this is the preferred path.
 
 ### Brief fields: no spawn without them
 
+For a stakeholder ask, pass its Slack thread permalink or GitHub issue/PR URL
+as `external_ref` when creating the task, and keep it when assigning or spawning.
+MCP creation and staffing refuse a source held by a peer and name its owner;
+coordinate before duplicating that work. An intentional second GitHub task
+requires a live supervisor's `supervisor_override=true reason="<agreement>"`
+on create or assignment; its decision stays with that task. Slack uses the
+existing claim/status/handoff authority. Binding epic splits retain their own
+delegation and takeover rules. Ownership messages that require action use
+`kind=status`, because `kind=receipt` waits quietly until the peer's next turn.
+
 Before you spawn onto a task or assign it, its task record must carry four
 fields. A missing field means no spawn: fill it with `task action=update`
 first. A worker cannot recover a goal or a proof method the brief never named.
@@ -73,6 +83,14 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+
+For rule-driven work, cite each rule id and its verbatim stakeholder scope in
+the brief. Declare known causal anchors with `Rule-driven sites:` (JSON objects
+with `rule_id`, repository-relative `path`, and exact source-line `anchor`), or
+require the worker to declare them in its close receipt. Code and tests carry
+adjacent `cas-rule: <id> scope: <JSON string>` comments. Close checks marker
+coverage and scope; verification checks undeclared causal sites. Unrelated work
+does not inherit the cited rule's scope.
 
 `qa.user_facing_labels` require `demo_statement` before creation/assignment:
 `As a <user>, I <do X> and see <Y>`; epics/internal tasks are exempt.
@@ -302,7 +320,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). A delivery whose phase misses its plan's measured target does not merge: hold only its dependents, keep shipping everything else, and ask the operator. Drain ready merges before free-form user replies.
+1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine). Do not wait for a merge request or for park once one of these holds, including when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). A delivery whose phase misses its plan's measured target does not merge: hold only its dependents, keep shipping everything else, and ask the operator. Drain ready merges before free-form user replies. Stop merging while a project hold is set (`cas factory hold status`).
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before

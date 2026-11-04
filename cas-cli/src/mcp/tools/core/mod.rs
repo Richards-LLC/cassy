@@ -7,6 +7,7 @@ mod maintenance;
 mod memory;
 mod opinion;
 pub(crate) mod rules;
+mod rule_drift;
 mod search;
 mod skills;
 mod system;

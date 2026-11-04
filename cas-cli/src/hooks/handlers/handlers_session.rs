@@ -587,6 +587,11 @@ pub fn handle_session_start(
     // ========================================================================
     let context = build_worker_worktree_assertion(&input.cwd, context);
 
+    // Operator project holds lead every startup, including resume deltas.
+    let context = cas_store::project_hold::notice(cas_root)
+        .map(|hold| format!("## Project hold\n{hold}\n\n{context}"))
+        .unwrap_or(context);
+
     let output = if context.is_empty() {
         HookOutput::empty()
     } else {

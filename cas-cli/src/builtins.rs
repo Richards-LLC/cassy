@@ -722,6 +722,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/model-boundary.py",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/model-boundary.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/model-boundary.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/model-boundary.md"),
+    },
     // cas-release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -1458,6 +1466,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/model-boundary.py",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/model-boundary.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/model-boundary.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/model-boundary.md"),
+    },
     // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
@@ -2188,6 +2204,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/model-boundary.py",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/model-boundary.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/model-boundary.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/model-boundary.md"),
     },
     // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {

@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Bar {
+pub(crate) struct Bar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,21 +22,25 @@ struct Bar {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Receipt {
-    measurements: BTreeMap<String, f64>,
-    receipt: String,
+pub(crate) struct Receipt {
+    pub(crate) measurements: BTreeMap<String, f64>,
+    pub(crate) receipt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run_log_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Outcome {
-    target: BTreeMap<String, Bar>,
+pub(crate) struct Outcome {
+    pub(crate) target: BTreeMap<String, Bar>,
     #[serde(default)]
-    evidence: Option<Receipt>,
+    pub(crate) evidence: Option<Receipt>,
 }
 
 impl Outcome {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             !self.target.is_empty(),
             "outcome target needs at least one metric"
@@ -85,7 +89,7 @@ impl Outcome {
         Ok(())
     }
 
-    fn misses(&self) -> Vec<String> {
+    pub(crate) fn misses(&self) -> Vec<String> {
         self.target
             .iter()
             .filter_map(|(metric, bar)| {
@@ -137,6 +141,7 @@ fn read(task: &Task) -> Result<Option<Outcome>> {
 /// Called only after the MCP boundary authenticates a live supervisor.
 /// Targets are immutable: receipt updates cannot quietly lower the agreed bar.
 pub(crate) fn record_note(
+    root: &Path,
     store: &dyn cas_store::TaskStore,
     id: &str,
     kind: &str,
@@ -170,8 +175,18 @@ pub(crate) fn record_note(
                 previous.context("declare outcome_target before recording a receipt")?;
             previous.evidence = Some(
                 serde_json::from_str(body)
-                    .context("outcome_receipt expects measurements and a receipt reference")?,
+                    .context("outcome_receipt expects measurements and a receipt artifact path")?,
             );
+            previous.validate()?;
+            crate::model_eval::bind_artifact(
+                root,
+                id,
+                previous
+                    .evidence
+                    .as_mut()
+                    .context("phase receipt is missing")?,
+                &previous.target,
+            )?;
             previous
         }
         _ => bail!("unknown outcome note type"),
@@ -237,7 +252,11 @@ pub(crate) fn record_override(
     entries.insert(
         id.into(),
         OperatorOverride {
-            outcome: task.deliverables.phase_outcome.clone().unwrap(),
+            outcome: task
+                .deliverables
+                .phase_outcome
+                .clone()
+                .context("phase has no serialized outcome to override")?,
             reason: reason.trim().into(),
             recorded_at: now,
         },
@@ -253,7 +272,10 @@ pub(crate) fn record_override(
         ),
     )?;
     let path = root.join(OVERRIDES);
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::create_dir_all(
+        path.parent()
+            .context("operator override path has no parent")?,
+    )?;
     let staging = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&staging, serde_json::to_vec_pretty(&entries)?)?;
     std::fs::rename(staging, path)?;
@@ -270,6 +292,22 @@ pub(crate) fn refusal(
     include_self: bool,
 ) -> Result<Option<String>> {
     let origin = id;
+    // A sibling prerequisite shares some ancestors with the task. Those are
+    // implementation phases whose outcomes this work is meant to establish,
+    // rather than external prerequisite phases whose outcomes gate it.
+    let mut own_ancestors = HashSet::new();
+    let mut ancestors = vec![id.to_string()];
+    while let Some(ancestor) = ancestors.pop() {
+        if own_ancestors.insert(ancestor.clone()) {
+            ancestors.extend(
+                store
+                    .get_dependencies(&ancestor)?
+                    .into_iter()
+                    .filter(|dep| dep.dep_type == DependencyType::ParentChild)
+                    .map(|dep| dep.to_id),
+            );
+        }
+    }
     let mut pending = vec![(id.to_string(), false)];
     let mut visited = HashSet::new();
     let mut misses = Vec::new();
@@ -278,12 +316,21 @@ pub(crate) fn refusal(
             continue;
         }
         let task = store.get(&id)?;
-        if (prerequisite || (include_self && id == origin))
+        let evaluate =
+            (prerequisite && !own_ancestors.contains(&id)) || (include_self && id == origin);
+        if evaluate && let Some(reason) = crate::model_eval::refusal(root, &task)? {
+            misses.push(reason);
+        }
+        if evaluate
             && let Some(outcome) = read(&task)?
             && !overridden(root, &task)
         {
             let unmet = outcome.misses();
-            if !unmet.is_empty() {
+            if unmet.is_empty() {
+                if let Some(evidence) = &outcome.evidence {
+                    crate::model_eval::verify_artifact(root, &task.id, evidence, &outcome.target)?;
+                }
+            } else {
                 misses.push(format!(
                     "{} ({}): {}. Operator only: cas qa outcome-override {} --reason '<why>'",
                     task.id,
@@ -355,6 +402,7 @@ mod tests {
                 .unwrap();
         }
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_target",
@@ -372,10 +420,17 @@ mod tests {
         );
         assert!(check(&root, store.as_ref(), "independent", true).is_ok());
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":72.7,"p95":1.48},"receipt":"artifact:eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &root,
+                "reader",
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 72.7, "p95": 1.48}),
+            )
+            .to_string(),
         )
         .unwrap();
         // Closed task status is not evidence that its measured bar passed.
@@ -389,6 +444,7 @@ mod tests {
         );
         assert!(
             record_note(
+                &root,
                 store.as_ref(),
                 "reader",
                 "outcome_target",
@@ -398,6 +454,7 @@ mod tests {
         );
         assert!(
             record_note(
+                &root,
                 store.as_ref(),
                 "reader",
                 "outcome_receipt",
@@ -428,10 +485,17 @@ mod tests {
         assert!(check(&root, store.as_ref(), "child", false).is_ok());
         assert!(check(&root, store.as_ref(), "child", true).is_ok());
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":73,"p95":1.5},"receipt":"artifact:new-eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &root,
+                "reader",
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 73, "p95": 1.5}),
+            )
+            .to_string(),
         )
         .unwrap();
         assert!(
@@ -439,13 +503,41 @@ mod tests {
             "new evidence requires a new operator decision"
         );
         record_note(
+            &root,
             store.as_ref(),
             "reader",
             "outcome_receipt",
-            r#"{"measurements":{"stability":99,"p95":0.9},"receipt":"artifact:passing-eval"}"#,
+            &crate::model_eval::fixture_receipt(
+                &root,
+                "reader",
+                serde_json::json!({"stability":{"min":95},"p95":{"max":1}}),
+                serde_json::json!({"stability": 99, "p95": 0.9}),
+            )
+            .to_string(),
         )
         .unwrap();
         assert!(check(&root, store.as_ref(), "child", true).is_ok());
+        let evidence = read(&store.get("reader").unwrap())
+            .unwrap()
+            .unwrap()
+            .evidence
+            .unwrap();
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&evidence.receipt).unwrap()).unwrap();
+        for missing in [
+            evidence.receipt.as_str(),
+            artifact["run_log"].as_str().unwrap(),
+        ] {
+            let bytes = std::fs::read(missing).unwrap();
+            std::fs::remove_file(missing).unwrap();
+            let error = check(&root, store.as_ref(), "child", true).unwrap_err();
+            // pin: dependent tasks must identify the prerequisite and give an actionable recovery.
+            assert!(
+                error.contains("reader") && error.contains("re-record the receipt"),
+                "{error}"
+            );
+            std::fs::write(missing, bytes).unwrap();
+        }
         // Malformed persisted state fails closed rather than disappearing.
         let mut reader = store.get("reader").unwrap();
         reader.deliverables.phase_outcome = Some(serde_json::json!({"target":{}}));

@@ -331,6 +331,15 @@ impl FactoryDaemon {
         }
     }
 
+    /// One loop pass for WebSocket clients: hand finished work-event answers
+    /// to their clients, then flush buffered frames.
+    pub(super) async fn serve_ws_clients(&mut self) {
+        if !self.ws_clients.is_empty() {
+            self.deliver_work_events();
+            self.flush_ws_client_output().await;
+        }
+    }
+
     /// Probe the stream for clients that follow it, and hand finished
     /// work-event answers and change notices to their clients (cas-ff22).
     pub(super) fn deliver_work_events(&mut self) {

@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Usage-limit notices
+
+- **A repeated usage-limit report repeats the original notice** — Was: when
+  the factory re-reported a worker's usage limit, for example after a daemon
+  restart, it read provider usage again and rebuilt the text, so the reset
+  countdown and account detail could differ from the notice the supervisor
+  already had. → Now: the stored notice comes back unchanged, with no second
+  provider usage read. Rows left by the removed automatic account switch are
+  still re-described under the report-only policy, never replayed.
+- **Removed dead worker resume code** — Was: the worker spawn path still
+  carried a session-resume option from the removed automatic switch, though
+  every caller passed none. → Now: the option and its launch rewrite are
+  gone; worker startup briefs are unchanged.
+
 ### Fixed — Write-root guard
 
 - **Allow read-only scripts that mention the write-roots key** — Was: a

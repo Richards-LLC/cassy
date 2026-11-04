@@ -1015,10 +1015,34 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
 #[tokio::test]
 async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let mut env = TestEnvGuard::temp_home();
-    for outcome in ["success", "failure", "ineligible"] {
+    for outcome in ["success", "failure", "ineligible", "oversize", "qa-revert", "qa-fix", "qa-default"] {
     env.set("CAS_AGENT_ROLE", "worker");
     let f = fixture(&mut env);
     let paths = if outcome == "ineligible" { "frontend/**" } else { "crates/**" };
+    let eligible = !matches!(outcome, "ineligible" | "oversize");
+    env.set("CAS_FACTORY_SESSION", "fast-lane-qa-test");
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    for id in ["br-worker-session", "br-supervisor-session"] {
+        let mut agent = agents.get(id).unwrap();
+        agent.factory_session = Some("fast-lane-qa-test".into());
+        agents.update(&agent).unwrap();
+    }
+    let [artifacts, legacy] = crate::config::factory_task_artifact_dirs(
+        &f.cas_dir(), &env.home().join(".cas/artifacts"), ID,
+    );
+    for directory in [&artifacts, &legacy] {
+        assert!(directory.starts_with(env.home()));
+        if directory.exists() { std::fs::remove_dir_all(directory).unwrap(); }
+    }
+    if outcome == "oversize" {
+        for index in 0..10 {
+            std::fs::write(f.worker_path.join(format!("crates/widget/note-{index}.md")), "Hotfix notes\n").unwrap();
+        }
+        git(&f.worker_path, &["add", "crates/widget"]);
+        git(&f.worker_path, &["commit", "-q", "-m", &format!("fix({ID}): over-size delivery")]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    }
+
     std::fs::write(
         f.cas_dir().join("config.toml"),
         format!(
@@ -1050,7 +1074,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     let notes = f.task().notes;
-    if outcome != "ineligible" {
+    if eligible {
         assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
         assert!(notes.contains("QA evidence is deferred to the post-merge receipt"), "{notes}");
     }
@@ -1063,7 +1087,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let premerge = CasCore::with_daemon(f.cas_dir(), None, None);
     premerge.set_agent_id_for_testing("br-supervisor-session".into());
-    let dispatch = if outcome != "ineligible" {
+    let dispatch = if eligible {
         premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main")
             .expect_err("an eligible fast lane needs its pre-merge verifier, rather than the batch verdict");
         let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
@@ -1086,7 +1110,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     git(repo, &["config", "user.email", "cas@example.test"]);
     tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
     let now = chrono::Utc::now();
-    if outcome != "ineligible" {
+    if eligible {
     tasks.append_trusted_note(
         ID,
         &format!("[{}] {}", now.format("%Y-%m-%d %H:%M"), crate::fast_lane::merge_note(&tip, &merge, now)),
@@ -1122,7 +1146,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
 
     receipt("in_progress", None);
     let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
-    if outcome == "ineligible" {
+    if !eligible {
         assert!(pending.contains("RELEASE VERDICT"), "an ineligible backend delivery cannot skip the batch verdict: {pending}");
         assert_ne!(f.task().status, TaskStatus::Closed);
         continue;
@@ -1133,6 +1157,26 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
         && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
 
+    if outcome.starts_with("qa-") {
+        receipt("completed", Some("success"));
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("qa-failure.txt"), "The hotfix journey failed\n").unwrap();
+        std::fs::write(artifacts.join("LEDGER.md"), format!(
+            "# Failed hotfix walk\n\nbuild: {merge}\nscope: hotfix journey\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Q1 | Turn the gear | Gear turns | Journey is broken | FAIL | fixture | qa-failure.txt | - |\n",
+        )).unwrap();
+        let held = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        let asks = queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap()
+            .into_iter().filter(|row| row.kind.as_deref() == Some("ask")).collect::<Vec<_>>();
+        assert_eq!(asks.len(), 1, "a failed QA walk sends one Commander ask: {held}");
+        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&asks[0].prompt).unwrap();
+        assert_eq!(payload.options, ["Revert", "Fix-forward"]);
+        assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "wait for the operator, rather than returning before a choice: {held}");
+        let again = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+        assert_eq!(queue.peek_operator_replies("fast-lane-qa-test", 100).unwrap().into_iter()
+            .filter(|row| row.kind.as_deref() == Some("ask")).count(), 1, "retry reuses the question: {again}");
+        continue;
+    }
     if outcome == "success" {
         receipt("completed", Some("success"));
         let closed = cassy.close_green_merged_delivery(ID).await.receipt(ID);

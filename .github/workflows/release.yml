@@ -181,6 +181,8 @@ jobs:
     needs: lookup-macos
     if: needs.lookup-macos.result == 'success' && needs.lookup-macos.outputs.found != 'true'
     uses: ./.github/workflows/release-prebuild.yml
+    secrets:
+      CASSY_RUNNER_READ_TOKEN: ${{ secrets.CASSY_RUNNER_READ_TOKEN }}
     with:
       platform: macos
 

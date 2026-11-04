@@ -37,6 +37,9 @@ on:
   # alone; with CAS_LANE_SLIM unset, lane.yml calls this workflow, so the
   # factory conditions below still apply to those pushes.
   workflow_call:
+    secrets:
+      CASSY_RUNNER_READ_TOKEN:
+        required: false
   push:
     branches:
       - main
@@ -265,6 +268,8 @@ jobs:
     outputs:
       runner: ${{ steps.route.outputs.runner }}
       mode: ${{ steps.route.outputs.mode }}
+      macos-runner: ${{ steps.macos-route.outputs.runner || '["macos-26"]' }}
+      macos-mode: ${{ steps.macos-route.outputs.mode || 'hosted' }}
     steps:
       - id: route
         env:
@@ -278,6 +283,42 @@ jobs:
             echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
             echo 'mode=hosted' >> "$GITHUB_OUTPUT"
           fi
+
+      # Inline selector only: no script is loaded from the checkout.
+      - id: macos-route
+        name: Prefer idle prowl, otherwise hosted macOS
+        timeout-minutes: 1
+        continue-on-error: true
+        if: >-
+          github.repository == 'Richards-LLC/cassy'
+          && ((github.event_name == 'merge_group' && startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/'))
+          || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+          && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/'))))
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CASSY_RUNNER_READ_TOKEN || github.token }}
+          retries: 0
+          script: |
+            const labels = ['self-hosted', 'macOS', 'ARM64', 'cas-mac', 'trusted-branches'];
+            const releaseRef = context.ref === 'refs/heads/main' || context.ref.startsWith('refs/tags/v') || context.ref.startsWith('refs/heads/release/');
+            const trusted = context.repo.owner === 'Richards-LLC' && context.repo.repo === 'cassy'
+              && ((context.eventName === 'merge_group' && context.ref.startsWith('refs/heads/gh-readonly-queue/main/'))
+              || (['push', 'workflow_dispatch', 'schedule'].includes(context.eventName) && releaseRef));
+            let runner = ['macos-26'];
+            if (trusted) {
+              try {
+                const runners = await github.paginate(github.rest.actions.listSelfHostedRunnersForRepo,
+                  {...context.repo, per_page: 100, request: {timeout: 5000}});
+                if (runners.some(candidate => candidate.name === 'prowl-cas-mac'
+                  && candidate.status === 'online' && candidate.busy === false
+                  && labels.every(label => candidate.labels.some(actual => actual.name === label)))) runner = labels;
+              } catch (error) {
+                // Missing read permission or unavailable API must never strand a Mac job.
+                core.warning(`Runner availability unavailable (${error.status || 'transport'}); using hosted macOS`);
+              }
+            }
+            core.setOutput('runner', JSON.stringify(runner));
+            core.setOutput('mode', runner.length > 1 ? 'self-hosted' : 'hosted');
 
   # A merge queue validates a synthetic tree, then GitHub pushes that exact
   # tree to main. Re-running the Fast Validation family on that push wastes
@@ -1868,7 +1909,7 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-runner-route]
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
     # push events) and cancel superseded runs. Keying on the head SHA put every
     # push in its own group, so a rapid second push left the first run's full
@@ -1886,7 +1927,7 @@ jobs:
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-26' }}
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON(needs.fast-validation-runner-route.outputs.macos-runner || '["macos-26"]') }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:

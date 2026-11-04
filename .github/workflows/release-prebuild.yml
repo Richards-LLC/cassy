@@ -22,6 +22,9 @@ on:
   push:
     branches: [main]
   workflow_call:
+    secrets:
+      CASSY_RUNNER_READ_TOKEN:
+        required: false
     inputs:
       platform:
         type: string
@@ -58,22 +61,24 @@ env:
   RELEASE_DIR: release-fast
 
 jobs:
-  # Cheap gate, merge_group only: is this queue entry a release? A called or
-  # dispatched run has already decided to build and skips it.
+  # Existing admission gate also selects the Mac runner. No new stage: called
+  # or dispatched builds skip version detection but still get hosted fallback.
   pending-release:
     name: Detect release version change
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     outputs:
-      pending: ${{ steps.detect.outputs.pending }}
+      pending: ${{ github.event_name != 'merge_group' && 'true' || steps.detect.outputs.pending }}
       version: ${{ steps.detect.outputs.version }}
       tag: ${{ steps.detect.outputs.tag }}
+      macos-runner: ${{ steps.macos-route.outputs.runner || '["macos-26"]' }}
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group'
         with:
           ref: ${{ github.sha }}
 
       - id: detect
+        if: github.event_name == 'merge_group'
         name: Detect a version change against the queue base
         shell: bash
         env:
@@ -86,10 +91,47 @@ jobs:
           ./scripts/detect-pending-release.sh --base-version "$base_version" | tee -a "$GITHUB_OUTPUT"
 
       - name: Report gate decision
+        if: github.event_name == 'merge_group'
         env:
           PENDING: ${{ steps.detect.outputs.pending }}
           TAG: ${{ steps.detect.outputs.tag }}
         run: echo "pending=$PENDING tag=$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # Inline selector only: no script is loaded from the checkout.
+      - id: macos-route
+        name: Prefer idle prowl, otherwise hosted macOS
+        timeout-minutes: 1
+        continue-on-error: true
+        if: >-
+          github.repository == 'Richards-LLC/cassy'
+          && ((github.event_name == 'merge_group' && startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/'))
+          || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+          && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/'))))
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CASSY_RUNNER_READ_TOKEN || github.token }}
+          retries: 0
+          script: |
+            const labels = ['self-hosted', 'macOS', 'ARM64', 'cas-mac', 'trusted-branches'];
+            const releaseRef = context.ref === 'refs/heads/main' || context.ref.startsWith('refs/tags/v') || context.ref.startsWith('refs/heads/release/');
+            const trusted = context.repo.owner === 'Richards-LLC' && context.repo.repo === 'cassy'
+              && ((context.eventName === 'merge_group' && context.ref.startsWith('refs/heads/gh-readonly-queue/main/'))
+              || (['push', 'workflow_dispatch', 'schedule'].includes(context.eventName) && releaseRef));
+            let runner = ['macos-26'];
+            if (trusted) {
+              try {
+                const runners = await github.paginate(github.rest.actions.listSelfHostedRunnersForRepo,
+                  {...context.repo, per_page: 100, request: {timeout: 5000}});
+                if (runners.some(candidate => candidate.name === 'prowl-cas-mac'
+                  && candidate.status === 'online' && candidate.busy === false
+                  && labels.every(label => candidate.labels.some(actual => actual.name === label)))) runner = labels;
+              } catch (error) {
+                // Missing read permission or unavailable API must never strand a Mac job.
+                core.warning(`Runner availability unavailable (${error.status || 'transport'}); using hosted macOS`);
+              }
+            }
+            core.setOutput('runner', JSON.stringify(runner));
+            core.setOutput('mode', runner.length > 1 ? 'self-hosted' : 'hosted');
 
   build:
     name: Prebuild Linux x86_64
@@ -276,8 +318,8 @@ jobs:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
 
-  # There is no Mac in the fleet, so this stays on hosted macOS. Starting it at
-  # enqueue overlaps the slowest release build with the merge-queue tests.
+  # Prefer the isolated prowl runner only while online and idle; otherwise use
+  # the same hosted Mac. Enqueue still overlaps this build with queue tests.
   build-macos:
     name: Prebuild macOS ARM64
     needs: pending-release
@@ -288,7 +330,7 @@ jobs:
       && (inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'macos')
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
-    runs-on: macos-26
+    runs-on: ${{ fromJSON(needs.pending-release.outputs.macos-runner || '["macos-26"]') }}
     concurrency:
       group: release-deps-macos-${{ github.event_name == 'push' && inputs.platform == '' && 'seed-main' || github.run_id }}
       cancel-in-progress: false

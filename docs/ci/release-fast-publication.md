@@ -21,8 +21,8 @@ Three facts decide the design:
 
 1. The merge queue already proves the exact tree that lands on `main`. Any
    later check of that tree re-checks it.
-2. macOS ARM64 is the slowest build (609-1,108 s measured with LTO off), and
-   there is no Mac in the fleet. It has to overlap other work, not follow it.
+2. macOS ARM64 is the slowest build (609-1,108 s measured with LTO off).
+   It overlaps other work; trusted jobs prefer idle prowl with hosted fallback.
 3. Every hand-off to an agent cost minutes to tens of minutes.
 
 So the version bump rides in the epic PR, the release builds run once on the
@@ -40,7 +40,7 @@ merge queue (merge_group)
   ci.yml                 the required checks
   release-prebuild.yml   pending-release: did this entry change the version?
                          build        Linux x86_64 release-fast   (hosted)
-                         build-macos  macOS ARM64, LTO off, signed (hosted)
+                         build-macos  macOS ARM64, LTO off, signed (idle prowl / hosted)
         |  the queue lands its tested merge commit as main
         v
 push to main touching cas-cli/Cargo.toml
@@ -138,9 +138,29 @@ request/cut metrics, which measured narrower spans.
 
 ## Self-hosted routing
 
-None. Every release lane runs on GitHub-hosted runners; the
-`CASSY_RELEASE_SELF_HOSTED` variable and the release routing jobs are gone, and
-the publishing job is the only one holding a `contents: write` token.
+Daniel approved prowl routing on November 4, 2026 after three release queue
+attempts stalled waiting for hosted Macs. This changes placement in the
+existing flow map (cas-a677 stage 3, merge queue, and stage 4, publication
+fallback): **the same Darwin compile and prebuild checks run once**. No new
+job, release stage, build, audit or retry loop is added. The existing hosted
+runner-route job in CI and pending-release admission job in Release Prebuild
+query runner availability before choosing their existing Mac consumer.
+
+Only canonical trusted queue/main/release refs may select `prowl-cas-mac` with
+`[self-hosted, macOS, ARM64, cas-mac, trusted-branches]`; PRs never select it.
+Offline, busy, incomplete labels, missing API permission and API failure select
+`macos-26`. The publisher alone retains `contents: write`. An optional read-only
+runner inventory token is passed only to the hosted selector; it is not passed
+to the Mac jobs. Non-queue prebuild calls still build directly, while a failed
+queue version detector cannot authorize a build.
+
+This is an availability snapshot, not a capacity reservation: two simultaneous
+selectors can both see idle, or prowl can stop after selection. The runner's
+normal queue semantics then apply; no second build is started automatically.
+Provisioning, isolation and the required live routing/timing receipts are in
+[the prowl runbook](prowl-runner.md). Budget targets remain commit→main thirty
+minutes and main→published twenty minutes; no improvement is claimed until
+measured on the target.
 
 ## Dry runs and recovery
 

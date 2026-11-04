@@ -24,7 +24,7 @@ class PolicyTests(unittest.TestCase):
         for entry in cls.entries + prose:
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
-        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/actions/run-script-suite-tests/action.yml'])
+        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/release-prebuild.yml', '.github/workflows/lane.yml', '.github/actions/run-script-suite-tests/action.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -860,6 +860,69 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('No Markdown files changed', result.stdout)
         self.assertFalse(log.exists())
+
+    def test_macos_route_never_assigns_untrusted_code(self):
+        labels = ['self-hosted', 'macOS', 'ARM64', 'cas-mac', 'trusted-branches']
+        cases = [
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'Richards-LLC', True),
+            ('push', 'refs/heads/main', 'Richards-LLC', True),
+            ('push', 'refs/tags/v4.0.1', 'Richards-LLC', True),
+            ('workflow_dispatch', 'refs/heads/release/4.0.1', 'Richards-LLC', True),
+            ('pull_request', 'refs/pull/1/merge', 'Richards-LLC', False),
+            ('pull_request_target', 'refs/heads/main', 'Richards-LLC', False),
+            ('workflow_run', 'refs/heads/main', 'Richards-LLC', False),
+            ('push', 'refs/heads/factory/untrusted', 'Richards-LLC', False),
+            ('merge_group', 'refs/heads/gh-readonly-queue/other/pr-1', 'Richards-LLC', False),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'fork-owner', False),
+        ]
+        replay = r"""
+const fs = require('fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const outputs = {}; let calls = 0;
+const github = {paginate: async () => {
+  calls++; if (input.state === 'api-error') throw new Error('forbidden');
+  return [{name: 'prowl-cas-mac', status: input.state === 'offline' ? 'offline' : 'online',
+    busy: input.state === 'busy', labels: (input.state === 'wrong-labels' ? ['macOS'] : input.labels).map(name => ({name}))}];
+}, rest: {actions: {listSelfHostedRunnersForRepo() {}}}};
+const core = {setOutput: (k,v) => outputs[k] = v, warning() {}, info() {}};
+const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+new AsyncFunction('github', 'context', 'core', input.body)(github, input.context, core)
+.then(() => console.log(JSON.stringify({outputs, calls}))).catch(e => {console.error(e);process.exitCode = 1;});
+"""
+        for file, route_job, consumer in [
+            ('.github/workflows/ci.yml', 'fast-validation-runner-route', 'macos-check'),
+            ('.github/workflows/release-prebuild.yml', 'pending-release', 'build-macos'),
+        ]:
+            jobs = policy.load(self.root / file)['jobs']
+            route = next(step for step in jobs[route_job]['steps'] if step.get('id') == 'macos-route')
+            self.assertIn(route_job, jobs[consumer]['needs'])
+            self.assertTrue(route['continue-on-error'])
+            self.assertEqual(self.gh_value(jobs[consumer]['runs-on'], {
+                'github.event_name': 'merge_group', f'needs.{route_job}.outputs.macos-runner': ''}), ['macos-26'])
+            if consumer == 'build-macos':
+                pending = jobs[route_job]['outputs']['pending']
+                for event, detected, expected in [('push', '', 'true'), ('workflow_dispatch', '', 'true'),
+                        ('merge_group', 'true', 'true'), ('merge_group', 'false', 'false'), ('merge_group', '', '')]:
+                    self.assertEqual(self.gh_value(pending, {'github.event_name': event,
+                        'steps.detect.outputs.pending': detected}), expected)
+            for event, ref, owner, trusted in cases:
+                for state in ['idle', 'busy', 'offline', 'wrong-labels', 'api-error']:
+                    with self.subTest(file=file, event=event, ref=ref, owner=owner, state=state):
+                        self.assertEqual(self.gh_expr(route['if'], {'github.event_name': event,
+                            'github.ref': ref, 'github.repository': owner + '/cassy'}), trusted)
+                        context = dict(eventName=event, ref=ref, repo=dict(owner=owner, repo='cassy'))
+                        result = subprocess.run(['node', '-e', replay], text=True, capture_output=True,
+                            input=json.dumps(dict(body=route['with']['script'], context=context, labels=labels, state=state)))
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        answer = json.loads(result.stdout)
+                        expected = labels if trusted and state == 'idle' else ['macos-26']
+                        self.assertEqual(json.loads(answer['outputs']['runner']), expected)
+                        self.assertEqual(answer['calls'], int(trusted), 'untrusted code must not query the runner API')
+                        output_key = 'macos-runner'
+                        selected = self.gh_value(jobs[consumer]['runs-on'], {
+                            'github.event_name': event,
+                            f'needs.{route_job}.outputs.{output_key}': json.dumps(expected)})
+                        self.assertEqual(selected, 'ubuntu-latest' if event == 'pull_request' and consumer == 'macos-check' else expected)
 
     def test_real_runner_route_defaults_to_hosted_and_requires_both_opt_ins(self):
         route = next(s for s in self.ci()['jobs']['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']

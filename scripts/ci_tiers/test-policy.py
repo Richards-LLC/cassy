@@ -866,8 +866,8 @@ else:
         cases = [
             ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'Richards-LLC', True),
             ('push', 'refs/heads/main', 'Richards-LLC', True),
-            ('push', 'refs/tags/v4.0.1', 'Richards-LLC', True),
-            ('workflow_dispatch', 'refs/heads/release/4.0.1', 'Richards-LLC', True),
+            ('push', 'refs/tags/v9.99.1', 'Richards-LLC', True),
+            ('workflow_dispatch', 'refs/heads/release/9.99.1', 'Richards-LLC', True),
             ('pull_request', 'refs/pull/1/merge', 'Richards-LLC', False),
             ('pull_request_target', 'refs/heads/main', 'Richards-LLC', False),
             ('workflow_run', 'refs/heads/main', 'Richards-LLC', False),

@@ -379,6 +379,17 @@ impl Approval {
     }
 
     pub(crate) fn validate_for_merge(&self, root: &Path, task: &Task) -> Result<(), String> {
+        let dispatch = cas_store::get_verification_dispatch(root, &self.dispatch_id)
+            .map_err(|error| error.to_string())?;
+        let verdict = cas_store::get_verification_for_dispatch(root, &self.dispatch_id)
+            .map_err(|error| error.to_string())?;
+        if dispatch.state != cas_types::VerificationDispatchState::Resolved
+            || !verdict.is_some_and(|verdict| {
+                verdict.id == self.verdict_id && verdict.status == VerificationStatus::Approved
+            })
+        {
+            return Err("the exact candidate approval is no longer current".into());
+        }
         self.candidate.validate(root, task)
     }
 

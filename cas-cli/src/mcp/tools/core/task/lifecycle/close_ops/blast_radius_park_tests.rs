@@ -1162,7 +1162,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
         std::fs::create_dir_all(&artifacts).unwrap();
         std::fs::write(artifacts.join("qa-failure.txt"), "The hotfix journey failed\n").unwrap();
         std::fs::write(artifacts.join("LEDGER.md"), format!(
-            "# Failed hotfix walk\n\nbuild: {merge}\nscope: hotfix journey\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Q1 | Turn the gear | Gear turns | Journey is broken | FAIL | fixture | qa-failure.txt | - |\n",
+            "# Failed hotfix walk\n\nbuild: {merge}\nscope: hotfix journey\nsurface: fixture\nbudget: 1 minute\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\n\n| id | cell | expected | observed | verdict | label | evidence path | defect task |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Q1 | Turn the gear | Gear turns | Journey is broken | FAIL | fixture | qa-failure.txt | {ID} |\n",
         )).unwrap();
         let held = if outcome == "qa-fix" {
             // The worker owns the production walk and may record its FAIL

@@ -97,14 +97,33 @@ pub(crate) fn ask(
         let decision: Decision = serde_json::from_slice(&fs::read(&path)?)?;
         return Ok(waiting(&decision));
     }
-    let agent = crate::store::open_agent_store(root)?.get(owner)?;
-    if agent.role != AgentRole::Supervisor {
-        bail!("the QA decision needs a registered factory supervisor");
-    }
+    let agents = crate::store::open_agent_store(root)?;
+    let agent = agents.get(owner)?;
     let session = agent
         .factory_session
         .clone()
-        .context("supervisor has no factory session")?;
+        .context("caller has no factory session")?;
+    let owner = match agent.role {
+        AgentRole::Supervisor => agent.id,
+        AgentRole::Worker
+            if task.assignee.as_deref().is_some_and(|assignee| {
+                assignee == agent.id || assignee.eq_ignore_ascii_case(&agent.name)
+            }) =>
+        {
+            // A worker records the production walk. This is Cassy's automatic
+            // receipt decision, bound to that worker's own factory supervisor;
+            // it does not grant the worker the operator messaging tool.
+            crate::factory_supervisor_overlap::live_supervisor_sessions(
+                &agents.list(None)?,
+                Utc::now(),
+            )
+            .into_iter()
+            .find(|supervisor| supervisor.session.as_deref() == Some(&session))
+            .context("no live supervisor in the delivery's factory session")?
+            .id
+        }
+        _ => bail!("the QA decision requires its assigned worker or factory supervisor"),
+    };
     let merge = task
         .deliverables
         .green_merge_commit
@@ -172,7 +191,7 @@ pub(crate) fn ask(
         repo: repo.canonicalize()?,
         target: target.strip_prefix("origin/").unwrap_or(target).into(),
         session,
-        owner: owner.into(),
+        owner,
         row: row.into(),
         ask,
         deadline: created + Duration::minutes(WAIT_MINUTES),

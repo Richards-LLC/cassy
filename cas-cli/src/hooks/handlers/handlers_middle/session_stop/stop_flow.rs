@@ -73,7 +73,16 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 
         // Factory agents can always exit - supervisor handles task reassignment
         if !is_factory_agent {
-            match get_exit_blockers(cas_root, &input.session_id) {
+            match get_exit_blockers(cas_root, &input.session_id).map(|mut blockers| {
+                // A recorded handoff (the /finish step) that names the work
+                // in flight lets the session end with those tasks intact.
+                if blockers.has_blockers() {
+                    if let Some((handoff, saved)) = session_handoff(cas_root, &input.session_id) {
+                        blockers.retain_unhanded(&handoff, saved);
+                    }
+                }
+                blockers
+            }) {
                 Ok(blockers) if blockers.has_blockers() => {
                     // Use decision: "block" to prevent Claude from stopping
                     // This tells Claude to continue working on the remaining tasks

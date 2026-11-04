@@ -10247,9 +10247,10 @@ impl CasCore {
                                 } else {
                                     crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
                                     &proof_worktree,
-                                    // cas-5200: a merged receipt is the whole
-                                    // delivery; never add the checkout HEAD.
-                                    (merged_receipt.is_none())
+                                    // cas-5200/cas-a32c: after a merge the receipt
+                                    // and parked anchor are the whole delivery;
+                                    // the target checkout's HEAD never is.
+                                    (!use_target_branch_proof)
                                         .then_some(resolved_parent_branch.as_str()),
                                     merged_receipt
                                         .as_deref()

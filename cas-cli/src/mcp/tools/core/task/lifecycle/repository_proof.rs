@@ -366,6 +366,61 @@ fn head_is_ahead_of_integration_base(
     !base.is_empty() && base != head
 }
 
+/// Bound on the first-parent walk that finds where a delivery joined the target.
+const DELIVERY_BASE_WALK_LIMIT: &str = "500";
+
+fn changed_paths(root: &Path, from: &str, to: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    let output = git_output(root, &["diff", "--name-only", "-z", from, to, "--"])?;
+    Ok(output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+/// cas-a32c: the delivered files that changed between the bound and current
+/// target heads. Each delivery's files are what it changed relative to the
+/// target as it stood just before the delivery joined it: the first commit on
+/// the bound head's first-parent line that does not contain the anchor.
+fn delivered_files_changed_since(
+    root: &Path,
+    bound_head: &str,
+    current_head: &str,
+    anchors: &[&String],
+) -> Result<Vec<String>, String> {
+    let moved = changed_paths(root, bound_head, current_head)
+        .map_err(|error| format!("cannot compare the bound and current heads: {error}"))?;
+    if moved.is_empty() {
+        return Ok(Vec::new());
+    }
+    let line = git_output(
+        root,
+        &["rev-list", "--first-parent", "--max-count", DELIVERY_BASE_WALK_LIMIT, bound_head],
+    )
+    .map_err(|error| format!("cannot walk the bound head: {error}"))?;
+    let line = String::from_utf8_lossy(&line).into_owned();
+    let mut touched = std::collections::BTreeSet::new();
+    for anchor in anchors {
+        let before = line
+            .lines()
+            .map(str::trim)
+            .find(|commit| !commit.is_empty() && !commit_is_reachable_from(root, anchor, commit))
+            .ok_or_else(|| {
+                format!(
+                    "cannot find where delivered commit {anchor} joined the target within \
+                     {DELIVERY_BASE_WALK_LIMIT} first-parent commits"
+                )
+            })?;
+        let base = git_output(root, &["merge-base", before, anchor])
+            .map(|base| String::from_utf8_lossy(&base).trim().to_string())
+            .map_err(|error| format!("cannot find delivered commit {anchor}'s base: {error}"))?;
+        let delivered = changed_paths(root, &base, anchor)
+            .map_err(|error| format!("cannot list delivered commit {anchor}'s files: {error}"))?;
+        touched.extend(delivered.intersection(&moved).cloned());
+    }
+    Ok(touched.into_iter().collect())
+}
+
 fn commit_exists(worktree_root: &Path, commit: &str) -> bool {
     git_output(worktree_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
@@ -570,11 +625,21 @@ pub(crate) fn evaluate_repository_proof(
     // A rewritten or dropped delivery is held by neither and is refused.
     let mut parked_refs: Vec<String> = Vec::new();
     let mut missing: Vec<&String> = Vec::new();
+    let mut delivered: Vec<&String> = Vec::new();
     for anchor in &proof.anchor_commits {
         if !commit_exists(&validation_root, anchor) {
             missing.push(anchor);
             continue;
         }
+        // cas-a32c: a target-bound proof reviewed the target tree at its
+        // bound head. An anchor that head never contained (an older dispatch
+        // bound the supervisor checkout's HEAD) was not part of that review.
+        if proof.target_branch.is_some()
+            && !commit_is_reachable_from(&validation_root, anchor, &proof.head_commit)
+        {
+            continue;
+        }
+        delivered.push(anchor);
         if commit_is_reachable_from(&validation_root, anchor, &current.head_commit) {
             continue;
         }
@@ -604,6 +669,44 @@ pub(crate) fn evaluate_repository_proof(
                 current_head = current.head_commit,
             ),
         });
+    }
+
+    if proof.target_branch.is_some() {
+        if delivered.is_empty() {
+            return Err(TaskLifecycleGateError::RepositoryProof {
+                message: format!(
+                    "repository proof changed after dispatch; request a fresh verification cycle \
+                     (dispatch bound head {bound}, current head {current_head}; the bound head \
+                     contains none of the delivered commits)",
+                    bound = proof.head_commit,
+                    current_head = current.head_commit,
+                ),
+            });
+        }
+        // cas-a32c: later merges into the target may land beside the delivery,
+        // never on top of it. A change to a delivered file needs a fresh review.
+        let touched =
+            delivered_files_changed_since(&validation_root, &proof.head_commit, &current.head_commit, &delivered)
+                .map_err(|message| TaskLifecycleGateError::RepositoryProof {
+                    message: format!(
+                        "repository proof changed after dispatch; request a fresh verification cycle \
+                         (dispatch bound head {bound}, current head {current_head}; {message})",
+                        bound = proof.head_commit,
+                        current_head = current.head_commit,
+                    ),
+                })?;
+        if !touched.is_empty() {
+            return Err(TaskLifecycleGateError::RepositoryProof {
+                message: format!(
+                    "repository proof changed after dispatch; request a fresh verification cycle \
+                     (dispatch bound head {bound}, current head {current_head}; later merges changed \
+                     delivered file(s): {files})",
+                    bound = proof.head_commit,
+                    current_head = current.head_commit,
+                    files = touched.join(", "),
+                ),
+            });
+        }
     }
 
     Ok(RepositoryProofStatus::DeliveredContentIntact {
@@ -983,6 +1086,48 @@ mod tests {
         let proof: RepositoryProofBoundary =
             serde_json::from_value(legacy).expect("pre-cas-5c33 dispatch rows still parse");
         assert!(proof.anchor_commits.is_empty());
+    }
+
+    /// cas-a32c: a target-bound proof survives a sibling merge beside the
+    /// delivery, ignores an anchor its bound head never contained (the old
+    /// checkout-HEAD anchor), and refuses a later change to a delivered file.
+    #[test]
+    fn target_proof_keeps_sibling_merges_and_refuses_changes_to_delivered_files() {
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        let commit = |file: &str, body: &str| {
+            std::fs::write(path.join(file), body).expect("write");
+            git(path, &["add", file]);
+            git(path, &["commit", "-q", "-m", body.trim()]);
+        };
+        git(path, &["init", "-q", "-b", "main"]);
+        commit("seed.txt", "seed\n");
+        git(path, &["branch", "epic"]);
+        commit("upstream.txt", "main moves on\n");
+        let stray = head(path);
+        git(path, &["checkout", "-q", "-b", "lane", "epic"]);
+        commit("delivered.txt", "delivered\n");
+        let tip = head(path);
+        git(path, &["checkout", "-q", "epic"]);
+        git(path, &["merge", "-q", "--no-ff", "lane", "-m", "merge lane"]);
+        let proof = capture_repository_proof_at_target(path, "epic", vec![tip, stray])
+            .expect("target proof");
+
+        commit("sibling.txt", "sibling\n");
+        assert!(
+            matches!(
+                evaluate_repository_proof(&proof).expect("sibling beside the delivery"),
+                RepositoryProofStatus::DeliveredContentIntact { .. }
+            ),
+            "an unrelated sibling merge keeps the verdict"
+        );
+
+        commit("delivered.txt", "rewritten by a sibling\n");
+        let refused = evaluate_repository_proof(&proof).expect_err("delivered file changed");
+        let TaskLifecycleGateError::RepositoryProof { message } = refused else {
+            panic!("repository proof refusal expected");
+        };
+        assert!(message.contains("delivered file(s): delivered.txt"), "{message}");
     }
 
     #[test]

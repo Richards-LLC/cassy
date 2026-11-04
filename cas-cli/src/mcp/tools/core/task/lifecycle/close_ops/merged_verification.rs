@@ -64,9 +64,12 @@ impl CasCore {
         }
         super::super::qa_evidence_gate::ledger_preflight(&self.cas_root, task, true)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // cas-a32c: `repo` is the supervisor's checkout, whose HEAD (often
+        // `main`, ahead of the epic) is not this merged delivery. Bound as an
+        // anchor it went "unreachable" at the first sibling merge.
         let anchors = super::super::repository_proof::delivered_anchor_commits(
             repo,
-            Some(target),
+            None,
             req.commit_receipt.as_deref(),
             Some(anchor),
         );

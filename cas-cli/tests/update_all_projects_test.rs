@@ -513,19 +513,28 @@ fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
         let _ = std::fs::remove_file(project.join(".cas").join(name));
     }
     {
-        // The current entries/rules schema without the columns m259/m260 add.
+        // The entries/rules schema before provenance, operator authority and
+        // stakeholder migrations. Strip column definitions independently of
+        // their position: stakeholder made origin_project non-terminal (cas-c744).
         // (SQLite's DROP COLUMN cannot rewrite this commented CREATE TABLE.)
         let legacy = cas_store::ENTRIES_RULES_SCHEMA
             .lines()
-            .filter(|line| !line.contains("operator_authority") && !line.contains("cas-5372"))
+            .filter(|line| {
+                !line.contains("operator_authority") && !line.contains("cas-5372")
+                    && !line.trim_start().starts_with("origin_project ")
+                    && !line.trim_start().starts_with("stakeholder ")
+            })
             .collect::<Vec<_>>()
             .join("\n")
-            .replace(",\n    origin_project TEXT\n)", "\n)");
+            .replace(",\n);", "\n);");
         assert!(!legacy.contains("origin_project") && !legacy.contains("operator_authority"));
         let conn = open_project_db(&project);
         conn.execute_batch(&legacy)
             .expect("create the legacy entries/rules-only store");
         assert!(!column_exists(&conn, "rules", "operator_authority"));
+        assert!(!column_exists(&conn, "rules", "origin_project"));
+        assert!(!column_exists(&conn, "entries", "origin_project"));
+        assert!(!column_exists(&conn, "rules", "stakeholder"));
     }
 
     let update = cas_cmd(root)
@@ -544,6 +553,8 @@ fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
     let conn = open_project_db(&project);
     assert!(column_exists(&conn, "rules", "operator_authority"));
     assert!(column_exists(&conn, "rules", "origin_project"));
+    assert!(column_exists(&conn, "entries", "origin_project"));
+    assert!(column_exists(&conn, "rules", "stakeholder"));
     let tasks: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'tasks'",

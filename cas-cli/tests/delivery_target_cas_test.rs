@@ -315,11 +315,9 @@ async fn arm_delivery_with_selector(
         artifact_path: Some(artifact.display().to_string()),
     };
 
-    // cas-2b667 / GH #588: a worker receipt must reject this unmerged
-    // source tip before persisting any delivery state. Keep that regression
-    // assertion here, then seed the post-acceptance boundary directly so the
-    // tests below can continue exercising worktree_merge's target CAS and
-    // drift handling independently of the review-queue gate.
+    // cas-c744 / cas-e051: review the unpublished candidate through the real
+    // receipt path. The retired #588 gate required publication first; seeding
+    // its delivery/dispatch rows bypassed the pre-merge proof boundary.
     let worker_service = delivery_service(&cas_root, &worker_id);
     let close = worker_service
         .task(Parameters(task_req(serde_json::json!({
@@ -330,54 +328,17 @@ async fn arm_delivery_with_selector(
         }))))
         .await
         .expect("receipt submission");
-    assert!(
-        get_text(&close).contains("DELIVERY RECEIPT REJECTED")
-            && get_text(&close).contains("current factory branch tip"),
-        "{}",
-        get_text(&close)
-    );
-
-    let lease = open_agent_store(&cas_root)
-        .expect("agent store")
-        .get_lease(&task.id)
-        .expect("fixture lease lookup")
-        .expect("worker lease remains after merge-gate rejection");
-    let durable_receipt = cas_store::build_worker_completion_receipt(
-        &receipt,
-        slug,
-        chrono::Utc::now(),
-    );
-    cas_store::create_worker_delivery_with_dispatch_for_lease(
-        &cas_root,
-        &durable_receipt,
+    assert!(get_text(&close).contains("State: awaiting_verification"), "{}", get_text(&close));
+    assert!(!cas_git_is_ancestor(&repo.root, &receipt.source_branch, "main"));
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id).unwrap().unwrap().1.state,
         WorkerDeliveryState::AwaitingVerification,
-        &worker_id,
-        lease.epoch,
-        &supervisor_id,
-        chrono::Utc::now() + chrono::Duration::minutes(10),
-    )
-    .expect("seed the delivery boundary after the explicit #588 rejection");
-    let mut pending = open_task_store(&cas_root)
-        .expect("task store")
-        .get(&task.id)
-        .expect("task after receipt rejection");
-    pending.status = TaskStatus::AwaitingMerge;
-    pending.pending_verification = true;
-    pending.close_reason = Some("worker handoff".to_string());
-    pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());
-    open_task_store(&cas_root)
-        .expect("task store")
-        .update(&pending)
-        .expect("project seeded delivery boundary as review-pending");
-    open_agent_store(&cas_root)
-        .expect("agent store")
-        .release_lease_if_owner_epoch(
-            &task.id,
-            &worker_id,
-            lease.epoch,
-            "Fixture receipt handoff after explicit merge-gate rejection",
-        )
-        .expect("release fixture lease");
+    );
+    assert!(open_agent_store(&cas_root).unwrap().get_lease(&task.id).unwrap().is_none(),
+        "the accepted receipt releases its exact worker lease");
+    let pending = task_store.get(&task.id).unwrap();
+    assert!(pending.pending_verification);
+    assert_ne!(pending.status, TaskStatus::Closed);
 
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
         .expect("dispatch lookup")
@@ -523,15 +484,16 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 }
 
 /// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
-/// closed by Cassy once its verdict approves: no worker re-close, the parked
+/// closed by Cassy using its pre-merge approval: no worker re-close, the parked
 /// close reason and the merge SHA are recorded, and the worker hears once.
-/// A rejected verdict or a red-CI override merge never closes it. A merge
+/// A rejected verdict prevents publication; a red-CI override never auto-closes. A merge
 /// without check runs still starts the close and records its unconfirmed CI.
 #[tokio::test]
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
-    // (row, CI conclusion, verdict recorded after merge, Cassy closes)
+    // cas-c744: cas-e051 moved the existing verdict before publication.
+    // (row, CI conclusion, pre-merge verdict, Cassy closes after merge)
     for (row, conclusion, verdict, closes) in [
-        // cas-46ea: the worker tries to close after the merge and blocks.
+        // The worker cannot close while its candidate is still under review.
         ("worker-blocked", "success", Some("approved"), true),
         // cas-46ea: merged from a pushed lane tip without a park.
         ("unparked", "success", Some("approved"), true),
@@ -539,7 +501,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         ("green-rejected", "success", Some("rejected"), false),
         ("advisory-no-checks", "no-checks", Some("approved"), true),
         ("advisory-pending-docs", "pending", Some("approved"), true),
-        ("red-override", "failure", None, false),
+        ("red-override", "failure", Some("approved"), false),
         ("fresh-branch", "success", Some("approved"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();
@@ -725,13 +687,84 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         env.set("CAS_AGENT_ROLE", "supervisor");
         let supervisor = delivery_service(&cas_root, &supervisor_id);
         let mut merge = coord_req("worktree_merge");
-        merge.id = Some(delivery_branch);
+        merge.id = Some(delivery_branch.clone());
         merge.task_id = Some(task.id.clone());
         merge.allow_trunk = Some(true);
         merge.cleanup = Some(false);
         if conclusion == "failure" {
             merge.supervisor_override = Some(true);
             merge.reason = Some("red run reviewed".to_string());
+        }
+        let target_before = git_stdout(&repo.root, &["rev-parse", "main"]);
+        let held = supervisor.factory(Parameters(merge.clone())).await
+            .expect_err("the candidate must be reviewed before publication, even with a CI override");
+        assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{row}: {held}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
+        assert!(!cas_git_is_ancestor(&repo.root, &delivery_branch, "main"));
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap().expect("pre-merge dispatch");
+        let proof = dispatch.repository.as_ref().expect("candidate repository proof");
+        assert_ne!(proof.head_commit, target_before, "{row}: review the candidate tree");
+        assert!(cas_git_is_ancestor(&repo.root, &delivery_branch, &proof.head_commit));
+        assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
+        if row == "green-approved" {
+            // cas-6a8b/cas-e051: the owner receives one typed handoff
+            // before publication, independently of any later COMMITTED reply.
+            assert_eq!(dispatch.owner_agent_id, supervisor_id);
+            assert_eq!(dispatch.requester_agent_id, supervisor_id);
+            let handoffs: Vec<_> = cas::store::open_prompt_queue_store(&cas_root)
+                .unwrap()
+                .peek_all(50)
+                .unwrap()
+                .into_iter()
+                .filter(|prompt| prompt.source == format!("verification-dispatch:{}", dispatch.id))
+                .collect();
+            assert_eq!(handoffs.len(), 1, "{row}: background dispatch {} must reach its owner before expiry", dispatch.id);
+            let handoff = &handoffs[0];
+            assert_eq!(handoff.target, "supervisor");
+            assert_eq!(handoff.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert_eq!(handoff.priority, cas_store::NotificationPriority::High);
+            assert!(handoff.created_at < dispatch.deadline_at);
+            assert!(chrono::Utc::now() < dispatch.deadline_at);
+            // pin: the daemon's wake parser requires this typed XML envelope and its dispatch identity.
+            assert!(handoff.prompt.contains(&format!("<cas-verification-dispatch dispatch_id=\"{}\"", dispatch.id)), "{}", handoff.prompt);
+            // pin: the wake parser must route the dispatch to its bound supervisor owner.
+            assert!(handoff.prompt.contains(&format!("owner=\"{supervisor_id}\"")), "{}", handoff.prompt);
+            // pin: the wake parser revalidates the typed dispatch's exact deadline.
+            assert!(handoff.prompt.contains(&format!("deadline=\"{}\"", dispatch.deadline_at.to_rfc3339())), "{}", handoff.prompt);
+        }
+        if row == "worker-blocked" {
+            // The removed post-merge worker relay is now a pre-merge hold.
+            // A worker retry cannot manufacture approval or publish the lane.
+            env.set("CAS_AGENT_ROLE", "worker");
+            let retry = delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
+                "action": "close", "id": task.id, "reason": "candidate still under review",
+            })))).await;
+            assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed, "{retry:?}");
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+        }
+        let verdict = verdict.expect("every publication needs a candidate verdict");
+        let recorded = get_text(&supervisor.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "status": verdict,
+            "summary": format!("{verdict} {row}"), "confidence": 1.0,
+            "dispatch_id": dispatch.id,
+        })))).await.expect("pre-merge verdict"));
+        assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed,
+            "approval alone cannot close an unpublished delivery: {row}: {recorded}");
+        if verdict == "rejected" {
+            let denied = supervisor.factory(Parameters(merge)).await.expect_err("rejection holds publication");
+            assert!(denied.message.contains(&dispatch.id), "{denied}");
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
+            assert!(!cas_git_is_ancestor(&repo.root, &delivery_branch, "main"));
+            let declined = task_store.get(&task.id).unwrap();
+            assert_eq!(declined.status, TaskStatus::Open, "{row}: {recorded}");
+            assert_eq!(declined.assignee.as_deref(), Some(worker.as_str()));
+            assert!(declined.deliverables.green_merge_commit.is_none());
+            assert!(declined.notes.contains(&format!("rejected {row}")));
+            assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id,
+                dispatch.id, "retries cannot create a post-merge approval");
+            continue;
         }
         let merged = if row == "green-approved" {
             // A close slower than the post-commit grace, deterministically.
@@ -763,7 +796,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
             // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
             assert!(
-                notes.contains("waiting on its verification dispatch") && notes.contains("awaiting_merge"),
+                notes.contains("Cassy closed task") && notes.contains("task status now `closed`"),
                 "{row}: {notes}"
             );
             answer
@@ -772,8 +805,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
-        // cas-46ea: Cassy parks an unparked pushed lane tip at its merge.
-        assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
+        assert_eq!(after_merge.status == TaskStatus::Closed, closes, "{row}: {merged}");
         let admission = match conclusion {
             "success" => "green",
             "failure" => "override",
@@ -788,96 +820,22 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         })))).await.expect("show merged task"));
         assert!(shown.contains(&format!("CI admission: {admission}")), "{row}: {shown}");
 
-        if let Some(verdict) = verdict {
-            if admission == "advisory" {
-                assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
+        if admission == "advisory" {
+            assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
+        }
+        assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
+        let after_dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
+        assert_eq!(after_dispatch.id, dispatch.id, "publication reuses the pre-merge verdict");
+        assert_eq!(after_dispatch.repository, dispatch.repository, "publication cannot replace the reviewed proof");
+        if closes {
+            if row == "unparked" {
+                assert!(after_merge.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", after_merge.close_reason);
+            } else {
+                assert_eq!(after_merge.close_reason.as_deref(), Some(parked_reason.as_str()));
             }
-            assert_eq!(
-                after_merge.deliverables.green_merge_commit.as_deref(),
-                Some(merge_sha.as_str()),
-                "{row}: {merged}"
-            );
-            let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{row}: Cassy's close dispatches verification: {merged}"));
-            assert_eq!(
-                dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()),
-                Some(merge_sha.as_str()),
-                "{row}: Cassy binds the dispatch to the merge commit"
-            );
-            if row == "green-approved" {
-                // cas-6a8b: the COMMITTED response preceded dispatch creation.
-                // Its owner must receive a wake-class handoff independently
-                // of the response and the background outcome note.
-                assert_eq!(dispatch.owner_agent_id, supervisor_id);
-                assert_eq!(dispatch.requester_agent_id, supervisor_id);
-                let handoffs: Vec<_> = cas::store::open_prompt_queue_store(&cas_root)
-                    .unwrap()
-                    .peek_all(50)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|prompt| prompt.source == format!("verification-dispatch:{}", dispatch.id))
-                    .collect();
-                assert_eq!(handoffs.len(), 1, "{row}: background dispatch {} must reach its owner before expiry", dispatch.id);
-                let handoff = &handoffs[0];
-                assert_eq!(handoff.target, "supervisor");
-                assert_eq!(handoff.origin, Some(cas_store::QueueOrigin::Daemon));
-                assert_eq!(handoff.priority, cas_store::NotificationPriority::High);
-                assert!(handoff.created_at < dispatch.deadline_at);
-                assert!(chrono::Utc::now() < dispatch.deadline_at);
-                // pin: the daemon's wake parser requires this typed XML envelope and its dispatch identity.
-                assert!(handoff.prompt.contains(&format!("<cas-verification-dispatch dispatch_id=\"{}\"", dispatch.id)), "{}", handoff.prompt);
-                // pin: the wake parser must route the dispatch to its bound supervisor owner.
-                assert!(handoff.prompt.contains(&format!("owner=\"{supervisor_id}\"")), "{}", handoff.prompt);
-                // pin: the wake parser revalidates the typed dispatch's exact deadline.
-                assert!(handoff.prompt.contains(&format!("deadline=\"{}\"", dispatch.deadline_at.to_rfc3339())), "{}", handoff.prompt);
-            }
-            if row == "worker-blocked" {
-                // The relay this task removes: a worker close after the merge
-                // is refused on the dispatch and the worker blocks on it.
-                env.set("CAS_AGENT_ROLE", "worker");
-                let worker_service = delivery_service(&cas_root, &worker_id);
-                let refused = worker_service.task(Parameters(task_req(serde_json::json!({
-                    "action": "close", "id": task.id, "commit_receipt": merge_sha, "reason": "merged task",
-                })))).await;
-                assert!(
-                    task_store.get(&task.id).unwrap().status != TaskStatus::Closed,
-                    "{row}: the close waits on the verdict: {refused:?}"
-                );
-                worker_service.task(Parameters(task_req(serde_json::json!({
-                    "action": "update", "id": task.id, "status": "blocked",
-                })))).await.expect("worker blocks on the dispatch");
-                env.set("CAS_AGENT_ROLE", "supervisor");
-            }
-            let recorded = get_text(
-                &supervisor
-                    .verification(Parameters(verification_req(serde_json::json!({
-                        "action": "add", "task_id": task.id, "status": verdict,
-                        "summary": format!("{verdict} {row}"), "confidence": 1.0,
-                        "dispatch_id": dispatch.id,
-                    }))))
-                    .await
-                    .expect("verdict"),
-            );
-            let task = task_store.get(&task.id).unwrap();
-            assert_eq!(task.status == TaskStatus::Closed, closes, "{row}: {recorded}");
-            if closes {
-                if row == "unparked" {
-                    assert!(task.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", task.close_reason);
-                } else {
-                    assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
-                }
-                assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
-                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
-            } else if verdict == "rejected" {
-                // cas-46ea: a failed verdict hands the task back with findings.
-                assert_eq!(task.status, TaskStatus::Open, "{row}: {recorded}");
-                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()));
-                assert!(task.notes.contains(&format!("{verdict} {row}")), "{row}: {}", task.notes);
-            }
+            assert_eq!(after_merge.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
         } else {
-            assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
-            assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(), "override must not auto-close or dispatch verification");
+            assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "CI override stays a manual close: {row}: {merged}");
         }
 
         let worker_prompts: Vec<String> = cas::store::open_prompt_queue_store(&cas_root)
@@ -903,13 +861,6 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             usize::from(row == "unparked"),
             "{row}: a worker parked by the merge hears it once (cas-e9d6): {worker_prompts:?}"
         );
-        if verdict == Some("rejected") {
-            assert_eq!(
-                worker_prompts.iter().filter(|p| p.contains(&format!("rejected {row}"))).count(),
-                1,
-                "{row}: the worker hears the findings once: {worker_prompts:?}"
-            );
-        }
         if closes && admission == "advisory" {
             assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");
             assert!(!worker_prompts.iter().any(|p| p.contains("with green CI")), "{worker_prompts:?}");
@@ -1089,6 +1040,17 @@ fn supervisor_merge_through_close_stays_under_stack_budget_cas_6a57() {
     merge.task_id = Some(task.id.clone());
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
+    // cas-c744: candidate review is a separate phase; keep the painted
+    // measurement on the approved publication through ordinary close.
+    let held = runtime.block_on(supervisor.factory(Parameters(merge.clone())))
+        .expect_err("prepare the pre-merge candidate");
+    assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{held}");
+    assert!(!cas_git_is_ancestor(&repo.root, &format!("factory/{slug}"), "main"));
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
+    runtime.block_on(supervisor.verification(Parameters(verification_req(serde_json::json!({
+        "action": "add", "task_id": task.id, "status": "approved",
+        "summary": "stack fixture candidate approved before publication", "dispatch_id": dispatch.id,
+    }))))).expect("pre-merge approval");
     let (reply, high_water) = runtime
         .block_on(runtime.spawn(async move {
             let painted = paint_stack();
@@ -1102,7 +1064,10 @@ fn supervisor_merge_through_close_stays_under_stack_budget_cas_6a57() {
         cas_git_is_ancestor(&repo.root, &format!("factory/{slug}"), "main"),
         "the delivery landed: {reply}"
     );
-    assert!(reply.contains(&format!("Cassy close of {}", task.id)), "the reply names the gate: {reply}");
+    assert!(reply.contains(&format!("Cassy closed task {}", task.id)), "the reply names the close: {reply}");
+    assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
+    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id,
+        dispatch.id, "the measured close reuses the candidate verdict");
     assert!(
         high_water < STACK_BUDGET,
         "merge through close used {high_water} stack bytes, budget {STACK_BUDGET}"

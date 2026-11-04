@@ -354,6 +354,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.
 
+### Fixed — Peer artifact fetch
+
+- **Scoped fetch instructions** — Peer artifact attachments now carry their owning task and sharing project and print a working fetch command. Older pointers ask the sender for the task or a fresh share.
+
+### Fixed — Merge queue notifications
+
+- **Route ejections to the delivery owner once** — Merge queue ejections use the
+  worker's recorded factory session for supervisor and worker notices. Watchers
+  leave deliveries from another machine to their owning daemon, and repeated
+  snapshots keep the same occurrence after a poll or restart.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

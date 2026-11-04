@@ -485,6 +485,7 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
 
     let artifact = PeerAttachment::Artifact {
         id: "art-1".into(),
+        task_id: Some("cas-proof".into()),
         name: Some("retry.pdf".into()),
         sha256: Some("ab".repeat(32)),
         url: Some("https://cloud.example/a/art-1".into()),
@@ -498,6 +499,15 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     let (pointers, text) = split_attachments(rest);
     assert_eq!(pointers, [file.clone(), artifact], "both pointers round-trip");
     assert_eq!(text, "Here's how we did it.");
+    let (legacy, _) = split_attachments(
+        "<cas-peer-attachment v=\"1\" kind=\"artifact\" id=\"art-old\"/>\nlegacy proof",
+    );
+    assert!(matches!(&legacy[0], PeerAttachment::Artifact { task_id: None, .. }));
+    let legacy_prompt = render_attachments(&legacy, CASSY);
+    // pin: old pointers must offer recovery instead of a fetch missing its required task.
+    assert!(legacy_prompt.contains("ask the sender to re-share"), "{legacy_prompt}");
+    assert!(!legacy_prompt.lines().any(|line| line.starts_with("Fetch:")));
+
 
     let rows = [
         sup("sup-gabber", "true-dragon-23", "u1", CASSY, "soundwave"),
@@ -519,6 +529,8 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "We retry with jitter.\n");
     // pin: delivered wording the recipient supervisor acts on.
     assert!(prompt.contains("published artifact art-1 (retry.pdf)"), "{prompt}");
+    // pin: the recipient executes the advertised MCP command verbatim.
+    assert!(prompt.contains("Fetch: artifact action=fetch task_id=cas-proof id=art-1"), "{prompt}");
     // pin: delivered wording the recipient supervisor acts on.
     assert!(prompt.ends_with("Here's how we did it."), "{prompt}");
 }

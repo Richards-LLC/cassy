@@ -922,6 +922,16 @@ fn newest_citation_wins() {
 }
 
 #[test]
+fn short_path_system_outcomes_do_not_cite_bundles_cas_d4310() {
+    for marker in ["BATCH_CLOSE_OUTCOME qab-one", "POST_COMMIT_OUTCOME:", "CLOSE_OUTCOME:"] {
+        let note = format!("[2026-11-04 19:00] 📝 PROGRESS {marker} Next: qa-bundle: /a/qa/bundle.json");
+        assert_eq!(cited_bundle_path(&note), None, "{marker} is system output, not a producer citation");
+        let notes = format!("[2026-11-04 18:59] qa-bundle: /producer/bundle.json\n\n{note}");
+        assert_eq!(cited_bundle_path(&notes).as_deref(), Some("/producer/bundle.json"));
+    }
+}
+
+#[test]
 fn ledger_tier_requires_a_fresh_pass_row() {
     let fx = Fixture::new();
     let ctx = EvidenceContext {

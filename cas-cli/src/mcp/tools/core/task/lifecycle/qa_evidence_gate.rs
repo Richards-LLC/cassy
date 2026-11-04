@@ -317,9 +317,9 @@ fn task_qa_notes<'a>(
         return original;
     }
     std::borrow::Cow::Owned(format!(
-        "{}\nqa-bundle: {}",
+        "{}\n\n{}",
         task.notes,
-        replacement.display()
+        crate::qa_evidence::bundle_citation_note(replacement.display())
     ))
 }
 
@@ -687,7 +687,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         None
     };
     let resolved_notes = match restored {
-        Some(bundle) => format!("{notes}\nqa-bundle: {}", bundle.display()),
+        Some(bundle) => format!("{notes}\n\n{}", crate::qa_evidence::bundle_citation_note(bundle.display())),
         None => notes.to_string(),
     };
     let ctx = EvidenceContext {
@@ -1021,6 +1021,24 @@ mod tests {
         assert!(problem.contains(legacy.to_str().unwrap()), "{error}");
         assert!(next.contains(scoped.to_str().unwrap()), "{error}");
         assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+    }
+
+    #[test]
+    fn restored_citation_after_batch_outcome_has_its_own_note_cas_d4310() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project/.cas");
+        let base = temp.path().join("artifacts");
+        let paths = crate::config::resolved_factory_artifact_paths(&root, Some(base.to_str().unwrap()));
+        let [scoped, legacy] = paths.task_dirs("cas-restored");
+        let bundle = scoped.join("qa/bundle.json");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(&bundle, "restored bundle").unwrap();
+        let mut task = Task::new("cas-restored".into(), "restored citation".into());
+        task.notes = format!("[2026-11-04 19:00] qa-bundle: {}\n\n[2026-11-04 19:01] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-old: held", legacy.join("qa/bundle.json").display());
+        let notes = task_qa_notes(&paths, &task, &scoped);
+        assert_eq!(crate::qa_evidence::cited_bundle_path(&notes).as_deref(), bundle.to_str());
+        assert_eq!(cas_store::task_note_markers::note_blocks(&notes).len(), 3,
+            "the restored citation must have its own timestamped note, not join the outcome block");
     }
 
     /// cas-1b4d: a merged delivery with deferred batch evidence closes inside

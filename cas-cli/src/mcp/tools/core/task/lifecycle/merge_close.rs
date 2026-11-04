@@ -149,10 +149,30 @@ fn summarize_gate(text: &str) -> String {
     format!("{}…", line.chars().take(LIMIT).collect::<String>())
 }
 
-fn batch_close_note(receipt_id: &str, outcome: &str) -> String {
-    format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-        summarize_gate(outcome))
+fn record_batch_close_outcome(
+    cas_root: &std::path::Path,
+    store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    receipt_id: &str,
+    outcome: &str,
+) -> Result<String, String> {
+    let summary = summarize_gate(outcome);
+    let body = if summary == outcome {
+        summary
+    } else {
+        // Preserve complete commands and original whitespace in the existing
+        // immutable receipt channel; never truncate its detail pointer.
+        let config = crate::config::Config::load(cas_root).map_err(|error| error.to_string())?;
+        let brief: String = summary.chars().take(80).collect();
+        super::close_ops::gate_text::compact_receipt(
+            cas_root, config.factory().artifacts_root.as_deref(), task_id,
+            "batch-close", &brief, outcome,
+        )?.replace('\n', " ")
+    };
+    let note = format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {body}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"));
+    store.append_note(task_id, &note).map_err(|error| error.to_string())?;
+    Ok(note)
 }
 
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
@@ -503,8 +523,7 @@ impl CasCore {
             // A close can outlive the batch response's post-commit grace.
             // Persist each result as it happens, including a selector refusal.
             let record = |outcome: &str| {
-                let note = batch_close_note(&receipt.id, outcome);
-                if let Err(error) = store.append_note(task_id, &note) {
+                if let Err(error) = record_batch_close_outcome(&self.cas_root, store.as_ref(), task_id, &receipt.id, outcome) {
                     tracing::warn!(%task_id, %error, "batch close outcome not recorded");
                 }
             };
@@ -797,14 +816,39 @@ mod tests {
 
     #[test]
     fn batch_hold_note_is_bounded_and_not_a_bundle_citation_cas_dd05() {
-        // Minimized cas-6faf hold; only the machine-specific artifact root is normalized.
+        // Condensed cas-6faf refusal and command hint with a fixture artifact root.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&Task::new("cas-note".into(), "outcome note".into())).unwrap();
         let hold = "PARK REFUSED: more than one close gate failed.\n\nTASK CLOSE REJECTED: cas-6faf is user-facing and its QA evidence bundle is not cited. Next: produce the bundle, then `task action=notes id=cas-6faf notes=\"qa-bundle: /proof/cas-6faf/qa/bundle.json\"`.";
         for outcome in [hold.to_string(), "Unreadable qa-bundle: /suggested/bundle.json".into(), format!("{hold}{}", " long detail".repeat(100))] {
-            let note = batch_close_note("qab-fixture", &outcome);
+            let note = record_batch_close_outcome(&root, store.as_ref(), "cas-note", "qab-fixture", &outcome).unwrap();
             assert_eq!(crate::qa_evidence::cited_bundle_path(&note), None, "{note}");
             assert_eq!(note.lines().count(), 1);
-            assert!(note.chars().count() <= 400, "outcome note is too long");
+            assert!(note.chars().count() <= 800, "outcome note is too long");
         }
+    }
+
+    #[test]
+    fn batch_outcome_keeps_a_complete_remedy_pointer_cas_d4310() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&Task::new("cas-dd05".into(), "scoped proof hold".into())).unwrap();
+        let command = "SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd scripts/run-scoped-tests.sh --proof";
+        let outcome = format!("scoped proof receipt has base None; must be proven against SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd. Re-run the delivered tip in a detached supervisor checkout with: {command}");
+        record_batch_close_outcome(&root, store.as_ref(), "cas-dd05", "qab-remedy", &outcome).unwrap();
+        let note = store.get("cas-dd05").unwrap().notes;
+        let path = note.split_once("Details: ").expect("the bounded note must point to its complete remedy")
+            .1.split_once(" (SHA-256 ").unwrap().0;
+        let detail = std::fs::read_to_string(path).unwrap();
+        assert_eq!(detail, outcome);
+        assert!(detail.contains(command));
+        assert_eq!(note.lines().count(), 1);
+        assert!(note.chars().count() <= 800, "{note}");
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed

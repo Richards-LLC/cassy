@@ -498,6 +498,10 @@ invariants:
     statement: A connected idle supervisor has a solid muted green dot; working is solid green and a machine outage is solid gray. State dots have accessible state names and remain distinguishable in light, dark and forced colors. Stopped sessions are absent from navigation.
     check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses muted green and verify accessible state names. Stopped sessions are absent; compare offline treatment using a running session during a machine outage. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
     bug: {task: cas-7389}
+  HUB-J14-MINUTE-RECENCY:
+    statement: Alternating sibling activity within one whole minute keeps the Most recent badge on the same stable session identity. A later activity minute moves the badge without changing row rectangles at 390 and 1280 pixels.
+    check: Run the ProjectNavigation ordering regression and the four recency stages in HUB-J14. Observe data-most-recent with MutationObserver oldValue through eight alternating catalog frames at each width; require zero value changes, then advance one session to a later minute and verify its badge and accessible name move while every row rectangle remains equal.
+    bug: {task: cas-b6ed}
   HUB-J15-WARNING-HEADER-FITS:
     statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
     check: Extend the existing HUB-J15 phone attention stage; verify every header action and identity bounding box stays inside 390px, then open the unchanged Attention sheet. Prove strict real-build polish in both themes.

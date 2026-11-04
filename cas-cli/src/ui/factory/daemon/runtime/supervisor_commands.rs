@@ -485,6 +485,50 @@ mod tests {
         daemon.pane_silent_since.insert(name.into(), Instant::now() - quiet);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn finish_accepts_an_idle_supervisor_with_a_repainting_background_shell_cas_88ca() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::finish_accepts_an_idle_supervisor_with_a_repainting_background_shell_cas_88ca") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.cc_session_id = Some("finish-background".into());
+        store.update(&agent).unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+        std::fs::create_dir_all(&projects).unwrap();
+        let at = Utc::now() - chrono::Duration::seconds(1);
+        std::fs::write(projects.join("finish-background.jsonl"), format!("{}\n{}\n",
+            serde_json::json!({"type":"user","timestamp":at,"message":{"content":"Prior work"}}),
+            serde_json::json!({"type":"assistant","timestamp":at,"message":{"stop_reason":"end_turn"}}))).unwrap();
+        let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
+                "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
+            cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor, pty, 24, 80, cas_mux::SupervisorCli::Claude).unwrap();
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+        daemon.app.mux.add_pane(pane);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pane = daemon.app.mux.get_mut(&name).unwrap();
+                pane.drain_output();
+                if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let receipt = daemon.dispatch_supervisor_command(
+            Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),
+            MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() },
+        ).await.expect("native turn ended and the prompt is empty: background repaint must not refuse Finish");
+        assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("finish-input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(root.path().join("finish-input")).unwrap()).matches("/finish").count(), 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn command_immediately_after_real_reply_waits_for_silence_then_sends() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::command_immediately_after_real_reply_waits_for_silence_then_sends") { return; }

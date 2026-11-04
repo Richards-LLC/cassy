@@ -22031,7 +22031,9 @@ mod cas_bf890_notice_digest_tests {
             )
             .unwrap()
             .id();
+        assert!(selected(&store).contains(&tipless), "a tipless ready keeps its wake");
         // A tip too short to be a commit cannot prefix-match and silence it.
+        // As a newer ready from the same worker, it also carries the tipless one.
         let garbage = store
             .enqueue_worker_action_with_outcome(
                 "w", "lead-sup", &ready.replace(&"a".repeat(9), "aaa"), "w", SESSION, None, None, false, &worker,
@@ -22103,7 +22105,7 @@ mod cas_bf890_notice_digest_tests {
         };
         let mut selected_ids = selected(&store);
         selected_ids.sort_unstable();
-        assert_eq!(selected_ids, vec![first, tipless, garbage, fresh, blocker, verdict]);
+        assert_eq!(selected_ids, vec![first, garbage, fresh, blocker, verdict]);
         let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
         assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director_id, ready_id, duplicate]);
         let evidence = store

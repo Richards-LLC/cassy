@@ -149,6 +149,12 @@ fn summarize_gate(text: &str) -> String {
     format!("{}…", line.chars().take(LIMIT).collect::<String>())
 }
 
+fn batch_close_note(receipt_id: &str, outcome: &str) -> String {
+    format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        crate::mcp::tools::truncate_str(outcome, 4000))
+}
+
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
 pub(crate) fn return_merged_delivery_for_source_fix(
     cas_root: &std::path::Path, actor: &str, task: &Task,
@@ -497,9 +503,7 @@ impl CasCore {
             // A close can outlive the batch response's post-commit grace.
             // Persist each result as it happens, including a selector refusal.
             let record = |outcome: &str| {
-                let note = format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {}: {}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M"), receipt.id,
-                    crate::mcp::tools::truncate_str(outcome, 4000));
+                let note = batch_close_note(&receipt.id, outcome);
                 if let Err(error) = store.append_note(task_id, &note) {
                     tracing::warn!(%task_id, %error, "batch close outcome not recorded");
                 }
@@ -791,6 +795,18 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn batch_hold_note_is_bounded_and_not_a_bundle_citation_cas_dd05() {
+        // Minimized cas-6faf hold; only the machine-specific artifact root is normalized.
+        let hold = "PARK REFUSED: more than one close gate failed.\n\nTASK CLOSE REJECTED: cas-6faf is user-facing and its QA evidence bundle is not cited. Next: produce the bundle, then `task action=notes id=cas-6faf notes=\"qa-bundle: /proof/cas-6faf/qa/bundle.json\"`.";
+        for outcome in [hold.to_string(), "Unreadable qa-bundle: /suggested/bundle.json".into(), format!("{hold}{}", " long detail".repeat(100))] {
+            let note = batch_close_note("qab-fixture", &outcome);
+            assert_eq!(crate::qa_evidence::cited_bundle_path(&note), None, "{note}");
+            assert_eq!(note.lines().count(), 1);
+            assert!(note.chars().count() <= 400, "outcome note is too long");
+        }
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed

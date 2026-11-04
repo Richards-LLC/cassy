@@ -57,6 +57,34 @@ describe("supervisor slash commands", () => {
     expect(run).toHaveBeenCalledWith("clear", true);
   });
 
+  it("runs the confirmation by keyboard: Cancel first, arrows rove, Tab stays inside, Esc returns to the composer (cas-c009)", () => {
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn().mockResolvedValue(undefined);
+    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const key = (key: string, shiftKey = false) => {
+      const event = new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true });
+      document.activeElement!.dispatchEvent(event);
+      return event;
+    };
+    input.value = "/finish"; input.focus();
+    commands.submit();
+    const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]')!;
+    expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toBe("test supervisor");
+    const [cancel, finish] = [...dialog.querySelectorAll("button")];
+    expect([cancel.textContent, finish.textContent]).toEqual(["Cancel", "Finish"]);
+    expect(document.activeElement).toBe(cancel);
+    for (const [press, shift, focused] of [["ArrowRight", false, finish], ["ArrowDown", false, cancel], ["ArrowLeft", false, finish], ["ArrowUp", false, cancel], ["Tab", true, finish], ["Tab", false, cancel]] as const) {
+      expect(key(press, shift).defaultPrevented, press).toBe(true);
+      expect(document.activeElement, `${press}${shift ? "+Shift" : ""}`).toBe(focused);
+    }
+    key("Escape");
+    expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect(run).not.toHaveBeenCalled();
+    commands.dispose();
+  });
+
   it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {
     const row = commandReceiptNode({ client_ref: "cmd-1", command: "compact", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "<unsafe>", interactive: false });
     expect(row.textContent).toContain("not confirmed");

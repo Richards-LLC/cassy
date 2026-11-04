@@ -261,7 +261,13 @@ def run(args):
         status,elapsed = execute(command+selection,cwd,env,attempt/'console.log',29 if index and args.runner=='rust' else None)
         report = attempt/('report.xml' if args.runner=='rust' else 'report.json')
         if native.is_file():shutil.copyfile(native,report)
-        tests = read_results(args.runner,report)
+        if index and not report.is_file():
+            # A timeout can kill the runner before it writes its report. Keep
+            # the original failures and record an incomplete, failing rerun.
+            print('FAIL: rerun produced no report; initial failures: '+', '.join(identity(t) for t in failed),file=sys.stderr)
+            tests = []
+        else:
+            tests = read_results(args.runner,report)
         attempts.append({'status':status,'seconds':elapsed,'tests':tests})
         if index==0:
             if original_log and (attempt/'native.log').is_file():shutil.copyfile(attempt/'native.log',original_log)

@@ -60,6 +60,10 @@ pub(crate) struct WriteRoot {
     pub modes: BTreeSet<WriteMode>,
     /// `Some(task)` for a one-off operator grant bound to that task.
     pub task_id: Option<String>,
+    /// A built-in root the first write may create (a Claude memory folder,
+    /// cas-2d9a): while it does not exist, it resolves beneath its existing
+    /// parent. Configured roots that are missing still admit nothing.
+    pub creatable: bool,
 }
 
 /// The operator's write roots and grants in effect for one hook call.
@@ -74,6 +78,17 @@ pub(crate) struct WritePolicy {
     /// (`sed -i`, `perl -i`) and rename sources judged under the contract;
     /// without it the default contract is exactly as before (cas-3147).
     pub configured: bool,
+}
+
+/// A creatable root that does not exist yet, resolved beneath its existing
+/// parent. Anything already at the path (a dangling symlink, a file) is refused.
+fn missing_root(path: &Path) -> Option<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
+        }
+        _ => None,
+    }
 }
 
 impl WritePolicy {
@@ -105,7 +120,9 @@ impl WritePolicy {
                 && root
                     .path
                     .canonicalize()
-                    .is_ok_and(|canonical| resolved.starts_with(&canonical) && resolved != canonical)
+                    .ok()
+                    .or_else(|| root.creatable.then(|| missing_root(&root.path)).flatten())
+                    .is_some_and(|canonical| resolved.starts_with(&canonical) && resolved != canonical)
         })
     }
 

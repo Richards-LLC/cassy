@@ -911,7 +911,24 @@ fn newest_citation_wins() {
         Some("/a/new/bundle.json"),
         "a later independent round citation must not shadow the implementer's bundle"
     );
+    // Historical multiline outcome notes must not manufacture or shadow citations.
+    let outcome = "[2026-11-04 18:52] 📝 PROGRESS BATCH_CLOSE_OUTCOME qab-one: PARK REFUSED\n\nNext: `task action=notes notes=\"qa-bundle: /suggested/bundle.json\"`.";
+    assert_eq!(cited_bundle_path(outcome), None);
+    let notes = format!("[2026-11-04 18:51] qa-bundle: /producer/bundle.json\n\n{outcome}");
+    assert_eq!(cited_bundle_path(&notes).as_deref(), Some("/producer/bundle.json"));
+    let notes = format!("{notes}\n\n[2026-11-04 18:53] qa-bundle: /producer/new.json");
+    assert_eq!(cited_bundle_path(&notes).as_deref(), Some("/producer/new.json"));
     assert_eq!(cited_bundle_path("nothing"), None);
+}
+
+#[test]
+fn short_path_system_outcomes_do_not_cite_bundles_cas_d4310() {
+    for marker in ["BATCH_CLOSE_OUTCOME qab-one", "POST_COMMIT_OUTCOME:", "CLOSE_OUTCOME:"] {
+        let note = format!("[2026-11-04 19:00] 📝 PROGRESS {marker} Next: qa-bundle: /a/qa/bundle.json");
+        assert_eq!(cited_bundle_path(&note), None, "{marker} is system output, not a producer citation");
+        let notes = format!("[2026-11-04 18:59] qa-bundle: /producer/bundle.json\n\n{note}");
+        assert_eq!(cited_bundle_path(&notes).as_deref(), Some("/producer/bundle.json"));
+    }
 }
 
 #[test]

@@ -7,6 +7,71 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-04
+
+### Fixed — Worker spawn admission
+
+- **Choose free worker branch names** — Isolated MCP spawns reserve generated
+  names against local and origin factory refs before queueing work. Explicit
+  collisions give a clear refusal before task binding or worktree creation.
+- **Explain Codex account refusals** — Spawn errors name a missing default home,
+  a logged-out account or a mismatched configuration directory and retain the
+  account-selection diagnostics that explain why a named login was not chosen.
+
+### Fixed — Merge queue
+
+- **Concurrent deliveries no longer conflict on the changelog** — Was: every
+  delivery inserted its section at the top of `CHANGELOG.md`'s
+  `## [Unreleased]`, so GitHub's merge queue, which ignores the local
+  changelog merge driver, dequeued the second of any two queued pull requests
+  as conflicting. Now: each delivery writes its own `changelog.d/<task-id>.md`
+  fragment, the close gate credits that fragment (and points a direct
+  `CHANGELOG.md` entry at it), the release gate checks fragment format, and
+  `scripts/release.sh` folds the fragments into the version section and deletes
+  them.
+
+### Fixed — Worker replies reach an idle supervisor
+
+- **A worker's ready for new work wakes the supervisor** — Was: when a
+  worker's task was parked at a tip that had already landed, its next
+  `status: ready` was filed as a digest of that old delivery, even when it
+  named a new tip or none. Nothing woke the supervisor; one such reply sat
+  unread for 8 hours overnight. → Now: CAS treats a ready as a repeat only
+  when its `tip:` line names the parked commit itself (7 to 40 hex
+  characters). Every other ready wakes an idle supervisor with the whole
+  message.
+- **Unread worker messages raise an alarm** — Was: only Cassy's own task
+  relays were escalated when the supervisor never received them. → Now: a
+  worker's message to the supervisor still unread after about 10 minutes,
+  including one filed as a digest, gets one wake and one operator notice.
+  Receipts, informational and quiet messages, and bare acknowledgements, are
+  left alone.
+- **End-of-turn warning for an uncovered worker** — Was: the stop warning
+  appeared only when the supervisor had no pending reminder at all, so any
+  unrelated reminder silenced it. → Now: when a supervisor ends a turn after
+  messaging a worker that holds open work, and no event reminder covers that
+  worker or its task, the stop hook names the worker once. It never blocks.
+
+### Changed — Factory write roots
+
+- **Agents can write their Claude memory** — Each project's Claude Code
+  memory folder (`<claude dir>/projects/<project>/memory`, under the active
+  Claude config) is now a built-in
+  write root, like Downloads, so supervisors and workers keep auto-memory
+  without any configuration; the first write creates the folder. Transcripts
+  and other files beside it stay refused, and a symlinked project or `memory`
+  folder pointing elsewhere is not granted.
+
+### Changed — Hosted Commander tailnets
+
+- **Reach any Tailscale tailnet from hosted Commander** — Was: hosted
+  Commander could load media, sockets and pages only from the team tailnets
+  named in `hub-web/hosted-tailnets.json`, so a friend's or teammate's
+  tailnet was blocked until it was added. Now: by operator decision ("ts.net
+  for now", review after 2026-12-04), `allow_any_tailnet` admits any
+  `*.ts.net` machine; ordinary websites stay blocked, and setting the field to
+  false restores the named list.
+
 ### Fixed — Factory message destinations
 
 - **Honor explicit message destinations** — `cas factory message` resolves the
@@ -372,6 +437,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Steady Most recent session marker** — Each sibling conversation reserves
   the badge's space, so moving it never shifts a row. Activity in the same
   minute shares a stable ranking instead of flashing on every output frame.
+- **A proper confirm sheet for slash commands** — Was: confirming `/finish`,
+  `/exit` or `/clear` showed Cancel and the command as full-width stacked rows,
+  and the keyboard could not move between them. → Now: the two actions are
+  content-width and right-aligned, with Cancel first and the command last, and
+  stack only on a phone. Arrows and Tab move between them, Enter or Space
+  chooses, Esc returns to the composer, and Cancel starts focused so a stray
+  Enter never ends a session.
 
 ### Fixed — Reminders to self
 

@@ -3703,11 +3703,22 @@ pub(super) fn undelivered_relay_operator_alert(
             envelope.task_id,
             envelope.new_status.to_string().replace('_', " ")
         ),
-        None => queued
-            .summary
-            .clone()
-            .filter(|summary| !summary.trim().is_empty())
-            .unwrap_or_else(|| "a factory event".to_string()),
+        None => {
+            let summary = queued
+                .summary
+                .clone()
+                .filter(|summary| !summary.trim().is_empty());
+            match (&queued.origin, summary) {
+                // cas-2961: a worker's own message, not a factory event.
+                (Some(cas_store::QueueOrigin::RegisteredAgent { .. }), summary) => format!(
+                    "{} sent \"{}\"",
+                    queued.source,
+                    summary.unwrap_or_else(|| "a message".to_string())
+                ),
+                (_, Some(summary)) => summary,
+                (_, None) => "a factory event".to_string(),
+            }
+        }
     };
     let retry_state = if queued.processed_at.is_some() {
         "Cassy has stopped retrying it."
@@ -3788,6 +3799,8 @@ pub(super) fn undelivered_supervisor_relay_candidates(
     let task_store = crate::store::open_task_store_local(cas_dir).ok();
     candidates
         .into_iter()
+        // cas-2961: a worker's bare acknowledgement asks for nothing.
+        .filter(|queued| !crate::supervisor_message_wakes::pure_ack(&queued.prompt))
         .filter(|queued| relay_task_still_current(task_store.as_deref(), queued))
         .collect()
 }
@@ -3845,6 +3858,12 @@ pub(super) fn record_undelivered_relay_alerts(
 ) -> Vec<RelayOperatorAlert> {
     let mut alerts = Vec::new();
     for queued in candidates {
+        // cas-2961: the alarm's wake. A worker message CAS filed as a digest
+        // goes back to ordinary delivery, which wakes the idle supervisor once
+        // with the whole message; the alert's dedupe keeps the alarm single.
+        if let Err(error) = queue.release_stranded_supervisor_digest(queued.id) {
+            tracing::warn!(prompt_id = queued.id, %error, "cas-2961: failed to release a stranded digest");
+        }
         let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
         let (summary, mut message) = undelivered_relay_operator_alert(
             &queued,

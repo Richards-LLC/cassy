@@ -7230,10 +7230,12 @@ fn operator_write_policy_for(
     };
     let configured_roots = stores.config().factory().write_roots;
     let user_roots = crate::config::operator_policy::user_write_roots();
+    let memory_roots = crate::config::operator_policy::project_claude_memory_roots(cas_root);
     let mut policy = WritePolicy {
         roots: crate::config::operator_policy::effective_write_roots(&configured_roots, &user_roots, cas_root)
             .into_iter()
             .map(|path| WriteRoot {
+                creatable: memory_roots.contains(&path),
                 path,
                 modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
                 task_id: None,
@@ -7259,6 +7261,7 @@ fn operator_write_policy_for(
                 path: root.path.clone(),
                 modes: modes(&root.modes),
                 task_id: None,
+                creatable: false,
             });
         }
     }
@@ -7285,6 +7288,7 @@ fn operator_write_policy_for(
             path: grant.path.clone(),
             modes: modes(&grant.modes),
             task_id: Some(grant.task.clone()),
+            creatable: false,
         });
     }
     (policy, task_ids)
@@ -8109,6 +8113,85 @@ mod workspace_contract_tests {
         assert_eq!(decision(&policy_write), "deny", "agents cannot change the user-level roots");
     }
 
+    /// cas-2d9a: with no configured roots, an agent creates, edits and deletes
+    /// in its project's Claude auto-memory folder, reached through its
+    /// account's `projects` symlink into the shared base. A transcript beside
+    /// it stays refused, and a `memory` symlink pointing elsewhere grants nothing.
+    /// The first write may create the folder; a symlinked project folder
+    /// grants no foreign memory.
+    #[test]
+    fn cas_2d9a_project_claude_memory_is_a_built_in_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().canonicalize().unwrap().join("home");
+        let worktree = fixture.path().canonicalize().unwrap().join("worker");
+        let account = home.join(".claude-agent@example.test");
+        let projects = home.join(".cas/claude-base/projects");
+        let slug = crate::factory_context_reset::claude_project_slug(&worktree.to_string_lossy());
+        let real_memory = projects.join(&slug).join("memory");
+        let memory = account.join("projects").join(&slug).join("memory");
+        let secret = home.join("secret");
+        for directory in [&worktree, &projects.join(&slug), &account, &secret] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::os::unix::fs::symlink(&projects, account.join("projects")).unwrap();
+        let mut env = TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("CLAUDE_CONFIG_DIR", &account);
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "memory-test");
+        env.set("CAS_FACTORY_SESSION", "cas-2d9a-test");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let cas_root = crate::store::init_cas_dir(&worktree).unwrap();
+        let decision = |input: &HookInput| {
+            serde_json::to_value(handle_pre_tool_use(input, Some(&cas_root)).unwrap()).unwrap()
+                ["hookSpecificOutput"]["permissionDecision"]
+                .clone()
+        };
+        let write = |path: &Path| {
+            tool_input("Write", serde_json::json!({"file_path": path, "content": "x"}), &worktree)
+        };
+        // No memory folder yet: the first write creates it.
+        assert_ne!(decision(&write(&memory.join("first.md"))), "deny", "first write creates memory/");
+        assert_eq!(decision(&write(&memory.join("../x.jsonl"))), "deny", "memory/.. escapes the root");
+        std::fs::create_dir_all(&real_memory).unwrap();
+        let note = memory.join("note.md");
+        assert_ne!(decision(&write(&note)), "deny", "create in the project's memory folder");
+        std::fs::write(&note, "x").unwrap();
+        let edit = tool_input("Edit", serde_json::json!({
+            "file_path": note, "old_string": "x", "new_string": "y",
+        }), &worktree);
+        assert_ne!(decision(&edit), "deny");
+        assert_ne!(decision(&bash_input(&format!("rm {}", note.display()), &worktree)), "deny");
+        // The same list the config read-back prints under every-project roots.
+        assert!(
+            crate::config::operator_policy::effective_write_roots(&[], &[], &cas_root)
+                .contains(&real_memory),
+            "the built-in memory root is listed"
+        );
+        let transcript = memory.parent().unwrap().join("session.jsonl");
+        assert_eq!(decision(&write(&transcript)), "deny", "transcripts beside memory stay refused");
+
+        std::fs::remove_dir_all(&real_memory).unwrap();
+        std::os::unix::fs::symlink(&secret, &real_memory).unwrap();
+        assert_eq!(decision(&write(&memory.join("key"))), "deny", "a memory symlink grants nothing");
+        assert_eq!(decision(&write(&secret.join("key"))), "deny");
+
+        // A project folder symlinked at another directory with a real memory/
+        // grants nothing there; only the account-level projects link is followed.
+        let foreign = home.join("foreign");
+        std::fs::create_dir_all(foreign.join("memory")).unwrap();
+        std::fs::remove_file(&real_memory).unwrap();
+        std::fs::remove_dir_all(projects.join(&slug)).unwrap();
+        std::os::unix::fs::symlink(&foreign, projects.join(&slug)).unwrap();
+        assert_eq!(decision(&write(&memory.join("key"))), "deny", "a symlinked project folder grants nothing");
+        assert_eq!(decision(&write(&foreign.join("memory/key"))), "deny");
+    }
+
     /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key
     /// through `cas config`, however it wraps the call; ordinary keys and
     /// reads stay available.
@@ -8591,6 +8674,7 @@ mod workspace_contract_tests {
                 path: path.to_path_buf(),
                 modes: modes.iter().copied().collect(),
                 task_id: task.map(str::to_string),
+                creatable: false,
             }],
             protected: Vec::new(),
             configured: true,
@@ -8734,6 +8818,7 @@ mod workspace_contract_tests {
                 path: main.clone(),
                 modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
                 task_id: None,
+                creatable: false,
             }],
             protected: vec![operator_dir.clone()],
             configured: true,

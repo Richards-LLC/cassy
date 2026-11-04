@@ -28,6 +28,9 @@ if '--test-list-invert' in args:
     excluded = name in pathlib.Path(args[args.index('--test-list-invert')+1]).read_text()
 failed = not excluded and (attempt == 1 or name == 'always-fail')
 if excluded: name = 'healthy-control'
+if attempt > 1 and os.environ.get('FIXTURE_MISSING_RERUN_REPORT'):
+    print('fixture stopped before writing the rerun report')
+    sys.exit(1)
 if pathlib.Path(sys.argv[0]).name == 'cargo':
     report = root/'target/nextest/queue/junit.xml'
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +168,21 @@ class QueueRecovery(unittest.TestCase):
                 result = self.run_queue(engine,event='workflow_dispatch')
                 self.assertNotEqual(result.returncode,0)
                 self.assertEqual(len(self.calls()),1)
+
+    def test_missing_rerun_report_preserves_the_initial_failure(self):
+        self.env['FIXTURE_MISSING_RERUN_REPORT'] = '1'
+        for engine in ('rust','playwright'):
+            with self.subTest(engine=engine):
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                result = self.run_queue(engine,'always-fail')
+                self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+                self.assertIn('always-fail',result.stderr)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'],'FAIL')
+                self.assertEqual(receipt['flaky'],[])
+                self.assertIn('fixture assertion failed',receipt['attempts'][0]['tests'][0]['output'])
+                self.assertEqual(receipt['attempts'][1]['tests'],[])
+                self.assertEqual(len(self.calls()),2)
 
     def reconcile(self):
         return subprocess.run([sys.executable,str(SCRIPT),'reconcile','--issues-repo','fixture/repo',

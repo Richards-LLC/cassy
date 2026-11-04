@@ -443,15 +443,35 @@ pub(crate) fn validate_cited_pair_coverage(
     .map(|_| true)
 }
 
+/// System-added producer citations need a fresh timeline block so an earlier
+/// outcome's quoted hints cannot consume a restored bundle's actual citation.
+pub(crate) fn bundle_citation_note(path: impl std::fmt::Display) -> String {
+    format!("[{}] 🧪 PLATFORM_PROOF {BUNDLE_CITATION} {path}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"))
+}
+
+// Keep historical multiline hints with their timestamped system outcome.
+fn is_system_outcome_note(note: &str) -> bool {
+    let Some((_, body)) = note.lines().next().and_then(|line| line.split_once("] ")) else {
+        return false;
+    };
+    let Some(body) = body.strip_prefix("📝 PROGRESS ") else {
+        return false;
+    };
+    ["BATCH_CLOSE_OUTCOME ", "POST_COMMIT_OUTCOME:", "CLOSE_OUTCOME:"]
+        .iter().any(|marker| body.starts_with(marker))
+}
+
 /// Newest `qa-bundle: <path>` citation in the notes that is the
 /// implementer's own. New independent rounds use `qa-review-bundle:`.
 /// Older rounds used this marker too, with a same-line independent-round
 /// suffix or an `/independent-qa/` path; neither shadows producer evidence,
 /// including when the reviewer kept its bundle under a separate task root.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {
-    notes
-        .match_indices(BUNDLE_CITATION)
-        .filter_map(|(index, token)| {
+    cas_store::task_note_markers::note_blocks(notes)
+        .into_iter()
+        .filter(|note| !is_system_outcome_note(note))
+        .flat_map(|notes| notes.match_indices(BUNDLE_CITATION).filter_map(move |(index, token)| {
             // Proof records carry quoted audit fields, not producer citations.
             // A review summary mentioning qa-bundle must not shadow the note.
             let line_start = notes[..index].rfind('\n').map_or(0, |offset| offset + 1);
@@ -473,7 +493,7 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
                         .to_string()
                 })
                 .filter(|path| !path.is_empty() && !path.contains("/independent-qa/"))
-        })
+        }))
         .last()
 }
 

@@ -44,7 +44,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   post-merge receipt due within 30 minutes that blocks close. A failed check
   is rerun once, a failure the hotfix caused opens a revert PR, and an
   ineligible delivery is refused from the lane with the reason recorded.
-  See `docs/qa/fast-lane.md`.
+  Lane state is recorded only by Cassy, so a task note cannot put a delivery
+  on the lane, and a check whose result on the previous commit is unknown
+  counts as caused by the hotfix. See `docs/qa/fast-lane.md`.
 
 ### Fixed — Codex worker recycle and context reset
 

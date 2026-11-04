@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Fixed — Commander
+### Fixed — Commander work events
 
 - **Drop work-event answers for disconnected clients** — Was: a finished
   work-event page or detail waited in the daemon until some Commander client

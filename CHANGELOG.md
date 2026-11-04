@@ -94,6 +94,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   second GitHub task needs a recorded supervisor reason; source claims release
   when the work ends, even while that supervisor stays online.
 
+### Fixed — Commander mirror
+
+- **Stop posting a supervisor answer twice on long sessions** — Was: once a
+  long Claude transcript outgrew the 4 MiB window the mirror reads, a turn
+  whose first message fell outside it got a new key from its next message and
+  appeared in Commander again minutes later. Now: the mirror reads from a turn
+  boundary, so a turn keeps the key it was first mirrored under, and a very
+  long newest turn is read back to its first message.
+
 ### Fixed — Verification
 
 - **Keep approved deliveries moving beside sibling merges** — Was: a target

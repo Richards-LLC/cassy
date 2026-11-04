@@ -155,6 +155,15 @@ fn batch_close_note(receipt_id: &str, outcome: &str) -> String {
         summarize_gate(outcome))
 }
 
+fn record_batch_close_outcome(
+    store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    receipt_id: &str,
+    outcome: &str,
+) -> cas_store::Result<()> {
+    store.append_note(task_id, &batch_close_note(receipt_id, outcome)).map(|_| ())
+}
+
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
 pub(crate) fn return_merged_delivery_for_source_fix(
     cas_root: &std::path::Path, actor: &str, task: &Task,
@@ -503,8 +512,7 @@ impl CasCore {
             // A close can outlive the batch response's post-commit grace.
             // Persist each result as it happens, including a selector refusal.
             let record = |outcome: &str| {
-                let note = batch_close_note(&receipt.id, outcome);
-                if let Err(error) = store.append_note(task_id, &note) {
+                if let Err(error) = record_batch_close_outcome(store.as_ref(), task_id, &receipt.id, outcome) {
                     tracing::warn!(%task_id, %error, "batch close outcome not recorded");
                 }
             };
@@ -805,6 +813,25 @@ mod tests {
             assert_eq!(note.lines().count(), 1);
             assert!(note.chars().count() <= 400, "outcome note is too long");
         }
+    }
+
+    #[test]
+    fn batch_outcome_keeps_a_complete_remedy_pointer_cas_d4310() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&Task::new("cas-dd05".into(), "scoped proof hold".into())).unwrap();
+        let command = "SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd scripts/run-scoped-tests.sh --proof";
+        let outcome = format!("scoped proof receipt has base None; must be proven against SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd. Re-run the delivered tip in a detached supervisor checkout with: {command}");
+        record_batch_close_outcome(store.as_ref(), "cas-dd05", "qab-remedy", &outcome).unwrap();
+        let state = store.get_execution_state("cas-dd05").unwrap().expect("a truncated outcome must retain complete details");
+        assert_eq!(state["batch_close_outcomes"]["qab-remedy"], outcome);
+        let note = store.get("cas-dd05").unwrap().notes;
+        assert!(note.contains("task action=show id=cas-dd05 full=true"), "{note}");
+        assert!(note.contains("batch_close_outcomes[qab-remedy]"), "{note}");
+        assert_eq!(note.lines().count(), 1);
+        assert!(note.chars().count() <= 400, "{note}");
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed

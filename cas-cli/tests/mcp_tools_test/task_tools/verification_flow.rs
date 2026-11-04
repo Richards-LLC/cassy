@@ -1319,6 +1319,17 @@ async fn release_verdict_closes_a_merged_delivery_after_request_changes_cas_bc15
     assert!(!recorded.contains("Keeps its own review"), "{recorded}");
     assert!(recorded.contains(&format!("commit_receipt={staging}")), "{recorded}");
 
+    // Adversarial probe: rework merged after the review is outside its staging.
+    let rework = merge_delivery_of(temp.path(), lane.path(), &cas_dir, &reworked, "src/rework.rs", branch);
+    let mut request = close_request(&reworked, "unreviewed rework");
+    request.commit_receipt = Some(head_of(temp.path()));
+    let refused = extract_text(worker.cas_task_close(Parameters(request)).await.expect("close"));
+    assert_ne!(tasks.get(&reworked).unwrap().status, TaskStatus::Closed, "{refused}");
+    let mut task = tasks.get(&reworked).unwrap();
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.historical_factory_branch_anchors.retain(|head| head != &rework);
+    tasks.update(&task).unwrap();
+
     let closed = close(&worker, &reworked, false).await;
     assert_eq!(tasks.get(&reworked).unwrap().status, TaskStatus::Closed, "{closed}");
 

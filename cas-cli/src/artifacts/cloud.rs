@@ -62,9 +62,13 @@ const ARTIFACT_UPLOAD_MIME_ALLOWLIST: &[&str] = &[
     "image/jpeg",
     "image/webp",
     "image/gif",
+    // cas-6adaa: QA screencasts play inline in Commander. Cloud's contract
+    // accepts both at the same 25 MiB cap; audio stays out.
+    "video/webm",
+    "video/mp4",
 ];
 
-fn validate_upload_mime(mime: &str) -> Result<String, UploadFailure> {
+pub(super) fn validate_upload_mime(mime: &str) -> Result<String, UploadFailure> {
     let canonical = mime.trim().to_ascii_lowercase();
     if ARTIFACT_UPLOAD_MIME_ALLOWLIST.contains(&canonical.as_str()) {
         Ok(canonical)
@@ -157,7 +161,7 @@ impl fmt::Display for UploadFailure {
         match self {
             UploadFailure::UnsupportedContentType { mime } => write!(
                 f,
-                "unsupported_content_type: Cloud artifact uploads do not allow {mime}; to publish a QA screencast, package it as a .zip archive (application/zip) and publish that archive"
+                "unsupported_content_type: Cloud artifact uploads do not allow {mime}; publish a QA screencast as .webm or .mp4, or package other files as a .zip archive (application/zip)"
             ),
             UploadFailure::NotLive { reason } => write!(f, "{reason}"),
             UploadFailure::Mismatch {

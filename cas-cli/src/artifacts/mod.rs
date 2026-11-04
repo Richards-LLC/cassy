@@ -361,6 +361,8 @@ pub fn mime_for(path: &Path) -> String {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "webm" => "video/webm",
+        // cas-6adaa: MP4 is uploadable, so an .mp4 screencast must say so.
+        "mp4" | "m4v" => "video/mp4",
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
         "xz" => "application/x-xz",
@@ -924,45 +926,42 @@ mod tests {
         }
     }
 
+    /// cas-6adaa (operator decision: video yes, audio no): WebM and MP4
+    /// screencasts publish as video and reach Cloud's begin request, while an
+    /// audio type is still refused before any request.
     #[tokio::test]
-    async fn webm_publish_is_rejected_before_cloud_requests_and_suggests_zip() {
-        let server = wiremock::MockServer::start().await;
-        let endpoint = server.uri();
-        let (outcome, stored_status) = tokio::task::spawn_blocking(move || {
-            let f = fixture();
-            let file = f.task_dir.join("receipt.webm");
-            fs::write(&file, b"webm bytes").unwrap();
-            let context = PublishContext {
-                store: &f.store,
-                roots: f.roots.clone(),
-                task_id: "cas-b72a".to_string(),
-                cloud: Some(ArtifactUploadClient::new(&endpoint, "test-token")),
-            };
+    async fn video_publish_reaches_cloud_and_audio_is_still_refused_cas_6adaa() {
+        for (name, mime) in [("receipt.webm", "video/webm"), ("receipt.mp4", "video/mp4")] {
+            let server = wiremock::MockServer::start().await;
+            let endpoint = server.uri();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let f = fixture();
+                let file = f.task_dir.join(name);
+                fs::write(&file, b"video bytes").unwrap();
+                let context = PublishContext {
+                    store: &f.store,
+                    roots: f.roots.clone(),
+                    task_id: "cas-6adaa".to_string(),
+                    cloud: Some(ArtifactUploadClient::new(&endpoint, "test-token")),
+                };
+                publish(&context, &file).unwrap()
+            })
+            .await
+            .unwrap();
 
-            let outcome = publish(&context, &file).unwrap();
-            let stored_status = f
-                .store
-                .get(&outcome.artifact.id)
-                .unwrap()
-                .expect("publish retains the local artifact record")
-                .status;
-            (outcome, stored_status)
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.artifact.mime, "video/webm");
-        let reason = match &outcome.disposition {
-            PublishDisposition::UploadFailed { reason } => reason,
-            other => panic!("expected an upload failure, got {other:?}"),
-        };
-        assert!(reason.contains("unsupported_content_type"), "{reason}");
-        assert!(reason.contains("application/zip"), "{reason}");
-        assert_eq!(stored_status, "local");
-        assert!(
-            server.received_requests().await.unwrap().is_empty(),
-            "an unsupported MIME must be refused before begin, presign, or PUT"
-        );
+            assert_eq!(outcome.artifact.mime, mime, "{name}");
+            if let PublishDisposition::UploadFailed { reason } = &outcome.disposition {
+                assert!(!reason.contains("unsupported_content_type"), "{name}: {reason}");
+            }
+            let begins = server.received_requests().await.unwrap();
+            assert!(
+                begins.iter().any(|request| request.url.path() == "/api/artifacts/begin"
+                    && String::from_utf8_lossy(&request.body).contains(mime)),
+                "{name} must reach Cloud's begin request as {mime}: {begins:?}"
+            );
+        }
+        let refused = super::cloud::validate_upload_mime("audio/webm").unwrap_err().to_string();
+        assert!(refused.contains("unsupported_content_type"), "{refused}");
     }
 
     #[test]

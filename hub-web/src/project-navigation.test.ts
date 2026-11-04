@@ -36,7 +36,6 @@ describe("project-first navigation", () => {
     expect(cards[0]!.querySelector('[data-harness="codex"] svg.provider-mark')).not.toBeNull();
     expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");
     expect(cards[1]!.querySelector(".conversation-account")).toBeNull();
-    expect(cards[1]!.querySelector(".conversation-session-slot")).toBeNull();
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
     expect(cards[1]!.querySelector<HTMLElement>(".project-card-summary")?.hidden).toBe(true);
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");

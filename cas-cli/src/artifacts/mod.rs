@@ -893,9 +893,6 @@ mod tests {
         assert_eq!(mime_for(Path::new("a/b.html")), "text/html");
         assert_eq!(mime_for(Path::new("a/b.md")), "text/markdown");
         assert_eq!(mime_for(Path::new("a/b.png")), "image/png");
-        // cas-6adaa: both uploadable video types are reachable by extension.
-        assert_eq!(mime_for(Path::new("a/b.webm")), "video/webm");
-        assert_eq!(mime_for(Path::new("a/b.MP4")), "video/mp4");
         assert_eq!(
             mime_for(Path::new("a/b.wat")),
             "application/octet-stream",
@@ -927,40 +924,39 @@ mod tests {
         }
     }
 
-    /// cas-6adaa (operator decision: video yes, audio no): a WebM screencast
-    /// passes the client preflight and reaches Cloud's begin request, while an
+    /// cas-6adaa (operator decision: video yes, audio no): WebM and MP4
+    /// screencasts publish as video and reach Cloud's begin request, while an
     /// audio type is still refused before any request.
     #[tokio::test]
     async fn video_publish_reaches_cloud_and_audio_is_still_refused_cas_6adaa() {
-        let server = wiremock::MockServer::start().await;
-        let endpoint = server.uri();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let f = fixture();
-            let file = f.task_dir.join("receipt.webm");
-            fs::write(&file, b"webm bytes").unwrap();
-            let context = PublishContext {
-                store: &f.store,
-                roots: f.roots.clone(),
-                task_id: "cas-6adaa".to_string(),
-                cloud: Some(ArtifactUploadClient::new(&endpoint, "test-token")),
-            };
-            publish(&context, &file).unwrap()
-        })
-        .await
-        .unwrap();
+        for (name, mime) in [("receipt.webm", "video/webm"), ("receipt.mp4", "video/mp4")] {
+            let server = wiremock::MockServer::start().await;
+            let endpoint = server.uri();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let f = fixture();
+                let file = f.task_dir.join(name);
+                fs::write(&file, b"video bytes").unwrap();
+                let context = PublishContext {
+                    store: &f.store,
+                    roots: f.roots.clone(),
+                    task_id: "cas-6adaa".to_string(),
+                    cloud: Some(ArtifactUploadClient::new(&endpoint, "test-token")),
+                };
+                publish(&context, &file).unwrap()
+            })
+            .await
+            .unwrap();
 
-        assert_eq!(outcome.artifact.mime, "video/webm");
-        if let PublishDisposition::UploadFailed { reason } = &outcome.disposition {
-            assert!(!reason.contains("unsupported_content_type"), "{reason}");
-        }
-        let begins = server.received_requests().await.unwrap();
-        assert!(
-            begins.iter().any(|request| request.url.path() == "/api/artifacts/begin"
-                && String::from_utf8_lossy(&request.body).contains("video/webm")),
-            "a WebM publish must reach Cloud's begin request: {begins:?}"
-        );
-        for mime in ["video/webm", "video/mp4"] {
-            assert_eq!(super::cloud::validate_upload_mime(mime).unwrap(), mime);
+            assert_eq!(outcome.artifact.mime, mime, "{name}");
+            if let PublishDisposition::UploadFailed { reason } = &outcome.disposition {
+                assert!(!reason.contains("unsupported_content_type"), "{name}: {reason}");
+            }
+            let begins = server.received_requests().await.unwrap();
+            assert!(
+                begins.iter().any(|request| request.url.path() == "/api/artifacts/begin"
+                    && String::from_utf8_lossy(&request.body).contains(mime)),
+                "{name} must reach Cloud's begin request as {mime}: {begins:?}"
+            );
         }
         let refused = super::cloud::validate_upload_mime("audio/webm").unwrap_err().to_string();
         assert!(refused.contains("unsupported_content_type"), "{refused}");

@@ -1390,7 +1390,12 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     } else {
         // The named spawn consumer uses this same prepare/provision/finish path.
         let prep = daemon.app.prepare_worker_spawn(Some(name), true, None).unwrap();
-        let prepared = prep.run().unwrap();
+        // cas-59af: replay the queue runner's low-disk condition regardless of
+        // the filesystem hosting this fixture.
+        let prepared = crate::ui::factory::app::with_spawn_available_bytes_for_test(
+            5 * 1024 * 1024 * 1024,
+            || prep.run(),
+        ).unwrap();
         daemon.app.finish_worker_spawn(prepared, None, Some(spec), None)
             .expect("same-name spawn reaps the exited pane");
     }

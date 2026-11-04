@@ -36,6 +36,7 @@ describe("project-first navigation", () => {
     expect(cards[0]!.querySelector('[data-harness="codex"] svg.provider-mark')).not.toBeNull();
     expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");
     expect(cards[1]!.querySelector(".conversation-account")).toBeNull();
+    expect(cards[1]!.querySelector(".conversation-session-slot")).toBeNull();
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
     expect(cards[1]!.querySelector<HTMLElement>(".project-card-summary")?.hidden).toBe(true);
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
@@ -64,15 +65,28 @@ describe("project-first navigation", () => {
       card.querySelector(".project-card-name")!.textContent,
       ...[...card.querySelectorAll<HTMLElement>(".conversation-row")].map((node) => node.dataset.threadKey),
     ]);
-    navigation.render(nav, rows(0), vi.fn(), undefined, { machines });
+    navigation.render(nav, rows(1), vi.fn(), undefined, { machines });
     const first = layout();
     expect(first).toEqual([["Atlas", "amber-fox-1"], ["cassy", "bright-lynx-4", "quiet-heron-7"], ["widget", "zesty-otter-2"]]);
     const nodes = [...nav.querySelectorAll(".conversation-row")];
+    const recent = () => nav.querySelector<HTMLElement>('[data-most-recent="true"]')?.dataset.threadKey;
+    expect(recent()).toBe("bright-lynx-4");
+    const observer = new MutationObserver(() => {});
+    observer.observe(nav, { subtree: true, attributes: true, attributeFilter: ["data-most-recent"], attributeOldValue: true });
+    let badgeChanges = 0;
     for (let tick = 1; tick <= 4; tick++) {
       navigation.render(nav, tick % 2 ? [...rows(tick)].reverse() : rows(tick), vi.fn(), undefined, { machines });
+      badgeChanges += observer.takeRecords().filter(record => record.oldValue !== (record.target as Element).getAttribute("data-most-recent")).length;
       expect(layout(), `update ${tick}`).toEqual(first);
       expect([...nav.querySelectorAll(".conversation-row")], `update ${tick} keeps each row's node in place`).toEqual(nodes);
     }
+    observer.disconnect();
+    expect(badgeChanges, "alternating activity within a minute never changes the badge (cas-b6ed)").toBe(0);
+    expect(recent()).toBe("bright-lynx-4");
+    navigation.render(nav, rows(4).map(item => item.key === "quiet-heron-7" ? { ...item, activityAt: 60_000 } : item), vi.fn(), undefined, { machines });
+    expect(recent()).toBe("quiet-heron-7");
+    expect(layout()).toEqual(first);
+    expect([...nav.querySelectorAll(".conversation-row")]).toEqual(nodes);
   });
 
   it("names a project card by its display name, else its folder, never its identity (cas-6f79)", () => {

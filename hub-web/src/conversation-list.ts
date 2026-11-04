@@ -74,6 +74,18 @@ export interface ConversationRow {
   canEnd?: boolean;
 }
 
+/** The badge follows whole-minute activity, tied by stable identity (cas-6faf).
+ * Without activity, use exact start times; unknown times never win. */
+export function mostRecentConversation<T extends ConversationRow>(rows: readonly T[]): T | undefined {
+  const anyActivity = rows.some((row) => row.activityAt !== undefined);
+  const rank = (row: T) => anyActivity ? Math.floor((row.activityAt ?? -Infinity) / 60_000) : row.startedAt ?? -Infinity;
+  return rows.reduce<T | undefined>((best, row) => {
+    if (rank(row) === -Infinity) return best;
+    if (!best || rank(row) > rank(best) || (anyActivity && rank(row) === rank(best) && row.key.localeCompare(best.key) < 0)) return row;
+    return best;
+  }, undefined);
+}
+
 /**
  * Put the rows of one project's live sessions on one machine together, most
  * recently active first, at the place of the group's first row; mark the most
@@ -98,13 +110,7 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const anyActivity = group.some((member) => member.activityAt !== undefined);
     const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
     const ordered = [...group].sort((a, b) => rank(b) - rank(a));
-    // cas-6faf: the visible time calls a whole minute "now". Treat activity
-    // in that minute as a tie, resolved by stable identity, so alternating
-    // output frames cannot shuttle the marker between siblings. Start times
-    // keep their exact ordering when no activity has been observed.
-    const recent = anyActivity ? [...group].sort((a, b) =>
-      Math.floor(rank(b) / 60_000) - Math.floor(rank(a) / 60_000) || a.key.localeCompare(b.key),
-    )[0] : ordered[0];
+    const recent = mostRecentConversation(group);
     // cas-5d2c: the same noun as the footer's "3 conversations".
     const label = `${rowProjectName(row) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
     ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));

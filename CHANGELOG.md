@@ -88,6 +88,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Verification
 
+- **Keep approved deliveries moving beside sibling merges** — Was: a target
+  advance discarded a pre-merge approval, and a fast-lane fix could wait for the
+  batch verdict. → Now: one shared reviewed-file rule preserves approvals across
+  unrelated siblings and append-only/generated updates, while changed reviewed
+  content requires review. Eligible hotfixes close on their own pre-merge PASS
+  and trusted post-merge receipt; ineligible fixes retain normal batch gates.
+  Timeout and missing-approval messages name supervisor recovery commands.
+
 - **Review before publishing factory deliveries** — Was: required verification
   ran after a merge published. → Now: the same verifier reviews an immutable
   candidate first; PASS publishes its exact tree and closes with that approval,

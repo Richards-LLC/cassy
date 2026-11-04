@@ -35,8 +35,8 @@ pub(super) fn classify(
         return LaneClose::Off;
     };
     if let Some(merge) = task.deliverables.green_merge_commit.clone() {
-        return match lane::merged_record(&task.notes, &merge) {
-            Some(record) if task.deliverables.factory_branch_anchor.as_deref() == Some(record.head.as_str()) => {
+        return match lane::merged_delivery(task) {
+            Some(record) => {
                 LaneClose::Merged { lane: config, merge, at: record.at }
             }
             _ => LaneClose::Off,

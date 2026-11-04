@@ -1,7 +1,7 @@
 # Hotfix fast lane
 
-A small frontend-only hotfix merges as soon as its unit tests and typecheck
-pass. The slower checks run after the merge and must pass within 30 minutes
+A small frontend-only hotfix merges after its own pre-merge verifier PASS and its unit tests
+and typecheck pass. The slower checks run after the merge and must pass within 30 minutes
 before the task can close. Design: `docs/design/frontend-hotfix-fast-lane.brief.md`.
 
 ## Configuration
@@ -70,8 +70,9 @@ path.
 | Park: bug case G3 | refuse | deferred; enforced at the post-merge close |
 | Park: QA evidence | refuse without evidence | deferred to the receipt |
 | Merge CI | every check run on the tip | `merge_checks` only |
-| Close after merge | QA evidence gate and independent QA | the post-merge receipt |
-| Verifier, proof claims, MERGE REQUIRED | kept | kept |
+| Close after merge | QA evidence gate and independent QA | own pre-merge PASS plus trusted post-merge receipt; no batch release wait |
+| Verifier | normal Tier 0 / batch Tier 1 policy | its own verifier before publication |
+| Proof claims, MERGE REQUIRED | kept | kept |
 
 ## The post-merge receipt
 
@@ -80,6 +81,9 @@ Lane state (merge, rerun, revert, follow-up) lives only on reserved
 `FAST_LANE_PROOF:` lines. Caller notes cannot contain them and the task store
 neutralizes them in any untrusted write, so only Cassy can put a delivery on
 the receipt path.
+The receipt is distinct from verifier approval: it cannot replace a missing
+pre-merge PASS, and close creates no second verifier. An ineligible delivery
+keeps the normal batch verdict requirement.
 Cassy's close after the merge then requires:
 
 1. every `receipt_checks` check run to be green on the merge commit;

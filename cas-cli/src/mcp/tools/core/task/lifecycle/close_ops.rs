@@ -9606,6 +9606,8 @@ impl CasCore {
             }
         }
 
+        // A trusted fast-lane receipt replaces batch QA, never its own approval.
+        let depth_light = depth_light && !fast_lane_receipt_passed;
         // Check verification status if enabled
         let config = self.load_config();
         let policy = verification_policy(supervisor_harness_from_env(), worker_harness_from_env());
@@ -9709,6 +9711,7 @@ impl CasCore {
                 .open_verification_store()
                 .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
         let rapid_unsampled = verification_enabled
+            && !fast_lane_receipt_passed
             && !skip_verification
             && !depth_light
             && no_verification_on_record
@@ -9734,7 +9737,7 @@ impl CasCore {
         .flatten();
         let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
             decision.tier == super::review_tier::VerificationTier::Mechanical
-        }) && no_verification_on_record;
+        }) && no_verification_on_record && !fast_lane_receipt_passed;
         if let Some(decision) = verification_tier.as_ref()
             && (decision.tier != super::review_tier::VerificationTier::Mechanical || tier_skips_verifier)
             && !task.notes.contains(&decision.note())
@@ -9744,10 +9747,10 @@ impl CasCore {
         // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
         // one verdict of the assembled tip names it. A dispatch or verdict already on
         // record keeps its authority below, and Tier 2 never takes this path.
-        let release_verdict_covers = superseding_release_verdict.is_some() || (!rapid_unsampled
+        let release_verdict_covers = !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
             && no_verification_on_record
             && verification_tier.is_some()
-            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root));
+            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
         if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,
@@ -10276,9 +10279,13 @@ impl CasCore {
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
                         {
+                            let delivery_branch = task.deliverables.parked_branch.as_deref()
+                                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
+                                .or(task.assignee.as_deref()).unwrap_or("<delivery branch>");
                             return Ok(Self::tool_error(format!(
-                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Reconcile the delivery's candidate and recorded promotion with its supervisor.",
-                                task.id
+                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Supervisor recovery: {}factory action=worktree_merge id={} task_id={} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {}task action=request_changes id={} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Repeating close cannot create a post-merge approval.",
+                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), delivery_branch, task.id,
+                                crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
                             )));
                         }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(

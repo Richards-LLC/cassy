@@ -2767,6 +2767,12 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
                     run_git(&["checkout", "epic/rebound"], &fixture.repo.root);
+                    if change == "unpublished cleanup" {
+                        std::fs::write(fixture.repo.root.join("independent.txt"), "Sibling retained after rollback\n").unwrap();
+                        run_git(&["add", "independent.txt"], &fixture.repo.root);
+                        run_git(&["commit", "-m", "Unrelated sibling before rejected push"], &fixture.repo.root);
+                        run_git(&["push", "origin", "epic/rebound"], &fixture.repo.root);
+                    }
                     let operator_edit = "Unrelated operator edit\n";
                     std::fs::write(fixture.repo.root.join("README.md"), operator_edit).unwrap();
                     let target_before_push = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);

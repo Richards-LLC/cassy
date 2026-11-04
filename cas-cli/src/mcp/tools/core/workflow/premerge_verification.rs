@@ -267,31 +267,97 @@ impl Candidate {
         repository_proof::verify_repository_proof(&self.proof)
             .map_err(|error| error.to_string())?;
         let target = git(&self.repository, &["rev-parse", &self.target_branch])?;
-        if target != self.target_sha {
-            // An interrupted attempt may have made exactly our reviewed local
-            // merge, without publishing. It is not a new target base or verdict.
-            let parent = git(&self.repository, &["rev-parse", &format!("{target}^1")])?;
-            if (parent != self.target_sha && target != self.source_sha)
-                || git(
-                    &self.repository,
-                    &["rev-parse", &format!("{target}^{{tree}}")],
-                )? != self.tree
-            {
-                return Err("target changed; review the new candidate".into());
-            }
-            return Ok(());
-        }
-        let tree = git(
+        if git(
             &self.repository,
-            &[
-                "merge-tree",
-                "--write-tree",
-                &self.target_sha,
-                &self.source_sha,
-            ],
+            &["merge-base", "--is-ancestor", &self.source_sha, &target],
+        )
+        .is_ok()
+        {
+            self.verify_landing(&target)
+        } else {
+            self.tree_on(&target).map(|_| ())
+        }
+    }
+
+    /// Independently reviewed siblings cannot widen this delivery's approval.
+    fn tree_on(&self, target: &str) -> Result<String, String> {
+        git(
+            &self.repository,
+            &["merge-base", "--is-ancestor", &self.target_sha, target],
         )?;
-        if tree.lines().next() != Some(self.tree.as_str()) {
-            return Err("merge content differs from the approved candidate".into());
+        let base = git(
+            &self.repository,
+            &["merge-base", &self.target_sha, &self.source_sha],
+        )?;
+        let changed = repository_proof::delivery_paths_changed(
+            &self.repository,
+            &base,
+            &self.source_sha,
+            &self.target_sha,
+            target,
+        )?;
+        if !changed.is_empty() {
+            return Err(format!(
+                "target changed reviewed delivery files: {}; review the new candidate",
+                changed.join(", ")
+            ));
+        }
+        let merged = git(
+            &self.repository,
+            &["merge-tree", "--write-tree", target, &self.source_sha],
+        )?;
+        let tree = merged
+            .lines()
+            .next()
+            .ok_or("merge tree missing")?
+            .to_string();
+        let changed = repository_proof::delivery_paths_changed(
+            &self.repository,
+            &base,
+            &self.source_sha,
+            &self.tree,
+            &tree,
+        )?;
+        if !changed.is_empty() {
+            return Err(format!(
+                "recomputed merge changed reviewed delivery content: {}",
+                changed.join(", ")
+            ));
+        }
+        Ok(tree)
+    }
+
+    fn landing_base(&self, landed: &str) -> Result<String, String> {
+        git(
+            &self.repository,
+            &["merge-base", "--is-ancestor", &self.source_sha, landed],
+        )?;
+        if landed == self.source_sha {
+            return Ok(self.target_sha.clone());
+        }
+        let parent = git(&self.repository, &["rev-parse", &format!("{landed}^1")])?;
+        if git(
+            &self.repository,
+            &["merge-base", "--is-ancestor", &self.source_sha, &parent],
+        )
+        .is_ok()
+        {
+            return Err("this is subsequent target progress, not the delivery landing".into());
+        }
+        Ok(parent)
+    }
+
+    fn verify_landing(&self, landed: &str) -> Result<(), String> {
+        let expected = self.tree_on(&self.landing_base(landed)?)?;
+        if git(
+            &self.repository,
+            &["rev-parse", &format!("{landed}^{{tree}}")],
+        )? != expected
+        {
+            return Err(
+                "landed tree differs from the recomputed approved delivery; publication refused"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -313,13 +379,17 @@ impl Approval {
             || record.source_sha != candidate.source_sha
             || record.target_sha != candidate.target_sha
             || record.candidate_tree != candidate.tree
-            || git(
-                &candidate.repository,
-                &["rev-parse", &format!("{}^{{tree}}", record.landed_sha)],
-            )? != candidate.tree
         {
             return Err("candidate promotion does not match the approved proof".into());
         }
+        candidate.verify_landing(&record.landed_sha)?;
+        let mut published = repository_proof::capture_repository_proof_at_target(
+            &candidate.repository,
+            &record.landed_sha,
+            vec![candidate.source_sha.clone()],
+        )?;
+        published.target_branch = Some(candidate.target_branch.clone());
+        repository_proof::verify_repository_proof(&published).map_err(|error| error.to_string())?;
         let reachable = [
             &candidate.target_branch,
             &format!("origin/{}", candidate.target_branch),
@@ -361,16 +431,7 @@ impl Approval {
             ],
         )?;
         for landed in commits.lines() {
-            let first_parent = git(
-                &candidate.repository,
-                &["rev-parse", &format!("{landed}^1")],
-            )?;
-            if (first_parent == candidate.target_sha || landed == candidate.source_sha)
-                && git(
-                    &candidate.repository,
-                    &["rev-parse", &format!("{landed}^{{tree}}")],
-                )? == candidate.tree
-            {
+            if self.candidate.verify_landing(landed).is_ok() {
                 self.promote(landed)?;
                 return Ok(true);
             }
@@ -418,21 +479,7 @@ impl Approval {
     }
 
     pub(crate) fn verify_landing(&self, landed: &str) -> Result<(), String> {
-        let candidate = &self.candidate;
-        if git(
-            &candidate.repository,
-            &["rev-parse", &format!("{landed}^{{tree}}")],
-        )? != candidate.tree
-        {
-            return Err(
-                "landed tree differs from the approved candidate; publication refused".into(),
-            );
-        }
-        git(
-            &candidate.repository,
-            &["merge-base", "--is-ancestor", &candidate.target_sha, landed],
-        )?;
-        Ok(())
+        self.candidate.verify_landing(landed)
     }
 
     pub(crate) fn promote(&self, landed: &str) -> Result<(), String> {
@@ -480,14 +527,11 @@ impl Approval {
             ));
         }
         self.verify_landing(attempted)?;
+        let attempted_base = self.candidate.landing_base(attempted)?;
         // Restore only our ref and merge paths. reset --hard would discard
         // unrelated operator edits which the merge deliberately preserved.
         let restored = operations
-            .compare_and_swap_ref(
-                &self.candidate.target_branch,
-                &self.candidate.target_sha,
-                attempted,
-            )
+            .compare_and_swap_ref(&self.candidate.target_branch, &attempted_base, attempted)
             .map_err(|error| error.to_string())
             .and_then(|()| {
                 let checkouts = operations
@@ -498,13 +542,7 @@ impl Approval {
                 }) {
                     git(
                         &checkout.path,
-                        &[
-                            "read-tree",
-                            "-u",
-                            "-m",
-                            attempted,
-                            &self.candidate.target_sha,
-                        ],
+                        &["read-tree", "-u", "-m", attempted, &attempted_base],
                     )?;
                 }
                 Ok(())
@@ -512,7 +550,7 @@ impl Approval {
         Ok(Some(match restored {
             Ok(()) => format!(
                 "Unconfirmed reviewed merge restored locally to {}. Candidate, source and approval retained; fix the push cause and retry.",
-                self.candidate.target_sha
+                attempted_base
             ),
             Err(error) => format!(
                 "Local rollback declined: {error}. Inspect the target before retrying; concurrent history was preserved."
@@ -618,8 +656,9 @@ impl CasCore {
             supervisor_harness_from_env, verification_policy, worker_harness_from_env,
         };
         let config = self.load_config();
+        let fast_lane = crate::fast_lane::owns_review(&self.cas_root, task, repo);
         if task.task_type == cas_types::TaskType::Epic
-            || task.depth == cas_types::TaskDepth::Light
+            || (task.depth == cas_types::TaskDepth::Light && !fast_lane)
             || !config.verification_enabled()
             || !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
                 .task_required()
@@ -635,6 +674,7 @@ impl CasCore {
                 .map_err(fail)?
                 .is_some();
         if !recorded
+            && !fast_lane
             && (review_tier::tier_for_delivery(task, repo)
                 .is_some_and(|tier| tier.tier == review_tier::VerificationTier::Mechanical)
                 || review_tier::release_verdict_owns(&self.cas_root, task, repo))
@@ -642,6 +682,7 @@ impl CasCore {
             return Ok(None);
         }
         if !recorded
+            && !fast_lane
             && !crate::rapid_response::verification_sampled(&task.id)
             && crate::rapid_response::active_for_task_at(&self.cas_root, task, None).is_some_and(
                 |window| {
@@ -709,6 +750,19 @@ impl CasCore {
                         | cas_types::VerificationDispatchState::Claimed
                 ) {
                     self.emit_premerge_review_handoff(task, dispatch)?;
+                }
+                if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
+                    return Err(fail(format!(
+                        "exact dispatch {} timed out. A registered supervisor must recover it. Re-dispatch task-verifier for task {} on this dispatch, or record its verdict directly: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<review and verdict>\". Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
+                        dispatch.id,
+                        task.id,
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                        task.id,
+                        dispatch.id,
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                        source,
+                        task.id,
+                    )));
                 }
                 return Err(fail(format!(
                     "task {} holds on dispatch {} ({:?}); finish this exact verdict before retrying the merge",

@@ -2582,6 +2582,10 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         std::fs::write(repo.join("hub-web/dist/app.js"), "base\n").unwrap();
         fixture_commit_as(&repo, "base");
         git(&repo, &["branch", "lane"]).unwrap();
+        let origin = dir.path().join("origin.git");
+        git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]).unwrap();
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]).unwrap();
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
         git(&repo, &["checkout", "-qb", "delivery"]).unwrap();
         std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
         std::fs::write(repo.join("hub-web/dist/app.js"), "mine\n").unwrap();
@@ -2592,6 +2596,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         std::fs::write(repo.join("src/other.rs"), "pub fn b() {}\n").unwrap();
         std::fs::write(repo.join("hub-web/dist/app.js"), "theirs\n").unwrap();
         fixture_commit_as(&repo, "target moved");
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
         git(&repo, &["checkout", "-q", "delivery"]).unwrap();
         assert!(git(&repo, &["merge", "-q", "lane"]).is_err(), "the fixture must conflict");
         std::fs::write(repo.join("hub-web/dist/app.js"), "regenerated\n").unwrap();
@@ -2606,10 +2611,23 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         git(&repo, &["checkout", "-q", "lane"]).unwrap();
         std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 2; }\n").unwrap();
         fixture_commit_as(&repo, "target rewrites the delivered function");
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
         git(&repo, &["checkout", "-q", "delivery"]).unwrap();
         git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "-X", "theirs", "lane", "-m", "take theirs"]).unwrap();
         let theirs = fixture_head(&repo);
         assert!(PassingTests::new(&root, &repo, &theirs).with_target("lane").receipts().is_empty());
+
+        // cas-6d79: any agent can move the shared local target ref. Pointed at
+        // an unpublished commit, it must not pass that commit off as target work.
+        record_passing_test_for_tests(&root, &repo, &theirs, "cas", "test(cached)");
+        git(&repo, &["checkout", "-qb", "smuggle", "lane"]).unwrap();
+        std::fs::write(repo.join("src/smuggled.rs"), "pub fn s() {}\n").unwrap();
+        fixture_commit_as(&repo, "unpublished change");
+        git(&repo, &["branch", "-f", "lane", "smuggle"]).unwrap();
+        git(&repo, &["checkout", "-q", "delivery"]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "lane", "-m", "merge moved lane"]).unwrap();
+        let smuggled = fixture_head(&repo);
+        assert!(PassingTests::new(&root, &repo, &smuggled).with_target("lane").receipts().is_empty());
     }
 
     #[test]

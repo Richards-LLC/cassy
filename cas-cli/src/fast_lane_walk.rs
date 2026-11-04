@@ -57,6 +57,7 @@ fn save(path: &Path, decision: &Decision) -> Result<()> {
     serde_json::to_writer_pretty(&mut temp, decision)?;
     temp.as_file().sync_all()?;
     temp.persist(path)?;
+    File::open(path.parent().context("decision directory")?)?.sync_all()?;
     Ok(())
 }
 
@@ -313,6 +314,7 @@ pub(crate) fn tick(root: &Path, now: DateTime<Utc>) -> Result<()> {
     if !directory.exists() {
         return Ok(());
     }
+    let mut failure = None;
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -320,11 +322,15 @@ pub(crate) fn tick(root: &Path, now: DateTime<Utc>) -> Result<()> {
         }
         if let Err(error) = advance(root, &path, now) {
             if !crate::qa_post_release::lock_contention(&error) {
-                return Err(error);
+                failure = Some(error);
             }
         }
     }
-    Ok(())
+    // One broken delivery must not prevent another delivery's deadline action.
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// One off-loop runner per project, including pending decisions on restart.

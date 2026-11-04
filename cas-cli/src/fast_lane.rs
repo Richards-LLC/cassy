@@ -567,11 +567,12 @@ pub fn open_revert_pr(
     let title = format!("Revert hotfix merge {}", &merge[..merge.len().min(12)]);
     // Recover a PR opened before the action receipt was persisted. An older
     // delivery's revert on the same task branch is never reused.
-    if let Ok(existing) = gh(binary, repo, &["pr", "view", &branch, "--json", "url,title,state,baseRefName"], PROBE)
+    if let Ok(existing) = gh(binary, repo, &["pr", "view", &branch, "--json", "url,title,state,baseRefName,body"], PROBE)
         && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&existing)
         && existing["state"].as_str() == Some("OPEN")
         && existing["title"].as_str() == Some(title.as_str())
         && existing["baseRefName"].as_str() == Some(target)
+        && existing["body"].as_str().is_some_and(|body| body.contains(&format!("merge {merge};")))
         && let Some(url) = existing["url"].as_str().filter(|url| !url.is_empty())
     { return Ok(url.to_string()); }
     git(repo, &["fetch", "--quiet", "origin", target], GIT_WRITE)?;

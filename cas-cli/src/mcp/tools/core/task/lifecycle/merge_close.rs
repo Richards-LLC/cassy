@@ -154,50 +154,50 @@ pub(crate) fn return_merged_delivery_for_source_fix(
     cas_root: &std::path::Path, actor: &str, task: &Task,
     repo: &std::path::Path, target: &str, gate: &str,
 ) -> Result<String, String> {
-        let (Some(anchor), Some(merge), Some(branch)) = (
-            task.deliverables.factory_branch_anchor.as_deref(),
-            task.deliverables.green_merge_commit.as_deref(),
-            task.deliverables.parked_branch.as_deref(),
-        ) else { return Ok(String::new()); };
-        if task.status != TaskStatus::AwaitingMerge || task.assignee.is_none() {
-            return Ok(String::new());
+    let (Some(anchor), Some(merge), Some(branch)) = (
+        task.deliverables.factory_branch_anchor.as_deref(),
+        task.deliverables.green_merge_commit.as_deref(),
+        task.deliverables.parked_branch.as_deref(),
+    ) else { return Ok(String::new()); };
+    if task.status != TaskStatus::AwaitingMerge || task.assignee.is_none() {
+        return Ok(String::new());
+    }
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    let target_tip = super::close_ops::resolve_branch_sha(repo, &format!("origin/{target}"))
+        .or_else(|| super::close_ops::resolve_branch_sha(repo, target));
+    let Some(target_tip) = target_tip.filter(|tip| {
+        super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
+            && super::close_ops::git_commit_is_ancestor(repo, merge, tip)
+    }) else { return Ok(String::new()); };
+    let reason = format!("post_merge_close_gate: delivery {anchor} landed at {merge} (target {target_tip}); source correction required.\n{gate}");
+    (|| -> Result<String, String> {
+        let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
+        let current = store.get(&task.id).map_err(|error| error.to_string())?;
+        if current.status != TaskStatus::AwaitingMerge
+            || current.assignee != task.assignee
+            || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+            || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
+            || current.deliverables.parked_branch != task.deliverables.parked_branch
+            || current.deliverables.work_target != task.deliverables.work_target
+        {
+            return Ok("delivery changed during close; no task transition attempted".into());
         }
-        let target = target.strip_prefix("origin/").unwrap_or(target);
-        let target_tip = super::close_ops::resolve_branch_sha(repo, &format!("origin/{target}"))
-            .or_else(|| super::close_ops::resolve_branch_sha(repo, target));
-        let Some(target_tip) = target_tip.filter(|tip| {
-            super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
-                && super::close_ops::git_commit_is_ancestor(repo, merge, tip)
-        }) else { return Ok(String::new()); };
-        let reason = format!("post_merge_close_gate: delivery {anchor} landed at {merge} (target {target_tip}); source correction required.\n{gate}");
-        (|| -> Result<String, String> {
-            let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
-            let current = store.get(&task.id).map_err(|error| error.to_string())?;
-            if current.status != TaskStatus::AwaitingMerge
-                || current.assignee != task.assignee
-                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
-                || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
-                || current.deliverables.parked_branch != task.deliverables.parked_branch
-                || current.deliverables.work_target != task.deliverables.work_target
-            {
-                return Ok("delivery changed during close; no task transition attempted".into());
-            }
-            // Retire the old auto-close intent before the worker may start a
-            // correction, so recovery cannot re-park the already declined tip.
-            cas_store::clear_pending_observed_delivery_merge(cas_root, &task.id, branch, target, anchor)
-                .map_err(|error| error.to_string())?;
-            cas_store::request_changes_for_parked_delivery(cas_root, &task.id, actor, &reason)
-                .map_err(|error| error.to_string())?;
-            let returned = store.get(&task.id).map_err(|error| error.to_string())?;
-            let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
-                cas_root, &returned, anchor, merge, &reason,
-            ) {
-                Ok(Some(id)) => format!("worker notified (prompt {id})"),
-                Ok(None) => "no live assigned worker to notify".into(),
-                Err(error) => format!("worker notice failed: {error}"),
-            };
-            Ok(format!("Cassy returned task {} Open to its assignee for the source fix; {notice}. Start task {} and re-deliver after fixing the gate; no supervisor request_changes is needed.", task.id, task.id))
-        })()
+        // Retire the old auto-close intent before the worker may start a
+        // correction, so recovery cannot re-park the already declined tip.
+        cas_store::clear_pending_observed_delivery_merge(cas_root, &task.id, branch, target, anchor)
+            .map_err(|error| error.to_string())?;
+        cas_store::request_changes_for_parked_delivery(cas_root, &task.id, actor, &reason)
+            .map_err(|error| error.to_string())?;
+        let returned = store.get(&task.id).map_err(|error| error.to_string())?;
+        let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
+            cas_root, &returned, anchor, merge, &reason,
+        ) {
+            Ok(Some(id)) => format!("worker notified (prompt {id})"),
+            Ok(None) => "no live assigned worker to notify".into(),
+            Err(error) => format!("worker notice failed: {error}"),
+        };
+        Ok(format!("Cassy returned task {} Open to its assignee for the source fix; {notice}. Start task {} and re-deliver after fixing the gate; no supervisor request_changes is needed.", task.id, task.id))
+    })()
 }
 
 impl CasCore {

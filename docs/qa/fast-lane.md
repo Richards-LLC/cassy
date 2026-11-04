@@ -111,8 +111,14 @@ On failure:
   hotfix. Cassy files one follow-up task and does not revert.
 - **A receipt status fails**, for example the Vercel build. Production keeps
   its previous deployment. The task returns to its worker with no revert.
-- **A ledger row is FAIL.** The task returns to its worker, and the
-  supervisor asks the operator whether to revert or fix forward.
+- **A ledger row is FAIL.** Cassy sends one Commander question for that
+  delivery, with **Revert** and **Fix-forward** choices. The task waits for
+  the answer. Revert opens a revert PR and returns the task to its worker;
+  Fix-forward returns it without a revert PR. No answer within fifteen
+  minutes defaults to Revert. Only an authenticated operator reply bound to
+  that question counts; retries and service restarts preserve its original
+  deadline. Opening the revert PR does not merge it: the supervisor merges
+  it after its merge checks pass and tells the operator.
 
 ## Worker guidance
 

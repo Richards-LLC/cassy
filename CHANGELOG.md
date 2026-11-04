@@ -46,7 +46,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   when the resolution touches only CHANGELOG.md or generated hub-web files.
   Any other conflicted file voids them, even one resolved by taking a side
   whole, and so does any commit of the delivery's own after the receipt,
-  including after it has merged.
+  including after it has merged. Only the target as published on origin
+  counts as already-proven work; a moved local target branch no longer
+  hides an unpublished commit.
 
 ### Fixed — Commander supervisor answers
 

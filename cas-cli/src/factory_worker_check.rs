@@ -1160,19 +1160,24 @@ fn git_paths(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
     })
 }
 
-/// The local target and its `origin/` tracking ref, when they resolve.
+/// The published target and, when it is an ancestor of that, the local ref.
+/// cas-6d79: any agent in the shared repository can move the local branch,
+/// so only `origin/<target>` vouches for target work. Without it, nothing is
+/// treated as integrated and the whole range counts.
 fn integrated_target_refs(repo: &Path, target: &str) -> Vec<String> {
-    [format!("refs/heads/{target}"), format!("refs/remotes/origin/{target}")]
-        .into_iter()
-        .filter(|reference| {
-            Command::new("git")
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
-                .current_dir(repo)
-                .output()
-                .is_ok_and(|output| output.status.success())
-        })
-        .collect()
+    let origin = format!("refs/remotes/origin/{target}");
+    let local = format!("refs/heads/{target}");
+    let resolves = |reference: &str| {
+        git_output(repo, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]).is_some()
+    };
+    if !resolves(&origin) {
+        return Vec::new();
+    }
+    let mut refs = vec![origin.clone()];
+    if resolves(&local) && git_output(repo, &["merge-base", "--is-ancestor", &local, &origin]).is_some() {
+        refs.push(local);
+    }
+    refs
 }
 
 fn range_log_paths(repo: &Path, selection: &[&str]) -> Option<Vec<String>> {

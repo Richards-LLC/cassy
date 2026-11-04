@@ -893,6 +893,9 @@ mod tests {
         assert_eq!(mime_for(Path::new("a/b.html")), "text/html");
         assert_eq!(mime_for(Path::new("a/b.md")), "text/markdown");
         assert_eq!(mime_for(Path::new("a/b.png")), "image/png");
+        // cas-6adaa: both uploadable video types are reachable by extension.
+        assert_eq!(mime_for(Path::new("a/b.webm")), "video/webm");
+        assert_eq!(mime_for(Path::new("a/b.MP4")), "video/mp4");
         assert_eq!(
             mime_for(Path::new("a/b.wat")),
             "application/octet-stream",

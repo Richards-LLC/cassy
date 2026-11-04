@@ -449,9 +449,15 @@ pub(crate) fn validate_cited_pair_coverage(
 /// suffix or an `/independent-qa/` path; neither shadows producer evidence,
 /// including when the reviewer kept its bundle under a separate task root.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {
-    notes
-        .match_indices(BUNDLE_CITATION)
-        .filter_map(|(index, token)| {
+    cas_store::task_note_markers::note_blocks(notes)
+        .into_iter()
+        .filter(|block| {
+            // System outcomes are not producer evidence. Keep historical
+            // multiline hints with their timestamped outcome header too.
+            !block.lines().next().and_then(|line| line.split_once("] "))
+                .is_some_and(|(_, body)| body.starts_with("📝 PROGRESS BATCH_CLOSE_OUTCOME "))
+        })
+        .flat_map(|notes| notes.match_indices(BUNDLE_CITATION).filter_map(move |(index, token)| {
             // Proof records carry quoted audit fields, not producer citations.
             // A review summary mentioning qa-bundle must not shadow the note.
             let line_start = notes[..index].rfind('\n').map_or(0, |offset| offset + 1);
@@ -473,7 +479,7 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
                         .to_string()
                 })
                 .filter(|path| !path.is_empty() && !path.contains("/independent-qa/"))
-        })
+        }))
         .last()
 }
 

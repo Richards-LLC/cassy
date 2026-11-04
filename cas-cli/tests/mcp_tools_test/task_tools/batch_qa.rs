@@ -797,6 +797,12 @@ async fn qa_receipt_after_the_verdict_finishes_the_close_cas_f497() {
     );
     assert!(qa.contains("Batch QA receipt") && qa.contains("Closed 1: cas-bq01."), "{qa}");
     assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{qa}");
+    let before = tasks.get("cas-bq01").unwrap().notes.matches("BATCH_CLOSE_OUTCOME").count();
+    assert!(before > 0, "the initial close must retain its outcome");
+    fx.supervisor.verification(Parameters(receipt(serde_json::json!({"task_ids": ["cas-bq01"]})))).await.unwrap();
+    let after = tasks.get("cas-bq01").unwrap().notes.matches("BATCH_CLOSE_OUTCOME").count();
+    assert_eq!(after, before, "another receipt must not add an already-closed outcome note");
+
 }
 
 /// cas-f497: what a verdict must not do. An implementer named only by the recorded

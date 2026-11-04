@@ -561,6 +561,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             script.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "${0##*/}" >> "$CALLS"\n'
                               '[[ "${FAIL_FIXTURE:-}" != "${0##*/}" ]]\n')
             script.chmod(0o755)
+        # Lane CI alone also runs the hosted-Commander deploy fixture (cas-7a33).
+        deploy = 'test-deploy-hub-release.py'
+        (self.root / 'scripts' / deploy).write_text(
+            'import os, sys\nopen(os.environ["CALLS"], "a").write(os.path.basename(__file__) + "\\n")\n'
+            'sys.exit(os.environ.get("FAIL_FIXTURE") == os.path.basename(__file__))\n')
         # Pre-push runs this suite with Git's repository-local variables set.
         # Keep both fixture Git commands and workflow bodies in this repository.
         environment = os.environ.copy()
@@ -598,7 +603,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                     calls.write_text('')
                     result = run(step, base)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(calls.read_text().splitlines(), expected)
+                    lane_only = [deploy] if expected and workflow == 'lane.yml' else []
+                    self.assertEqual(calls.read_text().splitlines(), expected + lane_only)
                     if expected:
                         calls.write_text('')
                         result = run(step, base, scripts[1])

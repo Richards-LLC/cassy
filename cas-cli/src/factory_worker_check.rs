@@ -2607,7 +2607,11 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "target moved");
         git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
         git(&repo, &["checkout", "-q", "delivery"]).unwrap();
-        assert!(git(&repo, &["merge", "-q", "lane"]).is_err(), "the fixture must conflict");
+        // cas-a376: pin the identity. On a runner without one, git refuses the
+        // merge before starting it, the resolution commits as a plain commit,
+        // and the receipt is voided by the fixture, not the code under test.
+        assert!(git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "lane"]).is_err());
+        assert!(repo.join(".git/MERGE_HEAD").exists(), "the fixture merge must stop at its conflict");
         std::fs::write(repo.join("hub-web/dist/app.js"), "regenerated\n").unwrap();
         fixture_commit_as(&repo, "merge lane");
         let delivered = fixture_head(&repo);

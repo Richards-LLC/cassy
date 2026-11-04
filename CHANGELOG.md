@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-04
+
+### Fixed — Worker spawn admission
+
+- **Choose free worker branch names** — Isolated MCP spawns reserve generated
+  names against local and origin factory refs before queueing work. Explicit
+  collisions give a clear refusal before task binding or worktree creation.
+- **Explain Codex account refusals** — Spawn errors name a missing default home,
+  a logged-out account or a mismatched configuration directory and retain the
+  account-selection diagnostics that explain why a named login was not chosen.
+
+### Fixed — Merge queue
+
+- **Concurrent deliveries no longer conflict on the changelog** — Was: every
+  delivery inserted its section at the top of `CHANGELOG.md`'s
+  `## [Unreleased]`, so GitHub's merge queue, which ignores the local
+  changelog merge driver, dequeued the second of any two queued pull requests
+  as conflicting. Now: each delivery writes its own `changelog.d/<task-id>.md`
+  fragment, the close gate credits that fragment (and points a direct
+  `CHANGELOG.md` entry at it), the release gate checks fragment format, and
+  `scripts/release.sh` folds the fragments into the version section and deletes
+  them.
+
 ### Fixed — Worker replies reach an idle supervisor
 
 - **A worker's ready for new work wakes the supervisor** — Was: when a

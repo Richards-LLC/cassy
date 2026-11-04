@@ -4,7 +4,7 @@ export type CommandKey = "previous" | "next" | "select" | "cancel";
 export interface CommandReceipt {
   client_ref: string;
   command: SupervisorCommand;
-  phase: "submitted" | "observed" | "refused" | "unconfirmed";
+  phase: "queued" | "submitted" | "observed" | "refused" | "unconfirmed";
   detail: string;
   output: string;
   interactive: boolean;
@@ -219,7 +219,7 @@ export class SupervisorCommandSession {
   constructor(private readonly options: SessionOptions) {}
   async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
-    if ([...this.receipts.values()].some(receipt => receipt.phase === "submitted" || receipt.interactive)) throw new Error("Wait for the current command or close its chooser first.");
+    if ([...this.receipts.values()].some(receipt => receipt.phase === "queued" || receipt.phase === "submitted" || receipt.interactive)) throw new Error("Wait for the current command or close its chooser first.");
     await this.options.control();
     const changed = this.options.unavailable(); if (changed) throw new Error(changed);
     const ref = `cmd-${crypto.randomUUID()}`;
@@ -239,7 +239,7 @@ export class SupervisorCommandSession {
     if (receipt.phase !== "refused") this.clearRefusals(receipt.command);
     const ended = this.endedCommands.get(receipt.client_ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
-    if (receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
+    if (receipt.phase !== "queued" && receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
     this.options.changed();
   }
   /** Only the authenticated catalog's ended receipt may settle a vanished pane. */
@@ -257,7 +257,7 @@ export class SupervisorCommandSession {
     this.options.changed();
   }
   private canSettleEnded(receipt: CommandReceipt): boolean {
-    return receipt.phase === "submitted" || receipt.phase === "unconfirmed" || receipt.interactive;
+    return receipt.phase === "queued" || receipt.phase === "submitted" || receipt.phase === "unconfirmed" || receipt.interactive;
   }
   private settleEnded(receipt: CommandReceipt, reason: string): void {
     if (!this.canSettleEnded(receipt)) return;
@@ -307,11 +307,14 @@ export class SupervisorCommandSession {
   private stopPoll(ref: string): void { clearTimeout(this.polls.get(ref)); this.polls.delete(ref); }
   private poll(ref: string): void {
     this.stopPoll(ref);
-    const started = Date.now();
+    let started = Date.now();
+    let queued = false;
     const read = () => {
       const receipt = this.receipts.get(ref);
-      if (!receipt || receipt.phase !== "submitted") { this.stopPoll(ref); return; }
-      if (Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
+      if (!receipt || (receipt.phase !== "queued" && receipt.phase !== "submitted")) { this.stopPoll(ref); return; }
+      if (receipt.phase === "queued") queued = true;
+      else if (queued) { started = Date.now(); queued = false; }
+      if (receipt.phase !== "queued" && Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
         this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
       }
       this.options.send({ SupervisorCommandStatus: { client_ref: ref } });

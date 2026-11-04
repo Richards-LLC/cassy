@@ -3887,6 +3887,7 @@ pub(crate) fn admit_correlated_daemon_frame(
         if pending.get(&(session.to_owned(), receipt.client_ref.clone())) != Some(&PendingRefKind::SupervisorCommand) { return false; }
         let detail = serde_json::json!({"client_ref": receipt.client_ref, "command": receipt.command, "phase": receipt.phase}).to_string();
         if store.audit_operation(context, match receipt.phase {
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Queued => "queued",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Submitted => "submitted",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",

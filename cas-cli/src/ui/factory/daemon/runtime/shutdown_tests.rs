@@ -1678,6 +1678,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
     env.set_current_dir(dir.path());
 
     let mut daemon = daemon(&cas_dir);
+    daemon.session_name = factory_session.clone();
     register_idle_worker(&cas_dir, NAME);
     let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
     if register_replacement {

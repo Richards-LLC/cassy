@@ -3,7 +3,7 @@ import { ATLAS, PELICAN } from "./world";
 import { SCOPES } from "./hub-double";
 import { journeyStamp } from "./clock";
 
-for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
     test.use({ viewport });
     test("HUB-J27 run a supervisor command and read its actual outcome", journeyPart, async ({ page, journey }) => {
@@ -64,6 +64,34 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
         await expect(page.locator(".supervisor-command-receipt").last()).toHaveAttribute("data-phase", "observed");
       });
+      await journey.stage("Cancel Finish by keyboard from a right-aligned confirmation (cas-c009)", async () => {
+        await input.fill("/finish"); await input.press("Enter");
+        const dialog = page.getByRole("alertdialog", { name: "the cas-src supervisor" });
+        const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+        const finish = dialog.getByRole("button", { name: "Finish", exact: true });
+        await expect(cancel).toBeFocused();
+        const [sheet, left, right] = await Promise.all([dialog.boundingBox(), cancel.boundingBox(), finish.boundingBox()]);
+        if (!sheet || !left || !right) throw new Error("confirmation is not laid out");
+        if (viewport.width > 500) {
+          // Content-width actions side by side, primary last at the right edge.
+          expect(Math.abs(left.y - right.y)).toBeLessThan(2);
+          expect(right.x).toBeGreaterThan(left.x + left.width);
+          expect(sheet.x + sheet.width - (right.x + right.width)).toBeLessThan(24);
+          expect(left.width + right.width).toBeLessThan(sheet.width / 2);
+        } else {
+          // A phone stacks full-width actions, the primary above Cancel.
+          expect(right.y + right.height).toBeLessThanOrEqual(left.y + 1);
+          expect(left.width).toBeGreaterThan(sheet.width * 0.8);
+        }
+        await page.keyboard.press("ArrowRight");
+        await expect(finish).toBeFocused();
+        await page.keyboard.press("Tab");
+        await expect(cancel).toBeFocused();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+        await expect(input).toBeFocused();
+        expect(mutations()).toHaveLength(2);
+      });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {
         await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
         await page.locator('[data-supervisor-command="clear"]').click();
@@ -74,7 +102,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toContainText("Its harness will end");
-        await dialog.getByRole("button", { name: "Exit", exact: true }).click();
+        await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+        await page.keyboard.press("ArrowRight");
+        await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
+        await page.keyboard.press("Enter");
         await expect.poll(() => mutations().length).toBe(3);
         expect(mutations()[2].body).toMatchObject({ command: "exit", confirmed: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);

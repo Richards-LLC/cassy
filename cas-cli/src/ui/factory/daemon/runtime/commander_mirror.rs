@@ -140,7 +140,8 @@ fn claude_turn_end(value: &Value) -> bool {
     (value.get("type").and_then(Value::as_str) == Some("assistant")
         && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
         && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
-        && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+        && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+            || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
         && text_blocks(value, "/message/content", "text").is_some())
         || (value.get("type").and_then(Value::as_str) == Some("system")
             && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
@@ -360,8 +361,9 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 // cas-ce9d: Claude writes one end_turn response as a
                 // thinking-only line and then its text line, both marked
                 // end_turn. Ending on the thinking line mirrored the turn's
-                // earlier progress text and dropped the answer, so only an
-                // end_turn line carrying text (or turn_duration) ends it.
+                // earlier progress text and dropped the answer. Normal ends
+                // and API failures require text on this primary record; a
+                // turn_duration record can also settle the accumulated text.
                 let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
                     && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
                         // API errors can end with stop_sequence and no duration.
@@ -1019,31 +1021,31 @@ mod tests {
             "timestamp":at(second),"type":"attachment","uuid":id,
             "attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":text}});
         for api_error in [false, true] {
-        let answer = |text: &str, second| serde_json::json!({
-            "timestamp":at(second),"type":"assistant","isApiErrorMessage":api_error,
-            "message":{"role":"assistant",
-            "stop_reason":if api_error { "stop_sequence" } else { "end_turn" },
-            "content":[{"type":"text","text":text}]}});
-        let filler = serde_json::json!({"timestamp":at(2),"type":"progress",
-            "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)});
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        let write = |values: &[Value]| std::fs::write(&path,
-            values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
-        let keys = || completed_turns(&claude_transcript_window(&path).unwrap(),
-            cas_mux::SupervisorCli::Claude).into_iter().map(|turn| turn.key).collect::<Vec<_>>();
+            let answer = |text: &str, second| serde_json::json!({
+                "timestamp":at(second),"type":"assistant","isApiErrorMessage":api_error,
+                "message":{"role":"assistant",
+                "stop_reason":if api_error { "stop_sequence" } else { "end_turn" },
+                "content":[{"type":"text","text":text}]}});
+            let filler = serde_json::json!({"timestamp":at(2),"type":"progress",
+                "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)});
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            let write = |values: &[Value]| std::fs::write(&path,
+                values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            let keys = || completed_turns(&claude_transcript_window(&path).unwrap(),
+                cas_mux::SupervisorCli::Claude).into_iter().map(|turn| turn.key).collect::<Vec<_>>();
 
-        let cut_turn = vec![
-            prompt("first-input", "Ship the hotfix?", 1), filler,
-            queued("second-input", "Also check CI", 3), answer("Shipped.", 4),
-        ];
-        write(&cut_turn);
-        assert_eq!(keys(), ["first-input"], "the newest turn is read back to its first input");
+            let cut_turn = vec![
+                prompt("first-input", "Ship the hotfix?", 1), filler,
+                queued("second-input", "Also check CI", 3), answer("Shipped.", 4),
+            ];
+            write(&cut_turn);
+            assert_eq!(keys(), ["first-input"], "the newest turn is read back to its first input");
 
-        let mut followed = cut_turn;
-        followed.extend([prompt("next-input", "Next?", 5), answer("Next done.", 6)]);
-        write(&followed);
-        assert_eq!(keys(), ["next-input"], "a cut turn behind later turns was already mirrored whole");
+            let mut followed = cut_turn;
+            followed.extend([prompt("next-input", "Next?", 5), answer("Next done.", 6)]);
+            write(&followed);
+            assert_eq!(keys(), ["next-input"], "a cut turn behind later turns was already mirrored whole");
         }
     }
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};

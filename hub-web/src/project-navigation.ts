@@ -1,6 +1,6 @@
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineVersionMarkup } from "./machine-version";
-import { ConversationList, machineName, rowProjectName, type ConversationRow } from "./conversation-list";
+import { ConversationList, machineName, mostRecentConversation, rowProjectName, type ConversationRow } from "./conversation-list";
 
 export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; latestRelease?: string }
 type Filter = "all" | "needs-you" | `machine:${string}`;
@@ -177,11 +177,9 @@ export class ProjectNavigation {
       const summary = [workerCount > 0 ? `${workerCount} live ${workerCount === 1 ? "worker" : "workers"}` : "", rate === undefined ? "" : `${rate} merges/h`].filter(Boolean).join(" · ");
       if (card.summary.textContent !== summary) card.summary.textContent = summary;
       card.summary.hidden = !summary;
-      const anyActivity = visible.some((row) => row.activityAt !== undefined);
-      const rank = (row: ConversationRow) => (anyActivity ? row.activityAt : row.startedAt) ?? -Infinity;
       const sorted = [...visible].sort(compareSupervisorRows);
       // The most recent session is marked where it stands; it never moves.
-      const newest = sorted.reduce<ConversationRow | undefined>((best, row) => rank(row) > (best ? rank(best) : -Infinity) ? row : best, undefined);
+      const newest = mostRecentConversation(sorted);
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
       const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));

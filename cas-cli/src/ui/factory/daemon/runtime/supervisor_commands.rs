@@ -608,6 +608,11 @@ mod tests {
             let pending = daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), owner.clone()).await.unwrap();
             assert!(matches!(pending, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
             assert!(std::fs::read(root.path().join("finish-input")).unwrap().is_empty(), "a truly active turn receives no command");
+            let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+            assert!(daemon.dispatch_supervisor_command(Request::Status, "finish-background".into(), foreign).await.is_err());
+            // Waiting on a long turn cannot expire the not-yet-submitted command.
+            daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-background".into())).unwrap().started = Instant::now() - REPLAY_WINDOW - Duration::from_secs(1);
+            assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "another-command".into(), owner.clone()).await.is_err());
             // Replay is caller-owned and cannot create another queued mutation.
             daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(), owner.clone()).await.unwrap();
             std::fs::write(&transcript, format!("{start}\n{end}\n")).unwrap();

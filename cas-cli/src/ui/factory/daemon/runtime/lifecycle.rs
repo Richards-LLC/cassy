@@ -4244,10 +4244,7 @@ impl FactoryDaemon {
             }
 
             // Flush pending WebSocket client output
-            if !self.ws_clients.is_empty() {
-                self.deliver_work_events();
-                self.flush_ws_client_output().await;
-            }
+            self.serve_ws_clients().await;
 
             // GH #1196: an operator send can tell from loop.json that no
             // Commander client is connected.

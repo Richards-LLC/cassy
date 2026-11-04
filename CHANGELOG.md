@@ -253,6 +253,76 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   starts the turn, Commander messages sent before it are named as earlier and
   listed oldest first, so they are answered first.
 
+### Fixed — Commander work events
+
+- **Drop work-event answers for disconnected clients** — Was: a finished
+  work-event page or detail waited in the daemon until some Commander client
+  reconnected. Now: an answer whose client has gone is dropped on the next
+  loop pass, and a reconnecting client asks again.
+
+### Fixed — Usage-limit notices
+
+- **A repeated usage-limit report repeats the original notice** — Was: when
+  the factory re-reported a worker's usage limit, for example after a daemon
+  restart, it read provider usage again and rebuilt the text, so the reset
+  countdown and account detail could differ from the notice the supervisor
+  already had. → Now: the stored notice comes back unchanged, with no second
+  provider usage read. Rows left by the removed automatic account switch are
+  still re-described under the report-only policy, never replayed.
+- **Removed dead worker resume code** — Was: the worker spawn path still
+  carried a session-resume option from the removed automatic switch, though
+  every caller passed none. → Now: the option and its launch rewrite are
+  gone; worker startup briefs are unchanged.
+
+### Fixed — Write-root guard
+
+- **Allow read-only scripts that mention the write-roots key** — Was: a
+  read-only script that named `factory.write_roots` in a string and used an
+  unrelated `set(...)` was refused as operator-only. → Now: `set` written as
+  a function call no longer counts as the config verb. Config writes are read
+  with the CLI parser, so options and their values (`--store here`) cannot
+  hide the key, and escaped, variable-held and wrapped forms stay refused.
+
+### Fixed — Worker isolation check
+
+- **Accept a detached QA worktree** — Was: `coordination my_context` called an
+  independent QA worker's own linked worktree, detached at its bound commit, a
+  shared trunk and asked for a respawn. → Now: a detached HEAD in a dedicated
+  linked worktree reports an OK binding; the shared checkout, detached or on
+  trunk, and plain directories inside it still raise the misbinding alarm.
+
+### Security — Hosted Commander
+
+- **Content-Security-Policy on hub.petrastella.io** — Hosted Commander now
+  sends a CSP. Images, media, live connections and visual pages may come only
+  from the team's Tailscale tailnets listed in `hub-web/hosted-tailnets.json`
+  or a loopback hub, with no blanket `https:` source. Composer image previews
+  (`blob:`), the pairing cloud and the GitHub release check stay allowed.
+  Scripts, styles and workers stay same-origin. The release deploy redeploys when only that list changes and
+  verifies that the live site serves the policy before keeping the deployment.
+- **Hubs on any serve port, and no referrer** — The hosted policy admits team
+  tailnet hubs on any port (`:*`), so a hub started with a non-default
+  `--tailscale-serve-port` keeps its health check, sockets, media and visual
+  pages. Hosted Commander also sends `Referrer-Policy: no-referrer`, as
+  hub-served Commander does.
+
+### Fixed — Commander worker timeline on a phone
+
+- **Worker name and terminal button line up** — In a worker's timeline at
+  390 px, the worker's name in the terminal note no longer breaks at its
+  hyphen, and the "Open the supervisor's raw output" button now lines up with
+  the note's text instead of sitting 8 px to its left.
+
+### Added
+
+### Fixed — Release report counts
+
+- **Stop counting upgrade notes as changes** — Was: bullets under `### Upgrade
+  notes` counted as shipped changes, with titles cut from their sentences. →
+  Now: upgrade, migration and operator-guidance notes stay in the report prose
+  but are left out of the change count and map, and the counting note names
+  them. v3.84.0 now counts 13 changes: 8 added, 3 changed and 2 fixed.
+
 ### Fixed — QA impact coverage
 
 - **Keep changed source files in the impact manifest** — Files remain listed as

@@ -29,6 +29,14 @@ PROJECT = "prj_tk3Jeh4OZ4YYoP7jbjiERqzrOXey"  # cas-hub-static
 TEAM = "team_oYRRKRaKgk6MHCVvkwCePax5"  # richards-llc
 ORIGIN = "https://hub.petrastella.io"
 SCHEMA = "https://openapi.vercel.sh/vercel.json"
+# cas-7a33: the team tailnets whose machine hubs hosted Commander may reach.
+TAILNETS = "hub-web/hosted-tailnets.json"
+# Pairing relay and operator inbox (Commander's cas-pairing-relay-origin).
+CLOUD = "https://petra-stella-cloud.vercel.app"
+# Commander's latest-release check (hub-web/src/machine-version.ts LATEST_RELEASE_URL).
+RELEASES = "https://api.github.com"
+LOOPBACK = "http://127.0.0.1:*"
+TAILNET = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -51,7 +59,7 @@ def command(args, **kwargs):
     return result.stdout.strip()
 
 
-def fetch(url, token=None, timeout=60):
+def fetch(url, token=None, timeout=60, with_csp=False):
     headers = {"Cache-Control": "no-cache"}
     if token:
         headers["Authorization"] = "Bearer " + token
@@ -60,6 +68,8 @@ def fetch(url, token=None, timeout=60):
         with HTTP.open(Request(url, headers=headers), timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"expected anonymous HTTP 200: {url}")
+            if with_csp:
+                return response.read(), response.headers.get("Content-Security-Policy")
             return response.read()
     except (HTTPException, OSError) as error:
         raise RuntimeError(f"HTTP verification failed: {url} ({getattr(error, 'code', 'network error')})") from None
@@ -194,7 +204,58 @@ def live_snapshot(vercel, deployment):
         return dict(pool.map(download, files.items()))
 
 
-def verify_origin(origin, snapshot, deadline=None):
+def hosted_csp(tailnets):
+    """Hosted Commander's policy: the hub-served one, with each team tailnet named.
+
+    A hub-served Commander keeps img-src and media-src 'self' (its media proxy
+    is same-origin). Hosted Commander's media, sockets and visual pages come
+    from the selected machine hub, so every team tailnet is listed explicitly.
+    No directive may carry a bare https:, wss: or * source (cas-1b35).
+    A hub can serve on any --tailscale-serve-port, so tailnet sources carry
+    :*. CSP3 "port-part matches" returns Matches for a * port, the scheme's
+    default port included, so no bare-port form is needed.
+    """
+    if not isinstance(tailnets, list) or not tailnets:
+        raise RuntimeError(f"{TAILNETS} must list at least one tailnet")
+    for name in tailnets:
+        if not isinstance(name, str) or not TAILNET.fullmatch(name):
+            raise RuntimeError(f"invalid tailnet {name!r} in {TAILNETS}: use the <tailnet> of <machine>.<tailnet>.ts.net")
+    names = sorted(set(tailnets))
+    https = [f"https://*.{name}.ts.net:*" for name in names]
+    wss = [f"wss://*.{name}.ts.net:*" for name in names]
+    directives = [
+        ("default-src", ["'none'"]),
+        ("script-src", ["'self'"]),
+        ("style-src", ["'self'"]),
+        # blob: only for images: composer thumbnails are local object URLs,
+        # as in the hub-served policy (cas-cli hub/server.rs).
+        ("img-src", ["'self'", "data:", "blob:", *https, LOOPBACK]),
+        # A loopback machine hub serves its media proxy like a tailnet hub.
+        ("media-src", ["'self'", *https, LOOPBACK]),
+        ("font-src", ["'self'"]),
+        ("connect-src", ["'self'", *https, *wss, LOOPBACK, "ws://127.0.0.1:*", CLOUD, RELEASES]),
+        ("frame-src", ["'self'", *https, LOOPBACK]),
+        ("object-src", ["'none'"]),
+        ("base-uri", ["'none'"]),
+        ("frame-ancestors", ["'none'"]),
+        ("form-action", ["'none'"]),
+        ("worker-src", ["'self'"]),
+        ("manifest-src", ["'self'"]),
+    ]
+    for name, sources in directives:
+        blanket = [source for source in sources if re.fullmatch(r"(https?|wss?):|\*", source)]
+        if blanket:
+            raise RuntimeError(f"{name} would carry a blanket source: {' '.join(blanket)}")
+    return "; ".join(f"{name} {' '.join(sources)}" for name, sources in directives)
+
+
+def release_csp(repo, tag):
+    """The policy the tag's own tailnet list produces; a release without one cannot deploy."""
+    config = json.loads(command(["git", "-C", str(repo), "show", f"{tag}:{TAILNETS}"]))
+    return hosted_csp(config.get("tailnets") if isinstance(config, dict) else None)
+
+
+def verify_origin(origin, snapshot, deadline=None, csp=None):
     expected = {"/commander/" + quote(name): data for name, (data, _) in snapshot.items()}
     expected.update({"/": snapshot["index.html"][0], "/commander/": snapshot["index.html"][0]})
 
@@ -203,21 +264,24 @@ def verify_origin(origin, snapshot, deadline=None):
         timeout = 60 if deadline is None else min(60, deadline - time.monotonic())
         if timeout <= 0:
             raise RuntimeError(f"verification deadline exceeded: {origin}")
-        if fetch(origin + path, timeout=timeout) != data:
+        body, served = fetch(origin + path, timeout=timeout, with_csp=True)
+        if body != data:
             raise RuntimeError(f"byte mismatch (including possible SSO page): {origin}{path}")
+        if csp is not None and served != csp:
+            raise RuntimeError(f"Content-Security-Policy mismatch: {origin}{path}")
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(verify, expected.items()))
     print(f"verified anonymous HTTP 200 and bytes: {origin} ({len(expected)} paths)")
 
 
-def verify_after_promote(snapshot):
+def verify_after_promote(snapshot, csp):
     # A successful promotion can precede alias propagation. Retry strict byte
     # checks for at most a minute, including their HTTP time, before rollback.
     deadline = time.monotonic() + 60
     while True:
         try:
-            verify_origin(ORIGIN, snapshot, deadline=deadline)
+            verify_origin(ORIGIN, snapshot, deadline=deadline, csp=csp)
             return
         except RuntimeError:
             remaining = deadline - time.monotonic()
@@ -227,14 +291,19 @@ def verify_after_promote(snapshot):
             time.sleep(min(5, remaining))
 
 
-def assemble_site(dist, scratch):
+def assemble_site(dist, scratch, csp):
     site = scratch / "site"
     public = site / "public"
     shutil.copytree(dist, public / "commander")
     shutil.copyfile(dist / "index.html", public / "index.html")
     command([str(Path(__file__).with_name("verify-hub-dist.sh"))],
             env=dict(os.environ, DIST_DIR=str(public / "commander"), ORIGIN_INDEX=str(public / "index.html")))
-    (site / "vercel.json").write_text(json.dumps({"$schema": SCHEMA}) + "\n")
+    headers = [{"key": "Content-Security-Policy", "value": csp},
+               {"key": "X-Content-Type-Options", "value": "nosniff"},
+               # As hub-served Commander sends (cas-cli hub/server.rs).
+               {"key": "Referrer-Policy", "value": "no-referrer"}]
+    (site / "vercel.json").write_text(json.dumps(
+        {"$schema": SCHEMA, "headers": [{"source": "/(.*)", "headers": headers}]}) + "\n")
     (site / ".vercel").mkdir()
     (site / ".vercel/project.json").write_text(json.dumps({"orgId": TEAM, "projectId": PROJECT}))
     return site
@@ -275,9 +344,10 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix="hub-release-") as tmp:
             scratch = Path(tmp)
             sha, tree, dist, snapshot = source_dist(args.repo, args.tag, scratch)
+            csp = release_csp(args.repo, args.tag)
             # One verifier run, against the assembled root/Commander pair,
             # including releases whose live tree turns out to be unchanged.
-            site = assemble_site(dist, scratch)
+            site = assemble_site(dist, scratch, csp)
             alias = vercel.api("/v4/aliases/hub.petrastella.io")
             if alias.get("projectId") != PROJECT:
                 raise RuntimeError("hub domain does not belong to cas-hub-static")
@@ -289,18 +359,20 @@ def main(argv=None):
                        "deployment_id": previous["id"], "immutable_url": previous["origin"],
                        "app_js_md5": hashlib.md5(snapshot["app.js"][0]).hexdigest(),
                        "app_css_md5": hashlib.md5(snapshot["app.css"][0]).hexdigest(),
-                       "status": "failed"}
-            if previous_tree == tree:
-                verify_origin(ORIGIN, snapshot)
+                       "csp": csp, "status": "failed"}
+            # A tailnet-list change alone (same dist tree) must still deploy.
+            live_csp = fetch(ORIGIN + "/", with_csp=True)[1]
+            if previous_tree == tree and live_csp == csp:
+                verify_origin(ORIGIN, snapshot, csp=csp)
                 receipt["status"] = "unchanged"
             else:
                 candidate = upload(vercel, site, args.tag, sha, tree)
                 receipt.update(deployment_id=candidate["id"], immutable_url=candidate["origin"])
-                verify_origin(candidate["origin"], snapshot)
+                verify_origin(candidate["origin"], snapshot, csp=csp)
                 # Rollback covers a failed/timeout promotion too: it may have moved aliases.
                 try:
                     vercel.cli("promote", candidate["id"], "--yes")
-                    verify_after_promote(snapshot)
+                    verify_after_promote(snapshot, csp)
                 except Exception:
                     print(f"promotion/verification failed; restoring {previous['id']}", file=sys.stderr)
                     try:

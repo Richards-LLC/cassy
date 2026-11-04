@@ -117,7 +117,9 @@ pub enum WorkerBinding {
 ///
 /// `branch` is the resolved HEAD at the directory the worker is bound to;
 /// `None` means git could not name a branch there (detached HEAD, missing
-/// directory, or not a repository).
+/// directory, or not a repository). `my_context` first recognizes a detached
+/// HEAD in a dedicated linked worktree ([`render_worker_binding_at`]), so only
+/// an unresolvable shared or non-worktree directory reaches this as trunk.
 pub fn classify_worker_binding(worker_name: &str, branch: Option<&str>) -> WorkerBinding {
     let worker_name = worker_name.trim();
     let branch = branch.map(str::trim).unwrap_or("");
@@ -289,6 +291,57 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> 
          Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
          Code PreToolUse harness)."
     )
+}
+
+/// Render the worktree-binding section of `coordination my_context` for the
+/// directory this session is bound to, resolving HEAD at that directory.
+pub fn render_worker_binding_at(worker_name: &str, is_worker: bool, path: Option<&Path>) -> String {
+    let branch = path.and_then(branch_at);
+    let location = path.map(|path| path.display().to_string());
+    // cas-f0f3: independent QA runs `git switch --detach <bound_head>` in its
+    // own worktree. A missing branch there is not the shared checkout.
+    if let (Some(path), Some(location), None) = (path, location.as_deref(), branch.as_deref())
+        && is_worker
+        && detached_linked_worktree_at(path)
+    {
+        return format!(
+            "**Clone Path**: {location}\n**Git Branch**: (detached HEAD)\n\
+             **Worktree Binding**: OK — detached HEAD in a dedicated linked worktree, not the \
+             shared checkout\n"
+        );
+    }
+    render_worker_binding(worker_name, is_worker, location.as_deref(), branch.as_deref())
+}
+
+/// Whether `path` is the root of a linked worktree (its own HEAD and index,
+/// separate from the shared main checkout) with HEAD detached. A plain
+/// directory inside a checkout resolves to the enclosing root and the main
+/// checkout's git directory is the common directory, so neither qualifies.
+pub fn detached_linked_worktree_at(path: &Path) -> bool {
+    if branch_at(path).is_some()
+        || !worktree_root_at(path).is_some_and(|root| same_path(&root, path))
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--verify", "HEAD"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines().map(str::trim);
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(git_dir), Some(common_dir), Some(head)) if !head.is_empty() => {
+            !same_path(Path::new(git_dir), Path::new(common_dir))
+        }
+        _ => false,
+    }
 }
 
 /// Render the worktree-binding section of `coordination my_context`.
@@ -527,6 +580,35 @@ mod tests {
         assert!(rendered.contains("ISOLATION MISBINDING"), "{rendered}");
         assert!(rendered.contains("shared trunk"), "{rendered}");
         assert!(rendered.contains("factory/zen-bear-56"), "{rendered}");
+    }
+
+    /// cas-f0f3: independent QA detaches its own linked worktree at the bound
+    /// SHA. Only a detached shared checkout, or a plain directory inside it,
+    /// is a trunk misbinding.
+    #[test]
+    fn my_context_accepts_a_detached_own_linked_worktree_cas_f0f3() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let git = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let qa = tmp.path().join("subtle-pelican-6");
+        git(&repo, &["worktree", "add", "--detach", qa.to_str().unwrap(), "main"]);
+        let rendered = render_worker_binding_at("subtle-pelican-6", true, Some(&qa));
+        assert!(!rendered.contains("MISBINDING"), "{rendered}");
+        assert!(rendered.contains("**Worktree Binding**: OK"), "{rendered}");
+
+        git(&repo, &["switch", "-q", "--detach", "main"]);
+        let stale = repo.join(".cas").join("worktrees").join("subtle-pelican-6");
+        std::fs::create_dir_all(&stale).unwrap();
+        for shared in [&repo, &stale] {
+            let rendered = render_worker_binding_at("subtle-pelican-6", true, Some(shared));
+            assert!(rendered.contains("ISOLATION MISBINDING"), "{rendered}");
+            assert!(rendered.contains("shared trunk"), "{rendered}");
+        }
     }
 
     #[test]

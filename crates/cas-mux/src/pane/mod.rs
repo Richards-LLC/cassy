@@ -441,7 +441,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
-        Self::worker_resuming(
+        Self::worker_with_startup_prompt(
             name,
             cwd,
             cas_root,
@@ -459,12 +459,12 @@ impl Pane {
             factory_session,
             active_workers,
             None,
-            None,
         )
     }
 
+    /// Spawn a worker whose first turn is the assignment CAS prepared.
     #[allow(clippy::too_many_arguments)]
-    pub fn worker_resuming(
+    pub fn worker_with_startup_prompt(
         name: &str,
         cwd: PathBuf,
         cas_root: Option<&PathBuf>,
@@ -481,7 +481,6 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
         active_workers: Option<usize>,
-        resume_session: Option<&str>,
         startup_prompt: Option<&str>,
     ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
@@ -503,9 +502,6 @@ impl Pane {
         );
         if let Some(prompt) = startup_prompt {
             config.set_worker_startup_prompt(cli.backend().name(), prompt);
-        }
-        if let Some(id) = resume_session {
-            config.resume_worker_session(cli.backend().name(), id)?;
         }
         push_factory_session_env(&mut config, cli, factory_session);
         record_runtime_capabilities(cli, &config);

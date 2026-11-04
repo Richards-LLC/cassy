@@ -4,12 +4,13 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { once } from "node:events";
 import { stat, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { createRealHubHome, createRealHubEnvironment } from "./real-hub-home.mjs";
 import { realHubProviderScript } from "./real-hub-provider.mjs";
-import { darwinProcessIdentity, darwinOwnedProcesses } from "./real-hub-processes.mjs";
+import { darwinProcessIdentity, darwinOwnedProcesses, stopLinuxFixtureProcesses } from "./real-hub-processes.mjs";
 
 test("native launch cleanup tracks owned descendants after reparenting and rejects reused PIDs", async t => {
   const parent = spawn(process.execPath, ["-e", `
@@ -36,6 +37,41 @@ test("native launch cleanup tracks owned descendants after reparenting and rejec
   assert.deepEqual((await darwinOwnedProcesses(root, remembered)).map(row => row.pid), [descendantPid]);
   remembered.set(descendantPid, { ...identity, starttime: "reused PID" });
   assert.deepEqual(await darwinOwnedProcesses(root, remembered), []);
+});
+
+test("Linux fixture cleanup stops late log writers before the HOME is removed", { skip: process.platform !== "linux", timeout: 15000 }, async t => {
+  // A daemon writes its lifecycle record while tearing down after SIGTERM, and
+  // the hub can start one before the launch shim records launched-pid.
+  const writer = `process.on("SIGTERM", () => {
+    const fs = require("node:fs"), dir = process.env.HOME + "/.cas/logs/factory/late";
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(dir + "/daemon.log", "exited\\n");
+    process.exit(0);
+  });
+  console.log("ready");
+  setInterval(() => {}, 1000);`;
+  const start = async home => {
+    const child = spawn(process.execPath, ["-e", writer], { env: { HOME: home }, stdio: ["ignore", "pipe", "inherit"] });
+    const exited = once(child, "exit");
+    t.after(async () => { child.kill("SIGKILL"); await exited; });
+    await once(child.stdout, "data");
+    return { child, exited };
+  };
+  const home = await createRealHubHome();
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const foreign = await createRealHubHome();
+  t.after(() => rm(foreign, { recursive: true, force: true }));
+  const owned = await start(home);
+  const bystander = await start(foreign);
+
+  await stopLinuxFixtureProcesses(home);
+  await rm(home, { recursive: true, force: true });
+  owned.child.kill("SIGTERM");
+  await owned.exited;
+
+  assert.equal(existsSync(home), false, "an owned writer outlived cleanup and recreated the fixture HOME");
+  assert.equal(bystander.child.exitCode, null, "cleanup signalled a process outside this fixture");
+  assert.equal(bystander.child.signalCode, null, "cleanup signalled a process outside this fixture");
 });
 
 test("real-hub provider consumes bracketed CR submissions and exits only on the exit command", { timeout: 5000 }, async t => {

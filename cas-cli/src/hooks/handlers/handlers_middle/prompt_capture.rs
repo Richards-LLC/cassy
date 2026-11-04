@@ -48,7 +48,7 @@ fn merge_prompt_context(factory_context: String, base: HookOutput) -> HookOutput
 /// and reject the harness envelopes observed at this boundary. Check every
 /// line: Claude can wrap a Commander relay in a teammate message before its
 /// `[cas #…]` line.
-fn is_operator_terminal_prompt(input: &HookInput, prompt: &str) -> bool {
+pub(crate) fn is_operator_terminal_prompt(input: &HookInput, prompt: &str) -> bool {
     if !matches!(
         input.submitted_prompt_origin(),
         cas_core::hooks::types::SubmittedPromptOrigin::Operator

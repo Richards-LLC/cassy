@@ -10,10 +10,6 @@ use std::sync::{Arc, Mutex};
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
-const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
-/// cas-0ea7: after a wait ends, or after the worker's own message to the
-/// supervisor, the same idle signal stays quiet this long.
-const IDLE_RELAY_QUIET: chrono::Duration = chrono::Duration::minutes(10);
 const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
 const SETTLED_RETRY: chrono::Duration = chrono::Duration::minutes(10);
 
@@ -187,7 +183,8 @@ pub(super) fn read_delivery(
         let mut wait = previous.wait.clone();
         if let Some((worker, read)) = &mut wait {
             read.waiting = worker_build_pending(data, &cas_dir, worker) || read.ci == "pending";
-            read.status_at = worker_status_at(data, &cas_dir, worker, supervisor, &read.task);
+            read.completion = crate::factory_worker_runs::snapshot(&cas_dir, worker, Some(&read.task), now)
+                .ok().and_then(|snapshot| snapshot.completion);
         }
         return (previous.ready.clone(), wait);
     }
@@ -213,6 +210,7 @@ struct IdleSignal {
     task: String,
     tip: Option<String>,
     ci: &'static str,
+    completed_run: Option<String>,
 }
 
 struct Retry {
@@ -225,9 +223,9 @@ struct Retry {
 pub(super) struct Retries {
     pub(super) probes: ProbeCache,
     entries: HashMap<String, Retry>,
-    /// The last admitted signal, when it was sent, and whether a wait has
-    /// ended since (which shortens its backoff to [`IDLE_RELAY_QUIET`]).
-    idle_signals: HashMap<String, (IdleSignal, DateTime<Utc>, bool)>,
+    /// One relay per unchanged worker/task/delivery/completed-run episode.
+    /// Timer expiration and temporary waits never create another episode.
+    idle_signals: HashMap<String, IdleSignal>,
     #[cfg(test)]
     pub now: Option<DateTime<Utc>>,
 }
@@ -259,34 +257,18 @@ impl Retries {
         }
     }
 
-    pub fn waiting(&mut self, worker: &str) {
-        // A later completed wait may matter, even at the same tip, but a
-        // worker cycling its own background runs is not news every minute
-        // (cas-0ea7): re-arm the signal on the shorter quiet window.
-        if let Some((_, _, rearmed)) = self.idle_signals.get_mut(worker) {
-            *rearmed = true;
-        }
-    }
-
-    /// Consume only a rendered, live relay. Suppressed waits never consume it.
-    /// A changed condition always relays. Only an identical repeat is held:
-    /// for the long backoff, for a quiet window after a wait ends, or for a
-    /// quiet window after the worker's own no-need status (cas-0ea7).
-    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
-        let signal = IdleSignal { task: read.task.clone(), tip: read.tip.clone(), ci: read.ci };
-        if let Some((previous, sent_at, rearmed)) = self.idle_signals.get(worker)
-            && previous == &signal
-        {
-            let held = now.signed_duration_since(*sent_at)
-                < if *rearmed { IDLE_RELAY_QUIET } else { IDLE_RELAY_BACKOFF };
-            let reported = read.status_at.is_some_and(|at| {
-                at > *sent_at && now.signed_duration_since(at) < IDLE_RELAY_QUIET
-            });
-            if held || reported {
-                return false;
-            }
-        }
-        self.idle_signals.insert(worker.to_string(), (signal, now, false));
+    /// Consume only a rendered live relay. A new completed run re-arms the
+    /// episode even at the same tip; changing message ages never does.
+    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait) -> bool {
+        let signal = IdleSignal {
+            task: read.task.clone(), tip: read.tip.clone(), ci: read.ci,
+            completed_run: read.completion.as_ref().map(|run| run.id.clone()).or_else(|| {
+                self.idle_signals.get(worker).filter(|old| old.task == read.task)
+                    .and_then(|old| old.completed_run.clone())
+            }),
+        };
+        if self.idle_signals.get(worker) == Some(&signal) { return false; }
+        self.idle_signals.insert(worker.to_string(), signal);
         true
     }
 
@@ -428,10 +410,7 @@ pub(super) struct WorkerWait {
     pub tip: Option<String>,
     pub ci: &'static str,
     pub waiting: bool,
-    /// When the worker's latest message to the supervisor was a typed status
-    /// for this task with no need (cas-0ea7). Any later blocker, ask, ready
-    /// or need-bearing message clears it.
-    pub status_at: Option<DateTime<Utc>>,
+    pub completion: Option<crate::factory_worker_runs::Completion>,
 }
 
 /// A self-reminder is a promised wake, not a stalled worker. Old-task,
@@ -473,32 +452,8 @@ pub(super) fn worker_has_pending_reminder(
     })
 }
 
-/// cas-0ea7: when the worker's latest message to the supervisor in its
-/// session is a typed status for `task` that needs nothing. Only that account
-/// may quiet a repeat; a blocker, ask, ready or stated need never does.
-fn worker_status_at(
-    data: &DirectorData, cas_dir: &Path, worker: &str, supervisor: &str, task: &str,
-) -> Option<DateTime<Utc>> {
-    let agent = data.agents.iter().find(|agent| agent.name == worker)?;
-    let session = crate::store::open_agent_store(cas_dir).ok()?.get(&agent.id).ok()?.factory_session;
-    let row = crate::store::open_prompt_queue_store(cas_dir).ok()?
-        .latest_from_source_to_targets(worker, &[supervisor, "supervisor"], session.as_deref())
-        .ok()??;
-    let action = crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)?;
-    let needs_nothing = row.prompt.lines().filter_map(|line| {
-        let line = line.trim();
-        line.get(..5).filter(|head| head.eq_ignore_ascii_case("need:")).map(|_| line[5..].trim())
-    }).all(|need| {
-        let need = need.to_ascii_lowercase();
-        need.is_empty() || need.starts_with("none") || need.starts_with("nothing")
-    });
-    (action.kind == crate::prompt_revalidation::WorkerActionKind::Status
-        && action.worker == worker
-        && action.task_id.as_deref() == Some(task)
-        && needs_nothing)
-        .then_some(row.created_at)
-}
-
+/// Live registered commands and candidate requests outlive harness turns.
+/// Lane locks and native descendants remain additional positive evidence.
 fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
     use crate::cli::factory::wedged;
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
@@ -506,6 +461,10 @@ fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bo
         return false;
     };
     if stored.machine_id != Some(cas_types::Agent::get_or_generate_machine_id()) { return false; }
+    if crate::factory_worker_runs::snapshot(cas_dir, worker, None, Utc::now())
+        .is_ok_and(|run| run.running)
+        || crate::factory_candidate_queue::worker_build_pending(cas_dir, worker, stored.factory_session.as_deref())
+    { return true; }
     if stored.metadata.get("clone_path").is_some_and(|clone| {
         crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
     }) { return true; }
@@ -530,7 +489,7 @@ pub(super) fn read_worker_wait(
     data: &DirectorData,
     cas_dir: &Path,
     repo: &Path,
-    supervisor: &str,
+    _supervisor: &str,
 ) -> Option<(String, WorkerWait)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(_), .. } = event else {
         return None;
@@ -546,8 +505,9 @@ pub(super) fn read_worker_wait(
             })
     })?;
     let build_pending = worker_build_pending(data, cas_dir, worker);
-    let status_at = worker_status_at(data, cas_dir, worker, supervisor, &task.id);
-    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending, status_at };
+    let completion = crate::factory_worker_runs::snapshot(cas_dir, worker, Some(&task.id), Utc::now())
+        .ok().and_then(|snapshot| snapshot.completion);
+    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending, completion };
     if build_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
         .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));

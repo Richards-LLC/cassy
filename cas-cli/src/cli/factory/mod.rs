@@ -771,6 +771,9 @@ pub enum FactoryCommands {
         /// Start the runner in its own session and return (backgrounded calls).
         #[arg(long)]
         detach: bool,
+        /// Server-created run identity, inherited only by the detached producer.
+        #[arg(long, hide = true, conflicts_with = "detach")]
+        completion_id: Option<String>,
         /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
         #[arg(long)]
         isolated_test_env: Option<std::path::PathBuf>,
@@ -1305,15 +1308,23 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: true,
+                completion_id: _,
                 isolated_test_env,
                 cargo_args,
             } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
+                completion_id,
                 isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
+            } => {
+                let execute = || crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref());
+                match completion_id {
+                    Some(id) => crate::factory_worker_runs::monitor(cas_root, id, execute),
+                    None => execute(),
+                }
+            },
             FactoryCommands::ScratchCheckout { cas_root, task_id, dispatch_id, head } => {
                 let checkout = crate::factory_review_scratch::create(
                     cas_root, &std::env::current_dir()?, task_id, dispatch_id.as_deref(), head,

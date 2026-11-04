@@ -583,6 +583,45 @@ mod cases {
         assert!(!pane.is_composer_dirty(), "standalone Esc still clears");
     }
 
+    /// cas-062b: a draft typed and then erased with Backspace is an empty
+    /// composer, so it must not hold an operator message for 107 s. Erasing
+    /// only part of it, or editing after moving the cursor, is still a draft.
+    #[test]
+    fn composer_erased_with_backspace_is_clean_cas_062b() {
+        use crate::pane::UserInputKind;
+
+        let pane = Pane::director("composer-erased", 10, 40).expect("create pane");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let send = |bytes: &[u8]| {
+            rt.block_on(async {
+                let _ = pane.deliver_user_input(bytes, UserInputKind::KeyStream).await;
+            })
+        };
+
+        send(b"ok sl");
+        send("\u{e9}".as_bytes());
+        send(b"\x7f\x7f\x7f");
+        assert!(pane.is_composer_dirty(), "three of six characters remain");
+        send(b"\x7f\x7f");
+        send(b"\x08");
+        assert!(!pane.is_composer_dirty(), "every typed character was erased");
+        send(b"\x7f");
+        assert!(!pane.is_composer_dirty(), "Backspace on an empty composer types nothing");
+
+        // After a cursor move or a meta key, a Backspace may erase nothing,
+        // so the length is unknown and the draft stays protected.
+        for moved in [b"\x1b[D".as_slice(), b"\x01", b"\x1bb"] {
+            send(b"ab");
+            send(moved);
+            send(b"\x7f\x7f\x7f");
+            assert!(pane.is_composer_dirty(), "{moved:?} then Backspace keeps the draft");
+            send(b"\x15");
+        }
+    }
+
     /// Regression (cas-ebc1 final review): the OSC 8 feed-time gate must detect
     /// a hyperlink introducer split across 3+ tiny feed chunks. The old carry
     /// logic kept the tail of the NEW chunk only, dropping earlier carried

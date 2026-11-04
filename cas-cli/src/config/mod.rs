@@ -204,6 +204,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectConfig>,
 
+    /// `[fast_lane]` — merge small frontend-only hotfixes on their unit tests
+    /// and typecheck, owing a post-merge receipt (cas-5ea7). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_lane: Option<crate::fast_lane::FastLaneConfig>,
+
     /// Machine-wide control for the managed Viktor upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viktor: Option<ViktorConfig>,
@@ -309,6 +314,7 @@ impl Config {
         merge_option!(secrets);
         merge_option!(project);
         merge_option!(release);
+        merge_option!(fast_lane);
         merge_option!(slack);
         merge_option!(viktor);
         changed

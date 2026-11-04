@@ -143,6 +143,17 @@ pub(crate) fn runner_is_live(cas_root: &Path) -> bool {
         .is_some_and(|age| age < HEARTBEAT_FRESH)
 }
 
+/// Pending work belongs to the exact worker registration's factory session.
+/// A stale request without a live runner cannot mute an idle alert forever.
+pub(crate) fn worker_build_pending(cas_root: &Path, worker: &str, session: Option<&str>) -> bool {
+    if !runner_is_live(cas_root) { return false; }
+    std::fs::read_dir(queue_dir(cas_root)).ok().into_iter().flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json" || ext == "building"))
+        .filter_map(|entry| read_request(&entry.path()).ok())
+        .any(|request| request.worker == worker && request.factory_session.as_deref() == session)
+}
+
 pub(crate) fn mark_runner_live(cas_root: &Path) -> Result<()> {
     std::fs::create_dir_all(queue_dir(cas_root))?;
     std::fs::write(

@@ -78,3 +78,8 @@ The lazy Accounts stylesheet uses the hub's hashed chunk convention. The dist ma
 ### Confirmation editor correction
 
 Verifier ver-0e147d7370b5 invalidated the prior completion claim: the shared dialog form grid overrode the editor's hidden attribute. The editor now has a scoped display-none rule; Cancel, dialog close/reopen and mutation settlement clear its heading, explanation, label, value and validation state. The existing browser journey now checks rendered visibility after Cancel/remove and for read-only pairings, rather than trusting the attribute. The original failure remains evidence. Native ACC-02/ACC-06 recaptures and the correction's final visual/craft verdict are deferred to batch QA round 2; the earlier critique scores do not prove this correction.
+
+
+### Per-account native usage recheck
+
+Each Claude/Codex account gets a quiet Check usage action in Accounts and New session. The action needs only machine-read access and never selects an account, changes defaults or starts a model turn. A shared controller owns per-account loading, dated results, named failure and retry; closing the sheet aborts outstanding reads. The server uses the existing `cas limits` native readers. Checked at is the lookup time; Usage as of is the native observation time. Old snapshots remain visibly stale, missing windows stay unknown, and the next action is to open a session on that account to refresh the native source. All displayed account times use Eastern 12-hour formatting. No live provider lookup is claimed. Existing Glass action, evidence, spacing, focus and phone target tokens govern the new control.

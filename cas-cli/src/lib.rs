@@ -47,6 +47,7 @@ pub(crate) mod rule_refs;
 pub mod error;
 pub(crate) mod epic_design_review;
 pub mod extraction;
+pub mod fast_lane;
 mod light_lane;
 #[doc(hidden)]
 pub use light_lane::run_detached_worker;
@@ -59,6 +60,7 @@ pub(crate) mod factory_candidate_queue;
 pub mod factory_ci_retry;
 pub(crate) mod factory_worker_check;
 pub(crate) mod factory_capacity_wait;
+pub(crate) mod factory_worker_runs;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_permission_relay;

@@ -2560,6 +2560,11 @@ pub(super) const CLAUDE_FIRST_PROMPT_GRACE: std::time::Duration =
 /// selection before the daemon looks at it again. The recheck offers nothing
 /// to a busy pane; it only re-parks the row, or escalates once the recipient
 /// has gone silent for [`CLAUDE_ACTIVE_TRANSCRIPT_WINDOW`].
+/// cas-062b: the hold recorded when an attached operator's draft protects
+/// the pane, and how Commander names it on the held message.
+pub(crate) const COMPOSER_HOLD_DETAIL: &str = "composer protected: operator draft is unsubmitted";
+pub(crate) const COMMANDER_PANE_HOLD: &str = "Held: your pane draft is unsent";
+
 pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2 * 60);
 
@@ -8113,7 +8118,7 @@ impl FactoryDaemon {
                     "prompt_queue message remains durable pending a clean composer"
                 );
                 let detail = if self.app.mux.pane_composer_dirty(&pane_target) {
-                    "composer protected: operator draft is unsubmitted"
+                    COMPOSER_HOLD_DETAIL
                 } else if self.app.mux.pane_submit_pending(&pane_target) {
                     "composer protected: pending submit for an earlier payload"
                 } else if self.app.mux.inject_pending(&pane_target) {
@@ -8127,6 +8132,9 @@ impl FactoryDaemon {
                 } else {
                     "composer protected: input readiness changed during delivery; rechecking"
                 };
+                if detail == COMPOSER_HOLD_DETAIL {
+                    self.note_operator_draft_hold(&queued, &pane_target);
+                }
                 self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
@@ -8770,6 +8778,16 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
+    /// cas-062b: show the operator, outside the composer, that his own
+    /// unsubmitted supervisor-pane draft is holding a Commander message.
+    fn note_operator_draft_hold(&mut self, queued: &cas_store::QueuedPrompt, pane_target: &str) {
+        if pane_target == self.app.supervisor_name()
+            && self.wake_sender_for(queued.origin.as_ref()) == WakeSender::Operator
+        {
+            self.app.operator_draft_hold = true;
+        }
+    }
+
     /// Re-offer a parked inline or composer-held row when the pane becomes input-ready
     /// or a newer turn completion arrives. No queue/store work is repeated
     /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
@@ -8934,6 +8952,12 @@ impl FactoryDaemon {
             operator_replies,
         } = selection;
         replacement_workers.extend(self.pending_worker_replacements());
+        // cas-062b: a cleared or submitted draft ends the pane's hold notice.
+        if self.app.operator_draft_hold
+            && !self.app.mux.pane_composer_dirty(self.app.supervisor_name())
+        {
+            self.app.operator_draft_hold = false;
+        }
         // Reuse the hook's message-class seam for inline operator/peer labels.
         // The roster arrived from QueueSelect; there is no loop-thread read.
         let supervisor_senders: HashMap<String, String> = registered_agents.iter()
@@ -10565,10 +10589,13 @@ impl FactoryDaemon {
                     // Keep the actionable draft explanation that PTY transport
                     // deferral used before this gate moved ahead of admission.
                     let pending_detail = if pane_state.composer_dirty {
-                        "composer protected: operator draft is unsubmitted".to_string()
+                        COMPOSER_HOLD_DETAIL.to_string()
                     } else {
                         wake_decision.status_detail()
                     };
+                    if pane_state.composer_dirty {
+                        self.note_operator_draft_hold(&queued, &pane_target);
+                    }
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
@@ -12684,7 +12711,10 @@ pub(super) fn commander_history_send(
     }
     let (reply_to, text) = commander_history_message_text(&row.prompt);
     let delivery = if terminal { None } else { queue.message_delivery_report(row.id).ok().flatten() };
-    Some(crate::ui::factory::ConversationHistoryMessage {
+    let held_by_draft = delivery
+        .as_ref()
+        .is_some_and(|report| report.holding_detail.as_deref() == Some(COMPOSER_HOLD_DETAIL));
+    let mut message = crate::ui::factory::ConversationHistoryMessage {
         notification_id: row.id,
         client_ref: delivery.as_ref().and_then(|report| report.client_ref.clone()),
         target: row.target,
@@ -12700,6 +12730,7 @@ pub(super) fn commander_history_send(
         } else {
             "acknowledged".to_string()
         },
+        pane_hold: None,
         stamped: !terminal,
         reply_to,
         device_id: operator.map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
@@ -12715,7 +12746,12 @@ pub(super) fn commander_history_send(
         )),
         session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
         at: row.created_at.to_rfc3339(),
-    })
+    };
+    // cas-062b: queued behind the operator's own unsent pane draft.
+    if message.state == "acknowledged" && held_by_draft {
+        message.pane_hold = Some(COMMANDER_PANE_HOLD.to_string());
+    }
+    Some(message)
 }
 
 /// Remove the durable reply marker from the operator's visible message while
@@ -13020,6 +13056,9 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     if let Err(error) = crate::factory_capacity_wait::reconcile(
         &cas_dir, Some(&session_name), chrono::Utc::now())
     { tracing::warn!(%error, "capacity wait reconciliation failed; retrying next reminder scan"); }
+    if let Err(error) = crate::factory_worker_runs::reconcile(
+        &cas_dir, Some(&session_name), chrono::Utc::now())
+    { tracing::warn!(%error, "detached worker completion reconciliation failed; retrying next reminder scan"); }
 
     let reminder_store = match open_reminder_store(&cas_dir) {
         Ok(s) => s,

@@ -85,6 +85,7 @@
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - typed requests, runner ownership, bounded sandbox probes and daemon-managed candidate builds.
 - `cas-cli/src/factory_ci_retry.rs` - exact-SHA merge retries, terminal CI notices, expiry and corrupt-intent quarantine.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs` - capped proof admission, builder guards and durable capacity waits.
+- `cas-cli/src/factory_worker_runs.rs` - worker-bound detached command records, completion wakes, PID-fenced liveness and retry recovery.
 
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task presentation and action-relay admission; internal parked-task lists stay complete.
 
@@ -112,7 +113,8 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry validation and diff-scoped journey selection.
 - `cas-cli/src/builtins/skills/cas-qa-craft/scripts/model-boundary.py`, `scripts/test-model-boundary.py` - approved model-owned plan metadata and added-site signals for independent verifier judgment.
-- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs` - shared evidence grammar, scaffolds, validation and bundles.
+- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs` - shared evidence grammar, scaffolds, validation and bundles; deployed-origin patterns.
+- `cas-cli/src/fast_lane.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/fast_lane_gate.rs`, `docs/qa/fast-lane.md` - hotfix fast lane: eligibility, merge-check admission, post-merge receipt and revert PR.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides.
 - `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - incremental Claude/Codex/Grok turn accounting before optional Commander mirroring; typed actions and authenticated wake provenance.
 - `cas-cli/src/migration/migrations/m292_quality_turns.rs` - append-only quality ledger CHECK upgrade, shared with store-open repair.
@@ -131,6 +133,7 @@
 - `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `cas-cli/src/hub/composer_upload.rs` - upload identity, progress and stored attachment routes.
 - `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media, content chunks and passive page previews.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/accounts-panel.ts` - pairing, scoped input grants and account controls.
+- `hub-web/src/account-usage-check.ts`, `cas-cli/src/hub/account_routes.rs` - per-account native usage rechecks shared by Accounts and New session, with distinct check/observation times.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, protocol doubles and real-hub fixtures.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - Slack router and per-user daemon entrypoints.
 

@@ -424,7 +424,7 @@ describe('conversation evidence', () => {
     // Journey F7: the title is the project, then the machine; the codename is tertiary text beneath.
     expect(waiting.querySelector('.conversation-who > .conversation-title > strong.conversation-project')?.textContent).toBe('cas-src');
     expect(waiting.querySelector('.conversation-title > .conversation-project + .conversation-machine')).not.toBeNull();
-    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor')?.textContent).toBe('patient-pelican-9');
+    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor > .conversation-supervisor-name')?.textContent).toBe('patient-pelican-9');
     expect(waiting.querySelector('.conversation-who')?.textContent).toBe('cas-srcAtlaspatient-pelican-9');
     expect(waiting.querySelector('.project-badge')).toBeNull();
     // P13: the title leads with the project, never a stray dot; the only separator rides with the machine.

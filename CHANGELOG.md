@@ -142,6 +142,134 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Model evaluation receipts** — Tasks and phases can require a passing evaluation against declared dataset thresholds. Receipts bind a real evaluation artifact naming the command, model, measured values and run log; misses remain open and close explains the failed bar.
 
+### Fixed — Verification
+
+- **Keep verdicts when a sibling lands on the epic** — Was: a merged
+  delivery's verification bound the supervisor checkout's HEAD as delivered
+  work, so the first unrelated merge into the epic refused the finished
+  verdict as "delivered commit(s) no longer reachable". Now: only the
+  delivery is bound; unrelated merges keep the verdict, and a later change to
+  a delivered file still asks for a fresh review.
+
+### Fixed — Release-batch closes after request_changes
+
+- **Close a merged delivery that went through request_changes** — A release
+  verdict listing such a delivery answered "Keeps its own review", and its
+  close, even with a supervisor override, kept waiting for batch evidence.
+  The verdict now covers the merged delivery, and the task closes with the
+  merge as its commit receipt. A supervisor override with a reason waives
+  deferred batch evidence and records it on the task. "Keeps its own review"
+  now says which review each delivery waits on and how to satisfy it.
+
+### Fixed — Concurrent hotfix PRs
+
+- **Start new work beside an earlier PR** — A worker whose branch still holds
+  an earlier PR, open or squash-merged, now starts a fresh task on its own
+  `factory/<worker>-<task>` branch from the target instead of refusing, and
+  assignment no longer calls that worker stale. Each hotfix gets its own PR
+  at once; resumed tasks still refuse work they cannot claim, and workers
+  still cannot push other workers' branches.
+
+### Fixed — Parked delivery conflict repair
+
+- **Fix your own merge conflict without a supervisor round-trip** — A parked
+  delivery the merge queue dropped for a conflict, or whose target moved into
+  a conflict, refused its own worker's start until the supervisor ran
+  request_changes. Start now checks the parked tip against the current target
+  and lets the assigned worker resume when it truly conflicts; a clean park
+  still waits for review. Merging the target in keeps earlier test receipts
+  when the resolution touches only CHANGELOG.md or generated hub-web files.
+  Any other conflicted file voids them, even one resolved by taking a side
+  whole, and so does any commit of the delivery's own after the receipt,
+  including after it has merged. Only the target as published on origin
+  counts as already-proven work; a moved local target branch no longer
+  hides an unpublished commit.
+
+### Fixed — Commander supervisor answers
+
+- **Mirror the supervisor's answer, not its progress line** — When a Claude
+  supervisor narrated a step before running tools, Commander received that
+  progress line as the turn's answer and the real answer never arrived. The
+  mirror now waits for the turn's final text. A supervisor whose transcript
+  cannot be found is named in a warning instead of being skipped silently.
+
+### Added — hotfix fast lane
+
+- **Ship small frontend hotfixes on unit tests and typecheck** — A project
+  that opts in with `[fast_lane]` merges an eligible delivery (inside the
+  configured paths, outside the deny list, at most 10 files and 300 lines,
+  Tier 1, a bug, finding or `hotfix` task) once its named merge checks pass.
+  Hermetic e2e, the production build and the journey walk become a
+  post-merge receipt due within 30 minutes that blocks close. A failed check
+  is rerun once, a failure the hotfix caused opens a revert PR, and an
+  ineligible delivery is refused from the lane with the reason recorded.
+  Lane state is recorded only by Cassy, so a task note cannot put a delivery
+  on the lane, and a check whose result on the previous commit is unknown
+  counts as caused by the hotfix. See `docs/qa/fast-lane.md`.
+
+### Fixed — Codex worker recycle and context reset
+
+- **Keep each worker's own launch recipe** — The daemon that receives every
+  agent's session start no longer stamps its own harness, account, model and
+  effort on another worker's row, which had recorded Codex workers as Claude
+  on a Claude account. Recycling a row already damaged this way relaunches on
+  Codex without the Claude account, and clear_context recycles it instead of
+  searching Claude project folders.
+
+### Fixed — QA evidence from deployments
+
+- **Close user-facing work with evidence from a deployment** — The QA
+  evidence gate now accepts per-deployment origin patterns such as
+  `https://<project>-*-<team>.vercel.app` in `qa.deployed_origins`, so
+  projects with no local build that can sign in can close from preview or
+  production walks. Its refusals now name the current setting and the
+  `cas config set qa.deployed_origins` command, rather than leaving a
+  supervisor override as the only route.
+
+### Fixed — Commander messages to the supervisor
+
+- **An erased pane draft no longer holds Commander messages** — Typing in the
+  supervisor pane and then erasing it with Backspace now counts as an empty
+  composer, so an operator's Commander message reaches an idle supervisor at
+  once instead of waiting for the next typed prompt (one measured case: 107 s).
+- **A held message says why** — While a real unsent pane draft holds a
+  Commander message, Commander labels it "Held: your pane draft is unsent" and
+  the supervisor pane border shows that a Commander message is waiting.
+- **Send order across Commander and the pane** — When a typed pane prompt
+  starts the turn, Commander messages sent before it are named as earlier and
+  listed oldest first, so they are answered first.
+
+### Fixed — QA impact coverage
+
+- **Keep changed source files in the impact manifest** — Files remain listed as
+  unowned when semantic journey selection excludes their registry owners, so
+  daemon source changes no longer disappear from QA impact reports.
+
+### Fixed — Detached worker completion
+
+- **Wake workers when capped background runs finish** — Detached commands now
+  record their exit and log path and deliver one completion message to the
+  owning worker, with daemon retry recovery. Live runs and candidate builds
+  suppress idle alerts; unchanged idle episodes no longer wake the supervisor
+  repeatedly, and a completed run's alert states its exit.
+
+### Fixed — Verification timing
+
+- **Measure recorded verifier duration** — Verdicts now record elapsed time
+  automatically and label child runtime, caller overrides and direct dispatch
+  fallback measurements. Direct fallback includes review wait; legacy timing
+  remains unknown.
+
+### Fixed — Commander
+
+- **Steady Most recent session marker** — Each sibling conversation reserves
+  the badge's space, so moving it never shifts a row. Activity in the same
+  minute shares a stable ranking instead of flashing on every output frame.
+
+### Added — Commander account usage
+
+- **Check usage before starting** — Each Claude/Codex account in Accounts and New session can reread its native usage snapshot without switching accounts or spending a model turn. Five-hour and weekly usage show Eastern reset times, separate check and observation times, and clear stale or missing data reasons.
+
 ## [3.100.0] - 2026-11-03
 
 ### Fixed — Supervisor response time

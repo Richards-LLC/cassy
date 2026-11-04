@@ -2059,6 +2059,26 @@ operator phase exception cannot waive a model-evaluation miss. Phase evaluation
 misses also hold dependent work through the existing outcome graph. Tasks with
 no declared evaluation bar retain their existing close behavior.
 
+## Verification timing
+
+`verification action=add` records `duration_ms` even when the caller omits it.
+`duration_source` distinguishes three measurements:
+
+| Source | Interval |
+| --- | --- |
+| `explicit` | Caller-supplied `duration_ms`, including zero; overrides automatic timing. |
+| `capability_bound_to_consumed` | Persisted capability `bound_at` to `consumed_at`; excludes dispatch wait before the child binds. |
+| `dispatch_elapsed_fallback` | Dispatch `requested_at` to verdict `created_at`; includes review/queue wait and is not isolated verifier runtime. |
+
+Direct supervisor verdicts retain `capability_id=NULL`; no child authority is
+created to measure time. The fallback also covers a legacy capability missing
+its bind timestamp. Child verdict `created_at` equals the persisted consume
+boundary; terminal dispatch `resolved_at` records resolution. Explicit duration
+overrides do not replace those audit timestamps. Negative clock deltas clamp to
+zero. `verification action=show` displays the source, and the quality ledger uses
+the recorded duration. Identical retries retain the original measurement.
+Migration m293 adds a nullable source; legacy rows stay unknown without backfill.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
@@ -2107,6 +2127,26 @@ checks in the background with a log. A backgrounded check or targeted test
 runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
+
+Detached capped runs register their worker/task, output log and PID incarnation
+before returning. Their existing worker-check command inherits a hidden
+`--completion-id`; after its capped producer returns, it records the original
+exit status and queues one completion message to that worker. The message names
+the log and task without claiming a test or task verdict. Completion delivery
+failure leaves durable state for the daemon's existing reminder scan to retry.
+If the callback is lost, the scan detects the exited PID and reads only this
+launch's bounded log tail for `worker-check: EXIT`; unavailable status stays
+explicitly unknown. PID reuse cannot keep an exited run active. These local
+records live under `.cas/worker-runs/`; no migration or authority capability is
+created. Linux and macOS resolve the actual stdout log file, and detached calls
+without a regular log are refused.
+
+Live registered runs and worker/session-matched candidate requests suppress
+worker-idle relays. A completed run ID, task or delivery-condition change can
+start a new idle episode; elapsed time, changing message ages and temporary wait
+expiry cannot repeat an unchanged episode. Its one idle alert includes the
+registered job's exit and log path. Restart recovery queues a completion once;
+notification acceptance does not prove the worker model acted on it.
 
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close

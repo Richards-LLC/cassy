@@ -3229,6 +3229,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
             target: "supervisor".into(),
             text: "private prompt".into(),
             state: "acknowledged".into(),
+            pane_hold: None,
             stamped: true,
             reply_to: None,
             device_id: "phone-7".into(),
@@ -4689,7 +4690,8 @@ impl OpsFixture {
             &self.signing,
             &self.credential,
             method,
-            uri,
+            // Match the browser: DPoP binds the bare path, without a query.
+            uri.split('?').next().unwrap_or(uri),
             chrono::Utc::now(),
             &uuid::Uuid::new_v4().to_string(),
         );

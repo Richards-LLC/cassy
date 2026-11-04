@@ -866,6 +866,7 @@ pub(crate) struct PassingTests<'a> {
     cas_root: &'a Path,
     repo: &'a Path,
     head: &'a str,
+    target: Option<&'a str>,
     records: std::sync::OnceLock<Vec<(String, String, TestReceipt)>>,
 }
 
@@ -875,13 +876,22 @@ impl<'a> PassingTests<'a> {
             cas_root,
             repo,
             head,
+            target: None,
             records: std::sync::OnceLock::new(),
         }
     }
 
+    /// cas-2bdf: judge ancestor receipts against the integration target, so a
+    /// merge of that target into the delivery counts only its resolution.
+    pub(crate) fn with_target(mut self, target: &'a str) -> Self {
+        self.target = Some(target);
+        self
+    }
+
     fn records(&self) -> &[(String, String, TestReceipt)] {
-        self.records
-            .get_or_init(|| passing_test_records(self.cas_root, self.repo, self.head))
+        self.records.get_or_init(|| {
+            passing_test_records(self.cas_root, self.repo, self.head, self.target)
+        })
     }
 
     pub(crate) fn receipts(&self) -> Vec<String> {
@@ -930,14 +940,25 @@ pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) ->
     PassingTests::new(cas_root, repo, head).packages()
 }
 
+/// [`passing_test_packages`] for a delivery bound for `target` (cas-2bdf).
+pub(crate) fn passing_test_packages_against(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    target: &str,
+) -> Vec<String> {
+    PassingTests::new(cas_root, repo, head).with_target(target).packages()
+}
+
 /// Exact test receipts plus ancestor receipts whose full commit range contains
 /// no Rust, test or build inputs. The latter saves an identical rerun after a
 /// documentation-only delivery commit while keeping proof tied to its tested
-/// tree.
+/// tree. With a target, commits already on it are not part of the range.
 fn passing_test_records(
     cas_root: &Path,
     repo: &Path,
     head: &str,
+    target: Option<&str>,
 ) -> Vec<(String, String, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
@@ -976,7 +997,7 @@ fn passing_test_records(
             continue;
         }
         ranges.entry(receipt_head.clone()).or_insert_with(|| {
-            receipt_range_changed_paths(&repo, receipt_head, head)
+            receipt_range_changed_paths(&repo, receipt_head, head, target)
         });
     }
 
@@ -1052,6 +1073,7 @@ fn receipt_range_changed_paths(
     repo: &Path,
     receipt_head: &str,
     delivered_head: &str,
+    target: Option<&str>,
 ) -> Option<Vec<String>> {
     if !valid_git_oid(receipt_head)
         || !valid_git_oid(delivered_head)
@@ -1060,17 +1082,113 @@ fn receipt_range_changed_paths(
         return None;
     }
     let range = format!("{receipt_head}..{delivered_head}");
+    let integrated = target.map(|target| integrated_target_refs(repo, target)).unwrap_or_default();
+    if integrated.is_empty() {
+        return range_log_paths(repo, &["-m", &range]);
+    }
+    // cas-2bdf: walk the delivery's own first-parent chain. Once merged, the
+    // delivery is reachable from the target, so reachability cannot separate
+    // it from target work. A merge whose other parents sit on the target's
+    // own first-parent history brought in target work, proven by its gate, so
+    // only that merge's conflicted and resolution paths are new; any other
+    // merge counts in full. Append-only and generated paths do not void.
+    let target_line = target_first_parent_line(repo, &integrated)?;
+    let chain = git_output(repo, &["rev-list", "--first-parent", "--parents", &range])?;
+    let mut paths = Vec::new();
+    for line in chain.lines() {
+        let mut ids = line.split_whitespace();
+        let (Some(commit), Some(first)) = (ids.next(), ids.next()) else { return None };
+        let others = ids.collect::<Vec<_>>();
+        if others.is_empty() {
+            paths.extend(git_paths(repo, &["diff-tree", "-r", "--name-only", "--no-renames", "--no-commit-id", "-z", commit])?);
+        } else if others.iter().all(|parent| target_line.contains(*parent)) {
+            let mut merged = git_paths(repo, &["diff-tree", "--cc", "-r", "--name-only", "--no-renames", "--no-commit-id", "-z", commit])?;
+            for parent in others {
+                merged.extend(merge_conflict_paths(repo, first, parent)?);
+            }
+            paths.extend(merged.into_iter().filter(|path| !append_only_or_generated(path)));
+        } else {
+            paths.extend(git_paths(repo, &["diff", "--name-only", "--no-renames", "-z", first, commit])?);
+        }
+    }
+    Some(paths)
+}
+
+/// Append-only shared files (the changelog and its fragments) and generated
+/// bundles. Concurrent deliveries all touch them, so neither a conflict-only
+/// repair (cas-2bdf) nor a sibling merge after dispatch (cas-a32c) is a change
+/// to reviewed code.
+pub(crate) fn append_only_or_generated(path: &str) -> bool {
+    path == "CHANGELOG.md" || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
+}
+
+/// Commits on the target refs' own first-parent history.
+fn target_first_parent_line(repo: &Path, refs: &[String]) -> Option<BTreeSet<String>> {
+    let mut args = vec!["rev-list", "--first-parent"];
+    args.extend(refs.iter().map(String::as_str));
+    Some(git_output(repo, &args)?.lines().map(str::to_owned).collect())
+}
+
+/// Paths `git merge` would report as conflicted for these parents, whatever
+/// side the recorded resolution later took.
+fn merge_conflict_paths(repo: &Path, first: &str, other: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["merge-tree", "--write-tree", "--name-only", first, other])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(0) => Some(Vec::new()),
+        Some(1) => {
+            let text = String::from_utf8(output.stdout).ok()?;
+            Some(text.lines().skip(1).take_while(|line| !line.is_empty()).map(str::to_owned).collect())
+        }
+        _ => None,
+    }
+}
+
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8(output.stdout).ok()).flatten()
+}
+
+fn git_paths(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
+    git_output(repo, args).map(|text| {
+        text.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect()
+    })
+}
+
+/// The published target and, when it is an ancestor of that, the local ref.
+/// cas-6d79: any agent in the shared repository can move the local branch,
+/// so only `origin/<target>` vouches for target work. Without it, nothing is
+/// treated as integrated and the whole range counts.
+fn integrated_target_refs(repo: &Path, target: &str) -> Vec<String> {
+    let origin = format!("refs/remotes/origin/{target}");
+    let local = format!("refs/heads/{target}");
+    let resolves = |reference: &str| {
+        git_output(repo, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]).is_some()
+    };
+    if !resolves(&origin) {
+        return Vec::new();
+    }
+    let mut refs = vec![origin.clone()];
+    if resolves(&local) && git_output(repo, &["merge-base", "--is-ancestor", &local, &origin]).is_some() {
+        refs.push(local);
+    }
+    refs
+}
+
+fn range_log_paths(repo: &Path, selection: &[&str]) -> Option<Vec<String>> {
     let Ok(changes) = Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .args([
-            "log",
-            "--format=",
-            "--name-only",
-            "--no-renames",
-            "-m",
-            "-z",
-            &range,
-        ])
+        .args(["log", "--format=", "--name-only", "--no-renames", "-z"])
+        .args(selection)
         .current_dir(repo)
         .output()
     else {
@@ -1652,8 +1770,28 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env);
-    let child = spawn_detached(command).context("starting the detached worker-check runner")?;
+    let repo = std::env::current_dir()?;
+    let log = detached_log_path().context("detached worker-check requires a regular output log")?;
+    let run = crate::factory_worker_runs::register(cas_root, &repo, &log, chrono::Utc::now())?;
+    let command = match run.as_deref() {
+        Some(id) => detached_runner_command_with_run(&std::env::current_exe()?, cas_root, args, isolated_test_env, Some(id)),
+        None => detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env),
+    };
+    let mut child = match spawn_detached(command).context("starting the detached worker-check runner") {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(id) = &run { let _ = crate::factory_worker_runs::finish(cas_root, id, 1, chrono::Utc::now()); }
+            return Err(error);
+        }
+    };
+    if let Some(id) = run
+        && let Err(error) = crate::factory_worker_runs::bind(cas_root, &id, child.id())
+    {
+        // The unreaped session leader is ours, so its PID/PGID cannot be reused.
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL); }
+        let _ = child.wait();
+        return Err(error.context("registering the detached runner PID"));
+    }
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
         child.id()
@@ -1665,6 +1803,11 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
 /// refused or failed run is distinguishable from one still running (cas-6591).
 #[cfg(unix)]
 fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
+    detached_runner_command_with_run(executable, cas_root, args, isolated_test_env, None)
+}
+
+#[cfg(unix)]
+fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
@@ -1674,9 +1817,29 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
     if let Some(directory) = isolated_test_env {
         command.arg("--isolated-test-env").arg(directory);
     }
+    if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
 }
+
+/// Resolve the actual redirected file, rather than interpreting shell text.
+#[cfg(target_os = "linux")]
+fn detached_log_path() -> Option<PathBuf> {
+    std::fs::read_link("/proc/self/fd/1").ok().filter(|path| path.is_absolute() && path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn detached_log_path() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buffer = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+    if unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETPATH, buffer.as_mut_ptr()) } < 0 { return None; }
+    let length = buffer.iter().position(|byte| *byte == 0)?;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buffer[..length].to_vec())))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn detached_log_path() -> Option<PathBuf> { None }
 
 /// Spawn `command` as a new session leader with stdin closed and both output
 /// streams on this process's stdout.
@@ -2409,6 +2572,71 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+    }
+
+    /// cas-2bdf: merging the moved target into a parked delivery voided its
+    /// receipt, because the target's own commits counted as untested change.
+    /// Against the target only the merge resolution counts, and a resolution
+    /// confined to generated files keeps the receipt.
+    #[test]
+    fn target_merge_with_generated_resolution_keeps_receipt_cas_2bdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.js"), "base\n").unwrap();
+        fixture_commit_as(&repo, "base");
+        git(&repo, &["branch", "lane"]).unwrap();
+        let origin = dir.path().join("origin.git");
+        git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]).unwrap();
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]).unwrap();
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
+        git(&repo, &["checkout", "-qb", "delivery"]).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.js"), "mine\n").unwrap();
+        fixture_commit_as(&repo, "delivery");
+        record_passing_test_for_tests(&root, &repo, &fixture_head(&repo), "cas", "test(cached)");
+
+        git(&repo, &["checkout", "-q", "lane"]).unwrap();
+        std::fs::write(repo.join("src/other.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.js"), "theirs\n").unwrap();
+        fixture_commit_as(&repo, "target moved");
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
+        git(&repo, &["checkout", "-q", "delivery"]).unwrap();
+        assert!(git(&repo, &["merge", "-q", "lane"]).is_err(), "the fixture must conflict");
+        std::fs::write(repo.join("hub-web/dist/app.js"), "regenerated\n").unwrap();
+        fixture_commit_as(&repo, "merge lane");
+        let delivered = fixture_head(&repo);
+
+        assert!(passing_test_receipts(&root, &repo, &delivered).is_empty());
+        assert_eq!(PassingTests::new(&root, &repo, &delivered).with_target("lane").receipts().len(), 1);
+
+        // A Rust conflict resolved by taking one side whole leaves no
+        // resolution diff, but it is still untested code.
+        git(&repo, &["checkout", "-q", "lane"]).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 2; }\n").unwrap();
+        fixture_commit_as(&repo, "target rewrites the delivered function");
+        git(&repo, &["push", "-q", "origin", "lane"]).unwrap();
+        git(&repo, &["checkout", "-q", "delivery"]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "-X", "theirs", "lane", "-m", "take theirs"]).unwrap();
+        let theirs = fixture_head(&repo);
+        assert!(PassingTests::new(&root, &repo, &theirs).with_target("lane").receipts().is_empty());
+
+        // cas-6d79: any agent can move the shared local target ref. Pointed at
+        // an unpublished commit, it must not pass that commit off as target work.
+        record_passing_test_for_tests(&root, &repo, &theirs, "cas", "test(cached)");
+        git(&repo, &["checkout", "-qb", "smuggle", "lane"]).unwrap();
+        std::fs::write(repo.join("src/smuggled.rs"), "pub fn s() {}\n").unwrap();
+        fixture_commit_as(&repo, "unpublished change");
+        git(&repo, &["branch", "-f", "lane", "smuggle"]).unwrap();
+        git(&repo, &["checkout", "-q", "delivery"]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "lane", "-m", "merge moved lane"]).unwrap();
+        let smuggled = fixture_head(&repo);
+        assert!(PassingTests::new(&root, &repo, &smuggled).with_target("lane").receipts().is_empty());
     }
 
     #[test]
@@ -4375,7 +4603,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
         let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
-        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach }) = factory.command else { panic!("worker-check command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach, completion_id: _ }) = factory.command else { panic!("worker-check command") };
         assert!(detach);
         assert_eq!(cas_root, root);
         assert_eq!(cargo_args, args);

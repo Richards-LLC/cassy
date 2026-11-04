@@ -3,6 +3,7 @@ pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
 mod docs_upkeep;
+mod fast_lane_gate;
 mod proof_claims;
 mod gate_preflight;
 #[cfg(test)]
@@ -9010,6 +9011,7 @@ impl CasCore {
         // cas-38e7: epics no longer need a full-suite journey receipt; the
         // merge queue runs the journeys once.
         let mut registry_upkeep_notices = Vec::new();
+        let mut fast_lane_receipt_passed = false;
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
@@ -9066,6 +9068,12 @@ impl CasCore {
                     qa_receipt,
                 )
             });
+            // cas-5ea7: the hotfix fast lane defers upkeep and QA evidence at
+            // park and owes a post-merge receipt instead of the QA evidence gate.
+            let fast_lane_stage = fast_lane_gate::classify(
+                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
+                &resolved_parent_branch, qa_receipt,
+            );
             let mut upkeep_refusals = Vec::new();
             let rule_head = super::qa_evidence_gate::delivered_head(
                 &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
@@ -9091,6 +9099,12 @@ impl CasCore {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
                 Err(message) => upkeep_refusals.push(message),
             }
+            if fast_lane_stage.on_lane() {
+                upkeep_refusals = fast_lane_gate::defer_upkeep(
+                    &mut close_notes, &mut task, &fast_lane_stage, upkeep_refusals,
+                    &mut registry_upkeep_notices,
+                );
+            }
             // Returning a merged delivery changes the task, so it happens once,
             // for all of its upkeep findings, and ends this attempt.
             if !upkeep_refusals.is_empty() {
@@ -9114,7 +9128,38 @@ impl CasCore {
             if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
                 gate_refusals.push(message);
             }
-            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+            let fast_lane_qa = match &fast_lane_stage {
+                fast_lane_gate::LaneClose::Off => None,
+                fast_lane_gate::LaneClose::Park => {
+                    close_notes.record(&mut task, "FAST LANE: QA evidence is deferred to the post-merge receipt.");
+                    Some(Ok(Vec::new()))
+                }
+                fast_lane_gate::LaneClose::Merged { .. } => {
+                    let ledger = crate::config::Config::load(&self.cas_root)
+                        .map(|config| crate::config::resolved_factory_artifact_paths(
+                            &self.cas_root, config.factory().artifacts_root.as_deref(),
+                        ).task_dirs(&task.id)[0].join("LEDGER.md"))
+                        .unwrap_or_default();
+                    match self.fast_lane_receipt_gate(
+                        &mut close_notes, &mut task, &fast_lane_stage, &evidence_repo,
+                        &resolved_parent_branch, &ledger,
+                    ) {
+                        fast_lane_gate::ReceiptGate::Passed => {
+                            fast_lane_receipt_passed = true;
+                            Some(Ok(Vec::new()))
+                        }
+                        fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(message)),
+                        fast_lane_gate::ReceiptGate::Failed(message) => {
+                            let recovery = self.return_merged_delivery_for_source_fix(
+                                &task, &evidence_repo, &resolved_parent_branch, &message,
+                            );
+                            gate_refusals.push(format!("{message}{recovery}"));
+                            return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                        }
+                    }
+                }
+            };
+            match fast_lane_qa.unwrap_or_else(|| super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
@@ -9122,7 +9167,7 @@ impl CasCore {
                 qa_receipt,
                 attributed_paths.as_deref(),
                 qa_base.as_deref(),
-            ) {
+            )) {
                 Ok(notes) => {
                     for note in notes {
                         close_notes.record(&mut task, &note);
@@ -9496,13 +9541,14 @@ impl CasCore {
             // cas-5c38: a live supervisor's override (validated above) with
             // its reason waives the pass for the delivered commit, exactly as
             // it waives the implementer's evidence gate.
-            match self.independent_qa_close_gate(
+            // cas-5ea7: a passed fast-lane receipt is this delivery's QA walk.
+            match if fast_lane_receipt_passed { super::qa_dispatch::QaCloseGate::Clear } else { self.independent_qa_close_gate(
                 &task,
                 &close_project_root,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
-            ) {
+            ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
                     return Ok(Self::tool_error(refusal));
@@ -9713,6 +9759,17 @@ impl CasCore {
                 Ok(Some(verdict)) => close_notes.record(
                     &mut task,
                     &format!("Release verdict {} covers this delivery at {}.", verdict.id, decision.tip),
+                ),
+                // cas-bc15: a live supervisor's reasoned override waives the
+                // release verdict for this delivery, and the task records it.
+                Ok(None) if supervisor_override => close_notes.record(
+                    &mut task,
+                    &format!(
+                        "[{}] ✅ DECISION supervisor_override waived the release verdict at {}: {}",
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                        decision.tip,
+                        req.reason.as_deref().unwrap_or_default().trim(),
+                    ),
                 ),
                 Ok(None) => {
                     return Ok(Self::tool_error(gate_text::waiting_for_release_verdict(
@@ -10241,9 +10298,10 @@ impl CasCore {
                                 } else {
                                     crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
                                     &proof_worktree,
-                                    // cas-5200: a merged receipt is the whole
-                                    // delivery; never add the checkout HEAD.
-                                    (merged_receipt.is_none())
+                                    // cas-5200/cas-a32c: after a merge the receipt
+                                    // and parked anchor are the whole delivery;
+                                    // the target checkout's HEAD never is.
+                                    (!use_target_branch_proof)
                                         .then_some(resolved_parent_branch.as_str()),
                                     merged_receipt
                                         .as_deref()
@@ -11295,7 +11353,8 @@ impl CasCore {
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             let passing_tests = delivered_tip.as_deref().map(|head| {
-                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head))
+                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)
+                    .with_target(&resolved_parent_branch))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {
@@ -11587,7 +11646,16 @@ impl CasCore {
         if let Err(message) = crate::qa_batch::ensure_deferred_close(
             &self.cas_root, &task, req.commit_receipt.as_deref(), commit_receipt_window.as_ref(),
         ) {
-            return Ok(Self::tool_error(message));
+            // cas-bc15: a live supervisor's reasoned override (validated
+            // above) answers deferred batch evidence, and the task records it.
+            if !supervisor_override {
+                return Ok(Self::tool_error(message));
+            }
+            close_notes.record(&mut task, &format!(
+                "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                req.reason.as_deref().unwrap_or_default().trim(),
+            ));
         }
 
         // Proceed with close

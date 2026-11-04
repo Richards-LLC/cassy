@@ -3,6 +3,7 @@ use crate::config::meta::registry::ConfigRegistry;
 mod accounts;
 mod coordination;
 mod daemon;
+mod fast_lane;
 mod history;
 mod hub;
 mod hooks_and_code;
@@ -26,6 +27,7 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     accounts::register_accounts(registry);
     hooks_and_code::register_hooks_and_code(registry);
     daemon::register_daemon(registry);
+    fast_lane::register_fast_lane(registry);
     history::register_history(registry);
     issues::register_issues(registry);
     notifications::register_notifications(registry);

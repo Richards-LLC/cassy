@@ -156,6 +156,7 @@ fn batch_close_note(receipt_id: &str, outcome: &str) -> String {
 }
 
 fn record_batch_close_outcome(
+    _cas_root: &std::path::Path,
     store: &dyn cas_store::TaskStore,
     task_id: &str,
     receipt_id: &str,
@@ -512,7 +513,7 @@ impl CasCore {
             // A close can outlive the batch response's post-commit grace.
             // Persist each result as it happens, including a selector refusal.
             let record = |outcome: &str| {
-                if let Err(error) = record_batch_close_outcome(store.as_ref(), task_id, &receipt.id, outcome) {
+                if let Err(error) = record_batch_close_outcome(&self.cas_root, store.as_ref(), task_id, &receipt.id, outcome) {
                     tracing::warn!(%task_id, %error, "batch close outcome not recorded");
                 }
             };
@@ -824,14 +825,15 @@ mod tests {
         store.add(&Task::new("cas-dd05".into(), "scoped proof hold".into())).unwrap();
         let command = "SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd scripts/run-scoped-tests.sh --proof";
         let outcome = format!("scoped proof receipt has base None; must be proven against SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd. Re-run the delivered tip in a detached supervisor checkout with: {command}");
-        record_batch_close_outcome(store.as_ref(), "cas-dd05", "qab-remedy", &outcome).unwrap();
-        let state = store.get_execution_state("cas-dd05").unwrap().expect("a truncated outcome must retain complete details");
-        assert_eq!(state["batch_close_outcomes"]["qab-remedy"], outcome);
+        record_batch_close_outcome(&root, store.as_ref(), "cas-dd05", "qab-remedy", &outcome).unwrap();
         let note = store.get("cas-dd05").unwrap().notes;
-        assert!(note.contains("task action=show id=cas-dd05 full=true"), "{note}");
-        assert!(note.contains("batch_close_outcomes[qab-remedy]"), "{note}");
+        let path = note.split_once("Details: ").expect("the bounded note must point to its complete remedy")
+            .1.split_once(" (SHA-256 ").unwrap().0;
+        let detail = std::fs::read_to_string(path).unwrap();
+        assert_eq!(detail, outcome);
+        assert!(detail.contains(command));
         assert_eq!(note.lines().count(), 1);
-        assert!(note.chars().count() <= 400, "{note}");
+        assert!(note.chars().count() <= 800, "{note}");
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed

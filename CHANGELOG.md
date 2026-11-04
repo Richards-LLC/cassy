@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Batch verdicts acknowledge committed receipts** — A slow delivery close no longer turns a recorded batch verdict into an unknown timeout. Closing continues through its existing gates, and task notes retain each result, including failures.
 
+- **Restored QA bundle citations stay visible** — Migrated, restored and synced bundle paths are recorded in their own timestamped notes, so a preceding close outcome cannot hide them. Batch, post-commit and late-close summaries all stay outside producer citation selection. Long close remedies remain complete in immutable detail receipts linked from their bounded summaries.
+
+- **Close summaries keep evidence citations explicit** — Batch-close outcomes stay on one bounded line, and their suggested QA bundle paths do not count as producer citations. Further receipts no longer add an outcome note to an already-closed task.
+
 ### Fixed — CI
 
 - **Keep worker recovery tests independent of runner disk space** — The
@@ -24,20 +28,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Steady Most recent badge** — Project cards keep the same badge through alternating activity within one minute. Activity in a later minute moves it without shifting sibling rows.
 
-### Fixed — Factory
-
-- **Restored QA bundle citations stay visible** — Migrated, restored and synced bundle paths are recorded in their own timestamped notes, so a preceding close outcome cannot hide them. Batch, post-commit and late-close summaries all stay outside producer citation selection. Long close remedies remain complete in immutable detail receipts linked from their bounded summaries.
-
 ### Fixed — Artifacts
 
 - **Publish QA screencasts as video** — Artifact publishing accepts WebM
   and MP4 video (`.webm`, `.mp4`, `.m4v`; same 25 MiB limit), so a screencast
   is stored as video for inline playback in Commander instead of arriving as a
   ZIP. Audio files are still refused.
-
-### Fixed — Factory
-
-- **Close summaries keep evidence citations explicit** — Batch-close outcomes stay on one bounded line, and their suggested QA bundle paths do not count as producer citations. Further receipts no longer add an outcome note to an already-closed task.
 
 ## [4.0.0] - 2026-11-04
 

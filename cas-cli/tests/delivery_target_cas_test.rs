@@ -782,7 +782,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert!(returned.notes.contains(&format!("rejected {row}")));
             let findings = cas::store::open_prompt_queue_store(&cas_root).unwrap().peek_all(50).unwrap()
                 .into_iter().filter(|prompt| prompt.target == worker && prompt.prompt.contains(&format!("rejected {row}"))).count();
-            assert_eq!(findings, 1, "the worker hears the supervisor's findings exactly once");
+            assert_eq!(findings, 1, "one worker findings handoff");
             continue;
         }
         let merged = if row == "green-approved" {
@@ -1736,6 +1736,7 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
             if let Some(dispatch) = held_dispatch {
                 // cas-c744: a new pending review holds publication, rather
                 // than allowing the old post-merge close-held scenario.
+                // pin: this stop notice identifies review admission, not a red CI result.
                 assert!(notices[0].prompt.contains("PRE-MERGE VERIFICATION"), "{notices:?}");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &fixture.task_id).unwrap().unwrap().id,
                     dispatch.id, "automatic retry cannot replace the pending review");

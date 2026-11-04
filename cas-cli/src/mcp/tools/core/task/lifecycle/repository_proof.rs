@@ -1157,7 +1157,8 @@ mod tests {
     /// history, so a clone without those commits has nothing to replay.
     #[test]
     fn real_cas_3388_and_cas_7a33_verdicts_survive_their_sibling_merges() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("repository root");
+        let workspace = crate::test_paths::workspace_root();
+        let root = workspace.as_path();
         let checkout_head = "e896d6d0185ca1d75056418d2e270034b999497c";
         let cases = [
             ("cas-3388", "cfaeba1bb00d0b689230abb1a515102ec9ed1bb8", "d0290d7d2e69958d5251e1756dcda5df90a99f19", "517f8dc284a5c921f59670bb4c9594e2c08d8601"),
@@ -1165,7 +1166,7 @@ mod tests {
         ];
         let needed = cases.iter().flat_map(|(_, bound, current, anchor)| [*bound, *current, *anchor]);
         if !needed.chain([checkout_head]).all(|commit| commit_exists(root, commit)) {
-            eprintln!("cas-a32c replay skipped: this clone lacks the recorded commits");
+            eprintln!("SKIP cas-a32c replay: this clone lacks the recorded commits");
             return;
         }
         for (task, bound, current, anchor) in cases {

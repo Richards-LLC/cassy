@@ -161,3 +161,15 @@ To run the task's tests yourself, use the counted verifier lane, never plain Car
   A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
 - `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
 - `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
+
+## Quality checklist
+
+Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
+
+- correctness: edge cases, error propagation, races;
+- design: follows existing patterns, sensible abstraction;
+- performance: redundant work, unbounded queries, quadratic loops;
+- security: input validation at boundaries, parameterized queries, secrets;
+- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
+
+Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.

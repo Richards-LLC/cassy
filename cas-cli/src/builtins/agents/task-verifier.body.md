@@ -66,15 +66,7 @@ Standards review; keep acceptance-criterion and scope findings on the Spec axis.
 Skip mechanically enforced rules and let documented repo decisions override
 smell heuristics.
 
-Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
-
-- correctness: edge cases, error propagation, races;
-- design: follows existing patterns, sensible abstraction;
-- performance: redundant work, unbounded queries, quadratic loops;
-- security: input validation at boundaries, parameterized queries, secrets;
-- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
-
-Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
+Apply **Quality checklist** in the same `verifier-evidence-gate.md` reference, retaining its evidence requirements and the rejection threshold below.
 
 ## Recording the verdict
 

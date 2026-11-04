@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — Verification
 
+- **Review before publishing factory deliveries** — Was: required verification
+  ran after a merge published. → Now: the same verifier reviews an immutable
+  candidate first; PASS publishes its exact tree and closes with that approval,
+  while FAIL or an unresolved verdict holds only that delivery. Tier zero and
+  batch tier one exemptions stay unchanged. An unconfirmed push retains the
+  source and restores its own local merge without discarding operator edits.
+
 - **Compare deliveries with the epic's plan** — Was: a narrower task card could
   pass while planned fields or outcome targets were missed. → Now: verifiers
   report `PLAN-FIT`, name each omission or missed target, reject known misses

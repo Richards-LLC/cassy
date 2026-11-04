@@ -3165,10 +3165,11 @@ mod worker_attention_tests {
             assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
             assert_eq!(rows[0].target, "supervisor");
             assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects the PR-lane recovery route.
             assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
             assert!(rows[0].prompt.contains("PR #659"));
             assert!(rows[0].prompt.contains("cas-pr-lane"));
-            assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
+            assert!(rows[0].prompt.contains(&failure.check_name));
             assert!(rows[0].prompt.contains("33436155392"));
             assert_recovery_class_requires_daemon(&rows[0]);
         }
@@ -3208,8 +3209,8 @@ mod worker_attention_tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].target, "delivery-worker");
             assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
-            assert!(rows[0].prompt.contains("PR #932 merged at merge-tip"));
-            assert!(rows[0].prompt.contains("close cas-7ea6 with commit_receipt=merge-tip"));
+            assert!(rows[0].prompt.contains(&task.id));
+            assert!(rows[0].prompt.contains(&format!("commit_receipt={}", observation.merge_commit.as_deref().unwrap())));
             assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
         }
     }
@@ -3239,6 +3240,7 @@ mod worker_attention_tests {
             assert_eq!(rows.len(), 1, "one escalation per owned merge receipt");
             assert_eq!(rows[0].target, "supervisor");
             assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects merged-delivery recovery.
             assert!(rows[0].prompt.contains("kind=\"delivery_pr_merge_timeout\""));
             assert!(rows[0].prompt.contains("PR #932"));
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));

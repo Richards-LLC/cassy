@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Commander
+
+- **A proper confirm sheet for slash commands** — Was: confirming `/finish`,
+  `/exit` or `/clear` showed Cancel and the command as full-width stacked rows,
+  and the keyboard could not move between them. → Now: the two actions are
+  content-width and right-aligned, with Cancel first and the command last, and
+  stack only on a phone. Arrows and Tab move between them, Enter or Space
+  chooses, Esc returns to the composer, and Cancel starts focused so a stray
+  Enter never ends a session.
+
 ### Fixed — Factory message destinations
 
 - **Honor explicit message destinations** — `cas factory message` resolves the

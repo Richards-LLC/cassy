@@ -345,6 +345,9 @@ fn caller_transcript_path(agent: &crate::types::Agent) -> Option<std::path::Path
 /// Closed write, a note append), the caller is answered after at most this
 /// much more post-commit work; the rest finishes in the background.
 const POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+// Receipt validation and persistence are already complete. Give fast closes a
+// short chance to return inline without making a batch wait on selector work.
+const BATCH_RECEIPT_POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
 
@@ -472,6 +475,11 @@ impl CasService {
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        let grace = if tool_name == "verification" && action == "batch_receipt" {
+            grace.min(BATCH_RECEIPT_POST_COMMIT_GRACE)
+        } else {
+            grace
+        };
         // Before spawning the handler: a call in flight is already activity.
         // This universal boundary also covers factory and proxy tool calls.
         record_worker_mcp_activity(&self.inner, tool_name, action);
@@ -534,7 +542,7 @@ impl CasService {
                     .map(|commit| commit.description.clone())
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                if receipt.action() != "worktree_merge" {
+                if !matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
                     let watcher_receipt = receipt.clone();
                     let tool = tool_name.to_string();
                     tokio::spawn(async move {
@@ -588,7 +596,7 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
-                } else if commit.is_some() && receipt.action() == "worktree_merge" {
+                } else if commit.is_some() && matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
                     // cas-3937 review: committed, still running; keep its result.
                     self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
@@ -769,25 +777,41 @@ impl CasService {
     /// after its push) keeps running. When it finishes, its result is
     /// appended to the task named by its `task_id` argument, so a close that
     /// a gate refused, or that failed, after the early answer is visible.
+    /// Batch receipts record the continuation on every listed task; individual
+    /// close results are also persisted as BATCH_CLOSE_OUTCOME notes.
     fn record_post_commit_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
         start: std::time::Instant,
-    ) {
-        let task_id = arguments
-            .and_then(|args| args.get("task_id"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_string);
+    ) -> tokio::task::JoinHandle<()> {
+        let mut task_ids: Vec<String> = if receipt.action() == "batch_receipt" {
+            arguments
+                .and_then(|args| args.get("task_ids"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        } else {
+            arguments
+                .and_then(|args| args.get("task_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        };
+        task_ids.sort();
+        task_ids.dedup();
         let service = self.clone();
         tokio::spawn(async move {
             let joined = handle.await;
-            log_post_commit("factory", &receipt, "finished in the background");
-            let Some(task_id) = task_id else {
-                return;
-            };
+            let tool = if receipt.action() == "batch_receipt" { "verification" } else { "factory" };
+            log_post_commit(tool, &receipt, "finished in the background");
             // cas-3937 review: the close's own outcome, not the merge
             // answer's first line (always its CI block).
             let recorded_close = receipt
@@ -813,18 +837,25 @@ impl CasService {
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
-                let status = store
-                    .get(&task_id)
-                    .map(|task| task.status.to_string())
-                    .unwrap_or_else(|error| format!("unreadable ({error})"));
-                let note = format!(
-                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                    elapsed.as_secs_f64(),
-                );
-                store
-                    .append_note(&task_id, &note)
-                    .map_err(|error| format!("{task_id}: {error}"))
+                let mut failures = Vec::new();
+                for task_id in task_ids {
+                    let status = store
+                        .get(&task_id)
+                        .map(|task| task.status.to_string())
+                        .unwrap_or_else(|error| format!("unreadable ({error})"));
+                    let note = format!(
+                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                        elapsed.as_secs_f64(),
+                    );
+                    if let Err(error) = store.append_note(&task_id, &note) {
+                        failures.push(format!("{task_id}: {error}"));
+                    }
+                }
+                if !failures.is_empty() {
+                    return Err(failures.join("; "));
+                }
+                Ok::<_, String>(())
             })
             .await;
             match recorded {
@@ -832,7 +863,7 @@ impl CasService {
                 Ok(Err(error)) => warn!(error = %error, "MCP post-commit outcome not recorded"),
                 Err(error) => warn!(error = %error, "MCP post-commit outcome recorder ended abnormally"),
             }
-        });
+        })
     }
 
     fn record_late_close_outcome(
@@ -1438,6 +1469,110 @@ mod tests {
         let text = format!("{answered:?}");
         assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
         assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
+    }
+
+    /// The real receipt handler must release its response budget once its
+    /// immutable verdict exists, even while subsequent close work is held.
+    #[tokio::test(start_paused = true)]
+    async fn batch_receipt_returns_committed_before_slow_followup_cas_343c() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='batch-response'\n[qa]\nmode='batch'\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(repo)
+                .env("GIT_AUTHOR_NAME", "implementer").env("GIT_AUTHOR_EMAIL", "impl@example.test")
+                .env("GIT_COMMITTER_NAME", "implementer").env("GIT_COMMITTER_EMAIL", "impl@example.test")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "delivery").unwrap();
+        git(&["add", "README.md"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-qm", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            let mut task = cas_types::Task::new(id.into(), "receipt delivery".into());
+            task.assignee = Some("implementer".into());
+            task.origin_project = Some("batch-response".into());
+            task.deliverables.factory_branch_anchor = Some(head.clone());
+            tasks.add(&task).unwrap();
+        }
+        let supervisor = cas_types::Agent::new_with_role("batch-recorder".into(), "batch-recorder".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let ledger = repo.join("LEDGER.md");
+        std::fs::write(&ledger, "cas-batch-a PASS\ncas-batch-b PASS\n").unwrap();
+        let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &artifacts,
+            roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), "cas-batch-a"),
+            task_id: "cas-batch-a".into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact.id;
+        let arguments = serde_json::json!({"action":"batch_receipt", "verification_type":"release",
+            "task_ids":["cas-batch-a","cas-batch-b"], "staging_sha":head,
+            "ledger_artifact_id":artifact, "ledger_path":ledger, "ledger_author":"independent-reviewer"});
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let sender = service.clone();
+        let (release, held) = tokio::sync::oneshot::channel();
+        let (finished, continued) = tokio::sync::oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let answered = service.call_with_deadline_and_grace(
+            "verification", arguments.as_object(), std::time::Duration::from_secs(55),
+            std::time::Duration::from_secs(15), async move {
+                let recorded = sender.verification(Parameters(request)).await?;
+                held.await.unwrap();
+                finished.send(()).unwrap();
+                Ok(recorded)
+            }).await.expect("the persisted batch must answer before its held continuation");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "receipt waited on the ordinary 15s grace");
+        let text = format!("{answered:?}");
+        let receipts = cas_store::list_qa_batch_receipts(&root, "batch-response").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(text.contains("COMMITTED") && text.contains(&receipts[0].id), "{text}");
+        assert_eq!(receipts[0].task_heads.len(), 2);
+        release.send(()).unwrap();
+        continued.await.expect("post-commit work must survive the early answer");
+    }
+
+    #[tokio::test]
+    async fn batch_close_failure_is_recorded_on_every_delivery_cas_343c() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        let tasks = core.open_task_store().unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            tasks.add(&cas_types::Task::new(id.into(), "held delivery".into())).unwrap();
+        }
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"batch_receipt", "task_ids":["cas-batch-a", "cas-batch-b", "cas-batch-a"]});
+        let receipt = mutation_receipt::Receipt::new("verification", "batch_receipt", None);
+        let handler = tokio::spawn(async {
+            Err(rmcp::ErrorData { code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: "committed selector failed".into(), data: None })
+        });
+        service.record_post_commit_outcome(handler, receipt, arguments.as_object(), std::time::Instant::now()).await.unwrap();
+        for id in ["cas-batch-a", "cas-batch-b"] {
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, cas_types::TaskStatus::Open);
+            assert!(task.notes.contains("POST_COMMIT_OUTCOME") && task.notes.contains("committed selector failed"), "{}", task.notes);
+            assert_eq!(task.notes.matches("POST_COMMIT_OUTCOME").count(), 1);
+        }
     }
 
     /// cas-24d8: a close that committed only an intermediate write (a gate

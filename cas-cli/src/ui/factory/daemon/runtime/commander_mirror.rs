@@ -111,18 +111,78 @@ pub(super) fn no_action_reply(text: &str) -> bool {
 }
 
 fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
+    transcript_window(path, TRANSCRIPT_TAIL_BYTES).map(|(values, _)| values)
+}
+
+/// The last `bytes` of a transcript, and whether that cut off earlier lines.
+fn transcript_window(path: &Path, bytes: u64) -> std::io::Result<(Vec<Value>, bool)> {
     let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
-    let start = size.saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    let start = size.saturating_sub(bytes);
     file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::new();
-    file.take(TRANSCRIPT_TAIL_BYTES).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(text
-        .lines()
-        .skip(usize::from(start > 0))
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect())
+    let mut buffer = Vec::new();
+    file.take(bytes).read_to_end(&mut buffer)?;
+    let text = String::from_utf8_lossy(&buffer);
+    Ok((
+        text.lines()
+            .skip(usize::from(start > 0))
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect(),
+        start > 0,
+    ))
+}
+
+/// How far back a Claude transcript is read to reach a cut turn's first input.
+const TRANSCRIPT_TURN_CAP_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A record that ends a Claude turn, as `completed_turns` reads it.
+fn claude_turn_end(value: &Value) -> bool {
+    (value.get("type").and_then(Value::as_str) == Some("assistant")
+        && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+        && text_blocks(value, "/message/content", "text").is_some())
+        || (value.get("type").and_then(Value::as_str) == Some("system")
+            && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
+}
+
+/// cas-aa62: the Claude transcript tail, starting at a turn boundary. A turn
+/// is keyed by its first input; when the byte window cut that input off, the
+/// next visible input re-keyed the turn and it was mirrored twice. A cut turn
+/// with later turns behind it was mirrored whole earlier, so it is dropped.
+/// A cut turn that is the newest is read back, up to
+/// `TRANSCRIPT_TURN_CAP_BYTES`, until its first input is in the window.
+fn claude_transcript_window(path: &Path) -> std::io::Result<Vec<Value>> {
+    let mut bytes = TRANSCRIPT_TAIL_BYTES;
+    loop {
+        let (mut values, cut) = transcript_window(path, bytes)?;
+        if !cut {
+            return Ok(values);
+        }
+        // One boundary per turn: Claude follows an end_turn answer with a
+        // turn_duration record, and only an input starts the next turn.
+        let mut ends = Vec::new();
+        let mut open = true;
+        for (index, value) in values.iter().enumerate() {
+            if claude_prompt(value).is_some() || claude_commander_hook(value).is_some() {
+                open = true;
+            }
+            if claude_turn_end(value) {
+                if open {
+                    ends.push(index);
+                }
+                open = false;
+            }
+        }
+        if ends.len() == 1 && bytes < TRANSCRIPT_TURN_CAP_BYTES {
+            bytes = (bytes * 2).min(TRANSCRIPT_TURN_CAP_BYTES);
+            continue;
+        }
+        if let Some(&first) = ends.first() {
+            values.drain(..=first);
+        }
+        return Ok(values);
+    }
 }
 
 /// Read consumed text/image input without treating queue bookkeeping, file
@@ -763,7 +823,12 @@ pub(super) fn scan_supervisor_replies(
         {
             state.transcript_reads += 1;
         }
-        let Ok(values) = transcript_tail(&path) else {
+        let values = if matches!(cli, cas_mux::SupervisorCli::Claude) {
+            claude_transcript_window(&path)
+        } else {
+            transcript_tail(&path)
+        };
+        let Ok(values) = values else {
             state.cursors.remove(&agent.id);
             continue;
         };
@@ -935,6 +1000,44 @@ fn mirror_supervisor_replies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-aa62: a Claude turn whose first input fell before the 4 MiB tail
+    /// was re-keyed by its next visible input (a queued_command) and mirrored
+    /// a second time. A cut turn is either dropped (later turns follow it, so
+    /// it was mirrored whole) or read back to its first input (it is newest).
+    #[test]
+    fn cut_tail_window_never_rekeys_a_claude_turn() {
+        let at = |second: u32| format!("2026-11-03T22:0{second}:00Z");
+        let prompt = |id: &str, text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"user","uuid":id,"promptId":id,
+            "message":{"role":"user","content":text}});
+        let queued = |id: &str, text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"attachment","uuid":id,
+            "attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":text}});
+        let answer = |text: &str, second| serde_json::json!({
+            "timestamp":at(second),"type":"assistant","message":{"role":"assistant",
+            "stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+        let filler = serde_json::json!({"timestamp":at(2),"type":"progress",
+            "padding":"x".repeat(TRANSCRIPT_TAIL_BYTES as usize)});
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let write = |values: &[Value]| std::fs::write(&path,
+            values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let keys = || completed_turns(&claude_transcript_window(&path).unwrap(),
+            cas_mux::SupervisorCli::Claude).into_iter().map(|turn| turn.key).collect::<Vec<_>>();
+
+        let cut_turn = vec![
+            prompt("first-input", "Ship the hotfix?", 1), filler,
+            queued("second-input", "Also check CI", 3), answer("Shipped.", 4),
+        ];
+        write(&cut_turn);
+        assert_eq!(keys(), ["first-input"], "the newest turn is read back to its first input");
+
+        let mut followed = cut_turn;
+        followed.extend([prompt("next-input", "Next?", 5), answer("Next done.", 6)]);
+        write(&followed);
+        assert_eq!(keys(), ["next-input"], "a cut turn behind later turns was already mirrored whole");
+    }
     use cas_store::{AgentStore, OperatorStamp, SqliteAgentStore, SqlitePromptQueueStore};
     use cas_types::{Agent, AgentRole};
 

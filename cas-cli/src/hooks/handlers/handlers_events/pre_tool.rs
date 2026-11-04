@@ -7230,10 +7230,12 @@ fn operator_write_policy_for(
     };
     let configured_roots = stores.config().factory().write_roots;
     let user_roots = crate::config::operator_policy::user_write_roots();
+    let memory_roots = crate::config::operator_policy::project_claude_memory_roots(cas_root);
     let mut policy = WritePolicy {
         roots: crate::config::operator_policy::effective_write_roots(&configured_roots, &user_roots, cas_root)
             .into_iter()
             .map(|path| WriteRoot {
+                creatable: memory_roots.contains(&path),
                 path,
                 modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
                 task_id: None,
@@ -7259,6 +7261,7 @@ fn operator_write_policy_for(
                 path: root.path.clone(),
                 modes: modes(&root.modes),
                 task_id: None,
+                creatable: false,
             });
         }
     }
@@ -7285,6 +7288,7 @@ fn operator_write_policy_for(
             path: grant.path.clone(),
             modes: modes(&grant.modes),
             task_id: Some(grant.task.clone()),
+            creatable: false,
         });
     }
     (policy, task_ids)
@@ -8670,6 +8674,7 @@ mod workspace_contract_tests {
                 path: path.to_path_buf(),
                 modes: modes.iter().copied().collect(),
                 task_id: task.map(str::to_string),
+                creatable: false,
             }],
             protected: Vec::new(),
             configured: true,
@@ -8813,6 +8818,7 @@ mod workspace_contract_tests {
                 path: main.clone(),
                 modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
                 task_id: None,
+                creatable: false,
             }],
             protected: vec![operator_dir.clone()],
             configured: true,

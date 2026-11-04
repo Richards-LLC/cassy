@@ -21946,6 +21946,13 @@ mod cas_bf890_notice_digest_tests {
             )
             .unwrap()
             .id();
+        // A tip too short to be a commit cannot prefix-match and silence it.
+        let garbage = store
+            .enqueue_worker_action_with_outcome(
+                "w", "lead-sup", &ready.replace(&"a".repeat(9), "aaa"), "w", SESSION, None, None, false, &worker,
+            )
+            .unwrap()
+            .id();
         let merge = |head: char| {
             format!(
                 "proof: kept whole\n\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>",
@@ -22011,7 +22018,7 @@ mod cas_bf890_notice_digest_tests {
         };
         let mut selected_ids = selected(&store);
         selected_ids.sort_unstable();
-        assert_eq!(selected_ids, vec![first, tipless, fresh, blocker, verdict]);
+        assert_eq!(selected_ids, vec![first, tipless, garbage, fresh, blocker, verdict]);
         let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
         assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director_id, ready_id, duplicate]);
         let evidence = store

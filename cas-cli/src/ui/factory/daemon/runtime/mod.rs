@@ -27,6 +27,8 @@ pub(crate) mod lifecycle;
 mod loop_latency_tests;
 #[cfg(test)]
 mod peer_mailbox_wake_tests;
+#[cfg(test)]
+mod worker_reply_wake_tests;
 pub(crate) mod loop_watchdog;
 mod output;
 pub(super) mod pane_size;

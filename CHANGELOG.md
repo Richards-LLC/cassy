@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Worker replies reach an idle supervisor
+
+- **A worker's ready for new work wakes the supervisor** — Was: when a
+  worker's task was parked at a tip that had already landed, its next
+  `status: ready` was filed as a digest of that old delivery, even when it
+  named a new tip or none. Nothing woke the supervisor; one such reply sat
+  unread for 8 hours overnight. → Now: CAS treats a ready as a repeat only
+  when its `tip:` line names the parked commit itself (7 to 40 hex
+  characters). Every other ready wakes an idle supervisor with the whole
+  message.
+- **Unread worker messages raise an alarm** — Was: only Cassy's own task
+  relays were escalated when the supervisor never received them. → Now: a
+  worker's message to the supervisor still unread after about 10 minutes,
+  including one filed as a digest, gets one wake and one operator notice.
+  Receipts, informational and quiet messages, and bare acknowledgements, are
+  left alone.
+- **End-of-turn warning for an uncovered worker** — Was: the stop warning
+  appeared only when the supervisor had no pending reminder at all, so any
+  unrelated reminder silenced it. → Now: when a supervisor ends a turn after
+  messaging a worker that holds open work, and no event reminder covers that
+  worker or its task, the stop hook names the worker once. It never blocks.
+
 ### Changed — Hosted Commander tailnets
 
 - **Reach any Tailscale tailnet from hosted Commander** — Was: hosted

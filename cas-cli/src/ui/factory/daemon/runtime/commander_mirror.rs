@@ -132,9 +132,57 @@ fn transcript_window(path: &Path, bytes: u64) -> std::io::Result<(Vec<Value>, bo
     ))
 }
 
-/// Stub replaced by the fix (cas-aa62, red).
+/// How far back a Claude transcript is read to reach a cut turn's first input.
+const TRANSCRIPT_TURN_CAP_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A record that ends a Claude turn, as `completed_turns` reads it.
+fn claude_turn_end(value: &Value) -> bool {
+    (value.get("type").and_then(Value::as_str) == Some("assistant")
+        && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        && value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+        && text_blocks(value, "/message/content", "text").is_some())
+        || (value.get("type").and_then(Value::as_str) == Some("system")
+            && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
+}
+
+/// cas-aa62: the Claude transcript tail, starting at a turn boundary. A turn
+/// is keyed by its first input; when the byte window cut that input off, the
+/// next visible input re-keyed the turn and it was mirrored twice. A cut turn
+/// with later turns behind it was mirrored whole earlier, so it is dropped.
+/// A cut turn that is the newest is read back, up to
+/// `TRANSCRIPT_TURN_CAP_BYTES`, until its first input is in the window.
 fn claude_transcript_window(path: &Path) -> std::io::Result<Vec<Value>> {
-    transcript_tail(path)
+    let mut bytes = TRANSCRIPT_TAIL_BYTES;
+    loop {
+        let (mut values, cut) = transcript_window(path, bytes)?;
+        if !cut {
+            return Ok(values);
+        }
+        // One boundary per turn: Claude follows an end_turn answer with a
+        // turn_duration record, and only an input starts the next turn.
+        let mut ends = Vec::new();
+        let mut open = true;
+        for (index, value) in values.iter().enumerate() {
+            if claude_prompt(value).is_some() || claude_commander_hook(value).is_some() {
+                open = true;
+            }
+            if claude_turn_end(value) {
+                if open {
+                    ends.push(index);
+                }
+                open = false;
+            }
+        }
+        if ends.len() == 1 && bytes < TRANSCRIPT_TURN_CAP_BYTES {
+            bytes = (bytes * 2).min(TRANSCRIPT_TURN_CAP_BYTES);
+            continue;
+        }
+        if let Some(&first) = ends.first() {
+            values.drain(..=first);
+        }
+        return Ok(values);
+    }
 }
 
 /// Read consumed text/image input without treating queue bookkeeping, file
@@ -775,7 +823,12 @@ pub(super) fn scan_supervisor_replies(
         {
             state.transcript_reads += 1;
         }
-        let Ok(values) = transcript_tail(&path) else {
+        let values = if matches!(cli, cas_mux::SupervisorCli::Claude) {
+            claude_transcript_window(&path)
+        } else {
+            transcript_tail(&path)
+        };
+        let Ok(values) = values else {
             state.cursors.remove(&agent.id);
             continue;
         };

@@ -252,6 +252,7 @@ fn grok_prompt(value: &Value) -> Option<String> {
     let params = value.get("params")?;
     let update = params.get("update")?;
     if update.get("sessionUpdate").and_then(Value::as_str) != Some("user_message_chunk")
+        || update.pointer("/_meta/syntheticPrompt").and_then(Value::as_bool) == Some(true)
         || !human_provenance(value) || !human_provenance(params) || !human_provenance(update)
         || update.pointer("/content/type").and_then(Value::as_str) != Some("text") {
         return None;
@@ -484,9 +485,25 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 let update = &value["params"]["update"];
                 match update["sessionUpdate"].as_str() {
                     Some("user_message_chunk") => {
-                        started = Some((String::new(), at, None));
-                        started_prompt = grok_prompt(value);
-                        final_text = None;
+                        // Image pastes emit text and image chunks with one
+                        // promptIndex; promptId may appear only on the reply.
+                        let key = value.pointer("/params/_meta/promptId")
+                            .or_else(|| update.pointer("/_meta/promptIndex"))
+                            .map(Value::to_string);
+                        let new_turn = started.as_ref().is_none_or(|(prior, _, _)| {
+                            key.as_ref().map_or_else(
+                                || update.pointer("/content/type").and_then(Value::as_str) == Some("text"),
+                                |key| key != prior,
+                            )
+                        });
+                        if new_turn {
+                            started = Some((key.unwrap_or_default(), at, None));
+                            started_prompt = None;
+                            final_text = None;
+                        }
+                        if let Some(prompt) = grok_prompt(value) {
+                            started_prompt.get_or_insert_with(String::new).push_str(&prompt);
+                        }
                     }
                     // Text before a tool is progress, not the final answer.
                     Some("tool_call") => final_text = None,
@@ -497,6 +514,12 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         }
                     }
                     Some("turn_completed") => {
+                        if update["stop_reason"].as_str() == Some("cancelled") {
+                            started = None;
+                            started_prompt = None;
+                            final_text = None;
+                            continue;
+                        }
                         let key = update["prompt_id"].as_str()
                             .or_else(|| value.pointer("/params/_meta/promptId").and_then(Value::as_str))
                             .filter(|key| !key.is_empty());

@@ -43025,6 +43025,29 @@ mod zero_change_close_tests {
         std::fs::write(p.join("scratch.md"), "uncommitted investigation notes").unwrap();
         crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
             .expect("epic movement and uncommitted files must not stale a no-delivery dispatch");
+        std::fs::remove_file(p.join("scratch.md")).unwrap();
+
+        // gabber cas-ef2b: a plain close with no commits of its own, with
+        // neither no_delivery nor the no-code note, is measured and pinned too.
+        let mut plain = Task::new("cas-f43d-plain".into(), "investigate a staging report".into());
+        (plain.status, plain.assignee, plain.task_type, plain.risk) =
+            (TaskStatus::InProgress, Some(worker.into()), TaskType::Spike, vec![TaskRisk::None]);
+        plain.deliverables.work_target = task.deliverables.work_target.clone();
+        store.add(&plain).unwrap();
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": plain.id, "reason": "investigation written up in the artifact",
+        })).unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let repository = cas_store::get_latest_verification_dispatch(&cas_dir, &plain.id).unwrap()
+            .unwrap_or_else(|| panic!("a plain close must dispatch verification: {response:?}"))
+            .repository.expect("dispatch binds a repository proof");
+        git(p, &["checkout", "-q", "-b", "factory/sibling-3", "epic/live"]);
+        commit_file(p, "sibling3.rs", "feat: a third unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling-3", "-m", "merge sibling 3"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("epic movement must not stale a plain close measured with no commits");
     }
 
     #[test]

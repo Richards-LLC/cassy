@@ -272,6 +272,10 @@ impl Config {
                 factory.stall_after_secs.to_string(),
             ),
             (
+                "factory.progress_watchdog_secs".to_string(),
+                factory.progress_watchdog_secs.to_string(),
+            ),
+            (
                 "factory.delivery_stalled_priority_secs".to_string(),
                 factory.delivery_stalled_priority_secs.to_string(),
             ),

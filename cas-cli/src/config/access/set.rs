@@ -263,6 +263,12 @@ impl Config {
                     MemError::Parse(format!("Invalid integer value for factory.stall_after_secs: {value}"))
                 })?;
             }
+            "factory.progress_watchdog_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.progress_watchdog_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.progress_watchdog_secs: {value}"))
+                })?;
+            }
             "factory.delivery_stalled_priority_secs" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.delivery_stalled_priority_secs = value.parse().map_err(|_| {

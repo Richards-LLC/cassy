@@ -2836,6 +2836,17 @@ pub trait PromptQueueStore: Send + Sync {
         since: DateTime<Utc>,
     ) -> Result<bool>;
 
+    /// cas-ddae (GH #1500): the newest row any of `sources` wrote in this
+    /// factory session (or untagged), excluding daemon-stamped rows such as
+    /// fired reminders and relays. The progress watchdog reads a change in this
+    /// id as "an agent here said something"; heartbeats never write rows.
+    fn latest_agent_message_id(&self, sources: &[String], factory_session: &str) -> Result<Option<i64>>;
+
+    /// cas-ddae: whether the peer asked in row `ask_id` has answered: the row
+    /// was acknowledged or replied to, or its target has since written any
+    /// non-daemon row.
+    fn ask_answered(&self, ask_id: i64) -> Result<bool>;
+
     /// Retire an unread alarm after a handed-off row's worker performs
     /// authenticated work, or for a self-addressed reminder. This is attention
     /// evidence only: it never writes a read receipt or acknowledgement.
@@ -7061,6 +7072,38 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              WHERE source = ?1 AND julianday(created_at) > julianday(?2)
                AND (factory_session = ?3 OR factory_session IS NULL))",
             params![source, since.to_rfc3339(), factory_session],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn latest_agent_message_id(&self, sources: &[String], factory_session: &str) -> Result<Option<i64>> {
+        if sources.is_empty() {
+            return Ok(None);
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let placeholders = vec!["?"; sources.len()].join(",");
+        let sql = format!(
+            "SELECT MAX(id) FROM prompt_queue
+             WHERE lower(source) IN ({placeholders})
+               AND COALESCE(origin_kind, '') <> 'daemon'
+               AND (factory_session = ? OR factory_session IS NULL)"
+        );
+        let mut values: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
+        values.push(factory_session.to_string());
+        Ok(conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| row.get(0))?)
+    }
+
+    fn ask_answered(&self, ask_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM prompt_queue a WHERE a.id = ?1 AND (
+                 a.acked_at IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM prompt_queue_recipient_ack k WHERE k.prompt_id = a.id)
+                 OR EXISTS (SELECT 1 FROM prompt_queue r WHERE r.id > a.id
+                     AND COALESCE(r.origin_kind, '') <> 'daemon'
+                     AND (lower(r.source) = lower(a.target)
+                          OR lower(r.source) LIKE lower(a.target) || '@%'))))",
+            params![ask_id],
             |row| row.get(0),
         )?)
     }

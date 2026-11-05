@@ -973,6 +973,55 @@ impl CasService {
             .map_err(|e| internal("Failed to schedule the ask deadline", e.to_string()))
     }
 
+    /// cas-ddae (GH #1500): a peer ask's deadline is a time reminder owned by
+    /// the asker. `fire_reminder` drops it when the peer has answered, and
+    /// otherwise wakes the asker as a blocker.
+    fn schedule_peer_ask_deadline(
+        &self,
+        ask_id: i64,
+        peer: &str,
+        secs: i64,
+        default: Option<&str>,
+        factory_session: Option<&str>,
+    ) -> Result<i64, McpError> {
+        let internal = |what: &str, error: String| {
+            Self::error(ErrorCode::INTERNAL_ERROR, format!("{what}: {error}"))
+        };
+        let owner_id = self
+            .inner
+            .get_agent_id()
+            .map_err(|e| internal("Failed to get agent ID", e.to_string()))?;
+        let origin_session = std::env::var("CAS_SESSION_ID")
+            .ok()
+            .filter(|session| !session.trim().is_empty())
+            .unwrap_or_else(|| owner_id.clone());
+        let minutes = (secs + 59) / 60;
+        let next = match default {
+            Some(default) => format!("Proceed with the default: {default}, or chase {peer} and tell the operator."),
+            None => format!("Chase {peer}, take the work over, or tell the operator."),
+        };
+        crate::store::open_reminder_store(&self.inner.cas_root)
+            .map_err(|e| internal("Failed to open reminder store", e.to_string()))?
+            .create_with_scope(
+                &owner_id,
+                None,
+                &format!("Peer ask #{ask_id} to {peer} got no answer in {minutes} min. {next}"),
+                cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() + chrono::Duration::seconds(secs)),
+                None,
+                Some(&serde_json::json!({
+                    crate::ui::factory::daemon::runtime::progress_watchdog::PEER_ASK_FILTER_KEY: ask_id,
+                    "peer": peer,
+                })),
+                0,
+                factory_session,
+                Some(&origin_session),
+                false,
+                None,
+            )
+            .map_err(|e| internal("Failed to schedule the peer ask deadline", e.to_string()))
+    }
+
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
         req: AgentRequest,
@@ -1903,6 +1952,33 @@ impl CasService {
                     .map_or_else(|| "none".to_string(), |id| id.to_string())
             )));
         }
+
+        // cas-ddae (GH #1500): a directed ask may carry a deadline; past it
+        // unanswered, the asker is woken. A deadline on anything else was
+        // silently ignored before, which reads as a deadline that never fires.
+        let peer_ask_deadline = match req.remind_delay_secs {
+            None => None,
+            Some(secs)
+                if secs > 0
+                    && req.kind.as_deref() == Some("ask")
+                    && !resolved_target.eq_ignore_ascii_case("all_workers") =>
+            {
+                Some((
+                    secs,
+                    req.remind_message
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned),
+                ))
+            }
+            Some(_) => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "remind_delay_secs on a message is an ask deadline: it needs kind=ask, one target (not all_workers) and remind_delay_secs > 0",
+                ));
+            }
+        };
 
         // Refuse CAS-generated row-source labels before any queue write.
         // Unregistered names may wait only for a matching pending local spawn.
@@ -3437,9 +3513,23 @@ impl CasService {
                 ),
             ));
         }
-        let supervisor_copy_suffix = supervisor_copy_id
+        let mut supervisor_copy_suffix = supervisor_copy_id
             .map(|id| format!("; supervisor copy #{id}"))
             .unwrap_or_default();
+        if let Some((secs, default)) = peer_ask_deadline.as_ref()
+            && !duplicate_suppressed
+        {
+            let id = self.schedule_peer_ask_deadline(
+                message_id,
+                &resolved_target,
+                *secs,
+                default.as_deref(),
+                factory_session.as_deref().filter(|session| !session.trim().is_empty()),
+            )?;
+            supervisor_copy_suffix.push_str(&format!(
+                "\nDeadline: reminder #{id} wakes you in {secs}s if {resolved_target} has not answered"
+            ));
+        }
         let receipt = if duplicate_suppressed {
             format!(
                 "suppressed #{message_id} → {resolved_target} (duplicate; no new row)\

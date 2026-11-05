@@ -725,27 +725,35 @@ fn provenance_is_written_off_the_lane_before_the_submit() {
 /// `task show` read to Claude as the operator rejecting the call. While the
 /// transcript shows a call in flight the urgent row is held, nothing typed;
 /// past the hold it interrupts and says Cassy did it, not the operator.
+/// cas-922d: the same for each member of an urgent all-workers broadcast.
 #[tokio::test]
 async fn urgent_row_holds_for_an_in_flight_tool_call_then_names_cassy_cas_73f7() {
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (root, cas_dir) = project_with_worker();
-    super::queue_and_events::reminder_dispatch_tests::write_agent_transcript(root.path(), &cas_dir,
-        &format!("{WORKER}-id"), &[
-        r#"{"type":"assistant","timestamp":"2026-11-05T14:37:56Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_73f7","name":"mcp__cas__task","input":{"action":"show"}}],"stop_reason":"tool_use"}}"#.to_string(),
-    ]);
-    let id = enqueue_urgent(&cas_dir, "start the task C4A-HOLD");
-    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
-    ready_claude_worker(&mut daemon).await;
-    let held = passes_until(&mut daemon, Duration::from_secs(2), |_| false).await;
-    assert!(!held.contains('\x1b') && !held.contains("C4A-HOLD"), "no Esc into the call: {held:?}");
-    let row = open_prompt_queue_store(&cas_dir).unwrap().queued_prompt(id).unwrap().unwrap();
-    assert!(row.processed_at.is_none(), "held for the call's end");
-    rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
-        .execute("UPDATE prompt_queue SET created_at=?, next_attempt_at=NULL WHERE id=?",
-            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(), id])
-        .unwrap();
-    let echoed = passes_until(&mut daemon, Duration::from_secs(6), |echoed| echoed.contains("C4A-HOLD")).await;
-    assert!(echoed.contains("this was not the operator"), "{echoed:?}");
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // A broadcast needs an Agent Teams tree (see the broadcast test above).
+    let claude_config = env.home().join(".claude");
+    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &claude_config);
+    for target in [WORKER, "all_workers"] {
+        let (root, cas_dir) = project_with_worker();
+        super::queue_and_events::reminder_dispatch_tests::write_agent_transcript(root.path(), &cas_dir,
+            &format!("{WORKER}-id"), &[
+            r#"{"type":"assistant","timestamp":"2026-11-05T14:37:56Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_73f7","name":"mcp__cas__task","input":{"action":"show"}}],"stop_reason":"tool_use"}}"#.to_string(),
+        ]);
+        let id = enqueue_urgent_to(&cas_dir, target, "start the task C4A-HOLD");
+        let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+        daemon.teams = Some(super::teams::TeamsManager::new(SESSION));
+        ready_claude_worker(&mut daemon).await;
+        let held = passes_until(&mut daemon, Duration::from_secs(2), |_| false).await;
+        assert!(!held.contains('\x1b') && !held.contains("C4A-HOLD"), "{target}: no Esc into the call: {held:?}");
+        let row = open_prompt_queue_store(&cas_dir).unwrap().queued_prompt(id).unwrap().unwrap();
+        assert!(row.processed_at.is_none(), "{target}: held for the call's end");
+        rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE prompt_queue SET created_at=?, next_attempt_at=NULL WHERE id=?",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(), id])
+            .unwrap();
+        let echoed = passes_until(&mut daemon, Duration::from_secs(6), |echoed| echoed.contains("C4A-HOLD")).await;
+        assert!(echoed.contains("this was not the operator"), "{target}: {echoed:?}");
+    }
 }
 
 /// cas-786a6 review M2 / round 2 L2: an urgent row typed by a daemon that

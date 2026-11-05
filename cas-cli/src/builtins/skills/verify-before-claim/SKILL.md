@@ -39,7 +39,11 @@ For a Rust change, the factory worker proof under `cas-worker/references/discipl
 - Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit, or the exact runtime denial if execution is deferred.
 - Any non-Rust suite the change touches, with its passed count.
 
+<!-- cas-src:begin -->
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+<!-- cas-src:else -->
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in CI on that SHA, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+<!-- cas-src:end -->
 
 ## The Four-Step Protocol
 

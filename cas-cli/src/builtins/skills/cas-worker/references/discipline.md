@@ -74,10 +74,6 @@ Commit first; zero matched tests fail. Success records
 receipts. Run the red test before fixing it, then commit and run the green test.
 
 Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
-Before rewording user-facing text, grep the tests for the old wording. Measure
-a size or count claim on a real tree as well as a fixture. List each module run
-in the close reason.
-
 <!-- cas-src:else -->
 In a Rust project, Cassy's capped runner admits only
 `cargo check -p <crate> --lib` (or `--tests`) and
@@ -86,6 +82,10 @@ committed first and backgrounded with a Git-ignored log; the hook's refusal name
 the exact shapes. Otherwise run the project's own targeted test commands
 directly and record their exit status and test count.
 <!-- cas-src:end -->
+Before rewording user-facing text, grep the tests for the old wording. Measure
+a size or count claim on a real tree as well as a fixture. List each module run
+in the close reason.
+
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
@@ -94,7 +94,11 @@ a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
+<!-- cas-src:begin -->
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
+<!-- cas-src:else -->
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in CI on that SHA, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
+<!-- cas-src:end -->
 For a supervisor's integrated run, record
 `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
 the epic. Child closes reference the epic's integration proof; final-gate

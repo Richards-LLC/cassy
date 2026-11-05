@@ -12,9 +12,14 @@ will check. A refused park lists every failed gate: fix them all, retry once.
 ## Commit and push
 
 Commit scoped work; push once before parking, once per review round, unless
+<!-- cas-src:begin -->
 `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
 `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
 CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+<!-- cas-src:else -->
+`delivery_mode=local_merge`. Each push starts CI. A configured pre-push hook
+gives early feedback; CI owns that proof. Park reads
+<!-- cas-src:end -->
 exact-tip capped test receipts, never runs checks. For changelog scope and
 format, follow [Changelog at park](#changelog-at-park).
 

@@ -4841,7 +4841,10 @@ mod tests {
         std::fs::create_dir_all(cas_src.join("cas-cli/src")).unwrap();
         std::fs::write(cas_src.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::write(cas_src.join("cas-cli/src/builtins.rs"), "").unwrap();
-        let cas_src_only = ["scripts/journey-eval.sh", "assembly-proof.py", "release.sh --hotfix", "hub-web/dist", "HUB_E2E_PORT"];
+        let cas_src_only = [
+            "merge queue", "cas_lane_slim", "fast rows", "fast-row", "contributing", "journey-eval",
+            "assembly-proof", "release.sh --hotfix", "hub-web/dist", "hub_e2e_port",
+        ];
         for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
             let personal = temp.path().join("home").join(format!("{harness:?}"));
             let source = cas_src.join(format!(".{harness:?}"));
@@ -4853,8 +4856,10 @@ mod tests {
                 if file.path.starts_with("skills/cas-cut-release/") {
                     continue; // The Cassy runtime release skill is cas-src by definition.
                 }
-                leaks.extend(cas_src_only.iter().chain(&[CAS_SRC_BEGIN, CAS_SRC_END])
-                    .filter(|token| installed.contains(**token)).map(|token| format!("{}: {token}", file.path)));
+                let lowered = installed.to_lowercase();
+                leaks.extend(cas_src_only.iter().filter(|token| lowered.contains(**token))
+                    .chain([CAS_SRC_BEGIN, CAS_SRC_END].iter().filter(|marker| installed.contains(**marker)))
+                    .map(|token| format!("{}: {token}", file.path)));
             }
             assert!(leaks.is_empty(), "{harness:?}: {leaks:#?}");
             let discipline = "skills/cas-worker/references/discipline.md";

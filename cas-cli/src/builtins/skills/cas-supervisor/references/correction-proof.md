@@ -43,8 +43,13 @@ work, then apply the supported binding limits below.
 - **CI:** require green validation for the new code/test tip before merge;
   pending/red remains a hold. For a documentation tail, consume only the
   code-check SHA explicitly accepted by the merge receipt. Neither patch-id
+  <!-- cas-src:begin -->
   equality nor an old candidate is a CI result. The merge queue owns final
   integration proof; do not add a duplicate full build or suite.
+  <!-- cas-src:else -->
+  equality nor an old candidate is a CI result. The final integration gate
+  (CI on the landing SHA) owns that proof; do not add a duplicate full build or suite.
+  <!-- cas-src:end -->
 
 ## Share one immutable candidate
 

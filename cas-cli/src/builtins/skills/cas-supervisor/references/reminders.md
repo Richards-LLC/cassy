@@ -9,7 +9,7 @@ authoritative task/worker state once before acting.
 
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge; if Cassy opened a dispatch, run the verifier on it (its verdict closes or returns the task; no worker message); a Tier 1 delivery in `qa.mode=batch` waits for the release verdict. Then cancel any phase reminder |
+| Worker reports `MERGE REQUIRED` | Merge the parked delivery immediately | No — the push is actionable | Merge; if Cassy opened a dispatch, run the verifier on it (its verdict closes or returns the task; no worker message); a Tier 1 delivery in `qa.mode=batch` waits for the release verdict. Then cancel any phase reminder |
 | Parked merge refused only for pending CI | Let the exact-SHA retry Cassy armed finish | No — green retries automatically; red or a moved lane sends one notice | Act only on that notice |
 | Other GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
 | Long release, publication, or other detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice | Check the authoritative job/task state once |

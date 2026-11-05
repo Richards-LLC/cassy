@@ -105,8 +105,8 @@ checkout's build. For runs in parallel from one checkout, set
 `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a distinct pair in 20000–32767 (below
 Linux's ephemeral range), and name the ports in the ledger header.
 <!-- cas-src:else -->
-The final integration gate (merge queue, or CI on the landing SHA) owns the
-full run.
+The final integration gate (CI on the landing SHA, or the supervisor's
+integrated run) owns the full run.
 <!-- cas-src:end -->
 
 Add any journey whose Goal the demo statement names. Walk each journey from

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use cas_store::{
-    CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
-    QualityPayload,
+    CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, FrictionSource, InterventionKind,
+    NewQualityEvent, QualityPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 
@@ -316,6 +316,172 @@ pub(crate) fn bug_labelled(
         event.actor = actor.map(str::to_string);
         emit(cas_root, &event);
     }
+}
+
+/// cas-87a2: the Cassy source checkout, where every bug task is a Cassy defect.
+/// In any other project a bug task is that project's bug, not Cassy friction.
+pub(crate) fn is_cassy_source(cas_root: &Path) -> bool {
+    let root = cas_root.parent().unwrap_or(cas_root);
+    std::fs::read_to_string(root.join("cas-cli/Cargo.toml"))
+        .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "name = \"cas\""))
+}
+
+/// The project a problem was found in, as a slug: its checkout directory name.
+fn project_slug(cas_root: &Path) -> Option<String> {
+    let name = cas_root.parent().unwrap_or(cas_root).file_name()?.to_string_lossy().to_string();
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
+        .take(64)
+        .collect();
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// cas-87a2: filing a bug task in the Cassy repository is the friction write.
+/// Nobody has to remember the ledger; the create path records it.
+pub(crate) fn bug_filed(
+    cas_root: &Path,
+    task_id: &str,
+    title: &str,
+    task_type: cas_types::TaskType,
+    priority: i32,
+    created_at: DateTime<Utc>,
+) -> bool {
+    if task_type != cas_types::TaskType::Bug || !is_cassy_source(cas_root) {
+        return false;
+    }
+    let mut event = NewQualityEvent::new(
+        format!("friction|task|{task_id}"),
+        QualityPayload::Friction {
+            source: FrictionSource::Task,
+            reference: task_id.to_string(),
+            severity: Some(format!("p{priority}")),
+            project: project_slug(cas_root),
+        },
+    );
+    event.occurred_at = created_at;
+    event.task_id = Some(task_id.to_string());
+    event.title = Some(title.to_string());
+    emit(cas_root, &event)
+}
+
+/// cas-87a2: an issue filed on the Cassy tracker, from any project, is friction.
+pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<Utc>) -> bool {
+    let Some(issue) = crate::github_issue_attach::parse_issue_refs(url, None).into_iter().next()
+    else {
+        return false;
+    };
+    let reference = format!("{}/{}/issues/{}", issue.owner, issue.repo, issue.number);
+    let mut event = NewQualityEvent::new(
+        format!("friction|issue|{}", reference.to_ascii_lowercase()),
+        QualityPayload::Friction {
+            source: FrictionSource::Issue,
+            reference,
+            severity: None,
+            project: project_slug(cas_root),
+        },
+    );
+    event.occurred_at = at;
+    event.title = Some(title.to_string());
+    event.link = Some(url.to_string());
+    emit(cas_root, &event)
+}
+
+/// What a friction backfill found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrictionBackfill {
+    pub tasks: usize,
+    pub issues: usize,
+    /// Why the Cassy tracker was not read, when it was not.
+    pub issues_skipped: Option<String>,
+}
+
+/// cas-87a2: record problems filed before the emitters existed. Cassy-source bug
+/// tasks come from the task store; Cassy tracker issues come from a bounded
+/// `gh issue list`. A missing or failing `gh` skips issues and says why.
+pub(crate) fn backfill_friction(
+    cas_root: &Path,
+    since: DateTime<Utc>,
+    gh_program: &Path,
+) -> anyhow::Result<FrictionBackfill> {
+    let mut found = FrictionBackfill::default();
+    for task in crate::store::open_task_store(cas_root)?.list(None)? {
+        if task.created_at >= since {
+            found.tasks += usize::from(bug_filed(
+                cas_root,
+                &task.id,
+                &task.title,
+                task.task_type,
+                task.priority.0,
+                task.created_at,
+            ));
+        }
+    }
+    let repo = crate::config::Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.get("issues.components.cassy"))
+        .filter(|repo| !repo.trim().is_empty());
+    let Some(repo) = repo else {
+        found.issues_skipped = Some("issues.components.cassy is not set".into());
+        return Ok(found);
+    };
+    match list_cassy_issues(gh_program, &repo, since) {
+        Ok(issues) => {
+            for (url, title, created_at) in issues {
+                found.issues += usize::from(issue_filed(cas_root, &url, &title, created_at));
+            }
+        }
+        Err(reason) => found.issues_skipped = Some(reason),
+    }
+    Ok(found)
+}
+
+/// Issues on `repo` created since `since`, without feature requests.
+fn list_cassy_issues(
+    gh_program: &Path,
+    repo: &str,
+    since: DateTime<Utc>,
+) -> Result<Vec<(String, String, DateTime<Utc>)>, String> {
+    use crate::bounded_process::{Deadline, run_command};
+    let budget = std::time::Duration::from_secs(15);
+    let mut command = std::process::Command::new(gh_program);
+    command
+        .args([
+            "issue", "list", "--repo", repo, "--state", "all", "--limit", "500",
+            "--search", &format!("created:>={}", since.format("%Y-%m-%d")),
+            "--json", "url,title,createdAt,labels",
+        ])
+        .env("GH_PROMPT_DISABLED", "1");
+    let output = run_command(&mut command, Deadline::after(budget), budget)
+        .map_err(|error| format!("gh issue list --repo {repo} did not complete: {error:?}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "gh issue list --repo {repo} failed: {}",
+            stderr.lines().next().unwrap_or("").trim()
+        ));
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("gh issue list --repo {repo} returned unreadable JSON: {error}"))?;
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            !row["labels"].as_array().is_some_and(|labels| {
+                labels.iter().any(|label| {
+                    matches!(label["name"].as_str(), Some("enhancement" | "feature"))
+                })
+            })
+        })
+        .filter_map(|row| {
+            let created = DateTime::parse_from_rfc3339(row["createdAt"].as_str()?).ok()?;
+            Some((
+                row["url"].as_str()?.to_string(),
+                row["title"].as_str()?.to_string(),
+                created.with_timezone(&Utc),
+            ))
+        })
+        .filter(|(_, _, created)| *created >= since)
+        .collect())
 }
 
 /// A verdict from the numbers alone. A supervisor's handoff line can disagree;

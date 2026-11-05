@@ -1487,6 +1487,12 @@ fn report_spawn_warnings(
             "warning",
             warning,
         );
+        // cas-73fa: a purely informational base (chosen, refreshed, ready,
+        // materialized, preserved) stays in the audit above. Every other
+        // warning names a repair and is still sent.
+        if SPAWN_BASE_INFORMATIONAL.iter().any(|kind| warning.starts_with(kind)) {
+            continue;
+        }
         let _ = enqueue_spawn_warning_notice(
             cas_dir,
             supervisor_name,
@@ -1497,6 +1503,16 @@ fn report_spawn_warnings(
         );
     }
 }
+
+/// cas-73fa: spawn warnings that only report what happened and ask nothing.
+const SPAWN_BASE_INFORMATIONAL: &[&str] = &[
+    "SPAWN BASE: ",
+    "SPAWN BASE REFRESHED",
+    "SPAWN BASE MATERIALIZED",
+    "EPIC BRANCH READY",
+    "EPIC BRANCH MATERIALIZED",
+    "EPIC BRANCH PRESERVED",
+];
 
 /// cas-00d5: close out a shutdown request. The row gets a terminal
 /// `stopped` or `failed` state (deferred to the store worker when this pass's
@@ -1536,6 +1552,12 @@ fn record_shutdown_outcome(
     // cas-b06f (spec-6194 P2.6): the supervisor asked for this, so it gets
     // ONE receipt with every worker's outcome, never a Critical worker_died
     // alarm per worker. A failure is still named, with what to do next.
+    // cas-73fa: a clean shutdown that released no task asks nothing of the
+    // supervisor, who asked for it; the spawn audit above records it.
+    let released: Vec<&String> = report.stopped.iter().flat_map(|(_, tasks)| tasks).collect();
+    if report.failed.is_empty() && released.is_empty() {
+        return;
+    }
     let request = request_id
         .map(|id| format!("shutdown request {id}"))
         .unwrap_or_else(|| "direct shutdown request".to_string());
@@ -1556,11 +1578,17 @@ fn record_shutdown_outcome(
             ),
         )
     };
-    let body = if lines.is_empty() {
+    let mut body = if lines.is_empty() {
         format!("{headline}\nNo live workers matched the request.")
     } else {
         format!("{headline}\n- {}", lines.join("\n- "))
     };
+    if !released.is_empty() {
+        body.push_str(&format!(
+            "\nNext action: reassign {}.",
+            released.iter().map(|task| task.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
     notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, body);
 }
 
@@ -1763,7 +1791,12 @@ fn enqueue_spawn_outcome_notice(
     stage: &str,
     success: bool,
     detail: &str,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<Option<i64>> {
+    // cas-73fa: a verified spawn asks nothing of the supervisor; the spawn
+    // audit and worker_status record it. Only a failure is sent.
+    if success {
+        return Ok(None);
+    }
     let queue = open_prompt_queue_store(cas_dir)?;
     let request = request_id
         .map(|id| format!("request {id}"))
@@ -1807,7 +1840,7 @@ fn enqueue_spawn_outcome_notice(
         )?
     };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// cas-2327 (GH #170): a booted worker whose promised task did not bind is a
@@ -2571,6 +2604,37 @@ pub(crate) const COMMANDER_PANE_HOLD: &str = "Held: your pane draft is unsent";
 
 pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2 * 60);
+
+/// cas-73f7: how long an urgent row waits for the recipient's in-flight tool
+/// call to end before it interrupts anyway, and what the hold and the late
+/// interrupt say.
+pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
+    "urgent held: recipient has a tool call in flight; surfaces when the call ends";
+pub(super) const URGENT_TOOL_CALL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What an urgent row does about its recipient's in-flight tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UrgentToolCallHold {
+    /// Inside [`URGENT_TOOL_CALL_HOLD`]: no Esc; wait for the call's end.
+    Wait,
+    /// Past the hold: interrupt, opening with [`URGENT_TOOL_CALL_NOTICE`].
+    Interrupt,
+}
+
+pub(super) const URGENT_TOOL_CALL_NOTICE: &str =
+    "Cassy interrupted your in-flight tool call to deliver this; this was not the operator.\n\n";
+
+/// cas-73f7: first recheck of a declined supervisor wake. Doubles per
+/// consecutive decline, capped at [`DECLINED_WAKE_RECHECK_MAX`] (cas-922d).
+pub(super) const DECLINED_WAKE_RECHECK_BASE: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const DECLINED_WAKE_RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(super) fn declined_wake_recheck(prior_declines: u32) -> std::time::Duration {
+    DECLINED_WAKE_RECHECK_BASE
+        .saturating_mul(1 << prior_declines.min(4))
+        .min(DECLINED_WAKE_RECHECK_MAX)
+}
 
 /// cas-d1659: whether a wake-starved row is escalated to the supervisor. A
 /// recipient still writing its transcript (or holding a tool call open, or
@@ -4639,6 +4703,13 @@ impl FactoryDaemon {
         let dispatch_dir = self.app.cas_dir().to_path_buf();
         self.relay_jobs.submit_write(&mut self.queue_jobs, "expired-verification-dispatches", None, move || {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
+        // cas-ddae (GH #1500): open work with no progress wakes the
+        // supervisor, then the operator; store and git reads, off the loop.
+        let (watchdog_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
+        self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", None, move || {
+            super::progress_watchdog::sweep(&watchdog_dir, &session, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
         // cas-786a6 (H3): the two pure-store sweeps run on the store
@@ -7458,6 +7529,7 @@ impl FactoryDaemon {
     /// transcript evidence the ordinary policy decides. cas-e6d7: that
     /// evidence is a turn end seen after the last turn start; a read tail with
     /// no turn record (a turn longer than the read window) does not count.
+    /// cas-73f7: the same evidence now decides every supervisor wake row.
     pub fn supervisor_self_reminder_wake(
         pane_target: &str,
         supervisor_name: &str,
@@ -7468,7 +7540,7 @@ impl FactoryDaemon {
             return None;
         }
         Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
-            WakeDecision::allow("fired self-reminder to a supervisor whose transcript shows its turn ended")
+            WakeDecision::allow("supervisor transcript shows its turn ended; pane repaint is not work")
         }))
     }
 
@@ -7644,6 +7716,24 @@ impl FactoryDaemon {
         input > 0 && input + 1 < rows.len()
             && rows[input - 1].contains("───")
             && rows[input + 1].trim_start().starts_with("───")
+    }
+
+    /// cas-73f7 / cas-922d: the one in-flight hold check for urgent rows,
+    /// single-target and broadcast alike. `None`: no call in flight.
+    fn urgent_tool_call_hold(
+        &self,
+        queued: &cas_store::QueuedPrompt,
+        pane: &str,
+    ) -> Option<UrgentToolCallHold> {
+        (queued.urgent && self.prepared_tool_call_evidence(pane) == ToolCallEvidence::InFlight).then(|| {
+            if chrono::Utc::now() - queued.created_at
+                < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
+            {
+                UrgentToolCallHold::Wait
+            } else {
+                UrgentToolCallHold::Interrupt
+            }
+        })
     }
 
     /// Combine off-loop transcript inputs with the pane's current vetoes.
@@ -8595,6 +8685,22 @@ impl FactoryDaemon {
         } else {
             Some(tally.notes.join("; "))
         };
+        // cas-99b5: a member held for its in-flight tool call still needs
+        // this row, for its hook or its bounded interrupt. Keep the row open
+        // and come back; members already handed it count as handed off.
+        if tally.held > 0 {
+            self.queue_jobs.stamp(
+                self.app.cas_dir(),
+                tally.queued.id,
+                &tally.queued.target,
+                super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                    detail: detail.unwrap_or_else(|| URGENT_TOOL_CALL_DETAIL.to_string()),
+                    recheck_at: chrono::Utc::now()
+                        + chrono::Duration::from_std(URGENT_TOOL_CALL_RECHECK).unwrap(),
+                },
+            );
+            return;
+        }
         self.queue_jobs.stamp(
             self.app.cas_dir(),
             tally.queued.id,
@@ -10386,6 +10492,18 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
+                    // cas-922d: the cas-73f7 in-flight hold, per member. The
+                    // released claim lets this worker's hook surface the
+                    // broadcast when its call ends; cas-99b5: the row stays
+                    // open for it (see `finish_broadcast`).
+                    let hold = self.urgent_tool_call_hold(&queued, name);
+                    if hold == Some(UrgentToolCallHold::Wait) {
+                        self.queue_jobs.stamp(self.app.cas_dir(), queued.id, name,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
+                        tally.held += 1;
+                        tally.notes.push(format!("{name}: {URGENT_TOOL_CALL_DETAIL}"));
+                        continue;
+                    }
                     tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
                         target_agent = %name, "Attempting prompt injection to '{}': {}", name,
                         queued.prompt.chars().take(50).collect::<String>());
@@ -10397,12 +10515,17 @@ impl FactoryDaemon {
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
                         let harness = self.app.harness_for(name);
+                        let member_prompt = if hold == Some(UrgentToolCallHold::Interrupt) {
+                            format!("{URGENT_TOOL_CALL_NOTICE}{prompt_with_instructions}")
+                        } else {
+                            prompt_with_instructions.clone()
+                        };
                         let payload = super::delivery::prepare_pty_machine_delivery(
                             self.app.cas_dir(),
                             name,
                             harness,
                             &inbox_source,
-                            &prompt_with_instructions,
+                            &member_prompt,
                             Some(queued.id),
                         );
                         let settle = self.urgent_settle_duration(name);
@@ -10552,7 +10675,19 @@ impl FactoryDaemon {
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
                             // cas-c0d0 (GH #1246): the supervisor's own fired reminder.
-                            self_addressed_reminder(&queued)
+                            // cas-73f7: and every other supervisor wake row (peer
+                            // ask, directed message, lifecycle). An idle Claude
+                            // supervisor with a background task repaints, so the
+                            // 2 s silence bar held peer ask 4226945 for 76 s.
+                            // Verified operator text keeps its own path.
+                            (self_addressed_reminder(&queued)
+                                || (wake_sender != WakeSender::Operator
+                                    && Self::row_is_supervisor_wake(
+                                        &wake_sender,
+                                        self.app.supervisor_name(),
+                                        &queued.source,
+                                        &queued.prompt,
+                                    )))
                                 .then(|| {
                                     Self::supervisor_self_reminder_wake(
                                         &pane_target,
@@ -10619,12 +10754,25 @@ impl FactoryDaemon {
                     if pane_state.composer_dirty {
                         self.note_operator_draft_hold(&queued, &pane_target);
                     }
+                    // cas-73f7: the in-memory re-offer below decides on the
+                    // transcript snapshot taken at this decline, so it never
+                    // sees the turn end. A declined wake comes back to fresh
+                    // selection on a short backoff; a draft waits for the
+                    // composer to clear, as before.
+                    let recheck = if wake_decision.kind == WakeOutcome::DeclinedByPolicy
+                        && !pane_state.composer_dirty
+                    {
+                        declined_wake_recheck(facts.wake_gate.map_or(0, |(declines, _)| declines))
+                    } else {
+                        BUSY_RECIPIENT_RECHECK_INTERVAL
+                    };
+                    let recheck_at = chrono::Utc::now() + chrono::Duration::from_std(recheck).unwrap();
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: pending_detail.clone(),
-                                recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
+                                recheck_at });
                         self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
                     }
                     // No transport admission, cadence spend or attempt: keep the
@@ -10636,13 +10784,37 @@ impl FactoryDaemon {
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::ParkBusy {
                             detail: pending_detail,
-                            recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
+                            recheck_at,
                         });
                     self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                     tracing::info!(target: "cas::coordination", stage = "inline_wake_parked",
                         message_id = queued.id, target_agent = %pane_target, reason = wake_decision.reason,
                         "inline body parked until recipient turn end or bounded recheck");
                     continue;
+                }
+                // cas-73f7: an urgent break (Esc) into an in-flight tool call
+                // reads to Claude as the operator rejecting it. Hold the row,
+                // claim released, so the recipient's hook surfaces it when
+                // the call ends; past the bound, interrupt and say who did.
+                let hold = self.urgent_tool_call_hold(&queued, &pane_target);
+                if hold == Some(UrgentToolCallHold::Wait) {
+                    let recheck_at = chrono::Utc::now()
+                        + chrono::Duration::from_std(URGENT_TOOL_CALL_RECHECK).unwrap();
+                    for (member, token) in batch_claims.iter().map(|(member, token)| (member.clone(), *token))
+                        .chain(std::iter::once((queued.clone(), claim_token)))
+                    {
+                        self.queue_jobs.stamp(self.app.cas_dir(), member.id, &member.target,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: token });
+                        self.queue_jobs.stamp(self.app.cas_dir(), member.id, &member.target,
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                                detail: URGENT_TOOL_CALL_DETAIL.into(),
+                                recheck_at,
+                            });
+                    }
+                    continue;
+                }
+                if hold == Some(UrgentToolCallHold::Interrupt) {
+                    prompt_with_instructions.insert_str(0, URGENT_TOOL_CALL_NOTICE);
                 }
                 let inject_generation = match self.queue_jobs.admit_claimed(
                     self.app.cas_dir(),
@@ -19076,6 +19248,48 @@ mod tests {
         );
     }
 
+    /// cas-73fa: a supervisor notice that asks nothing of its recipient is not
+    /// sent. A verified spawn, a clean shutdown with nothing to reassign and an
+    /// informational spawn base stay in the spawn audit; failures and
+    /// unpublished, unverified, local-only or diverged bases still reach the
+    /// supervisor.
+    #[test]
+    fn notices_that_ask_nothing_are_not_sent_cas_73fa() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = || queue.peek_all(20).unwrap().into_iter().map(|row| row.summary.unwrap_or_default()).collect::<Vec<_>>();
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(1), "tender-owl-85",
+            "register", true, "Worker is active in the Cassy agent registry for this factory session.").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(2),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-claude".into(), Vec::new())], failed: Vec::new(),
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(3), "ready-jay-11", &[
+            "SPAWN BASE: 'main' — task cas-d8e0's WorkTarget; declared delivery branch wins over ambient trunk and pinned focus.".into(),
+            "SPAWN BASE REFRESHED: local 'main' (aaa) is 2 commit(s) behind 'origin/main' (bbb); local branch FAST-FORWARDED to the published tip.".into(),
+            "EPIC BRANCH READY: 'epic/x' already published on origin.".into(),
+        ]);
+        assert!(rows().is_empty(), "nothing here asks the supervisor to act: {:?}", rows());
+
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(4), "happy-shark-29",
+            "provision", false, "worktree add failed").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(5),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-codex".into(), vec!["cas-held1".into()])], failed: vec![("stuck".into(), "pid alive".into())],
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(6), "ready-jay-12", &[
+            "EPIC BRANCH UNPUBLISHED: 'epic/x' (ccc) could not be published to origin.".into(),
+            // Any warning not known to be informational still names a repair.
+            "WORKER BASE MISMATCH: resolved base 'epic/x' (ddd) does not contain the task's start commit.".into(),
+        ]);
+        let sent = rows();
+        assert_eq!(sent.len(), 4, "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn failed at provision")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker shutdown: 1 stopped, 1 failed")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn base warning")), "{sent:?}");
+    }
+
     // -----------------------------------------------------------------------
     // cas-2702 (GH #58 / #59): the spawn-queue consumer must never wedge, and
     // every queued request must end in a launch or a supervisor-visible FAILED.
@@ -22491,7 +22705,7 @@ mod delivery_probe_tests;
 
 #[cfg(test)]
 #[path = "reminder_dispatch_tests.rs"]
-mod reminder_dispatch_tests;
+pub(crate) mod reminder_dispatch_tests;
 
 #[cfg(test)]
 #[path = "relay_retry_exhaustion_tests.rs"]

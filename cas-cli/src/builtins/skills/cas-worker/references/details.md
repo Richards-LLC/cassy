@@ -1,116 +1,85 @@
 # Details — Evidence, Sync and Resume
 
-- [Read-only evidence](#read-only-evidence)
-- [Requested sync](#requested-sync)
-- [Task fields](#task-fields)
-- [Resume state](#resume-state)
-- [Credentials and routing](#credentials-and-routing)
-- [Batch QA](#batch-qa)
-- [Worker peer lane](#worker-peer-lane)
-
 Read for a report/evidence task, a requested sync or a context-resume handoff.
 `ready` and `available` provide read-only backlog visibility — not self-dispatch.
-The task/coordination schemas supply exact fields and valid actions; use
-`cas-search` for exploratory retrieval and `rg` for exact code matches.
+Use `cas-search` for exploratory retrieval and `rg` for exact code matches.
 
 ## Read-only evidence
 
 Use task/search/coordination records, `.cas/logs`, Git and exported artifacts
 first. If insufficient, note the missing evidence, then snapshot the store with
-`sqlite3 <db> ".backup <path>"` into the configured task artifacts directory.
-Avoid copying a database, worktree or build cache into RAM-backed temporary
-storage; it competes with every session on the host. For live inspection use a
-read-only URI such as `file:/abs/path/to/.cas/cas.db?mode=ro`, never unrestricted
-SQLite access. Workers do not edit the shared database directly.
+`sqlite3 <db> ".backup <path>"` into the configured task artifacts directory,
+not RAM-backed temporary storage. For live inspection use a read-only URI such
+as `file:/abs/path/to/.cas/cas.db?mode=ro`. Workers never edit the shared database.
 
 The task artifacts directory is `[factory] artifacts_root/<project-key>/<task-id>/`;
 the assignment brief prints the exact path. Leave historical flat
-`<base>/<task-id>/` evidence in place: it stays readable, and its project
-ownership may be ambiguous.
+`<base>/<task-id>/` evidence in place.
 
 ## Requested sync
 
-Checkpoint dirty work as a commit, then `git rebase <branch>` onto the exact
-branch the supervisor named. Resolve conflicts or escalate the affected files.
-Use a commit instead of `git stash`: all worktrees share the stash stack.
-Choose the local or remote ref from current assignment evidence; do not assume
-their freshness. A frozen parked delivery stays on its original branch; a new
-assignment uses its own per-task branch from the target tip.
+Checkpoint dirty work as a commit (all worktrees share the stash stack), then
+`git rebase <branch>` onto the exact branch the supervisor named; resolve
+conflicts or escalate the affected files. A frozen parked delivery stays on its
+original branch; a new assignment uses its own per-task branch from the target tip.
 
 ## Task fields
 
-**`task`** — the task ID field is always `id` (NOT `task_id`, `taskId`, `_id`). Notes parameter is `notes` (plural, NOT `note`).
+The task ID field is always `id`; the notes parameter is `notes`.
 
 ```text
-# Start / show / close
 task action=start id=cas-abc1
-task action=show id=cas-abc1
 task action=close id=cas-abc1 reason="Implemented X, tests pass"
-
-# Progress notes (note_type ∈ progress|blocker|decision|discovery|question|platform_proof)
 task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
-
-# Mark blocked
-task action=update id=cas-abc1 status=blocked
-task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
 ```
 
-`platform_proof` is the note the close gate reads for `risk=platform`.
+`note_type` is one of progress, blocker, decision, discovery, question or
+`platform_proof`, which the close gate reads for `risk=platform`.
 
 ## Resume state
 
-Read task state with `action=show` or `action=start brief=true` after a context
-clear. Supplement milestone notes with bounded `state_patch` when useful:
+After a context clear, read task state with `action=show` or
+`action=start brief=true`. Supplement milestone notes with a bounded `state_patch`:
 
 ```text
 task action=update id=<task-id> state_patch='{"phase":"verify","receipts":[{"command":"python3 scripts/check.py","exit_status":0}],"files_touched":["scripts/check.py"],"next_step":"push branch"}'
 ```
 
-Fields are `phase`, `receipts` (`command`, `exit_status`), `files_touched`,
-`decisions`, `next_step`; `null` deletes a field. Use `id` for the task and
-`notes` for appended notes. `platform_proof` supplies non-Rust platform evidence.
+Fields are `phase`, `receipts`, `files_touched`, `decisions` and `next_step`;
+`null` deletes one.
 
 ## Credentials and routing
 
 For a database branch, ask the supervisor with `blocker=true`, task ID and
 reason. The supervisor writes `DATABASE_URL` to `.env.cas-db`; source it without
-printing or committing it. Workers do not create branches or hold Neon credentials.
-Load `task` and `coordination`. For an assigned QA-pass task, also load
-`verification` and record your verdict with `verification action=qa_record
-task_id=<delivery-id>` and the round's ledger. Recording closes the QA task;
-implementation-task close verification remains supervisor-owned.
-`server_start`/`server_list`/`server_stop` (owned servers only) are the assigned
-server exception, with `cas-servers`. `factory action=candidate_request
-task_id=<own-task> revision=<full-sha>` is the candidate exception; never ask the
-supervisor for a candidate the daemon can build, and never run Cargo for one. A refusal
-names why. Where the daemon cannot sandbox a build (not Linux, or no working `bwrap`),
-the refusal says so; then ask the supervisor, who runs `cas qa candidate build` directly.
-Fleet, merges, cleanup and database control
-belong to the supervisor even where the runtime exposes them.
+printing or committing it.
+For an assigned QA-pass task, load `verification` and record your verdict with
+`verification action=qa_record task_id=<delivery-id>` and the round's ledger;
+that closes the QA task. `server_start`/`server_list`/`server_stop` (owned
+servers only, with `cas-servers`) and `factory action=candidate_request
+task_id=<own-task> revision=<full-sha>` are the worker exceptions; never run
+Cargo for a candidate. Where the daemon cannot sandbox a build, its refusal says
+so; then ask the supervisor, who runs `cas qa candidate build`. Fleet, merges,
+cleanup and database control belong to the supervisor.
 
 Operational bugs use `cas config get issues.repo` and
 `issues.components.{cassy,violet,cloud}`. File in the matching tracker before
 moving on; CAS source bugs become in-repo fix tasks. With no tracker, record a
-task note. Use the supervisor's filing reference for public-safe reports.
-Put long evidence in the configured task artifacts directory; for peer proofs,
-follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs);
-message and note schemas enforce the traffic limits.
+task note. Put long evidence in the task artifacts directory; for peer proofs,
+follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs).
 
 ## Batch QA
 
 `qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
-Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
-A batch park defers evidence and opens no automatic per-task round, including
-when older waived rounds exist. Capture visual before/after evidence while
-building. The supervisor owns the release's one epic-tip candidate, shared PASS ledger
-and `verification action=batch_receipt` listing delivery anchors. Close deferred
-deliveries after that receipt exists; "waiting for batch receipt" is a pending
-obligation. Explicit `qa_request` reviews remain available.
+A batch park defers evidence and opens no per-task round. Capture visual
+before/after evidence while building. The supervisor owns the release's one
+epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`;
+deferred deliveries close after that receipt, so "waiting for batch receipt" is
+a pending obligation. Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane
 
-- Worker peer lane: `coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
-  reaches only a registered worker in the same factory session. Cassy also sends a copy
-  to that session's supervisor. Use this narrow lane for collision
-  warnings, not general chat or cross-session contact; send task status, blockers
-  and handoffs to `target=supervisor`.
+`coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
+reaches only a registered worker in the same factory session, and Cassy copies
+it to that session's supervisor. Use it only for collision warnings; send status,
+blockers and handoffs to `target=supervisor`.

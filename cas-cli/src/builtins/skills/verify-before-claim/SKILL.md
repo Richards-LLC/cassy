@@ -19,7 +19,7 @@ Every claim in a close reason or note carries exactly one verdict; "looks good",
 
 ## Proof ladder
 
-Climb as far as the blast radius demands and name the rung you reached: **1. read** (diff, `rg` wiring hits, typecheck) → **2. targeted test** of the changed path → **3. integration or real run** (the actual binary, script, endpoint or suite) → **4. user-path walk** (the journey driven end to end, per `cas-qa-craft`). Docs and one-file local edits stop at rung 1; shared code, config, schema and `pub` API need rung 3; user-facing paths need rung 4. A `risk=blast-radius` claim below rung 3 on any `proof_targets` entry is NOT VERIFIED.
+Climb as far as the blast radius demands and name the rung you reached: **1. read** (diff, `rg` wiring hits, typecheck) → **2. targeted test** of the changed path → **3. integration or real run** (the actual binary, script, endpoint or suite) → **4. user-path walk** (the journey driven end to end, per `cas-qa-craft`). Docs and one-file local edits stop at rung 1; shared code, config, schema and `pub` API need rung 3; user-facing paths reach rung 4 in batch QA. A `risk=blast-radius` claim below rung 3 on any `proof_targets` entry is NOT VERIFIED.
 
 Test count is never evidence; the one regression that fails without the fix is ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)).
 
@@ -39,7 +39,7 @@ For a Rust change, the factory worker proof under `cas-worker/references/discipl
 - Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit, or the exact runtime denial if execution is deferred.
 - Any non-Rust suite the change touches, with its passed count.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
 
 ## The Four-Step Protocol
 
@@ -92,7 +92,11 @@ If a proof failed or a claim is INCONCLUSIVE, do not close. Go back to the worke
 | "Tests pass" (factory worker, Rust) | Tests written or updated and committed, plus the worker proof above; targeted runs have nonzero receipts, and the full suite follows the ownership rule above (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
 | "Tests pass" (non-Rust) | Affected targeted tests with a nonzero passed count; the full suite follows the ownership rule above |
 | "Tests pass" (supervisor / non-factory, Rust) | `cargo test [--lib --test --workspace]` against the relevant scope |
+<!-- cas-src:begin -->
 | "Build is clean" (supervisor / non-factory) | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
+<!-- cas-src:else -->
+| "Build is clean" (supervisor / non-factory) | The project's build command for the touched packages; `cargo build` (`--workspace` for `pub` type changes) in a Rust project |
+<!-- cas-src:end -->
 | "Script runs end-to-end" | The actual script invocation, with the expected input |
 | "New CLI subcommand works" | `<binary> <subcommand> [args]` against a freshly built binary (supervisor / non-factory for Rust binaries) |
 | "Endpoint returns 200" | `curl -fsS` against a running server, OR an integration test |

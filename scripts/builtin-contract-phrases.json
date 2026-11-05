@@ -117,6 +117,18 @@
         {
           "text": "Phase outcome met (plan metric receipt)",
           "reason": "Audit finding 6: the exit ladder requires measured outcome evidence."
+        },
+        {
+          "text": "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "Cassy glitches: reassign/replace workers, file; skip 'go'.",
+          "reason": "Operator directive: a Cassy-caused hold is routed around and filed; only genuine policy calls reach the operator."
         }
       ],
       "absent": [
@@ -303,6 +315,14 @@
         {
           "text": "cite the plan section and its metric receipt at close",
           "reason": "Audit finding 13: workers report the governing outcome alongside task completion."
+        },
+        {
+          "text": "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
         }
       ],
       "absent": [
@@ -611,6 +631,10 @@
         {
           "text": "../../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "Run the tests that cover the code you touched",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): a worker's proof is the tests covering the code it touched."
         }
       ],
       "absent": [
@@ -661,6 +685,10 @@
         {
           "text": "--lib <module>",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "every integration harness that calls it",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): this phrase ordered integration suites and eval fixtures for one-file changes."
         }
       ],
       "any_of": []
@@ -788,6 +816,10 @@
         {
           "text": "## Fewest tests",
           "reason": "Keep the canonical Fewest tests principle at the anchor its citations link to."
+        },
+        {
+          "text": "replays the real incident",
+          "reason": "cas-97c4: a bug fix's red test replays the real incident; four deliveries passed their own fixtures and failed the real replay."
         }
       ],
       "absent": [],
@@ -3282,8 +3314,8 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
         },
         {
-          "text": "one full assembly gate run",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+          "text": "single full-suite run",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): the epic's one full-suite run is on the tree that lands, skipped when the queue or CI already ran it."
         },
         {
           "text": "system action=preflight",
@@ -3292,6 +3324,10 @@
         {
           "text": "Phase outcome met (plan metric receipt)",
           "reason": "Audit finding 6: completion requires a plan metric receipt."
+        },
+        {
+          "text": "never name suites or evals",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): 84% of wasted worker test minutes came from supervisor acceptance naming suites or evals."
         }
       ],
       "absent": [
@@ -4864,6 +4900,39 @@
           "reason": "Do not force rebuild/reconnect for an unknown source comparison."
         }
       ],
+      "any_of": []
+    },
+    "skills/finish/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/finish/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "at most 10 minutes",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "one line per worker",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "`[NOT PUSHED:",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "refs/cas/rescue/",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "Do not report the session finished while any worker",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        }
+      ],
+      "absent": [],
       "any_of": []
     }
   },

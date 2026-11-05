@@ -7,10 +7,33 @@ const SEND_LEASE_SECS: i64 = 120;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerSendError {
+    #[error("build route peer {0} is in its 90-second routing cooldown")]
+    BuildRouteCooldown(String),
     #[error("peer supervisor {0} has no receiving factory daemon")]
     NoReceivingDaemon(String),
     #[error("{cause}{retry}")]
     Failed { cause: String, retry: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("build route peer {0} is in its routing cooldown")]
+struct BuildRouteCooldown(String);
+
+pub(crate) fn build_route_recent_peers(root: &Path, since: i64) -> Result<std::collections::HashSet<String>, String> {
+    let read = || -> anyhow::Result<_> {
+        let conn = connection(root)?;
+        let mut query = conn.prepare("SELECT DISTINCT json_extract(payload,'$.recipient_agent_id') FROM peer_message_outbox WHERE created_at>?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%'")?;
+        Ok(query.query_map([since], |row| row.get::<_, String>(0))?.collect::<Result<std::collections::HashSet<_>, _>>()?)
+    };
+    read().map_err(|error| error.to_string())
+}
+
+pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<(), String> {
+    let cancel = || -> anyhow::Result<()> {
+        connection(root)?.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
+        Ok(())
+    };
+    cancel().map_err(|error| error.to_string())
 }
 
 impl From<PeerSendError> for String {
@@ -39,8 +62,20 @@ fn connection(root: &Path) -> anyhow::Result<Connection> {
 
 pub(super) fn enqueue_and_send(
     root: &Path,
-    mut message: PeerSend,
+    message: PeerSend,
     recipient: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, false)
+}
+
+/// Publication may re-attempt an abandoned receipt after the peer recovers.
+/// Keep the original logical send key; ordinary messages retain their policy.
+pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, true)
+}
+
+fn enqueue_with_recovery(
+    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
     http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
@@ -55,19 +90,30 @@ pub(super) fn enqueue_and_send(
         let mut conn = connection(root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !message.dedupe_key.is_empty() {
-            let existing: Option<(i64, Option<String>)> = tx.query_row(
-                "SELECT id,cloud_id FROM peer_message_outbox
+            let existing: Option<(i64, Option<String>, String)> = tx.query_row(
+                "SELECT id,cloud_id,state FROM peer_message_outbox
                  WHERE sender_agent_id=?1
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
                 params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
-            if let Some(existing) = existing {
-                return Ok(existing);
+            if let Some((id, cloud_id, state)) = existing {
+                if recover_abandoned && state == "abandoned" && cloud_id.is_none() {
+                    let now = chrono::Utc::now().timestamp();
+                    tx.execute("UPDATE peer_message_outbox SET state='pending',created_at=?2,next_attempt_at=?2,last_error=NULL WHERE id=?1 AND state='abandoned'", params![id,now])?;
+                    tx.commit()?;
+                }
+                return Ok((id, cloud_id));
             }
         }
         let now = chrono::Utc::now().timestamp();
+        if message.dedupe_key.starts_with("build-route:") {
+            // The same immediate transaction selects the slot and persists
+            // the ask: concurrent spawns cannot consume one peer twice.
+            let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peer_message_outbox WHERE created_at>?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%' AND json_extract(payload,'$.recipient_agent_id')=?2)", params![now - 90, message.recipient_agent_id], |row| row.get(0))?;
+            if occupied { return Err(BuildRouteCooldown(recipient.into()).into()); }
+        }
         tx.execute("INSERT INTO peer_message_outbox(sender_agent_id,sender_name,sender_session,recipient,payload,created_at,next_attempt_at) VALUES (?1,?2,?3,?4,'',?5,?5)",
             params![sender.id,sender.name,sender.factory_session,recipient,now])?;
         let id = tx.last_insert_rowid();
@@ -90,7 +136,11 @@ pub(super) fn enqueue_and_send(
         tx.commit()?;
         Ok((id, None))
     })();
-    let (id, sent) = result.map_err(|e| failed(e, None))?;
+    let (id, sent) = result.map_err(|error| {
+        if let Some(cooldown) = error.downcast_ref::<BuildRouteCooldown>() {
+            PeerSendError::BuildRouteCooldown(cooldown.0.clone())
+        } else { failed(error, None) }
+    })?;
     if let Some(id) = sent {
         return Ok(SendReceipt { id, status: "duplicate".into() });
     }
@@ -249,4 +299,54 @@ fn notify_abandoned(
 ) -> anyhow::Result<()> {
     queue.notify_peer_send_abandoned(sender, name, session, id, recipient, cause)?;
     Ok(())
+}
+
+/// One ask this supervisor sent a peer that no peer reply answers yet
+/// (cas-bddf9).
+#[derive(Debug, Clone)]
+pub struct OpenPeerAsk {
+    /// Cloud peer message id; absent while the ask is still queued.
+    pub cloud_id: Option<String>,
+    pub recipient: String,
+    pub body: String,
+}
+
+/// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
+/// `sender_agent_id` in the last `window_secs` that no delivered peer reply
+/// answers: a reply naming it with `in_reply_to` whose kind is not a
+/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
+/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
+/// the peer.
+pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
+    let Ok(conn) = connection(root) else {
+        return Vec::new();
+    };
+    let since = chrono::Utc::now().timestamp() - window_secs;
+    let Ok(mut statement) = conn.prepare(
+        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body')
+         FROM peer_message_outbox o
+         WHERE o.sender_agent_id = ?1 AND o.created_at >= ?2 AND o.state != 'abandoned'
+           AND (json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
+                OR json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"blocker\"/>%')
+           AND (o.cloud_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM prompt_queue q
+                WHERE q.source LIKE 'peer:%'
+                  AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
+         ORDER BY o.id",
+    ) else {
+        return Vec::new();
+    };
+    statement
+        .query_map(params![sender_agent_id, since], |row| {
+            Ok(OpenPeerAsk {
+                cloud_id: row.get(0)?,
+                recipient: row.get(1)?,
+                body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
 }

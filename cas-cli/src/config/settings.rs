@@ -871,6 +871,12 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch_root: Option<String>,
 
+    /// cas-fee3: the project's cheap local gate (lint plus touched tests, for
+    /// example `pnpm ci:local`) that a worker's push runs before any CI run.
+    /// Unset runs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_local_gate: Option<String>,
+
     /// Operator-only automatic supervisor replies in local history. Terminal
     /// questions and explicit operator messages are recorded separately. This
     /// does not enroll a cloud audience. Set false to opt out; re-enabling
@@ -965,6 +971,11 @@ pub struct FactoryConfig {
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
+
+    /// Route spawned build tasks to a fresh same-account, same-repository
+    /// peer when local admission is saturated. Disable to release routes.
+    #[serde(default = "default_true")]
+    pub auto_route_builds: bool,
 
     /// Host pressure and load fallback thresholds for build admission.
     #[serde(default)]
@@ -1310,6 +1321,7 @@ impl Default for FactoryConfig {
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
             scratch_root: None,
+            worker_local_gate: None,
             commander_mirror_enabled: true,
             design_review_bug_threshold: default_design_review_bug_threshold(),
             design_review_window_hours: default_design_review_window_hours(),
@@ -1325,6 +1337,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,
             render_max_fps: default_render_max_fps(),

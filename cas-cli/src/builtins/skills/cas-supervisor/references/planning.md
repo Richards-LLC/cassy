@@ -4,44 +4,40 @@
 
 Before work is assigned:
 
-- **SRP enforcement** — Split tasks with more than one responsibility; "and" in a task description is a red flag
-- **Dependency ordering** — Sequence tasks so no worker blocks on unfinished work
-- **Scope lock** — Task brief is frozen at assignment; link the plan section and its metric so workers can check plan fit without expanding scope unilaterally
+- **SRP** — split a task with more than one responsibility; "and" in a task description is a red flag.
+- **Dependency ordering** — sequence tasks so no worker blocks on unfinished work.
+- **Scope lock** — the brief freezes at assignment; link the plan section and its metric so workers can check plan fit without expanding scope.
 
 ## Trajectory Gate
 
-Before finalizing EPIC scope, multi-task plans, or architectural decisions, explicitly assess trajectory questions — not just immediate correctness:
+Before finalizing EPIC scope, a multi-task plan or an architectural decision, assess trajectory, not just immediate correctness:
 
-- **Scalability** — does this approach hold up at 10x volume, users, code size, or complexity? Name the breaking point if there is one.
-- **Lock-in** — does this commit us to a direction that's hard to reverse? Call out any one-way doors.
-- **Production failure mode** — what breaks in production, how is it detected, and how does the on-call engineer recover?
-- **Six-month direction** — given what we know about where the project is heading, does this move us toward or away from that destination?
-- **Known traps** — check project memories and prior incidents for patterns this decision might repeat.
+- **Scalability** — does it hold at 10x volume, users, code size or complexity? Name the breaking point.
+- **Lock-in** — call out any one-way doors.
+- **Production failure mode** — what breaks, how is it detected, how does on-call recover?
+- **Six-month direction** — does this move toward or away from where the project is heading?
+- **Known traps** — check memories and prior incidents for a pattern this repeats.
 
-Surface the trajectory assessment in-line even when the answer is "no concerns" — the fact that you thought about it is part of the value. Do not skip this gate for "small" decisions that accumulate into architecture.
+State the assessment in-line even when the answer is "no concerns"; small decisions accumulate into architecture.
 
 ## Spec Requirements
 
-Every task spec must include:
+Every task spec includes:
 
-- **Acceptance criteria first** — Worker receives "what done looks like" before "how to build it"
-- **Interface definition** — Inputs, outputs, and error states defined explicitly
-- **Layer boundary** — Which files/modules the worker owns and must not touch outside of; boundary violation is a rejection condition
-- **Explicit non-goals** — What the task deliberately does NOT do, stated to prevent scope creep
-- **Test guidance** — Name the behaviour each test must catch; the error path only when the change touches it. Ask for the [fewest tests](../../cas-tdd/SKILL.md#fewest-tests), a few that each prove one behaviour: never a scenario list, a test count or a fixture per case.
-- **Evidence-source plan** — For report/investigation/evidence tasks, explicitly name the MCP/log/recording/task-record sources the worker should use. Treat live `.cas/cas.db` access as an exception: only require it when safer surfaces are insufficient, and then specify read-only URI or copied-snapshot access.
+- **Acceptance criteria first** — what done looks like before how to build it.
+- **Interface definition** — inputs, outputs and error states.
+- **Layer boundary** — the files or modules the worker owns; a breach is a rejection.
+- **Explicit non-goals** — what the task deliberately does not do.
+- **Test guidance** — name the behaviour each test must catch, and the error path only when the change touches it. Ask for the [fewest tests](../../cas-tdd/SKILL.md#fewest-tests): never a scenario list, a test count or a fixture per case.
+- **Evidence-source plan** — for report or investigation tasks, name the MCP, log, recording or task-record sources. Require live `.cas/cas.db` access only when safer surfaces are insufficient, and then read-only or from a copied snapshot.
 
-**Task-description specificity (observed 2026-08-11):** Bad: `Improve issue intake (GH #221).`
-Good: `Codex workers receive a task but remain idle; instrument the wake path and prove a delivered message surfaces a turn (GH #224).`
-State the symptom, failing surface, and repro/observable; a title restatement leaves the worker to rediscover the assignment.
+State the symptom, failing surface and observable. Bad: `Improve issue intake (GH #221).` Good: `Codex workers receive a task but remain idle; instrument the wake path and prove a delivered message surfaces a turn (GH #224).`
 
-For EPIC subtasks specifically, shape the spec prose using the Implementation Unit Template below. `Spec Requirements` enumerates *what must be present*; the template specifies *how the prose is shaped*.
+EPIC subtasks shape this content with the Implementation Unit Template below.
 
 ## Implementation Unit Template
 
-Every EPIC subtask (`task_type=task` or `task_type=feature` that is a child of an EPIC) uses this template as the canonical shape of its `description` + companion fields. The goal is predictable structure a worker can parse in five seconds. Standalone bugs, chores, and spikes stay freeform — spike deliverables are *understanding*, not implementation, so the template does not fit.
-
-Canonical template:
+Use it for every EPIC child (`task_type=task` or `feature`) so a worker can parse the brief in five seconds. Standalone bugs, chores and spikes stay freeform; fields may be `N/A` or omitted.
 
 ```markdown
 - [ ] **Unit N: [Name]**
@@ -60,19 +56,7 @@ Canonical template:
 **Verification:** Observable outcomes when complete
 ```
 
-Field purposes (write decisions, not code — "Approach" is 1–3 sentences of sequencing and design choice, not a diff sketch; "Files" lists paths only):
-
-- **Goal** — one sentence the worker can restate back to you. If you can't state it in one sentence, the unit is too big.
-- **Requirements** — stable R-IDs from the linked brainstorm doc at `docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md`. Convention only, no new field. Omit when no brainstorm exists.
-- **Dependencies** — hard blockers go in `blocked_by`; soft ordering or "after X lands" notes stay as prose.
-- **Files** — the layer boundary from Spec Requirements, as paths.
-- **Approach** — the sequencing or design decision already made. Not a code sketch, not a pseudocode draft. If you find yourself writing pseudocode, you are doing the worker's job.
-- **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. Never use `characterization-first` on behaviour the plan replaces; use it only to protect what stays. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
-- **Patterns to follow** — pointer to existing code or a prior commit the worker should mirror. Reduces stylistic drift.
-- **Test scenarios** — the Spec Requirements test guidance: one scenario per changed behaviour.
-- **Verification** — observable outcome. What can be demonstrated when done. Maps to `demo_statement`.
-
-EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can be `N/A` or omitted when not applicable.
+Write decisions, not code: the Goal is one sentence the worker can restate, and Approach is 1–3 sentences of design choice, never pseudocode. Requirements are stable R-IDs from `docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md`. Never use `characterization-first` on behaviour the plan replaces; use it only to protect what stays. `additive-only` refuses close on any modified file, and `value-only` permits edits to existing values only; omit the field for broader edits.
 
 | Template field | Maps to |
 |---|---|
@@ -89,63 +73,37 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 
 ## Assignment Checks
 
-- **Agent-task fit** — Right capability for the job; no generalist on specialist work
-- **Context injection** — Send only needed context; link the plan section and its metric in the brief, and withhold irrelevant info to prevent scope bleed
-- **Contract handoff** — Worker reads the acceptance criteria and accepts the assignment with a successful `task action=start`; no prose ACK is required
+- **Agent-task fit** — the right lane for the job ([model-selection.md](model-selection.md)).
+- **Context injection** — link the plan section and its metric in the brief; withhold what the task does not need.
+- **Contract handoff** — a successful `task action=start` accepts the assignment; no prose ACK.
 
 ## Review Gates
 
-Supervisor has rejection authority. Work is sent back with specific, actionable reasons.
+You have rejection authority. Every rejection names the gate that failed, the code or file, and what must change: "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split it", not "SRP violation".
 
-- **Fewest tests** — Each changed behaviour has one test that fails without the change ([Fewest tests](../../cas-tdd/SKILL.md#fewest-tests)); they run once at the Phase 4 final gate. Near-duplicates, matrices, restated implementation, sleeps and retry-wrapped flakes are findings; read the merge request's line delta.
-- **DRY violation scan** — Duplication flagged and sent back; "clean up later" is not accepted
-- **SRP violation scan** — Multi-responsibility modules or functions are sent back
-- **Layer breach** — Work outside declared boundary is automatic rejection
-- **Interface compliance** — Output matches the declared interface exactly; surprises are rejected
-- **Config compliance** — No magic numbers or hardcoded values that should be configurable
-- **Flag obvious SOLID violations** — with specifics; don't rubber-stamp "SOLID compliance verified"
-- **Verify, don't trust** — Read the actual diff and delivery evidence before accepting. Worker self-reports are inputs, not verdicts.
-- **Rejection format** — Every rejection names: (1) which gate failed, (2) the specific code/file, (3) what needs to change. "SRP violation" alone is not actionable; "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split into two functions" is.
-- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): read the diff against the task spec and acceptance criteria, check ownership boundaries, contracts, lane CI, and receipts, and record a verification receipt. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once for cross-task integration, and a merge queue that runs the full suite on the merged tree is that gate. Do not dispatch a separate review workflow or require worker-supplied review output.
-
-## Ongoing Discipline
-
-- **Pattern consistency** — New work matches established conventions; deviations require explicit justification
-- **Debt tagging** — Log deliberate shortcuts with reason and remediation plan; unlogged shortcuts are violations
-- **Search before planning** — see [workflow.md Phase 1](workflow.md#phase-1-plan).
+- **Fewest tests** — each changed behaviour has one test that fails without the change ([Fewest tests](../../cas-tdd/SKILL.md#fewest-tests)); they run once at the Phase 4 final gate. Near-duplicates, matrices, restated implementation, sleeps and retry-wrapped flakes are findings; read the line delta.
+- **DRY, SRP and layer breaches** — sent back, never "clean up later"; work outside the declared boundary is rejected.
+- **Interface and config compliance** — output matches the declared interface; no magic numbers that should be configurable.
+- **Verify, don't trust** — read the diff and delivery evidence; worker self-reports are inputs, not verdicts.
+- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): the diff against the spec and acceptance criteria, ownership, contracts, lane CI and receipts. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once, and a CI run of the full suite on the merged tree is that gate. Do not dispatch a separate review workflow or require worker-supplied review output.
 
 ## EPIC Sizing
 
-5–12 subtasks per EPIC is the sweet spot. Below 5 usually means the tasks are too coarse (split further). Above 12, consider splitting into phases — each phase is its own EPIC with a clear handoff boundary.
+5–12 subtasks per EPIC. Fewer usually means tasks are too coarse; more means split into phases, each its own EPIC with a clear handoff. Run 3–4 parallel workers for most EPICs, matched to independent file groups; beyond 4, coordination costs outweigh throughput.
 
-Practical worker limits: 3–4 parallel workers for most EPICs. Beyond 4, coordination overhead (merge conflicts, sync messages, context injection) dominates over throughput gains. Match worker count to independent file groups, not task count.
+| Pattern | Shape | Cassy fields |
+|---|---|---|
+| Chain | A → B → C | `dep_add id=B to_id=A dep_type=blocks` |
+| Fan-out | A → {B, C, D} → E | B/C/D each `blocked_by=A`; E `blocked_by=B,C,D` |
+| Independent | {A, B, C} | no `blocked_by` |
 
-**Dependency patterns:**
+## Task Breakdown
 
-| Pattern | Shape | When to use | Cassy fields |
-|---|---|---|---|
-| Chain | A → B → C | Sequential work where each step needs the prior output | `dep_add id=B to_id=A dep_type=blocks` |
-| Fan-out | A → {B, C, D} → E | Independent tasks after a shared setup, converging at a gate | B/C/D each `blocked_by=A`; E `blocked_by=B,C,D` |
-| Independent | {A, B, C} | No dependencies — maximum parallelism | No `blocked_by` needed |
+Prefer tracer-bullet vertical slices (adapted from mattpocock/skills `to-tickets`, MIT © 2026 Matt Pocock): each task cuts a narrow, complete path through the affected layers, is demoable on its own and fits one fresh worker context. Give tasks only their genuine blocking edges.
 
-Fan-out is the most common pattern for EPICs with 3+ workers: one setup/spike task fans out into parallel implementation tasks, then a final integration task gates on all of them.
+For a mechanical, codebase-wide change that cannot land green as a slice, use **expand–contract**: add the new form beside the old, migrate call sites in blast-radius-sized batches blocked by the expansion, then remove the old form after every batch lands. Keep the dependencies in Cassy tasks.
 
-## Task Breakdown Guidelines
-
-## Vertical slices and wide refactors
-
-Adapted from mattpocock/skills `to-tickets`, MIT © 2026 Matt Pocock. Prefer tracer-bullet vertical slices: each task cuts a narrow but complete path through the affected layers, is independently demoable or verifiable, and fits one fresh worker context. Give every task only its genuine blocking edges and work the unblocked frontier.
-
-For a mechanical, codebase-wide change that cannot land green as a vertical slice, use **expand–contract** instead: first add the new form beside the old; then migrate call sites in blast-radius-sized batches, each blocked by expansion; finally remove the old form only after every migration batch completes. Preserve Cassy task dependencies with `task`; never substitute external tracker or scratch-file workflows.
-
-When breaking an epic into subtasks, apply these patterns:
-
-**Demo statements** — Every subtask must have a `demo_statement` describing what can be demonstrated when complete. Example: `demo_statement="User types a query and results filter live"`. If a task has no demo-able output, it may be a horizontal slice — restructure it into a vertical slice that delivers observable value.
-
-**Spikes** — If a task's primary output is understanding (not code), create it as a spike: `task_type=spike`. Spikes have question-based acceptance criteria (e.g., "Which auth library fits our constraints?") and produce a decision or recommendation, not implementation.
-
-**Gates** — If a task represents a promotion, rollout, flag flip, or sign-off decision owned by the supervisor, create it as a gate: `task_type=gate`. Start the gate yourself, record the outcome with `task action=notes note_type=decision`, then close it without borrowing commit evidence. An open gate can block downstream tasks through `blocked_by` like any other task.
-
-**Fit checks** — When multiple approaches exist, create a spike first to compare options. Document the comparison in the spec's `design_notes` before committing to an approach. This prevents wasted implementation effort on the wrong path.
-
-**Model lane** — Decide each task's worker lane while breaking down: default standard; tag deviations with `labels="tier:light"` / `"tier:taste"` / `"tier:heavy"` and note non-obvious rationale in `design`. Registry lane rubric, spawn mix, and escalation workflow in [model-selection.md](model-selection.md).
+- **Demo statements** — every subtask has a `demo_statement`, e.g. `demo_statement="User types a query and results filter live"`. A task with nothing to demo is probably a horizontal slice; restructure it.
+- **Spikes** — when the output is understanding, use `task_type=spike` with question-based acceptance criteria and a decision as the deliverable. Compare competing approaches in a spike before implementing one.
+- **Gates** — a promotion, rollout, flag flip or sign-off you own is `task_type=gate`: start it, record the outcome with `task action=notes note_type=decision`, then close it without commit evidence.
+- **Model lane** — tag each task's lane at breakdown; see [model-selection.md](model-selection.md). Search before planning: [workflow.md Phase 1](workflow.md#phase-1-plan).

@@ -239,6 +239,8 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
     }
 }
 
+/// cas-73f7: also with this sender pair's hourly wake cap already spent, as on
+/// prowl at 9:24 AM ET Nov 5; the cap holds status chatter, never these.
 async fn action_wakes(kind: &str) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = peer_fixture().await;
@@ -246,6 +248,15 @@ async fn action_wakes(kind: &str) {
     message.body = format!("<cas-peer-intent kind=\"{kind}\"/>\nPlease coordinate.");
     let report = import(&daemon, vec![message]);
     age_imported(&daemon);
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let row = queue.queued_prompt(report.admitted[0]).unwrap().unwrap();
+    let peer = crate::cloud::peer_mailbox::parse_envelope(&row.prompt).unwrap();
+    let pair = format!("cloud:{}:{}", peer.repo, peer.sender_agent_id);
+    let spent = Utc::now() - chrono::Duration::minutes(10);
+    for lead in 0..6 {
+        crate::supervisor_message_wakes::record(daemon.app.cas_dir(), 900_000 + lead,
+            daemon.app.supervisor_name(), std::slice::from_ref(&pair), spent, spent).unwrap();
+    }
     daemon.process_prompt_queue().await.unwrap();
     super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
@@ -258,6 +269,57 @@ async fn action_wakes(kind: &str) {
         cas_store::WakeAttempt::Fired,
         "{delivery:?}"
     );
+}
+
+/// cas-73f7: replay prompt_queue 4226945. The supervisor's turn was running
+/// when prowl's ask came due, so the gate declined it; the turn then ended,
+/// but the idle Claude pane kept repainting (a background task), so the 2 s
+/// silence bar never cleared and the ask sat 76 s until an unrelated turn.
+/// The decline must come back within 30 s and wake on the ended turn.
+#[tokio::test(flavor = "current_thread")]
+async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73f7() {
+    use std::time::{Duration, Instant};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = peer_fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let name = daemon.app.supervisor_name().to_string();
+    let mut turn = vec![
+        r#"{"type":"user","timestamp":"2026-11-05T14:35:18Z","message":{"role":"user","content":"<task-notification>review finished</task-notification>"}}"#.to_string(),
+        r#"{"type":"assistant","timestamp":"2026-11-05T14:35:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_73f7","name":"mcp__cas__coordination","input":{"action":"inbox_poll"}}],"stop_reason":"tool_use"}}"#.to_string(),
+        r#"{"type":"user","timestamp":"2026-11-05T14:35:20Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_73f7","content":"none"}]}}"#.to_string(),
+    ];
+    let transcript = super::queue_and_events::reminder_dispatch_tests::write_agent_transcript(
+        root.path(), &cas, "local-sup", &turn);
+    let mut ask = peer_message("pm-4226945", false);
+    ask.body = crate::cloud::peer_mailbox::attach_message_intent("wake test from prowl", Some("ask"), false).unwrap();
+    let id = import(&daemon, vec![ask]).admitted[0];
+    age_imported(&daemon);
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    // Mid-turn and repainting: declined, nothing typed.
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
+    daemon.process_prompt_queue().await.unwrap();
+    super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+    let declined = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_ne!(declined.wake_attempt, cas_store::WakeAttempt::Fired, "{declined:?}");
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    let recheck: String = rusqlite::Connection::open(cas.join("cas.db")).unwrap()
+        .query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?", [id], |row| row.get(0)).unwrap();
+    let recheck = chrono::DateTime::parse_from_rfc3339(&recheck).unwrap();
+    assert!(recheck <= Utc::now() + chrono::Duration::seconds(30), "decline rechecks within 30 s, not {recheck}");
+    // The turn ends; the pane keeps repainting. The recheck comes due.
+    turn.push(r#"{"type":"assistant","timestamp":"2026-11-05T14:35:23Z","message":{"role":"assistant","content":[{"type":"text","text":"Nothing needs you yet."}],"stop_reason":"end_turn"}}"#.to_string());
+    std::fs::write(&transcript, turn.join("\n") + "\n").unwrap();
+    rusqlite::Connection::open(cas.join("cas.db")).unwrap()
+        .execute("UPDATE prompt_queue SET next_attempt_at=? WHERE id=?",
+            rusqlite::params![Utc::now().to_rfc3339(), id]).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..3 {
+        daemon.pane_silent_since.insert(name.clone(), Instant::now());
+        daemon.process_prompt_queue().await.unwrap();
+        super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+    }
+    let woke = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(woke.wake_attempt, cas_store::WakeAttempt::Fired, "{woke:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -415,7 +477,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         );
     }
     // pin: every shipped supervisor contract must describe the real peer wake policy above.
-    let peer_policy = "Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn.";
+    let peer_policy = "Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.";
     let root = tempfile::tempdir().unwrap();
     let queue = crate::store::open_prompt_queue_store(root.path()).unwrap();
     for (harness, cli) in [

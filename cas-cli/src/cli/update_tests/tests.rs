@@ -710,6 +710,45 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     }
 }
 
+/// cas-3199: every account links `skills` to its shared base, and personal
+/// skills outrank project skills, so a finish-only base refresh froze the
+/// whole fleet at Oct 27 (stale worker body, missing references).
+#[test]
+fn shared_bases_receive_the_full_builtin_catalog_cas_3199() {
+    use cas_mux::SupervisorCli;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home();
+    let worker = "skills/cas-worker/SKILL.md";
+    for (harness, base, account) in [
+        (SupervisorCli::Claude, ".cas/claude-base", ".claude-named@example.com"),
+        (SupervisorCli::Codex, ".cas/codex-base", ".codex-named@example.com"),
+    ] {
+        let catalog = crate::builtins::skill_catalog_for_harness(harness);
+        let current = catalog.iter().find(|file| file.path == worker).unwrap().content;
+        let stale = home.join(base).join(worker);
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, current.replace("Phase references", "Stale heading")).unwrap();
+        // An account profile reads its skills through the shared base.
+        let account = home.join(account);
+        std::fs::create_dir_all(&account).unwrap();
+        std::os::unix::fs::symlink(home.join(base).join("skills"), account.join("skills")).unwrap();
+    }
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(true), || Ok(())));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    for (harness, base, account) in [
+        (SupervisorCli::Claude, ".cas/claude-base", ".claude-named@example.com"),
+        (SupervisorCli::Codex, ".cas/codex-base", ".codex-named@example.com"),
+    ] {
+        let parity = crate::builtins::install_parity_for_harness(harness, &home.join(base));
+        assert!(parity.missing.is_empty() && parity.stale.is_empty(), "{base}: {parity:?}");
+        let row = receipt["finish_accounts"].as_array().unwrap().iter()
+            .find(|row| row["path"] == home.join(base).to_str().unwrap()).unwrap();
+        assert_eq!(row["full_catalog"], true, "{row}");
+        assert!(home.join(account).join("skills/cas-worker/references/recovery.md").is_file());
+    }
+}
+
 #[test]
 fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -3406,6 +3445,59 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
             assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
         }
     }
+}
+
+/// cas-3199: gabber's frozen state. v3.82.0 retired four catalog paths, but the
+/// uncommitted managed `.gitignore` block from Cassy's own v3.81.0 sync still
+/// lists them; that earlier write must be repaired, not read as a user edit.
+/// A real edit still blocks, and fails loudly in the sweep and at SessionStart.
+#[test]
+fn retired_cassy_ignore_lines_are_repaired_and_real_conflicts_fail_cas_3199() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let mut args = update_test_args();
+    args.sync = true;
+    let (result, _) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    cas_6718_git(&project, &["add", "-A"]);
+    cas_6718_git(&project, &["commit", "-qm", "commit Cassy's managed block", "--allow-empty"]);
+    let retired = [
+        "skills/cas-release-report/references/default-tokens.json",
+        "skills/cas-release-report/scripts/check-pdf.py",
+        "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+    ];
+    let lines: Vec<_> = [".claude", ".grok", ".opencode"].iter()
+        .flat_map(|dir| retired.iter().map(move |path| format!("/{dir}/{path}")))
+        .collect();
+    let gitignore = project.join(".gitignore");
+    let committed = std::fs::read_to_string(&gitignore).unwrap();
+    assert!(!lines.iter().any(|line| committed.lines().any(|l| l == line)), "fixture paths must be retired");
+    let end = crate::builtins::BUILTIN_GITIGNORE_END;
+    let with_block_lines = |extra: &[String]| committed.replace(end, &format!("{}\n{end}", extra.join("\n")));
+    std::fs::write(&gitignore, with_block_lines(&lines)).unwrap();
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+    assert_eq!(receipt["managed_files"]["conflicts"], serde_json::json!([]), "{receipt}");
+    assert_eq!(std::fs::read_to_string(&gitignore).unwrap(), committed);
+
+    let user_line = vec!["/user-owned-output".to_string()];
+    std::fs::write(&gitignore, with_block_lines(&user_line)).unwrap();
+    let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(true), &root, false));
+    let ProjectPhase::Failed(reason) = phase else { panic!("a skipped sync must fail: {phase:?}") };
+    assert!(reason.contains(".gitignore"), "{reason}");
+    let banner = crate::hooks::handlers::session_hygiene::build_session_start_managed_conflict_banner_sized(&root)
+        .expect("SessionStart must report the blocked sync");
+    assert!(banner.full.contains("  ! .gitignore\n"), "{}", banner.full);
+    std::fs::write(&gitignore, &committed).unwrap();
+    let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(true), &root, false));
+    assert!(!phase.failed(), "{phase:?}");
+    assert!(crate::hooks::handlers::session_hygiene::build_session_start_managed_conflict_banner_sized(&root).is_none());
 }
 
 /// cas-4585: exercise the native update sweep with physical cwd, HOME and

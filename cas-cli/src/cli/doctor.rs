@@ -31,6 +31,8 @@ mod slack_transport;
 mod communication;
 mod git_hooks;
 mod journeys;
+#[cfg(feature = "mcp-proxy")]
+mod retired_tools;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -263,12 +265,13 @@ impl CheckGroup {
             | "mcp config"
             | "mcp stdio upstreams"
             | "mcp upstream reachability"
+            | "retired mcp references"
             | "sync target"
             | "models"
             | "git hooks path"
             | "sessionstart budget"
             | "managed commits" => Self::Config,
-            "issue repositories" | "shipped issues" | "journey registry" => Self::Config,
+            "issue repositories" | "shipped issues" | "release-tagged issues" | "journey registry" => Self::Config,
             "integrations" | "violet" | "violet wake" | "violet claims"
             | "violet consumers" | "violet channels" | "github origin" => {
                 Self::Integrations
@@ -1711,7 +1714,7 @@ fn shipped_issues_check(
     states: &dyn crate::issue_reconcile::IssueStates,
     tag_containing: &dyn Fn(&str) -> Option<String>,
 ) -> Check {
-    const NAME: &str = "shipped issues";
+    const NAME: &str = "release-tagged issues";
     let Some(repo) = default_repo else {
         return Check::new(
             NAME,
@@ -1744,10 +1747,10 @@ fn shipped_issues_check(
         // An empty shipped list only proves absence in repositories whose
         // lookups succeeded; don't attribute it to an unchecked default repo.
         let message = if default_lookup_failed {
-            "no open issue in the checked repositories has all of its referencing tasks shipped"
+            "no open issue in the checked repositories has all of its referencing task deliveries in local release tags"
                 .to_string()
         } else {
-            format!("no open {repo} issue has all of its referencing tasks shipped")
+            format!("no open {repo} issue has all of its referencing task deliveries in local release tags")
         };
         Check::new(
             NAME,
@@ -1759,7 +1762,7 @@ fn shipped_issues_check(
             NAME,
             CheckStatus::Warning,
             format!(
-                "{} open issue(s) whose referencing tasks have all shipped; close them with the \
+                "{} open issue(s) whose referencing task deliveries are all in local release tags; close them with the \
                  release version: {}",
                 report.shipped.len(),
                 report
@@ -2802,6 +2805,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_stdio_commands_check(&cas_root));
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(retired_tools::check(&cas_root));
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_upstream_reachability_check(&cas_root));
 
@@ -7222,6 +7227,9 @@ mod tests {
         let repo = Some("Richards-LLC/cassy");
 
         let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
+        assert!(check.name == "release-tagged issues" && check.message.contains("release tags")
+            && !check.message.contains("shipped"),
+            "tag containment does not prove publication or installation: {}: {}", check.name, check.message);
         assert!(
             matches!(check.status, CheckStatus::Warning),
             "{}",

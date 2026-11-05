@@ -168,6 +168,17 @@ pub(super) fn execute_cleanup(args: &FactoryArgs) -> Result<()> {
         fmt.newline()?;
     }
 
+    // cas-2879: never delete a branch's only copy of its commits silently.
+    for (name, work) in &report.rescued {
+        StatusLine::warning(format!("{name}: {}", work.describe())).render(&mut fmt)?;
+    }
+    for (name, error) in &report.rescue_failed {
+        StatusLine::warning(format!(
+            "{name}: worktree kept, its unpushed work could not be preserved: {error}"
+        ))
+        .render(&mut fmt)?;
+    }
+
     fmt.newline()?;
     fmt.info(&format!(
         "Removed {} worktree directories:",

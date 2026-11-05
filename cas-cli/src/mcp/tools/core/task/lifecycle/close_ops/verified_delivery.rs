@@ -1,9 +1,11 @@
 //! An approval for correction B cannot close the already-merged delivery A.
 use super::*;
+use crate::mcp::tools::core::workflow::premerge_verification::{self, Candidate};
 
 pub(super) struct ReviewedDelivery {
     pub(super) dispatch: String,
     pub(super) repository: cas_types::RepositoryProofBoundary,
+    candidate: Option<Candidate>,
 }
 
 /// A recorded correction B on the reusable lane supersedes a preservation
@@ -50,13 +52,54 @@ pub(super) fn current(
     }) {
         return Ok(None);
     }
+    let candidate = premerge_verification::candidate_for_dispatch(root, &dispatch)?;
     Ok(dispatch.repository.map(|repository| ReviewedDelivery {
         dispatch: dispatch.id,
         repository,
+        candidate,
     }))
 }
 
 impl ReviewedDelivery {
+    fn premerge_source_is_contained(
+        &self,
+        repo: &std::path::Path,
+        task: &Task,
+        target: &str,
+        reference: &str,
+    ) -> bool {
+        let Some(candidate) = self.candidate.as_ref() else {
+            return false;
+        };
+        let Some(landed) = resolve_branch_sha(repo, reference) else {
+            return false;
+        };
+        if candidate.task_id != task.id
+            || candidate.target_branch != target
+            || task.deliverables.factory_branch_anchor.as_deref()
+                != Some(candidate.source_sha.as_str())
+            || !git_commit_is_ancestor(repo, &candidate.source_sha, &landed)
+            || !git_stdout_lines(
+                repo,
+                &["show", "-s", "--format=%P", &self.repository.head_commit],
+            )
+            .is_ok_and(|parents| {
+                parents == vec![format!("{} {}", candidate.target_sha, candidate.source_sha)]
+            })
+        {
+            return false;
+        }
+        let Some(base) = git_merge_base(repo, &candidate.target_sha, &candidate.source_sha) else {
+            return false;
+        };
+        // Force the reviewed base: ordinary ancestry alone also accepts a
+        // merge that dropped/reverted some delivery content. Reverse-check the
+        // entire binary patch in a private target index, without touching HEAD,
+        // the worktree or the real index. Unrelated target progress is allowed.
+        reverse_delivery_patch_applies_to_tree(repo, &base, &candidate.source_sha, &landed, None)
+            .unwrap_or(false)
+    }
+
     pub(super) fn merge_refusal(
         &self,
         repo: &std::path::Path,
@@ -71,6 +114,12 @@ impl ReviewedDelivery {
         } else {
             preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
         };
+        // A queue publishes its own merge, not the synthetic reviewed commit.
+        // The immutable candidate must bind this task's exact delivery and the
+        // authoritative target must contain both its identity and all its patch.
+        if self.premerge_source_is_contained(repo, task, target, &reference) {
+            return None;
+        }
         // Preserve an explicit canonical squash receipt only when its full
         // tree equals this exact verified head and it is on the authoritative
         // target. A receipt for earlier A cannot stand in for changed B.

@@ -309,18 +309,32 @@ mod tests {
         }
     }
 
-    /// Verifier ver-37f17bf1f171 (3): a bare acknowledgement is not an answer.
+    /// Verifier ver-37f17bf1f171 (3) and cas-5c23: an acknowledgement or a
+    /// progress status ("reviewing, ETA 1h") leaves the ask open; an answer
+    /// or an untyped reply releases it.
     #[test]
-    fn a_receipt_reply_does_not_answer_an_ask_cas_bddf9() {
+    fn only_an_answer_reply_releases_an_ask_cas_bddf9() {
         let (_env, _temp, root, conn) = fixture();
-        sent_ask(&conn, "ask-ok", "Can you review PR #4249?");
-        conn.execute(
-            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
-             '<cas-peer-message v=\"1\" id=\"r2\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-ok\" kind=\"receipt\"/>\nok')",
-            [],
-        )
-        .unwrap();
-        assert!(pr_merge(&root, "sup-soundwave", 4249).is_some(), "an \"ok\" receipt leaves the ask open");
+        let cases = [
+            (" kind=\"receipt\"", "ok", true),
+            (" kind=\"status\"", "reviewing, ETA 1h", true),
+            (" kind=\"answer\"", "approved", false),
+            ("", "approved", false),
+        ];
+        for (index, (kind, text, holds)) in cases.iter().enumerate() {
+            let sender = format!("sup-reply-{index}");
+            let ask = format!("ask-reply-{index}");
+            sent_ask_from(&conn, &sender, &ask, "Can you review PR #4249?");
+            conn.execute(
+                &format!(
+                    "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+                     '<cas-peer-message v=\"1\" id=\"r-{index}\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"{ask}\"{kind}/>' || char(10) || '{text}')"
+                ),
+                [],
+            )
+            .unwrap();
+            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), *holds, "reply{kind}: {text}");
+        }
     }
 
     /// Verifier ver-37f17bf1f171 (2): `gh pr merge` with a branch or with no

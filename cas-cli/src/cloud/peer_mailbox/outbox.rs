@@ -264,8 +264,9 @@ pub struct OpenPeerAsk {
 /// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
 /// `sender_agent_id` in the last `window_secs` that no delivered peer reply
 /// answers: a reply naming it with `in_reply_to` whose kind is not a
-/// receipt or quiet FYI (a bare "ok" does not answer a question). Abandoned
-/// sends never reached the peer.
+/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
+/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
+/// the peer.
 pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
     let Ok(conn) = connection(root) else {
         return Vec::new();
@@ -282,7 +283,8 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
                 WHERE q.source LIKE 'peer:%'
                   AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
                   AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0))
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
          ORDER BY o.id",
     ) else {
         return Vec::new();

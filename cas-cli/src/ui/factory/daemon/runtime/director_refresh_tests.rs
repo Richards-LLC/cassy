@@ -221,7 +221,7 @@ async fn r1_verification_wait_wakes(release: &str) {
 #[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
-    for cause in ["owned", "foreign", "expired", "timed-out", "independent", "successor"] {
+    for cause in ["owned", "foreign", "expired", "timed-out", "independent", "successor", "reminded"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         let supervisor = Agent::new_with_role(
@@ -267,10 +267,19 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             dispatch.id
         );
         store.update(&task).unwrap();
-        if cause == "independent" {
+        if matches!(cause, "independent" | "reminded") {
             store.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
                 "reason": "Operator must restore credentials", "who": "merge-w", "when": chrono::Utc::now()
             }})).unwrap();
+        }
+        if cause == "reminded" {
+            // cas-d511: the worker named its own wake for this task.
+            use cas_store::ReminderStore;
+            let reminders = cas_store::SqliteReminderStore::open(&cas_dir).unwrap();
+            reminders.init().unwrap();
+            reminders.create_with_scope("merge-w", Some("merge-w"), "resume when cas-dd05 lands",
+                cas_store::ReminderTriggerType::Event, None, Some("task_completed"), None, 3600,
+                None, Some("merge-w"), false, Some("cas-9efb-test")).unwrap();
         }
         let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
             task_id: task.id,
@@ -324,7 +333,8 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             )
             .unwrap();
         }
-        assert_eq!(queue.peek_all(10).unwrap().len(), if owned { 1 } else { 2 });
+        assert_eq!(queue.peek_all(10).unwrap().len(), if owned || cause == "reminded" { 1 } else { 2 },
+            "{cause}: a worker's own task reminder replaces the deadline escalation");
         if owned {
             for _ in 0..2 {
                 reconcile_blocked_task_alert(&cas_dir, "cas-9efb-test",

@@ -424,6 +424,8 @@ impl Candidate {
     }
 
     fn landing_base(&self, landed: &str) -> Result<String, String> {
+        let landed = self.delivery_landing(landed)?;
+        let landed = landed.as_str();
         git(
             &self.repository,
             &["merge-base", "--is-ancestor", &self.source_sha, landed],
@@ -445,6 +447,7 @@ impl Candidate {
 
     fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
+        let landed = self.delivery_landing(landed)?;
         if git(
             &self.repository,
             &["rev-parse", &format!("{landed}^{{tree}}")],

@@ -16,7 +16,7 @@ Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [
     UNKNOWN communication: no factory session recorded
 Config        [OK] SessionStart budget  [OK] configuration  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config
   [WARN] issue repositories      issues.repo unset; no usable GitHub origin; set `cas config set issues.repo owner/repo` | cassy=Richards-LLC/cassy | violet=Richards-LLC/violet_ps | cloud=Richards-LLC/petra-stella-cloud
-  [WARN] retired MCP references  2 guidance reference(s) name absent or disabled MCP servers (review mentions, including historical or retirement instructions): builtin:skills/cas-codex-supervisor-checklist/SKILL.md:18 — violet (absent or disabled) builtin:skills/cas-playwright-debug/SKILL.md:21 — playwright (absent or disabled) Review the named guidance or restore its registration; doctor does not edit it.
+  [WARN] retired MCP references  1 guidance reference(s) name absent or disabled MCP servers (review mentions, including historical or retirement instructions): builtin:skills/cas-playwright-debug/SKILL.md:21 — playwright (absent or disabled) Review the named guidance or restore its registration; doctor does not edit it.
   [INFO] release-tagged issues   skipped: no GitHub repository resolved for this project
 Integrations  [OK] integrations
 

@@ -108,7 +108,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - exact-source PR creation/reuse and expected-head auto-merge for confirmed default-branch queues, before local merge mutation.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
-- `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
+- `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators (including durable rule-projection deletion reconciliation in `store/syncing.rs`), numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
 - `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs and project-scoped integrated-delivery recovery actions at startup.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
@@ -168,6 +168,6 @@
 ## Policy hygiene
 
 - `cas-cli/src/mcp/tools/core/rule_drift.rs` — read-only rule source/generated/peer snapshot comparisons.
-- `cas-cli/src/mcp/tools/core/rules.rs` — explicit stakeholder attribution and review deadlines; operator-only encode chores and pending-chore rendering.
+- `cas-cli/src/mcp/tools/core/rules.rs` — explicit stakeholder attribution and review deadlines; rule source/hold listing; operator-only encode chores and pending-chore rendering. `mcp/tools/service/core.rs` routes authenticated personal-rule creation through `service/pattern_ops.rs`.
 - `crates/cas-types/src/entry/behavior.rs` — supersession and temporal validity shared by context filters.
 - `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` — nullable provenance, without backfill.

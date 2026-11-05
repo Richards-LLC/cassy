@@ -13338,11 +13338,31 @@ impl CasCore {
             )
         })?;
 
+        // cas-cff4: tell the assignee, and report what was actually sent.
+        let assignee = task.assignee.as_deref().unwrap_or("unassigned");
+        let notice = task_store
+            .get(&task.id)
+            .map_err(|error| format!("task re-read failed: {error}"))
+            .and_then(|reopened| {
+                super::supervisor_push::queue_request_changes_notice(
+                    &self.cas_root,
+                    &reopened,
+                    req.reason.trim(),
+                    &outcome.branch_handling,
+                )
+            });
+        let notice = match notice {
+            Ok(prompt_id) => format!("Assignee {assignee} notified (prompt {prompt_id})."),
+            Err(reason) => format!(
+                "Assignee {assignee} NOT notified: {reason}. Message the worker yourself."
+            ),
+        };
+
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
             task.id,
             task.title,
-            task.assignee.as_deref().unwrap_or("unassigned"),
+            assignee,
             outcome.branch_handling,
             req.reason.trim(),
         )))

@@ -239,8 +239,9 @@ esac
 [[ "$no_reuse" == true ]] || integration_proof=''
 # Rows the merge queue's successful run executed on its exact tree: the CI
 # script tiers and Commander web checks (preflight), the workspace suite from
-# an archive in a plain checkout (shards), doctests and macOS Check.
-readonly merge_queue_rows=' ci-script-tests hub-web-tests hub-web-dist-drift hub-web-visual-qa macos-check fixture-paths nextest doctests archive-mode '
+# an archive in a plain checkout (shards), and doctests. macOS Check no longer
+# runs on merge_group; the standalone gate must prove macos-check itself.
+readonly merge_queue_rows=' ci-script-tests hub-web-tests hub-web-dist-drift hub-web-visual-qa fixture-paths nextest doctests archive-mode '
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 

@@ -6,12 +6,11 @@ the live ruleset changes; do not treat editing this JSON as applying the change.
 
 ## 1. Required-set audit
 
-The two required contexts are deliberately minimal, but neither removes coverage:
+The sole required context is `Fast Validation` (operator decision, November 4, 2026):
 
 | Required context | Unique protection | Steady-state wall | Verdict |
 | --- | --- | --- | --- |
 | `Fast Validation` | On the canonical `merge_group` tree, its rollup rejects a failed preflight, the full-suite fan-in (and every exhaustive nextest shard), **and doctests**. | Queue receipt 32367317728: 3m38 from merge-group start to the rollup. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the exhaustive check. |
-| `macOS Check` | On the canonical `merge_group` tree, Darwin/Xcode/SDK compilation that Linux does not exercise. | Queue receipt 32367317728: 4m43 before removing the duplicate no-MCP-proxy check. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the full Darwin compile. |
 
 `Fast Validation — doctests` is intentionally not a separate required context: the required
 `Fast Validation` fan-in already requires `fast-validation-docs` to succeed. Its coverage is
@@ -19,7 +18,7 @@ therefore retained in the fan-in, not dropped.
 
 ## 2. Merge queue
 
-[`main-ruleset.json`](main-ruleset.json) requires the two contexts above, blocks branch
+[`main-ruleset.json`](main-ruleset.json) requires `Fast Validation`, blocks branch
 deletion and force-pushes, and requires GitHub's merge queue. The queue is single-entry
 (`min/max entries to merge = 1`, zero fill wait, one concurrent build) so it supplies a
 merged-tree revalidation without batching a second PR onto the headline latency path. It uses
@@ -38,11 +37,11 @@ Verify afterwards, and roll back if needed:
 `~DEFAULT_BRANCH` is used instead of a literal `refs/heads/main` so the rule follows the
 default branch if it is ever renamed. Substitute `"refs/heads/main"` if you prefer it pinned.
 
-The CI workflow must include the `merge_group` trigger and make both required contexts report
+The CI workflow must include the `merge_group` trigger and report `Fast Validation`
 on the synthetic merged-tree SHA. Main PR contexts are deliberately cheap hosted admissions:
 they let auto-merge enter the queue without compiling the PR head and the eventual merged tree
-back-to-back. The full Fast Validation and Darwin checks run only on the canonical merged tree
-before it lands. Without the `merge_group` trigger, entries wait until their status-check timeout
+back-to-back. The full Fast Validation checks run on the canonical merged tree
+before it lands. Darwin release compilation is proven separately before publication. Without the `merge_group` trigger, entries wait until their status-check timeout
 because no required context can report.
 
 ### Validation performed
@@ -53,20 +52,20 @@ Dry validation only, as required:
 - Field names, nesting and the `rules[].type` values follow the repository-rulesets schema:
   `target: "branch"`, `conditions.ref_name.include/exclude`, and a `required_status_checks`
   rule whose `parameters.required_status_checks[]` entries are `{ "context": ... }` objects.
-- Both required contexts are matched **programmatically** against job names, and the tier
+- The required context is matched **programmatically** against job names, and the tier
   contract pins the `merge_group` trigger plus every required fan-in dependency.
 
 Live API application remains operator-visible and must be receipted.
 
 ## 3. Which checks belong in the list — and which deliberately do not
 
-`.github/workflows/ci.yml` defines three jobs. Their triggers decide eligibility, because
+These CI jobs illustrate the required-set boundary. Their triggers decide eligibility, because
 **a required check that never reports on a given ref blocks that ref forever.**
 
 | Job (`name:`) | Triggers | Required? |
 | --- | --- | --- |
 | `Fast Validation` | Cheap hosted admission on `pull_request`; exhaustive rollup on `merge_group`, push to `main`, schedule, dispatch | **Yes — the rollup, not the lower full-suite fan-in** |
-| `macOS Check` | Cheap hosted admission on `pull_request`; Darwin compile on `merge_group`, push to `main`, schedule, dispatch | **Yes** — see below |
+| `macOS Check` | Informational notice on protected `pull_request`; advisory Darwin/cache lane on push to `main`, tags, schedule, dispatch; never `merge_group` | **No** |
 | `Release-Profile & Build Guard (compile-only, no test suite)` | `if:` limits it to `schedule` or `refs/heads/main` | **No — must not be required** |
 
 **Release-Profile & Build Guard is excluded, and this is the load-bearing exclusion.** Its
@@ -75,11 +74,25 @@ on pull requests. Requiring it would leave every PR waiting on a check that can 
 permanently unmergeable. Its own renamed title already says it is compile-only with no test
 suite, so it is not the suite-executing gate anyway.
 
-**macOS Check is included**, per the standing "Linux-green ≠ merge-ready" discipline — macOS
-breakage has shipped before precisely because Linux was green. Its full compile runs on
-`macos-26` with a pinned Xcode 26.3 `DEVELOPER_DIR` against the canonical merge-queue tree, so
-runner or SDK trouble remains a merge blocker. The PR admission job is hosted and intentionally
-does not claim Darwin coverage; it exists only to admit the PR to the tree that does provide it.
+**macOS Check is excluded** (cas-04c3). PR #1475's queue runs
+41851954166, 41855101135 and 41860322468 never acquired their macos-26 runner:
+empty runner name, zero steps, and GitHub's annotation
+"The job was not acquired by Runner of type hosted even after multiple attempts".
+That is hosted-runner non-acquisition, not a compile failure or our stale-archive
+watchdog. The operator chose to remove the queue stage, rather than add retries.
+The live ruleset already requires only `Fast Validation`; the checked-in template
+also reflects the live 30-minute response timeout. No live ruleset write is part
+of this code/docs change.
+
+`Release Prebuild` still runs on release `merge_group` entries, including
+`build-macos`. Its jobs are neither required contexts nor dependencies of
+`Fast Validation`, so its macOS non-acquisition (also observed in runs
+41855101589 and 41860322470) cannot eject a green queue entry. GitHub removes
+entries for [failed required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue#failing-ci);
+Prebuild is outside that required dependency graph.
+The release workflow adopts successful artifacts or calls the same prebuild
+as a fallback, then requires both packaged-asset audits before publication.
+See the [release-flow map](../ci/release-fast-publication.md).
 
 ## 4. Factory flow
 
@@ -141,7 +154,7 @@ stop that followed escalates.
 
 ## 5. Check names are pinned
 
-The two context strings in the JSON are exact matches for job `name:` values in
+The context string in the JSON is an exact match for the job `name:` value in
 `.github/workflows/ci.yml`. GitHub matches required checks **by name string**. Renaming a job
 without updating this file silently makes the required check un-reportable, and every affected
 ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs once. See the
@@ -162,11 +175,10 @@ the reuse, which skips only what the full gate proved.
 | Required context | On a queue tree with a matching full-gate receipt | Otherwise |
 | --- | --- | --- |
 | `Fast Validation` | Reports success only if the preflight job succeeds. The rollup's "Report the full-gate receipt reused by this merge-queue run" step requires `PREFLIGHT == success`. The suite build, shards, fan-in and doctest jobs are skipped (`run-fast-validation == 'false'`). The preflight runs, minus the steps the full gate proved. | All lanes run, and the rollup requires each to succeed (unchanged). |
-| `macOS Check` | Runs in full on the queue tree. The local gate runs on Linux and cannot prove Darwin: `macos-check` runs when `reuse-source == 'full-gate'`. | Runs in full (unchanged). |
 
-The ruleset is unchanged: the same two contexts are required, and both still
-report on the `merge_group` SHA. Every required context still starts at
-enqueue, so the 15-minute `check_response_timeout_minutes` is unaffected.
+`Fast Validation` reports on the `merge_group` SHA. Full-gate reuse does not
+restore the removed macOS queue job; the 30-minute response timeout applies
+to the required context.
 
 ### What the preflight still runs on reuse
 
@@ -187,51 +199,30 @@ The suite shards and doctests are skipped. The full gate's `nextest`,
 
 The expected saving on a release like 3.47.0 is the 260 s of publication
 guards, plus the Commander non-journey work, off the preflight critical path.
-The queue then waits on the longer of the journeys and `macOS Check`.
+The queue then waits on its remaining Fast Validation dependencies.
 Measuring the real saving takes one live queue run, recorded under the next
 release's `release-latency.receipt`. With a matching full-journeys receipt
 (cas-9f70, below) the journeys are skipped too, and the queue waits on
-`macOS Check` and the compile checks.
+the Linux compile checks.
 
 ### macOS Check latency: a warm cache from main
 
-Once the Commander step skips diffs that leave hub-web alone, `macOS Check`
-becomes the queue's slowest required check. PR #1191's Linux path ended at
-about 8m20s; its macOS Check ended at 16m16s. The cause was a cold cache, not
-the work. A queue ref reads only its own and main's Actions caches, and main
-never ran the job, because a deduplicated main push skipped it. On 2026-10-14
-every first-attempt queue entry sampled restored "No cache found", with 0 hits
-and 698 misses, and took 11m51s–13m54s in `cargo check`. The sample was
-PRs #1187, #1189, #1191, #1192 and #1193. The one warm run measured was the PR #1187
-retry (cargo cache restored, 90% sccache hits). It took 5m27s in `cargo check`
-and 404 s for the whole job. Starting 44 s into the run, the job ends at about
-7m30s. That is below the Linux path, so the entry lands in about 8.5 minutes.
+This section previously described a required Darwin check on each queue entry.
+That policy was superseded by the November 4 decision above: `macos-check` is
+now advisory and excluded from `merge_group`, including full-gate reuse.
 
-| Option | Darwin coverage per queue entry | Expected queue wall | Decision |
-| --- | --- | --- | --- |
-| (a) Run macOS only for "platform" diffs | Lost for most Rust diffs. A diff classifier cannot see an unchanged `cfg(target_os = "macos")` caller broken by a shared-API change. The only macOS-only queue failure since 2026-09-10 (PR #809) was inside such a block. | ~8m20s | Rejected: unsafe classification |
-| (b) Warm the cache from main | Unchanged: every Rust diff is still compiled on Darwin. | ~8.5 min warm; today's ~16 min if the cache is evicted | **Chosen** |
-| (c) Move it to release/nightly | Lost per entry; breakage is found after it lands. | ~8m20s | Rejected |
+Its existing non-queue behavior is retained: protected PRs get a cheap hosted
+notice; main pushes maintain Darwin dependency caches; tag pushes, schedules
+and dispatches retain their compile checks. Only main saves the macOS cargo
+cache. On a queue-proven main tree, an exact dependency-cache hit skips Cargo;
+a miss compiles to seed it. This maintenance lane does not prove every landed
+source change on Darwin. `Release Prebuild/build-macos` is the pre-publish
+macOS proof and uses its own release profile/cache.
 
-How (b) works (cas-861c0):
-
-- `macos-check` also runs on every push to main, after the merge and off the
-  queue's critical path, so main saves the Darwin cargo cache and sccache
-  entries.
-- `Swatinem/rust-cache` saves only on `refs/heads/main`. Each queue or tag ref
-  used to save its own 333 MiB copy that no later entry could read. The
-  repository sits at its 10 GB Actions cache cap, so those copies only evicted
-  main's cache.
-- `scripts/ci_tiers/test-policy.py` evaluates the real job condition for each
-  event and the `save-if` expression, with a mutation control.
-
-**Operator note: the required set is unchanged.** `Fast Validation` and
-`macOS Check` stay required, and `main-ruleset.json` is untouched, so no live
-ruleset update is needed. The cost is one macOS compile per Rust-touching push
-to main, about 7–14 runner-minutes. It runs after the merge, so it adds no
-merge latency. A red result there flags Darwin drift on main.
-To verify after merge, the next queue entry's macOS Check log should show
-"Cache restored successfully" and an sccache hit rate above 50%.
+The original cold-cache measurements (PR #1191: Linux about 8m20s, Darwin
+16m16s) explain that maintenance lane, but no longer describe queue latency.
+`scripts/ci_tiers/test-policy.py` checks both main-cache behavior and exclusion
+of ordinary and full-gate-reuse queue events.
 
 ### What counts as a receipt
 
@@ -311,7 +302,7 @@ journeys on the runner.
   - only the publication guards and the gate-covered Commander steps are
     skipped;
   - the rollup requires the preflight;
-  - `macOS Check` runs.
+  - `macOS Check` is skipped on both ordinary and full-gate-reuse queue entries.
 - Dry run against the live API: the guard was pointed at 3.47.0's PR #1134
   (head `f084dd7b5`, tree `f1bab7758`, the queue tree). It resolved the head
   and matched the tree, found no `cas/full-gate` status (none was posted

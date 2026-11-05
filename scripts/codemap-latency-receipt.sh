@@ -336,26 +336,20 @@ measure_github_run() {
         github_queue_status=unavailable
     fi
 
-    required_job_seconds=()
-    for required_job in 'Fast Validation' 'macOS Check'; do
-        job_start="$(jq -r --arg name "$required_job" '[.jobs[] | select(.name == $name and .startedAt != null and .completedAt != null) | .startedAt][0] // empty' <<<"$github_json")"
-        job_end="$(jq -r --arg name "$required_job" '[.jobs[] | select(.name == $name and .startedAt != null and .completedAt != null) | .completedAt][0] // empty' <<<"$github_json")"
-        if [[ -z "$job_start" || -z "$job_end" ]]; then
-            github_required_status=unavailable
-            return 0
-        fi
-        job_start_epoch="$(epoch_of "$job_start")"
-        job_end_epoch="$(epoch_of "$job_end")"
-        if [[ ! "$job_start_epoch" =~ ^[0-9]+$ || ! "$job_end_epoch" =~ ^[0-9]+$ ]] || (( job_end_epoch < job_start_epoch )); then
-            github_required_status=invalid
-            return 0
-        fi
-        required_job_seconds[${#required_job_seconds[@]}]=$((job_end_epoch - job_start_epoch))
-    done
-    github_required_seconds="${required_job_seconds[0]}"
-    if (( required_job_seconds[1] > github_required_seconds )); then
-        github_required_seconds="${required_job_seconds[1]}"
+    required_job='Fast Validation'
+    job_start="$(jq -r --arg name "$required_job" '[.jobs[] | select(.name == $name and .startedAt != null and .completedAt != null) | .startedAt][0] // empty' <<<"$github_json")"
+    job_end="$(jq -r --arg name "$required_job" '[.jobs[] | select(.name == $name and .startedAt != null and .completedAt != null) | .completedAt][0] // empty' <<<"$github_json")"
+    if [[ -z "$job_start" || -z "$job_end" ]]; then
+        github_required_status=unavailable
+        return 0
     fi
+    job_start_epoch="$(epoch_of "$job_start")"
+    job_end_epoch="$(epoch_of "$job_end")"
+    if [[ ! "$job_start_epoch" =~ ^[0-9]+$ || ! "$job_end_epoch" =~ ^[0-9]+$ ]] || (( job_end_epoch < job_start_epoch )); then
+        github_required_status=invalid
+        return 0
+    fi
+    github_required_seconds=$((job_end_epoch - job_start_epoch))
     github_required_status=measured
     github_required_source=github-required-jobs
 }

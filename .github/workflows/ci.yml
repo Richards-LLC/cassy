@@ -405,7 +405,7 @@ jobs:
           runner_base="$BASE_SHA"
           if [[ -z "$runner_base" || "$runner_base" =~ ^0+$ ]] \
             || ! git rev-parse --verify --quiet "$runner_base^{commit}" >/dev/null; then
-            runner_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
+            runner_base="$(git merge-base HEAD "origin/$DEFAULT_BRANCH")"
           fi
           changed=false
           changed_paths="$(git diff --name-only "$runner_base" HEAD -- \
@@ -626,7 +626,7 @@ jobs:
           runner_base="$BASE_SHA"
           if [[ -z "$runner_base" || "$runner_base" =~ ^0+$ ]] \
             || ! git rev-parse --verify --quiet "$runner_base^{commit}" >/dev/null; then
-            runner_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
+            runner_base="$(git merge-base HEAD "origin/$DEFAULT_BRANCH")"
           fi
           changed=false
           changed_paths="$(git diff --name-only "$runner_base" HEAD -- \
@@ -1762,8 +1762,8 @@ jobs:
           else
             journeys="the Commander journeys ran on the queue tree"
           fi
-          echo "::notice title=Fast Validation reused the full gate::The release train's full gate proved this exact tree ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, doctests and gate-covered preflight steps; $journeys; the compile checks and macOS Check ran."
-          echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. On the queue tree, $journeys; the compile checks and macOS Check ran." >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Fast Validation reused the full gate::The release train's full gate proved this exact tree ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, doctests and gate-covered preflight steps; $journeys; the Linux compile checks ran; Release Prebuild owns pre-publish macOS proof."
+          echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. On the queue tree, $journeys; the Linux compile checks ran; Release Prebuild owns pre-publish macOS proof." >> "$GITHUB_STEP_SUMMARY"
 
       # This artifact is published only after the merge-group Fast Validation
       # fan-in passes. A later main push may reuse it only after the workflow
@@ -1846,12 +1846,13 @@ jobs:
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
-  # Linux test suite on a more expensive runner. The full check runs on the
-  # canonical merge-queue tree; main PRs emit only a hosted admission receipt
-  # so their code is not compiled twice before it can enter that queue.
+  # Linux test suite on a more expensive runner. This advisory lane does not
+  # run on merge_group (cas-04c3): hosted macOS runner non-acquisition must not
+  # delay queue admission. Release Prebuild/build-macos proves shipped macOS
+  # artifacts before publication; main PRs retain a cheap informational notice.
   # Main retains a cache-maintenance lane: a queue-proven tree only looks
   # up its exact Darwin dependency key. A hit needs no download or Cargo;
-  # a miss compiles once to seed the main-scope cache later queue refs read.
+  # a miss compiles once to seed the main-scope cache other refs can read.
   # Release prebuild uses a different profile/key and is not warmed here.
   macos-check:
     name: macOS Check
@@ -1862,7 +1863,6 @@ jobs:
       || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
@@ -1890,10 +1890,10 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
-      - name: Admit protected PR to merge-queue Darwin validation
+      - name: Report advisory macOS coverage
         if: github.event_name == 'pull_request'
         run: |
-          echo "macOS Check is deferred to the canonical merge-queue tree."
+          echo "macOS Check is advisory. Release Prebuild proves macOS release artifacts before publication."
 
       - uses: actions/checkout@v4
         if: github.event_name != 'pull_request'

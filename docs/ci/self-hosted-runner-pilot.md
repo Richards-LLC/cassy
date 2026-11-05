@@ -132,7 +132,8 @@ with an org registration token when one is available. Their units cap CPU at
 ## Availability and isolation
 
 The pilot job is not present in `docs/branch-protection/main-ruleset.json`. The
-ruleset still requires only the `Fast Validation` rollup and `macOS Check`.
+ruleset requires only the `Fast Validation` rollup. `macOS Check` is advisory
+and excluded from merge-group events; Release Prebuild retains macOS proof.
 For ordinary PRs, and whenever the self-hosted control variable is absent or
 disabled, every Fast Validation component runs hosted. A merge-queue archive,
 preflight, and doctest lane may use the trusted box only after the runner is

@@ -87,14 +87,13 @@ chmod +x "$tmp/fake-cas"
 cat >"$tmp/fake-gh" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1 $2" == 'run view' ]]; then
-    mac_end='2026-08-30T12:00:09Z'
+    fast_end='2026-08-30T12:00:08Z'
     if [[ "${FAKE_REQUIRED_SECONDS:-5}" == 60 ]]; then
-        mac_end='2026-08-30T12:01:04Z'
+        fast_end='2026-08-30T12:01:03Z'
     fi
     cat <<JSON
 {"createdAt":"2026-08-30T12:00:00Z","url":"https://github.com/example/repo/actions/runs/123","jobs":[
-  {"name":"Fast Validation","startedAt":"2026-08-30T12:00:03Z","completedAt":"2026-08-30T12:00:05Z","conclusion":"success"},
-  {"name":"macOS Check","startedAt":"2026-08-30T12:00:04Z","completedAt":"$mac_end","conclusion":"success"},
+  {"name":"Fast Validation","startedAt":"2026-08-30T12:00:03Z","completedAt":"$fast_end","conclusion":"success"},
   {"name":"Clippy (advisory)","startedAt":"2026-08-30T12:00:03Z","completedAt":"2026-08-30T12:01:00Z","conclusion":"skipped"}
 ]}
 JSON
@@ -148,7 +147,7 @@ expect_field "$out" KNOWLEDGE_BUILD_BUDGET_SECONDS 90 'knowledge build defaults 
 expect_field "$out" KNOWLEDGE_BUILD_WITHIN_BUDGET true 'knowledge build is within its bound'
 expect_field "$out" AGENT_CONTROLLED_TOTAL_SECONDS 4 'agent-controlled phases exclude docs and queue time'
 expect_field "$out" AGENT_CONTROLLED_WITHIN_BUDGET true 'agent-controlled total is within five minutes'
-expect_field "$out" DOCS_ONLY_REQUIRED_COMPUTE_SECONDS 5 'required docs path uses the slower required context'
+expect_field "$out" DOCS_ONLY_REQUIRED_COMPUTE_SECONDS 5 'required docs path measures Fast Validation without a macOS Check job'
 expect_field "$out" DOCS_ONLY_REQUIRED_COMPUTE_SOURCE github-required-jobs 'required docs timing identifies its source'
 expect_field "$out" DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET true 'required docs path is within one minute'
 expect_field "$out" GITHUB_QUEUE_SECONDS 3 'GitHub queue delay starts at workflow creation and ends at first runner'

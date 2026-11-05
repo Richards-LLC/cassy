@@ -29,4 +29,4 @@ Run the [intake gate](../cas-supervisor/references/intake.md); log any user over
 
 ## Before Closing an EPIC
 
-Require **Phase outcome met (plan metric receipt)**, then close out once, in order: freeze scope; one full review with the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck); one batch fix; re-review only the fix diff; one QA round with the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when a child has a demo statement; enqueue. Epic close verification uses `verification_type=epic`.
+Require **Phase outcome met (plan metric receipt)**, then close out once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round with the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when a child has a demo statement; enqueue. Epic close verification uses `verification_type=epic`.

@@ -1,9 +1,8 @@
 # Verifier evidence gate
 
 The task-verifier applies Code review procedure and Quality checklist to every
-review. Demo-statement and measurable-claim sections apply when the task, or a
-child of its epic, has that requirement; those evidence gates run before the
-close reason is read. Workers produce evidence; the verifier consumes it.
+review. The demo and measurable-claim gates apply when the task or a child of its
+epic has that requirement, and run before the close reason is read.
 
 ## Demo-statement evidence mode
 
@@ -21,15 +20,12 @@ For an epic with child demos, use `verification_type=epic` for every verdict.
 Before Step 0A, require exactly one `Epic flow walk` note and
 `~/.cas/artifacts/<epic-id>/LEDGER.md`; reject missing evidence with
 `QA evidence required: epic has child demo_statement but no Epic flow walk note or LEDGER.md`.
-Require a completed pass on the current assembled epic tip, a 60-minute budget,
-and coverage mapping for every child demo. Reject a missing, duplicate,
-running, stale-tip, or incomplete-coverage receipt; list omitted demos as owed
-work. The note's cells/PASS/FAIL/NOT EXERCISED counts and label split must match
-the ledger. Apply the same Step 0A REJECT table and capture judgments to this
-single combined matrix, not separately per child. Check Contradictions across
-child surfaces against the captures; a cross-child contradiction is a defect,
-not a reason to accept individually passing child receipts. Do not rerun QA
-from the close verifier or substitute the children's ledgers for the epic walk.
+Require a completed pass on the current assembled epic tip, within its 60-minute
+budget, covering every child demo; reject a missing, duplicate, running,
+stale-tip or incomplete receipt and list omitted demos as owed work. The note's
+counts and label split must match the ledger. Apply Step 0A to this one combined
+matrix, not per child; a cross-child contradiction in the captures is a defect.
+Never rerun QA or substitute the children's ledgers for the epic walk.
 
 ### Step 0A: Apply the QA evidence gate before any judgment
 
@@ -38,43 +34,30 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    substitute for the ledger. If the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
-2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
-   and verifier share this parser. A nonzero exit rejects the ledger before
-   capture judgment. List each returned line, row ID, field and message in the
-   verification summary, record rejection, and stop. Use the candidate
-   revision's command when reviewing a change to the parser itself.
-3. Keep the JSON report as proof of the structural check. The executable owns
-   grammar, counts, labels and task-derived breadth.
-
-4. If the shared check passes, open every capture referenced by a `PASS` row
-   with the available image-capable or terminal-capture reader. Judge the
-   capture itself, not its filename, ledger prose, or source code. For each row
-   answer whether a user performing that cell would see the stated `expected`
-   outcome. If the capture does not show that outcome, downgrade that row to
-   `FAIL` in the verification summary and state the capture path and reason;
-   never silently leave it as `PASS` and do not edit the worker's ledger.
+2. Run `cas qa ledger check <path> --task <id> --json` (the candidate
+   revision's command when the parser itself changed). It owns grammar, counts,
+   labels and breadth; a nonzero exit rejects the ledger: list each returned
+   line, row, field and message in the summary, record the rejection and stop.
+3. If the check passes, open every capture referenced by a `PASS` row with an
+   image-capable or terminal-capture reader. Judge the capture itself, not its
+   filename, ledger prose or source code: would a user performing that cell see
+   the stated `expected` outcome? If not, downgrade the row to `FAIL` in the
+   summary with the capture path and reason; never edit the worker's ledger.
    Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
    never as `PASS`.
-5. `NOT EXERCISED` rows are owed work, not failures. List each such row in the
-   verification summary with every row's final verdict, label, capture
-   judgment, and the shared-check result.
-6. Only after this evidence gate passes may you read the close reason and
-   compare it with the acceptance criteria. A capture-downgraded row or a
-   ledger `FAIL` is incomplete evidence even if the close reason says the task
-   is complete.
+4. `NOT EXERCISED` rows are owed work, not failures. List every row's final
+   verdict, label and capture judgment with the shared-check result.
+5. Only then read the close reason. A capture-downgraded row or a ledger `FAIL`
+   is incomplete evidence whatever the close reason says.
 
 ### NOT EXERCISED rows: the supervisor decides
 
 Neither approve nor reject a ledger because of its `NOT EXERCISED` rows. When
-the evidence gate otherwise passes and at least one row is `NOT EXERCISED`
-(including rows you downgraded for a weak label), stop and escalate: record
-`status=supervisor_call` with a summary that starts
-`SUPERVISOR CALL: <n> NOT EXERCISED row(s)` and lists each row ID, cell, and
-why it was not exercised, then say the same in your final output. The
-supervisor decides whether the owed rows block the close, then answers with
-`verification action=add` on the same `dispatch_id`, the final `approved` or
-`rejected` status, and the answer in `summary`. The dispatch stays open; no
-re-dispatch is needed.
+the gate otherwise passes and at least one row is `NOT EXERCISED` (including
+rows you downgraded), record `status=supervisor_call` with a summary starting
+`SUPERVISOR CALL: <n> NOT EXERCISED row(s)` that lists each row ID, cell and
+reason. The supervisor decides whether they block and answers with
+`verification action=add` on the same `dispatch_id`; no re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment
 
@@ -96,25 +79,17 @@ count, rate), with or without a demo:
 
 With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
 
-## Scratch checkout lifetime
-
-The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). A verdict or task close reclaims disposable `target/` output once the dispatch is resolved (or a terminal task has no active dispatch), with no lease or live user; existing GC/admission retries deferred cleanup. Source and its Git worktree registration retain the two-hour idle grace period before GC removes them. Checkouts with source changes are kept. This ownership record makes cleanup independent of whether your session exits normally.
-
 ## Candidate fixture isolation
 
-Before running a candidate `serve` or any stateful command, create a disposable
-project with an empty `.cas` directory and a disposable HOME outside the source
-checkout. Set `CAS_ROOT` to that fixture `.cas`, `HOME` to the disposable home,
-and `XDG_CONFIG_HOME` beneath it for every candidate subprocess, including the
-fixture's `cas init`. Initialize the fixture store before serving it and record
-the resolved store path with the command receipt. A scratch Git worktree still
-discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
-it. Keep these overrides scoped to candidate subprocesses so your authenticated
-reviewer MCP session retains its factory binding.
+Before running a candidate `serve` or any stateful command, isolate it in a
+disposable fixture exactly as [evidence-ledger.md](evidence-ledger.md) describes
+(fixture `.cas`, `CAS_ROOT`, `HOME`, `XDG_CONFIG_HOME`, recorded store path). Keep
+these overrides scoped to candidate subprocesses so your reviewer MCP session
+keeps its factory binding.
 
 ## Counted verifier lane
 
-To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
 
 ## Rule candidates
 
@@ -139,9 +114,7 @@ Run commands, do not just opine. Use `ast-grep` on changed files, for example `a
 rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|except:' <changed_file>
 ```
 
-Back every finding with a command output or an exact line reference.
-
-To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
+Back every finding with a command output or an exact line reference. Run tests only through the Counted verifier lane.
 
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 
@@ -203,16 +176,13 @@ against `stakeholder.scope` when present, without expanding it to unrelated work
 
 When `task_type=epic`, use `verification_type=epic` and check, in order:
 
-0. **Child-demo evidence first:** the evidence gate in Step 0 when any child has a demo statement.
-1. **All subtasks closed:** every child from `task action=dep_list id=<epic-id>` is `closed`; otherwise reject.
-2. **No open blockers.**
-3. **Plan outcome:** apply Step 2 to the assembled epic's full planned scope and measurable acceptance targets, with receipts for actual outcomes. Closed children and passing checks do not prove those outcomes. A missed target or omitted planned behaviour is `PLAN-FIT: NOT VERIFIED` and rejects, even if every child's card passed. Follow-ups cannot excuse an unmet obligation of this epic.
-4. **Close reason covers the whole epic**, not only the last child. Follow-ups that belong to future epics are fine only when they do not defer an obligation of this epic's plan.
-5. **Verify on the epic branch**, not a worker worktree.
-6. **Stranded-branch gate:** a clean review does not override the merge-state gate. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target. A `stranded_branch_override` is valid only when the close response authorizes it for a live registered supervisor who records the inspection narrative.
-7. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic. Treat an unassigned, stale, or mismatched owner as a blocking authority failure.
-
-The close reason may come from the verification prompt, the epic's latest note, or its close-reason field.
+0. **Child-demo evidence first:** Step 0 when any child has a demo statement.
+1. **All subtasks closed:** every child from `task action=dep_list id=<epic-id>` is `closed`, with no open blockers.
+2. **Plan outcome:** apply Plan conformance to the assembled epic's full planned scope and measurable targets, with receipts. A missed target or omitted behaviour is `PLAN-FIT: NOT VERIFIED` even if every child's card passed; follow-ups cannot excuse it.
+3. **Close reason covers the whole epic**, not only the last child; future-epic follow-ups may not defer this epic's obligations.
+4. **Verify on the epic branch**, not a worker worktree.
+5. **Stranded-branch gate:** a clean review does not override it. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target, unless the close authorizes `stranded_branch_override` for a live registered supervisor who records the inspection narrative.
+6. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic; an unassigned, stale or mismatched owner is a blocking authority failure.
 
 ## Verdict recording
 
@@ -232,5 +202,4 @@ The task record names the delivery: `deliverables.files_changed`, `deliverables.
 cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
 ```
 
-The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory. See Scratch checkout lifetime above for location and cleanup.
-Use this managed checkout as the working directory for review.
+Use the printed checkout path as your working directory for review; Cassy reclaims it after the verdict. Omit `--dispatch-id` only when the task has no dispatch. Publish durable logs and captures to the task artifacts directory.

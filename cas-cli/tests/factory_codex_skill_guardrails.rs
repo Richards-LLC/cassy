@@ -227,7 +227,8 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
             "{contract}"
         );
         assert!(
-            contract.contains("ask the supervisor to verify and close"),
+            contract.contains("retry close yourself")
+                && !contract.contains("close on your behalf"),
             "{contract}"
         );
     }

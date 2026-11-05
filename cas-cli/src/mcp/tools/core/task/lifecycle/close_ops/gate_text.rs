@@ -112,7 +112,11 @@ pub(crate) fn verification_timeout_message(
                  1. Re-dispatch the task-verifier for task {task_id}, or record the verdict \
                  directly: `{supervisor_prefix}verification action=add task_id={task_id} \
                  dispatch_id={dispatch_id} status=approved summary=\"...\"`\n\
-                 2. Then retry {retry}."
+                 2. Then retry {retry}.\n\
+                 Already shipped by a merged PR or merge-queue run: a registered supervisor \
+                 closes it with `{supervisor_prefix}task action=close id={task_id} \
+                 supervisor_override=true commit_receipt=<merge sha on origin/target> \
+                 reason=\"shipped; verifier dispatch {dispatch_id} timed out\"`."
             )
         }
         VerificationTimeout::Legacy { waited_mins } => format!(

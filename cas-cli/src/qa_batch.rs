@@ -71,6 +71,14 @@ pub(crate) fn integration_state(repo: &Path, head: &str, target: &str) -> Option
     }
 }
 
+/// cas-4b22: the task's delivery anchor once it is integrated on the task's
+/// own target, as close's merge gate measures it. Unresolvable means unshipped.
+pub(crate) fn shipped_anchor(root: &Path, task: &Task) -> Option<String> {
+    let (repo, target) = task_context(root, task).ok()?;
+    let anchor = delivery_anchor(&repo, task)?;
+    (integration_state(&repo, &anchor, &target) == Some(true)).then_some(anchor)
+}
+
 /// Use exactly close's target inheritance and repository resolver.
 pub(crate) fn task_context(root: &Path, task: &Task) -> Result<(PathBuf, String), String> {
     use crate::mcp::tools::core::task::{lifecycle::close_ops, repo_context};

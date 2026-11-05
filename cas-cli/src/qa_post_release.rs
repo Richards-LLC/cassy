@@ -190,6 +190,56 @@ mod tests {
         );
     }
 
+    /// cas-4b22: a parked delivery already on origin/<target> gets one
+    /// supervisor notice per release SHA naming the exact batch_receipt call.
+    #[test]
+    fn batch_receipt_offer_names_live_parked_deliveries_once_per_sha() {
+        use cas_store::{AgentStore, SupervisorQueueStore, TaskStore};
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(project).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "qa@example.test"]);
+        git(&["config", "user.name", "QA"]);
+        fs::write(project.join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let anchor = |name: &str| {
+            fs::write(project.join(name), name).unwrap();
+            git(&["add", name]);
+            git(&["commit", "-qm", name]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let live = anchor("live.md");
+        git(&["update-ref", "refs/remotes/origin/main", &live]);
+        let unpushed = anchor("unpushed.md");
+        let cas = crate::store::init_cas_dir(project).unwrap();
+        let supervisor = cas_types::Agent::new_with_role("sup-4b22".into(), "release-sup".into(), cas_types::AgentRole::Supervisor);
+        crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store(&cas).unwrap();
+        for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed)] {
+            let mut task = Task::new(id.into(), id.into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(head.clone());
+            tasks.add(&task).unwrap();
+            cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
+        }
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per release SHA");
+        let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        let payload = &rows[0].payload;
+        assert!(
+            payload.contains(&format!("verification action=batch_receipt task_ids=[cas-live] staging_sha={live}")),
+            "{payload}"
+        );
+        assert!(!payload.contains("cas-unpushed"), "{payload}");
+    }
+
     #[test]
     fn qa_post_release_verdict_sequences() {
         let start = DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
@@ -735,7 +785,7 @@ pub(crate) fn tick(cas_root: &Path) -> Result<()> {
 /// One OS lease owns the configured project's runner across all serve processes.
 /// Unconfigured projects and contenders spawn no task and produce no warning.
 fn project_runner_lease(cas_root: &Path) -> Result<Option<File>> {
-    if configured(cas_root).is_none() {
+    if configured(cas_root).is_none() && !batch_offers_pending(cas_root) {
         return Ok(None);
     }
     let directory = cas_root.join("post-release");
@@ -775,8 +825,12 @@ pub(crate) fn spawn_runner(cas_root: PathBuf) {
         loop {
             let root = cas_root.clone();
             let result = tokio::task::spawn_blocking(move || {
-                if configured(&root).is_none() {
+                let batch = batch_mode(&root);
+                if configured(&root).is_none() && !batch {
                     return Ok(false);
+                }
+                if batch && let Err(error) = offer_batch_receipts(&root) {
+                    tracing::warn!(%error, "batch receipt offer failed");
                 }
                 tick(&root).map(|()| true)
             })
@@ -792,6 +846,67 @@ pub(crate) fn spawn_runner(cas_root: PathBuf) {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
+}
+
+fn batch_mode(cas_root: &Path) -> bool {
+    Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch)
+}
+
+/// A batch-mode project starts the runner only once a deferral waits on a receipt.
+fn batch_offers_pending(cas_root: &Path) -> bool {
+    batch_mode(cas_root)
+        && cas_store::pending_qa_batch_deferrals(cas_root).is_ok_and(|ids| !ids.is_empty())
+}
+
+/// cas-4b22: offer, never record, the batch QA receipt for parked deliveries
+/// whose anchor is already on origin/<target>. A receipt needs a supervisor
+/// recorder and an independent ledger author, so Cassy sends the supervisor
+/// one notice per release SHA naming the exact call. Returns notices sent.
+pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
+    use crate::qa_batch::{ancestor, commit, delivery_anchor, task_context};
+    let pending = cas_store::pending_qa_batch_deferrals(cas_root)?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let tasks = crate::store::open_task_store(cas_root)?;
+    let mut live: std::collections::BTreeMap<(String, String), Vec<String>> = Default::default();
+    for id in pending {
+        let Ok(task) = tasks.get(&id) else { continue };
+        if task.status != cas_types::TaskStatus::AwaitingMerge {
+            continue;
+        }
+        let Ok((repo, target)) = task_context(cas_root, &task) else { continue };
+        let (Some(anchor), Some(tip)) = (delivery_anchor(&repo, &task), commit(&repo, &format!("origin/{target}"))) else {
+            continue;
+        };
+        if ancestor(&repo, &anchor, &tip) == Some(true) {
+            live.entry((target, tip)).or_default().push(id);
+        }
+    }
+    let offered = cas_root.join("post-release").join("batch-offers");
+    let mut sent = 0;
+    for ((target, tip), ids) in live {
+        let marker = offered.join(&tip);
+        if marker.exists() {
+            continue;
+        }
+        let detail = format!(
+            "{} parked deliver{} already live on origin/{target} at {tip}: {}. They stay AwaitingMerge until their batch QA receipt is recorded. \
+             Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
+             Cassy did not record it: a receipt needs a supervisor recorder and an independent ledger author.",
+            ids.len(),
+            if ids.len() == 1 { "y is" } else { "ies are" },
+            ids.join(", "),
+            ids.join(","),
+        );
+        let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
+        let recipient = crate::supervisor_notices::resolve(&agents, None, None);
+        crate::supervisor_notices::enqueue(cas_root, &recipient, "batch_receipt_offer", &detail, &tip)?;
+        fs::create_dir_all(&offered)?;
+        fs::write(&marker, ids.join("\n"))?;
+        sent += 1;
+    }
+    Ok(sent)
 }
 
 // US Central switches on March's second Sunday / November's first Sunday.

@@ -59,7 +59,7 @@ full_gate_reuse() {
     [[ "$url" == https://* ]] || url="https://github.com/$repository/commit/$head"
     printf 'run-fast-validation=false\nreuse-source=full-gate\nvalidating-run-id=full-gate:%s\nprior-run-url=%s\n' \
         "$head" "$url" >>"$output"
-    echo "::notice title=Fast Validation reused the full gate::Tree $tree_hash is PR #$pr_number head $head, which the release train's full gate proved ($url); skipping the duplicate queue preflight, suite and doctests. macOS Check still runs."
+    echo "::notice title=Fast Validation reused the full gate::Tree $tree_hash is PR #$pr_number head $head, which the release train's full gate proved ($url); skipping the duplicate queue preflight, suite and doctests."
     full_journeys_reuse "$statuses" "$tree_hash" "$head"
 }
 

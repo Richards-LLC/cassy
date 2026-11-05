@@ -31,7 +31,7 @@ add('c01','cas-4245','e452e2418','cc5c5350d','spec',['scripts/assembly-proof.py'
 add('c02','cas-3253','d460825c6','fc942f642','spec',['.github/workflows/ci.yml','scripts/test-ci-test-tiers.sh'],
     'Scoped Validation condition removes the default-branch PR exclusion, expanding the operator-approved admission-only policy.',
     'Restore default-branch PR exclusion, matching dedupe explanation and original policy check.',
-    ['Change-scoped selection applies to factory pushes and epic-targeted PRs.','Default-branch PRs retain only required Fast Validation and macOS Check lanes.'])
+    ['Change-scoped selection applies to factory pushes and epic-targeted PRs.','Default-branch PRs retain Fast Validation as the only required check.'])
 add('c03','cas-d0fb','4fb8854c','0a93e428c','spec',['cas-cli/Cargo.toml','cas-cli/tests/integration/contracts.rs','cas-cli/tests/hooks_test/main.rs','scripts/cas-test-targets.py'],
     'Inventory sees root tests/*.rs only; directory-main hook suite is omitted from the grouped harness, dropping 34 executed tests.',
     'Include tests/*/main.rs in inventory and wire hooks_test/main.rs with correct nested module imports.',

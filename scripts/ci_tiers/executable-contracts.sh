@@ -548,10 +548,11 @@ run_queue_gate_guard() {
     GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME=merge_group \
         GITHUB_REF="refs/heads/gh-readonly-queue/main/pr-1134-4444444444444444444444444444444444444444" \
         GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" FAKE_TREE="$guard_tree" \
-        FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
+        FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >"$guard_tmp/queue-$mode.notice"
     cat "$output"
 }
 gate_hit_output="$(run_queue_gate_guard gate-hit)"
+require_absent "$(<"$guard_tmp/queue-gate-hit.notice")" 'macOS Check still runs.' 'queue reuse notice does not claim the removed macOS check ran'
 require_text "$gate_hit_output" 'run-fast-validation=false' 'a matching full-gate tree receipt skips the queue Fast Validation lanes'
 require_text "$gate_hit_output" 'reuse-source=full-gate' 'queue reuse names the full-gate receipt'
 require_text "$gate_hit_output" 'prior-run-url=https://example.test/gate' 'queue reuse exposes the gate receipt URL'

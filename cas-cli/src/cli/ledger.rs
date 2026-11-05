@@ -396,7 +396,8 @@ fn task_state(repo: &Path, task: &cas_types::Task) -> (&'static str, String) {
 fn friction_rows(cas_root: &Path, repo: &Path, events: &[QualityEvent]) -> Vec<FrictionRow> {
     use cas_store::FrictionSource;
     let tasks: BTreeMap<String, cas_types::Task> = crate::store::open_task_store(cas_root)
-        .and_then(|store| store.list(None))
+        .ok()
+        .and_then(|store| store.list(None).ok())
         .map(|tasks| tasks.into_iter().map(|task| (task.id.clone(), task)).collect())
         .unwrap_or_default();
     let default_repo = crate::github_issue_attach::default_repo_for(cas_root);

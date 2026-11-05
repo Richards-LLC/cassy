@@ -30346,6 +30346,13 @@ esac
         blocker.deliverables.factory_branch_anchor = Some(blocker_anchor);
         blocker.deliverables.work_target = Some(target.clone());
         store.add(&blocker).unwrap();
+        // Merged, closed and reopened for rework: only history names the old tip.
+        let mut reopened = worker_task("idle-heron-4b22");
+        reopened.id = "cas-4b22-reopened".into();
+        reopened.status = TaskStatus::Open;
+        reopened.deliverables.historical_factory_branch_anchors = vec![blocker.deliverables.factory_branch_anchor.clone().unwrap()];
+        reopened.deliverables.work_target = blocker.deliverables.work_target.clone();
+        store.add(&reopened).unwrap();
         let mut task = worker_task("brisk-otter-4b22");
         task.id = "cas-4b22-a".into();
         task.task_type = TaskType::Bug;
@@ -30356,9 +30363,11 @@ esac
         task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now());
         task.deliverables.work_target = Some(target);
         store.add(&task).unwrap();
-        store
-            .add_dependency(&Dependency::new(task.id.clone(), blocker.id.clone(), DependencyType::Blocks))
-            .unwrap();
+        for to in [&blocker.id, &reopened.id] {
+            store
+                .add_dependency(&Dependency::new(task.id.clone(), to.clone(), DependencyType::Blocks))
+                .unwrap();
+        }
         let dispatch = cas_store::create_verification_dispatch_bound(
             &cas_dir, &task.id, "task-verifier", actor,
             &cas_types::VerificationProofBoundary::task(),
@@ -30368,10 +30377,10 @@ esac
         cas_store::timeout_verification_dispatch(&cas_dir, &task.id, chrono::Utc::now() + chrono::Duration::hours(2))
             .unwrap()
             .unwrap();
-        let close = |reason: String| {
+        let close = |reason: String, commit_receipt: &str| {
             let request = serde_json::from_value(serde_json::json!({
                 "action": "close", "id": task.id, "supervisor_override": true,
-                "reason": reason, "commit_receipt": receipt,
+                "reason": reason, "commit_receipt": commit_receipt,
             }))
             .unwrap();
             let service = &service;
@@ -30385,13 +30394,24 @@ esac
             }
         };
 
-        let (refused, text) = close("shipped by PR 1513".into()).await;
+        let named = format!("shipped by PR 1513; verifier dispatch {} timed out", dispatch.id);
+        let (refused, text) = close(named.clone(), &receipt).await;
+        assert!(refused, "{text}");
+        assert!(text.contains("blocking dependencies are still open: cas-4b22-reopened."), "a reopened blocker holds: {text}");
+        store.remove_dependency(&task.id, &reopened.id).unwrap();
+
+        // Another task's commit on origin/main is not this task's shipped receipt.
+        let foreign = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        let (refused, text) = close(named.clone(), &foreign).await;
+        assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
+
+        let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
         assert!(refused, "{text}");
         assert!(text.contains("VERIFICATION TIMED OUT") && text.contains("Already shipped"), "{text}");
         assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
         assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
 
-        let (refused, text) = close(format!("shipped by PR 1513; verifier dispatch {} timed out", dispatch.id)).await;
+        let (refused, text) = close(named, &receipt).await;
         assert!(!refused, "{text}");
         let closed = store.get(&task.id).unwrap();
         assert_eq!(closed.status, TaskStatus::Closed, "{text}");

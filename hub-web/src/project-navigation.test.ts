@@ -29,11 +29,11 @@ describe("project-first navigation", () => {
       return span.textContent;
     };
     for (const [runtime, latest, installed, text] of [
-      ["4.0.0", "4.0.2", "4.0.2", "Hub 4.0.0 · installed 4.0.2 Run cas hub restart"],
-      ["4.0.0", "4.0.3", "4.0.2", "Hub 4.0.0 · installed 4.0.2 Run cas hub restart Update available → 4.0.3"],
-      ["4.0.2", "4.0.2", "4.0.2", "Cassy 4.0.2"],
-      ["4.0.2", "4.0.3", "4.0.2", "Cassy 4.0.2 Update available → 4.0.3"],
-      ["4.0.0", "4.0.2", undefined, "Cassy 4.0.0 Update available → 4.0.2"],
+      ["9.99.0", "9.99.2", "9.99.2", "Hub 9.99.0 · installed 9.99.2 Run cas hub restart"],
+      ["9.99.0", "9.99.3", "9.99.2", "Hub 9.99.0 · installed 9.99.2 Run cas hub restart Update available → 9.99.3"],
+      ["9.99.2", "9.99.2", "9.99.2", "Cassy 9.99.2"],
+      ["9.99.2", "9.99.3", "9.99.2", "Cassy 9.99.2 Update available → 9.99.3"],
+      ["9.99.0", "9.99.2", undefined, "Cassy 9.99.0 Update available → 9.99.2"],
     ] as const) expect(shown(runtime, latest, installed), `${runtime}/${installed}/${latest}`).toBe(text);
   });
   it("contains supervisors across machines in one project and renders only supplied identity", () => {

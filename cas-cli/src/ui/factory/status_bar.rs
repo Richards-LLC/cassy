@@ -1182,15 +1182,15 @@ mod tests {
     /// the restart; a release is offered only beyond what is installed.
     #[test]
     fn version_badge_names_an_installed_binary_the_daemon_has_not_loaded() {
-        const STALE: &str = "installed v4.0.2 · restart factory to load";
-        const NEXT: &str = "⬆ v4.0.3 available";
+        const STALE: &str = "installed v9.99.2 · restart factory to load";
+        const NEXT: &str = "⬆ v9.99.3 available";
         for (running, installed, latest, badge) in [
-            ("4.0.0", Some("4.0.2"), Some("4.0.2"), Some(STALE)),
-            ("4.0.0", Some("4.0.2"), Some("4.0.3"), Some(STALE)),
-            ("4.0.2", Some("4.0.2"), Some("4.0.2"), None),
-            ("4.0.2", Some("4.0.2"), Some("4.0.3"), Some(NEXT)),
-            ("4.0.0", None, Some("4.0.2"), Some("⬆ v4.0.2 available")),
-            ("4.0.3", Some("4.0.2"), Some("4.0.2"), None),
+            ("9.99.0", Some("9.99.2"), Some("9.99.2"), Some(STALE)),
+            ("9.99.0", Some("9.99.2"), Some("9.99.3"), Some(STALE)),
+            ("9.99.2", Some("9.99.2"), Some("9.99.2"), None),
+            ("9.99.2", Some("9.99.2"), Some("9.99.3"), Some(NEXT)),
+            ("9.99.0", None, Some("9.99.2"), Some("⬆ v9.99.2 available")),
+            ("9.99.3", Some("9.99.2"), Some("9.99.2"), None),
         ] {
             assert_eq!(
                 StatusBar::version_badge(running, installed, latest).as_deref(),

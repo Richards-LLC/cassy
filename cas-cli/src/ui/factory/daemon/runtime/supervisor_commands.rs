@@ -654,13 +654,17 @@ mod tests {
             let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
             std::fs::create_dir_all(&projects).unwrap();
             let transcript = projects.join("reload-version.jsonl");
-            for version in [None, Some("2.1.317")] {
+            for version in [None, Some("2.1.310")] {
                 std::fs::write(&transcript, format!("{}\n", serde_json::json!({"type":"user","sessionId":"reload-version","version":version}))).unwrap();
                 let error = daemon.dispatch_supervisor_command(run.clone(), "reload-unverified".into(), owner.clone()).await.unwrap_err();
-                assert!(error.to_string().contains("unverified version") && error.to_string().contains("2.1.318"), "{error}");
+                assert!(error.to_string().contains("unverified version"), "{error}");
                 assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
             }
-            std::fs::write(&transcript, "{\"type\":\"user\",\"sessionId\":\"reload-version\",\"version\":\"2.1.318\"}\n").unwrap();
+            for version in ["2.1.311", "2.1.316"] {
+                std::fs::write(&transcript, format!("{}\n", serde_json::json!({"type":"user","sessionId":"reload-version","version":version}))).unwrap();
+                verify_claude_reload_version(daemon.app.cas_dir(), &daemon.session_name, &name)
+                    .unwrap_or_else(|error| panic!("live-proved Claude {version} must permit reload: {error}"));
+            }
             let receipt = daemon.dispatch_supervisor_command(run.clone(), "reload".into(), owner.clone()).await.unwrap();
             assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
             daemon.dispatch_supervisor_command(run, "reload".into(), owner.clone()).await.unwrap();
@@ -690,6 +694,18 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
             }).await.expect("registry replacement must complete the original receipt");
+            quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+            let replay = Request::Run { command, confirmed: false };
+            daemon.dispatch_supervisor_command(replay.clone(), "reload-timeout".into(), owner.clone()).await.unwrap();
+            let timeout_owner = ("reload-owner".into(), "reload-timeout".into());
+            daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap().started -= Duration::from_secs(91);
+            let run_timeout = daemon.dispatch_supervisor_command(replay, "reload-timeout".into(), owner.clone()).await.unwrap();
+            let DaemonMessage::SupervisorCommandReceipt { receipt: run_timeout } = run_timeout else { panic!("owned reload receipt") };
+            assert_eq!(run_timeout.phase, Phase::Unconfirmed);
+            assert!(run_timeout.detail.contains("replacement live MCP PID and version"), "{}", run_timeout.detail);
+            daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap().receipt.phase = Phase::Submitted;
+            let status_timeout = daemon.dispatch_supervisor_command(Request::Status, "reload-timeout".into(), owner.clone()).await.unwrap();
+            assert!(matches!(status_timeout, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed && receipt.detail == run_timeout.detail));
         }
     }
     #[tokio::test(flavor = "current_thread")]

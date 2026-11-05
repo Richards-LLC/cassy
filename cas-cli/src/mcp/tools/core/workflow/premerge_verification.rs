@@ -324,6 +324,17 @@ impl Candidate {
 
     /// Independently reviewed siblings cannot widen this delivery's approval.
     fn tree_on(&self, target: &str) -> Result<String, String> {
+        // cas-4af9: the approval covers (source tip, candidate tree). A target
+        // move that recomputes the exact reviewed tree, such as a ref fast-
+        // forward or a queue merge of commits the source already carries,
+        // changes no reviewed content, whatever the path overlap says.
+        if let Ok(merged) = git(
+            &self.repository,
+            &["merge-tree", "--write-tree", target, &self.source_sha],
+        ) && merged.lines().next() == Some(self.tree.as_str())
+        {
+            return Ok(self.tree.clone());
+        }
         git(
             &self.repository,
             &["merge-base", "--is-ancestor", &self.target_sha, target],

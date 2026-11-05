@@ -414,13 +414,15 @@ impl RuleStore for SyncingRuleStore {
     }
 
     fn list_proven(&self) -> Result<Vec<Rule>> {
-        Ok(self.list()?.into_iter().filter(|rule| rule.status == RuleStatus::Proven).collect())
+        Ok(self.inner.list_proven()?.into_iter().map(|rule| self.reconcile(rule))
+            .collect::<Result<Vec<_>>>()?.into_iter()
+            .filter(|rule| rule.status == RuleStatus::Proven).collect())
     }
 
     fn list_critical(&self) -> Result<Vec<Rule>> {
         Ok(self.inner.list_critical()?.into_iter()
             .map(|rule| self.reconcile(rule)).collect::<Result<Vec<_>>>()?
-            .into_iter().filter(|rule| Self::live(rule)).collect())
+            .into_iter().filter(|rule| matches!(rule.status, RuleStatus::Proven | RuleStatus::Draft)).collect())
     }
 
     fn close(&self) -> Result<()> {

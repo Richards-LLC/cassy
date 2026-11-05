@@ -396,6 +396,14 @@ impl RuleStore for SyncingRuleStore {
     ) -> Result<()> {
         // Reconcile first so a legacy row's original state is in history.
         self.get(id)?;
+        let version = if version.is_none() && self.receipt(id)?.as_deref() == Some("held") {
+            // Repeated edits/votes while held may record additional Stale
+            // snapshots; the keep decision restores the newest live source.
+            self.inner.list_versions(id)?.into_iter().find_map(|version| {
+                serde_json::from_str::<Rule>(&version.snapshot_json).ok()
+                    .filter(Self::live).map(|_| version.version)
+            })
+        } else { version };
         self.inner.restore_version(id, version, changed_by, change_note)?;
         self.forget_projection(id);
         self.after_write(id, true)
@@ -520,7 +528,7 @@ mod tests {
         assert!(!target.join("rule-legacy.md").exists());
         assert!(queue.pending(100, 5).unwrap().is_empty(), "a local hold must not propagate to Cloud");
         // The original version is retained; restore is the explicit keep decision.
-        store.restore_version(&rule.id, Some(1), Some("operator"), Some("keep this rule")).unwrap();
+        store.restore_version(&rule.id, None, Some("operator"), Some("keep this rule")).unwrap();
         assert_eq!(store.list_proven().unwrap().len(), 1);
         assert!(target.join("rule-legacy.md").exists());
     }

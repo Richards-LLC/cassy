@@ -933,7 +933,7 @@ impl CasService {
     }
 }
 
-fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
+pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
     match tool_name {
         "task" => !matches!(
             action,

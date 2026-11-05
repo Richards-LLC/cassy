@@ -1190,7 +1190,7 @@ mod tests {
                 let noop = serde_json::to_value(&rows[1].payload).unwrap();
                 assert_eq!(noop["no_op"], true);
                 assert_eq!(noop["actions"], serde_json::json!([]));
-                assert_eq!(noop["woken_by"], "unknown", "wrong-recipient envelope is untrusted");
+                assert_eq!(noop["woken_by"], "terminal", "a wrong-recipient envelope is untrusted pane input");
                 assert!(noop["input_tokens"].is_null(), "missing usage must stay unknown");
                 // Truncation replays with the same natural keys, never duplicates.
                 std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();

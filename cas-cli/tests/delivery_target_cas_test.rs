@@ -518,7 +518,9 @@ async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
         ("late-approved", "success", Some("approved"), true),
         ("late-timedout-approved", "success", Some("approved"), true),
         ("late-moved-target", "success", Some("approved"), true),
-        ("late-child", "success", Some("approved"), false),
+        ("late-child", "success", Some("approved"), true),
+        ("late-child-superseded", "success", Some("approved"), false),
+        ("late-child-changed", "success", Some("approved"), false),
     ]).await;
 }
 
@@ -780,7 +782,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             let recomputed = git_stdout(&repo.root, &["merge-tree", "--write-tree", "origin/main", &delivery_branch]);
             assert_eq!(recomputed.lines().next(), Some(tree.as_str()), "moved target keeps the reviewed candidate tree");
         }
-        let late_child = if row == "late-child" {
+        let late_child = if row.starts_with("late-child") {
             let child_id = format!("{slug}-verifier-session");
             let mut child = Agent::new(child_id.clone(), "task-verifier".into());
             child.agent_type = AgentType::SubAgent;
@@ -800,33 +802,50 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
                 "UPDATE verification_dispatches SET requested_at=?2,deadline_at=?3 WHERE id=?1",
                 rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), (now - chrono::Duration::minutes(2)).to_rfc3339()],
             ).unwrap();
+            if row.starts_with("late-child") {
+                conn.execute(
+                    "UPDATE verification_capabilities SET issued_at=?2,bound_at=?2,expires_at=?3 WHERE dispatch_id=?1",
+                    rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), (now - chrono::Duration::minutes(2)).to_rfc3339()],
+                ).unwrap();
+            }
             drop(conn);
-            if row == "late-timedout-approved" {
+            if row == "late-timedout-approved" || row.starts_with("late-child") {
                 let expired = cas_store::timeout_verification_dispatch(&cas_root, &task.id, now).unwrap().unwrap();
                 assert_eq!(expired.id, dispatch.id);
             }
         }
-        if let Some(child_id) = late_child {
-            let refused = delivery_service(&cas_root, &child_id).verification(Parameters(verification_req(serde_json::json!({
-                "action":"add", "task_id":task.id, "dispatch_id":dispatch.id,
-                "status":"approved", "summary":"child review after deadline", "confidence":1.0,
-            })))).await.expect_err("expired child authority must refuse loudly, never accept then discard");
-            assert!(refused.message.contains("expired"), "{refused}");
-            let timed_out = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
-            assert_eq!(timed_out.id, dispatch.id);
-            assert_eq!(timed_out.state, cas::types::VerificationDispatchState::TimedOut);
-            assert!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().is_none());
-            let held = supervisor.factory(Parameters(merge)).await.expect_err("a missing child verdict must hold the same dispatch");
-            assert!(held.message.contains(&dispatch.id), "{held}");
-            assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
-            continue;
+        if row == "late-child-superseded" {
+            cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_root, &task.id).unwrap();
+            let next = cas_store::create_verification_dispatch_bound(
+                &cas_root, &task.id, &supervisor_id, &supervisor_id,
+                &cas::types::VerificationProofBoundary::task_at(proof.clone()),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+            assert_ne!(next.id, dispatch.id);
+        }
+        if row == "late-child-changed" {
+            std::fs::write(worker_path.join(delivered_path), "changed after review\n").unwrap();
+            run_git(&["commit", "-am", "changed candidate after verifier started"], &worker_path);
         }
         let verdict = verdict.expect("every publication needs a candidate verdict");
-        let recorded = get_text(&supervisor.verification(Parameters(verification_req(serde_json::json!({
+        let request = verification_req(serde_json::json!({
             "action": "add", "task_id": task.id, "status": verdict,
             "summary": format!("{verdict} {row}"), "confidence": 1.0,
             "dispatch_id": dispatch.id,
-        })))).await.expect("pre-merge verdict"));
+        }));
+        let result = if let Some(child_id) = late_child {
+            delivery_service(&cas_root, &child_id).verification(Parameters(request)).await
+        } else { supervisor.verification(Parameters(request)).await };
+        if row == "late-child-superseded" || row == "late-child-changed" {
+            let refused = result.expect_err("late authority cannot cross a changed or superseded candidate");
+            assert!(refused.message.contains("superseded") || refused.message.contains("changed"), "{row}: {refused}");
+            assert!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().is_none());
+            if row == "late-child-superseded" {
+                assert_ne!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
+            }
+            continue;
+        }
+        let recorded = get_text(&result.expect("an exact bound late verdict must be accepted"));
         if row.starts_with("late-") {
             let resolved = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
             let accepted = cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().unwrap();

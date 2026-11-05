@@ -150,32 +150,15 @@ clone_epic "$tmp/epic" epic/alpha alpha
 epic="$tmp/epic"
 run() { (cd "$1" && shift && ./scripts/release.sh "$@"); }
 
-# Delivery anchors live in the selected clone's store, including worktrees.
-record_delivery() {
-    python3 - "$1" "$2" "$3" "$4" <<'PYDB'
-import json, sqlite3, sys
-from pathlib import Path
-root, task, anchor, base = sys.argv[1:]
-folder = Path(root) / '.cas'
-folder.mkdir(exist_ok=True)
-with sqlite3.connect(folder / 'cas.db') as db:
-    db.execute('CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, deliverables TEXT)')
-    db.execute('INSERT OR REPLACE INTO tasks VALUES (?, ?)',
-               (task, json.dumps({'factory_branch_anchor': anchor,
-                                  'factory_branch_start': {'base_sha': base}})))
-with (Path(root) / '.git/info/exclude').open('a') as out:
-    out.write('\n.cas/\n')
-PYDB
-}
-
 missing_fragment_delivery_stops_release() {
-    local fixture="$tmp/missing-fix" base fix before status=0
+    local fixture="$tmp/missing-fix" base fix second before status=0
     clone_epic "$fixture" hotfix/missing-fix missing-fix
     # Replay af4c35f71 (red) plus d702e7333/8890a7a95 (notes), without
     # their fix: the fragment rides in the fix commit and is dropped too.
     echo 'failing peer wake regression' >"$fixture/red-test.txt"
     git -C "$fixture" add red-test.txt
     git -C "$fixture" commit --quiet -m 'test(peer): untyped peer mail must wake a peer (cas-0004 red)'
+    git -C "$fixture" commit --quiet --allow-empty -m 'test: another missing delivery (cas-0005 red)'
     base="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$fixture/changelog.d"
     echo 'actual peer wake fix' >"$fixture/fix.txt"
@@ -183,8 +166,14 @@ missing_fragment_delivery_stops_release() {
     printf '# delivery-lock-marker\n' >>"$fixture/Cargo.lock"
     echo 'delivery generated bundle' >"$fixture/hub-web/dist/app.js"
     git -C "$fixture" add fix.txt changelog.d Cargo.lock hub-web/dist
-    git -C "$fixture" commit --quiet -m 'peer wake fix and its fragment'
+    git -C "$fixture" commit --quiet -m 'fix: peer wake and its fragment (cas-0004)'
     fix="$(git -C "$fixture" rev-parse HEAD)"
+    git -C "$fixture" branch delivered-peer "$fix"
+    echo second >"$fixture/second.txt"
+    git -C "$fixture" add second.txt
+    git -C "$fixture" commit --quiet -m 'fix: second delivery (cas-0005)'
+    second="$(git -C "$fixture" rev-parse HEAD)"
+    git -C "$fixture" branch delivered-second "$second"
     git -C "$fixture" reset --quiet --hard "$base"
     mkdir -p "$fixture/docs/release-notes"
     write_valid_draft "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
@@ -193,7 +182,6 @@ missing_fragment_delivery_stops_release() {
     sed -i 's/easier to use/safer to use/' "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
     git -C "$fixture" commit --quiet -am 'docs(release): ships the peer wake fix only'
     [[ ! -f "$fixture/changelog.d/cas-0004.md" && ! -f "$fixture/fix.txt" ]] || return 1
-    record_delivery "$fixture" cas-0004 "$fix" "$base"
     before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/missing-fix-state"
     : >"$tmp/missing-fix-gh.log"
@@ -201,32 +189,84 @@ missing_fragment_delivery_stops_release() {
         run "$fixture" --hotfix --no-watch --notes "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" >"$tmp/missing-fix.log" 2>&1 || status=$?
     [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
         grep -q 'cas-0004' "$tmp/missing-fix.log" && grep -q "$fix" "$tmp/missing-fix.log" &&
+        grep -q 'cas-0005' "$tmp/missing-fix.log" && grep -q "$second" "$tmp/missing-fix.log" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
         ! grep -q '^pr create' "$tmp/missing-fix-gh.log" || return 1
 
     # A cherry-pick changes identity but retains the full delivery patch.
     git -C "$fixture" cherry-pick --quiet "$fix" || return 1
+    git -C "$fixture" commit --quiet --amend -m 'backport peer wake without the original subject'
+    git -C "$fixture" cherry-pick --quiet "$second" || return 1
     ! git -C "$fixture" merge-base --is-ancestor "$fix" HEAD || return 1
+    sed -i 's/actual peer wake fix/later refinement/' "$fixture/fix.txt"
+    git -C "$fixture" commit --quiet -am 'docs: mention cas-dead1 in passing'
+    git -C "$fixture" checkout --quiet -b epic/cas-dead2
+    echo merged >"$fixture/merge.txt"
+    git -C "$fixture" add merge.txt
+    git -C "$fixture" commit --quiet -m 'unrelated epic work'
+    git -C "$fixture" checkout --quiet hotfix/missing-fix
+    git -C "$fixture" merge --quiet --no-ff epic/cas-dead2 -m 'Merge epic/cas-dead2 (cas-dead3)'
     # Generated output and lock resolution may legitimately differ on a cut.
     sed -i 's/delivery-lock-marker/regenerated-lock-marker/' "$fixture/Cargo.lock"
     echo 'regenerated bundle' >"$fixture/hub-web/dist/app.js"
     git -C "$fixture" commit --quiet -am 'regenerate build outputs'
     run "$fixture" --hotfix --dry-run --notes "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" >>"$tmp/missing-fix.log" 2>&1 || return 1
     [[ ! -f "$fixture/changelog.d/cas-0004.md" ]] || return 1
-    # A resumed release must recover the consumed fragment's claim, even
-    # after the code is dropped from an already-prepared branch.
-    git -C "$fixture" rm --quiet fix.txt
-    git -C "$fixture" commit --quiet -m 'drop fix after preparation'
+    # A later edit does not erase the historical delivery on a rerun.
     before="$(git -C "$fixture" rev-parse HEAD)"
-    status=0
-    FAKE_GH_STATE="$tmp/missing-fix-state" FAKE_GH_LOG="$tmp/missing-fix-gh.log" \
-        run "$fixture" --hotfix --no-watch >>"$tmp/missing-fix.log" 2>&1 || status=$?
-    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -q "$fix" "$tmp/missing-fix.log" &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
-        ! grep -q '^pr create' "$tmp/missing-fix-gh.log"
+    run "$fixture" --hotfix --dry-run >>"$tmp/missing-fix.log" 2>&1 &&
+        [[ "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
+
 }
-check 'missing_fragment_delivery_stops_release || { cat "$tmp/missing-fix.log"; false; }' 'cas-4bdf: red plus notes without fix or fragment refuses; equivalent source patch passes regenerated outputs'
+check 'missing_fragment_delivery_stops_release || { cat "$tmp/missing-fix.log"; false; }' 'cas-4bdf: report all missing fixes; accept historical cherry-picks after edits and ignore epic mentions'
+
+# Real release history is part of this regression: CI checks out full history.
+historical_release_replay() {
+    local status=0
+    python3 - "$script_dir/.." "$tmp/history" >"$tmp/history.log" 2>&1 <<'PYHISTORY' || status=$?
+from pathlib import Path
+import shutil, subprocess, sys
+root, clone = map(Path, sys.argv[1:])
+def git(*args, cwd=root):
+    return subprocess.check_output(['git', *args], cwd=cwd, text=True).strip()
+subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', str(root), str(clone)], check=True)
+cases = []
+for merge in git('log', '--first-parent', '--merges', '--format=%H', 'origin/main').splitlines():
+    release = git('log', f'{merge}^1..{merge}^2', '--grep=^release: v', '--format=%H', '-1')
+    if release:
+        head = git('rev-parse', f'{release}^')
+        cases.append((head, git('merge-base', f'{merge}^1', head)))
+    if len(cases) == 12:
+        break
+assert len(cases) == 12, 'release regression requires the last twelve releases (full Git history)'
+cases.append((git('rev-parse', '34f5034e5^2'), git('rev-parse', '66719836d')))
+def verify(head, base, expected):
+    git('update-ref', 'refs/heads/replay', head, cwd=clone)
+    git('symbolic-ref', 'HEAD', 'refs/heads/replay', cwd=clone)
+    shutil.rmtree(clone / 'changelog.d', ignore_errors=True)
+    (clone / 'changelog.d').mkdir()
+    for path in git('ls-tree', '-r', '--name-only', head, '--', 'changelog.d/', cwd=clone).splitlines():
+        (clone / path).write_bytes(subprocess.check_output(['git', 'show', f'{head}:{path}'], cwd=clone))
+    result = subprocess.run(['python3', str(root / 'scripts/release_changelog.py'),
+                             'verify-deliveries', base], cwd=clone, text=True, capture_output=True)
+    print(f'{head} expected={expected} actual={result.returncode} {result.stderr.strip()}')
+    assert result.returncode == expected, result.stderr
+for head, base in cases:
+    verify(head, base, 0)
+# Build the actual incident without the fix, only the red and notes commits.
+shutil.rmtree(clone / 'changelog.d')
+git('sparse-checkout', 'init', '--cone', cwd=clone)
+git('sparse-checkout', 'set', 'changelog.d', 'docs/release-notes', cwd=clone)
+git('checkout', '--quiet', '--force', '--detach', 'af4c35f71', cwd=clone)
+git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'cherry-pick', 'd702e7333', '8890a7a95', cwd=clone)
+verify(git('rev-parse', 'HEAD', cwd=clone), git('rev-parse', '66719836d'), 1)
+print('12 release preparations + actual shipped tip accepted; incident refused')
+PYHISTORY
+    cat "$tmp/history.log"
+    return "$status"
+}
+check 'historical_release_replay' 'cas-4bdf: twelve real releases and shipped peer fix pass; actual incident refuses'
 
 # cas-56bbc: a dry patch release must commit the bundle built from the new
 # manifest, not leave the old embedded version for the merge queue to reject.
@@ -317,9 +357,6 @@ printf '### Added — alpha\n\n- **Second alpha** — the follow-up landed.\n' >
 printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipped.\n' >"$epic/changelog.d/cas-0003.md"
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
-for task in cas-0001 cas-0002 cas-0003; do
-    record_delivery "$epic" "$task" "$(git -C "$epic" rev-parse HEAD^)" "$(git -C "$epic" rev-parse HEAD^^)"
-done
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
 head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"

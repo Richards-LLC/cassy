@@ -498,7 +498,7 @@ replaces this manual precheck when its hosted command is available.
 <!-- cas-src:else -->
 This precheck belongs to the Cassy source repository. In other projects, CI
 check-runs on the reviewed SHA (or the supervisor's integrated run of the
-commands the project's CLAUDE.md or AGENTS.md names) serve as the precheck.
+commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
 <!-- cas-src:end -->
 
 ## Phase 4: Complete

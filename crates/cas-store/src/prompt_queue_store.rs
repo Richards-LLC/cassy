@@ -16408,7 +16408,7 @@ mod tests {
         // Only completed supervisor transcript mirrors may expire. Real operator
         // messages and fresh mirrors survive; outbox delivery remains independent.
         let mut mirrors = Vec::new();
-        for label in ["aged", "fresh", "outbox"] {
+        for label in ["aged", "fresh"] {
             let outcome = store.enqueue_idempotent(
                 "supervisor", "operator", label, Some("factory-a"), None, None,
                 &format!("commander-mirror:factory-a:{label}"), None,
@@ -16421,11 +16421,9 @@ mod tests {
             }
             mirrors.push(id);
         }
-        store.conn.lock().unwrap().execute(
-            "INSERT INTO operator_delivery_outbox
-             (event_id, prompt_id, factory_session, payload_snapshot, created_at)
-             VALUES ('mirror-outbox', ?, 'factory-a', '{}', ?)",
-            params![mirrors[2], Utc::now().to_rfc3339()],
+        let snapshot: String = store.conn.lock().unwrap().query_row(
+            "SELECT payload_snapshot FROM operator_delivery_outbox WHERE prompt_id = ?",
+            [mirrors[0]], |row| row.get(0),
         ).unwrap();
 
         let expired = store
@@ -16445,8 +16443,8 @@ mod tests {
         ).unwrap();
         assert!(fresh_pending, "fresh mirrors survive");
         let outbox_pending: bool = conn.query_row(
-            "SELECT payload_snapshot = '{}' AND retained_at IS NULL AND lease_token IS NULL
-             FROM operator_delivery_outbox WHERE prompt_id = ?", [mirrors[2]], |row| row.get(0),
+            "SELECT payload_snapshot = ? AND retained_at IS NULL AND lease_token IS NULL
+             FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
         ).unwrap();
         assert!(outbox_pending, "the independent durable delivery snapshot still retries");
         drop(conn);

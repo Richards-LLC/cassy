@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectNavigation } from "./project-navigation";
-import { isNewerRelease } from "./machine-version";
+import { isNewerRelease, machineVersionMarkup } from "./machine-version";
 import type { ConversationRow } from "./conversation-list";
 
 const row = (key: string, extra: Partial<ConversationRow> = {}): ConversationRow => ({ key, session: key, machineId: "soundwave", host: "soundwave · Linux", projectDir: "/projects/cassy", supervisor: key, connection: "Live", freshness: "", attention: 0, selected: false, ...extra });
@@ -21,6 +21,20 @@ describe("project-first navigation", () => {
       [undefined, "3.88.0", false], ["3.87.0", undefined, false],
       ["3.87.0", "invalid", false], ["3.87.0", "3.88.0-rc.1", false],
     ] as const) expect(isNewerRelease(current, latest), `${current} → ${latest}`).toBe(newer);
+  });
+  it("names a hub still running an older binary than the installed one, and offers only releases beyond it (cas-d786)", () => {
+    const shown = (runtime: string, latest: string, installed?: string) => {
+      const span = document.createElement("span");
+      span.innerHTML = machineVersionMarkup(runtime, latest, undefined, installed);
+      return span.textContent;
+    };
+    for (const [runtime, latest, installed, text] of [
+      ["4.0.0", "4.0.2", "4.0.2", "Hub 4.0.0 · installed 4.0.2 Run cas hub restart"],
+      ["4.0.0", "4.0.3", "4.0.2", "Hub 4.0.0 · installed 4.0.2 Run cas hub restart Update available → 4.0.3"],
+      ["4.0.2", "4.0.2", "4.0.2", "Cassy 4.0.2"],
+      ["4.0.2", "4.0.3", "4.0.2", "Cassy 4.0.2 Update available → 4.0.3"],
+      ["4.0.0", "4.0.2", undefined, "Cassy 4.0.0 Update available → 4.0.2"],
+    ] as const) expect(shown(runtime, latest, installed), `${runtime}/${installed}/${latest}`).toBe(text);
   });
   it("contains supervisors across machines in one project and renders only supplied identity", () => {
     const nav = setup();

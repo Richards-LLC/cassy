@@ -2,7 +2,7 @@ import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineVersionMarkup } from "./machine-version";
 import { ConversationList, machineName, mostRecentConversation, rowProjectName, type ConversationRow } from "./conversation-list";
 
-export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; latestRelease?: string }
+export interface NavigationMachine { id: string; label: string; online?: boolean; runtime?: string; installed?: string; latestRelease?: string }
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
@@ -159,7 +159,7 @@ export class ProjectNavigation {
       const chipMarkup = hosts.map((row) => {
         const machine = options.machines?.find(machine => machine.id === row.machineId);
         const online = machine?.online ?? row.machine_online;
-        return `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}${online === undefined ? "" : online ? ", online" : ", offline"}"><span class="machine-online-dot${online === true ? " online" : online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${online === undefined ? "" : online ? ", online" : ", offline"}</span>${machineVersionMarkup(machine?.runtime, machine?.latestRelease)}</button>`;
+        return `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}${online === undefined ? "" : online ? ", online" : ", offline"}"><span class="machine-online-dot${online === true ? " online" : online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${online === undefined ? "" : online ? ", online" : ", offline"}</span>${machineVersionMarkup(machine?.runtime, machine?.latestRelease, undefined, machine?.installed)}</button>`;
       }).join("");
       // The live DOM also contains aria-description added below. Compare the
       // generated input so an unchanged catalog tick keeps the focused chip.

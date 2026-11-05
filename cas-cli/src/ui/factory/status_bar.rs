@@ -860,25 +860,69 @@ impl StatusBar {
     }
 
     fn update_badge(cas_dir: &Path) -> Option<String> {
-        if std::env::var("CAS_DISABLE_UPDATE_CHECK")
+        let latest = if std::env::var("CAS_DISABLE_UPDATE_CHECK")
             .ok()
             .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         {
-            return None;
-        }
-
-        Self::refresh_update_cache_async_if_stale(cas_dir);
-
-        let cache_path = cas_dir.join(UPDATE_CHECK_CACHE_RELATIVE);
-        let cache = Self::read_update_cache(&cache_path)?;
-        if cache.update_available {
-            cache
-                .latest_version
-                .filter(|v| Self::is_newer_version(v, env!("CARGO_PKG_VERSION")))
-                .map(|v| format!("⬆ v{v} available"))
-        } else {
             None
+        } else {
+            Self::refresh_update_cache_async_if_stale(cas_dir);
+            Self::read_update_cache(&cas_dir.join(UPDATE_CHECK_CACHE_RELATIVE))
+                .filter(|cache| cache.update_available)
+                .and_then(|cache| cache.latest_version)
+        };
+        Self::version_badge(
+            env!("CARGO_PKG_VERSION"),
+            Self::installed_version_nonblocking().as_deref(),
+            latest.as_deref(),
+        )
+    }
+
+    /// The daemon renders this bar, so `running` is its own compiled version.
+    /// A newer installed binary is loaded only by restarting the factory
+    /// (cas-d786); otherwise offer a release beyond what is installed.
+    fn version_badge(
+        running: &str,
+        installed: Option<&str>,
+        latest: Option<&str>,
+    ) -> Option<String> {
+        if let Some(installed) = installed.filter(|v| Self::is_newer_version(v, running)) {
+            return Some(format!(
+                "installed v{} · restart factory to load",
+                installed.trim_start_matches('v')
+            ));
         }
+        latest
+            .filter(|v| {
+                Self::is_newer_version(v, running)
+                    && installed.is_none_or(|i| Self::is_newer_version(v, i))
+            })
+            .map(|v| format!("⬆ v{} available", v.trim_start_matches('v')))
+    }
+
+    /// The installed binary's version, probed off the render thread at most
+    /// every thirty seconds; `None` until the first probe answers.
+    fn installed_version_nonblocking() -> Option<String> {
+        static INSTALLED: OnceLock<Mutex<(Option<std::time::Instant>, Option<String>)>> =
+            OnceLock::new();
+        let slot = INSTALLED.get_or_init(|| Mutex::new((None, None)));
+        let mut guard = slot.lock().ok()?;
+        let stale = guard
+            .0
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(30));
+        if stale {
+            // Mark the probe as started so one render spawns one probe.
+            guard.0 = Some(std::time::Instant::now());
+            std::thread::spawn(|| {
+                let version = crate::factory_binary_skew::relaunch_version();
+                if let Some(slot) = INSTALLED.get()
+                    && let Ok(mut guard) = slot.lock()
+                {
+                    guard.1 = version;
+                }
+            });
+        }
+        guard.1.clone()
     }
 
     fn refresh_update_cache_async_if_stale(cas_dir: &Path) {
@@ -1132,6 +1176,28 @@ mod tests {
         let text = render_status_bar(50, Some("⬆ v99.0.0 available"), None);
         assert!(text.contains(&running_version_label()), "{text}");
         assert!(text.contains("⬆ v99.0.0 available"), "{text}");
+    }
+
+    /// cas-d786: a daemon older than the installed binary says so and names
+    /// the restart; a release is offered only beyond what is installed.
+    #[test]
+    fn version_badge_names_an_installed_binary_the_daemon_has_not_loaded() {
+        const STALE: &str = "installed v4.0.2 · restart factory to load";
+        const NEXT: &str = "⬆ v4.0.3 available";
+        for (running, installed, latest, badge) in [
+            ("4.0.0", Some("4.0.2"), Some("4.0.2"), Some(STALE)),
+            ("4.0.0", Some("4.0.2"), Some("4.0.3"), Some(STALE)),
+            ("4.0.2", Some("4.0.2"), Some("4.0.2"), None),
+            ("4.0.2", Some("4.0.2"), Some("4.0.3"), Some(NEXT)),
+            ("4.0.0", None, Some("4.0.2"), Some("⬆ v4.0.2 available")),
+            ("4.0.3", Some("4.0.2"), Some("4.0.2"), None),
+        ] {
+            assert_eq!(
+                StatusBar::version_badge(running, installed, latest).as_deref(),
+                badge,
+                "{running}/{installed:?}/{latest:?}"
+            );
+        }
     }
 
     #[test]

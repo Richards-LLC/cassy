@@ -4862,7 +4862,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
@@ -6260,6 +6260,7 @@ function pairedMachineRows(): PairedMachineRow[] {
         : state?.phase === "failed" && state.fatal === true ? { cause: `This browser can't connect. ${fatalConnectionRecovery(state.reason)}` } : {}),
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version,
+      installed: machineInfo.get(machine.id)?.installed_version,
       latestRelease: latestRelease.version,
       // cas-d382: what this pairing may do to the fleet, and how to get the rest.
       fleet: { operate: fleetControlGate(machine.scopes, "add-workers", location.origin), manage: fleetControlGate(machine.scopes, "stop-worker", location.origin) } };

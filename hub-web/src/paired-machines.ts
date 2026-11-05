@@ -23,6 +23,8 @@ export interface PairedMachineRow {
   connectionState?: MachineConnectionLabelState;
   lastSeen: string;
   runtime?: string;
+  /** The binary installed beside that hub, when it says (cas-d786). */
+  installed?: string;
   latestRelease?: string;
   /**
    * Fleet permissions on this pairing (cas-d382): managing workers and tasks
@@ -169,7 +171,7 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.cause ?? row.connection, '.paired-machine-seen': row.lastSeen };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
     const runtime = node.querySelector('.paired-machine-runtime')!;
-    const versionMarkup = machineVersionMarkup(row.runtime, row.latestRelease, row.connected ? 'Version unknown' : 'Version unknown until it connects');
+    const versionMarkup = machineVersionMarkup(row.runtime, row.latestRelease, row.connected ? 'Version unknown' : 'Version unknown until it connects', row.installed);
     if (runtime.innerHTML !== versionMarkup) runtime.innerHTML = versionMarkup;
     renderFleetPermissions(node, row, options);
     if (options.installations) {

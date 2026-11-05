@@ -74,6 +74,8 @@ export type DoubleOptions = {
   commands?: string[];
   /** Actual /v1/machine reports for the version-badge journey. */
   versions?: Record<string, string>;
+  /** The binary each /v1/machine reports as installed beside its hub (cas-d786). */
+  installedVersions?: Record<string, string>;
   /** Durable local uploads, shared with a separately paired device's hub double. */
   composerUploads?: Map<string, ComposerUpload>;
   /** Unreceipted daemon replies, independent of the bounded history page. */
@@ -1021,7 +1023,7 @@ export class HubDouble {
       this.observed();
       const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.commands?.length ? ["supervisor_commands"] : []), ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
-      return route.fulfill({ json: { schema_version: 1, version: this.options.versions?.[machineId] ?? "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
+      return route.fulfill({ json: { schema_version: 1, version: this.options.versions?.[machineId] ?? "journey-double", ...(this.options.installedVersions?.[machineId] ? { installed_version: this.options.installedVersions[machineId] } : {}), capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
     if (path === "/v1/auth/scopes" && method === "POST") {
       const add = (route.request().postDataJSON() as { add?: string[] }).add;

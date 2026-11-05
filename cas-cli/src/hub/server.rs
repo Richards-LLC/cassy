@@ -672,6 +672,9 @@ struct MachineResponse {
     schema_version: u32,
     machine_id: String,
     version: &'static str,
+    /// The installed binary a restart would load; omitted when unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed_version: Option<String>,
     capabilities: &'static [&'static str],
     transport: super::MachineTransport,
     cloud_devices: Vec<super::CloudDeviceSuggestion>,
@@ -693,11 +696,13 @@ async fn machine<R: SessionReadModel>(
         return with_cors(unauthorized_for(&error), &headers);
     }
     let metadata = state.publication.lock().unwrap().metadata.clone();
+    let installed_version = state.catalog.installed_version().await;
     with_cors(
         Json(MachineResponse {
             schema_version: super::HUB_SCHEMA_VERSION,
             machine_id: state.machine.id,
             version: env!("CARGO_PKG_VERSION"),
+            installed_version,
             capabilities: &[
                 "session_index",
                 "daemon_attach",

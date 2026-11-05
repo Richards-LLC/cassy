@@ -517,13 +517,10 @@ pub(crate) fn emit_worker_final_git_state(
     // implied the worker died; supervisors were incorrectly using it as a
     // liveness signal and resetting tasks on active workers.
     let dirty_tag = if gs.dirty { "dirty" } else { "clean" };
-    let pushed_tag = if gs.pushed_ref == "none" {
-        "not-pushed"
-    } else {
-        &gs.pushed_ref
-    };
+    // cas-2879: "pushed" only when every HEAD commit is on the remote ref.
+    let pushed_tag = gs.push_state_label();
     let summary = format!(
-        "checkpoint git-state: {} @ {} [{}] [{}] ahead:{} behind:{} PR: {}",
+        "checkpoint git-state: {} @ {} [{}] {} ahead:{} behind:{} PR: {}",
         gs.branch,
         crate::mcp::tools::service::factory_ops::head_sha_for_display(&gs.head_sha),
         dirty_tag,
@@ -546,6 +543,7 @@ pub(crate) fn emit_worker_final_git_state(
         "base_branch": gs.base_branch,
         "dirty": gs.dirty,
         "pushed_ref": gs.pushed_ref,
+        "unpushed_commits": gs.upstream.map(|(ahead, _)| ahead),
         "pr_url": gs.pr_url.to_string(),
     });
 
@@ -747,6 +745,8 @@ mod tests_b3 {
             base_branch: "main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
+            upstream: None,
+            delivery: None,
             pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };

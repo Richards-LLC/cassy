@@ -164,9 +164,10 @@ impl CasService {
             let message = self.peer_body(message, attachment).await?;
             // cas-2a5a: a reply across projects is advisory too.
             let blocker = blocker && envelope.scope == peer_mailbox::PeerScope::Project;
-            // A substantive reply to an actionable message completes the
-            // asker's wait. Explicit receipts and wake=false remain quiet.
-            let kind = kind.or_else(|| envelope.wakes_idle().then_some("answer"));
+            // cas-7dd1d: a reply completes the asker's wait, so an untyped
+            // reply is an answer and wakes it. Explicit receipts and
+            // wake=false remain quiet.
+            let kind = kind.or(Some("answer"));
             let (body, summary) = (
                 peer_mailbox::attach_message_intent(&message, kind, blocker)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?,

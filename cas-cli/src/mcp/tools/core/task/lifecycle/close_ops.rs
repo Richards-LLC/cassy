@@ -29076,7 +29076,7 @@ mod merge_state_gate_tests {
     }
 
     #[cfg(unix)]
-    async fn queue_proof_close_cas_4386(case: &str) -> (Task, String) {
+    async fn queue_proof_close_cas_4386(case: &str, supervisor_override: bool) -> (Task, String) {
         use crate::mcp::CasService;
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store};
         use cas_types::{Agent, AgentRole, WorkTarget};
@@ -29180,11 +29180,15 @@ esac
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:cas-4386-fixture".into(), target_branch: "main".into(),
         });
+        // cas-fe831: replay cas-d4310's evidence at supervisor close: the
+        // worker tested its exact tip, then the queue landed the delivery.
+        // Its capped receipt deliberately has no SCOPED_PROOF base/head.
+        task.notes = format!("WORKER TEST test: PASS {delivery} cas test(queue_proof) 1");
         store.add(&task).unwrap();
         let reason = if case == "no-citation" { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
         let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "commit_receipt": delivery,
-            "supervisor_override": true, "reason": reason,
+            "supervisor_override": supervisor_override, "reason": reason,
         })).unwrap())).await.unwrap();
         (store.get(&task.id).unwrap(), format!("{response:?}"))
     }
@@ -29192,7 +29196,7 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn supervisor_close_reuses_landed_queue_proof_cas_4386() {
-        let (task, text) = queue_proof_close_cas_4386("green").await;
+        let (task, text) = queue_proof_close_cas_4386("green", true).await;
         assert_eq!(task.status, TaskStatus::Closed, "{text}");
         assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
         assert!(task.notes.contains("run=4386"), "{}", task.notes);
@@ -29200,9 +29204,19 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831() {
+        let (task, text) = queue_proof_close_cas_4386("green", false).await;
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
+        assert!(!task.notes.contains("supervisor_override=true accepted"), "{}", task.notes);
+        assert!(!task.notes.contains("SCOPED_PROOF:"), "{}", task.notes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386() {
         for case in ["no-citation", "failed", "pending", "wrong-event", "wrong-repo", "wrong-tree", "before-delivery", "no-gate-receipt"] {
-            let (task, text) = queue_proof_close_cas_4386(case).await;
+            let (task, text) = queue_proof_close_cas_4386(case, true).await;
             assert_ne!(task.status, TaskStatus::Closed, "{case}: {text}");
             assert!(text.contains("scoped proof receipt has base"), "{case}: {text}");
             assert!(!task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
@@ -29212,7 +29226,7 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn supervisor_queue_proof_keeps_delivery_content_gate_cas_4386() {
-        let (task, text) = queue_proof_close_cas_4386("dropped").await;
+        let (task, text) = queue_proof_close_cas_4386("dropped", true).await;
         assert_ne!(task.status, TaskStatus::Closed, "{text}");
         assert!(text.contains("DELIVERY CONTENT DROPPED"), "{text}");
     }

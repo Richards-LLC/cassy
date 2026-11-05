@@ -1114,8 +1114,15 @@ fn render_status(
             .as_deref()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
+        let local = local_pairing_origin(record);
+        // cas-b790: name the origin a local browser pairs with, never the shim.
+        let shim = record
+            .tailscale_serve_target
+            .as_deref()
+            .map(|target| format!("\n  ({target} is the Tailscale Serve shim, not a pairing origin)"))
+            .unwrap_or_default();
         format!(
-            "Cassy hub is running and ready at {endpoint}\n  pid {}, version {}, binary: {binary_version}",
+            "Cassy hub is running and ready at {endpoint}\n  pid {}, version {}, binary: {binary_version}\n  Pair from this machine: cas hub pair --origin {local} --hub-url {local}{shim}",
             record.pid, record.version
         )
     } else {
@@ -2693,6 +2700,50 @@ pub(crate) fn pairing_admission(
     Ok(())
 }
 
+/// cas-b790: the Tailscale Serve shim is a loopback listener for Tailscale's
+/// TLS proxy, not a Commander origin. A pairing made through it succeeds, but
+/// every API call then fails with 401, so refuse it and name the hub origin.
+fn pairing_origin_refusal(
+    record: Option<&HubProcessRecord>,
+    origin: &str,
+    hub_url: Option<&str>,
+) -> Option<String> {
+    let record = record?;
+    let target = record.tailscale_serve_target.as_deref()?;
+    let shim_port = url::Url::parse(target).ok()?.port_or_known_default()?;
+    let through_shim = |candidate: &str| {
+        url::Url::parse(candidate).ok().is_some_and(|url| {
+            url.port_or_known_default() == Some(shim_port)
+                && url.host().is_some_and(|host| match host {
+                    url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+                    url::Host::Ipv4(ip) => ip.is_loopback(),
+                    url::Host::Ipv6(ip) => ip.is_loopback(),
+                })
+        })
+    };
+    if !through_shim(origin) && !hub_url.is_some_and(through_shim) {
+        return None;
+    }
+    let local = local_pairing_origin(record);
+    let remote = record
+        .public_url
+        .as_deref()
+        .map(|url| format!(" From another device, pair with the Tailscale URL {}.", url.trim_end_matches('/')))
+        .unwrap_or_default();
+    Some(format!(
+        "Refused: {target} is this hub's Tailscale Serve shim, a loopback listener for Tailscale's TLS proxy, not a Commander origin. A device paired through it gets 401 on every API call, and no invitation was minted. Pair from this machine with: cas hub pair --origin {local} --hub-url {local}.{remote}"
+    ))
+}
+
+/// The loopback origin the hub itself serves Commander from.
+fn local_pairing_origin(record: &HubProcessRecord) -> String {
+    let host = match record.bind.as_str() {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        bind => bind,
+    };
+    format!("http://{host}:{}", record.port)
+}
+
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
     let scopes: Vec<Scope> = args
         .scopes
@@ -2712,6 +2763,13 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
         }
         println!("launch check: the operator may pair a Commander device");
         return Ok(());
+    }
+    // cas-b790: refuse the Tailscale Serve shim before any prompt or mint.
+    let live = HubRuntimePaths::default_for_user()
+        .ok()
+        .and_then(|paths| paths.read_process_record().ok());
+    if let Some(refusal) = pairing_origin_refusal(live.as_ref(), &args.origin, args.hub_url.as_deref()) {
+        anyhow::bail!(refusal);
     }
     // cas-3c26: only the operator mints an invitation for their own machine
     // hub, and only after confirming the origin and scopes at their own
@@ -4123,6 +4181,39 @@ mod tests {
             transport_warning: None,
             nofile_limit: None,
         }
+    }
+
+    /// cas-b790: pairing against the live hub's Tailscale Serve shim (the
+    /// release incident used 127.0.0.1:34501) is refused before any invitation,
+    /// naming the hub origin; the hub origin and remote URLs still pair, and
+    /// `cas hub status` prints the local origin to pair with.
+    #[test]
+    fn cas_b790_pairing_refuses_the_tailscale_shim_and_status_names_the_hub_origin() {
+        let mut live = record("9.99.1", 4173, Some(443));
+        live.tailscale_serve_target = Some("http://127.0.0.1:34501".to_owned());
+        let shim = "http://127.0.0.1:34501";
+        for (origin, hub_url) in [(shim, Some(shim)), (shim, None), ("http://127.0.0.1:4173", Some(shim)), ("http://localhost:34501", None)] {
+            let refusal = pairing_origin_refusal(Some(&live), origin, hub_url)
+                .unwrap_or_else(|| panic!("{origin} / {hub_url:?} pairs through the shim and must be refused"));
+            assert!(refusal.contains("Tailscale Serve shim") && refusal.contains("34501"), "{refusal}");
+            assert!(refusal.contains("--origin http://127.0.0.1:4173 --hub-url http://127.0.0.1:4173"), "{refusal}");
+            assert!(refusal.contains("https://hub.example:443"), "names the remote URL: {refusal}");
+        }
+        for (origin, hub_url) in [
+            ("http://127.0.0.1:4173", Some("http://127.0.0.1:4173")),
+            ("https://hub.petrastella.io", Some("https://hub.example:443")),
+            ("http://127.0.0.1:29925", Some("https://journey-hub.ts.net:29927")),
+        ] {
+            assert_eq!(pairing_origin_refusal(Some(&live), origin, hub_url), None, "{origin} / {hub_url:?}");
+        }
+        assert_eq!(pairing_origin_refusal(None, shim, Some(shim)), None, "no hub record: nothing to compare");
+
+        let rendered = render_status(&live, HubDisplayState::Running, "9.99.1");
+        assert!(
+            rendered.contains("Pair from this machine: cas hub pair --origin http://127.0.0.1:4173 --hub-url http://127.0.0.1:4173"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("http://127.0.0.1:34501 is the Tailscale Serve shim, not a pairing origin"), "{rendered}");
     }
 
     #[test]

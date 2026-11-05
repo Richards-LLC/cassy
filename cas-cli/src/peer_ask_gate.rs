@@ -141,13 +141,17 @@ mod tests {
     use cas_store::SupervisorQueueStore;
 
     fn sent_ask(conn: &rusqlite::Connection, cloud_id: &str, body: &str) {
+        sent_ask_from(conn, "sup-soundwave", cloud_id, body);
+    }
+
+    fn sent_ask_from(conn: &rusqlite::Connection, sender: &str, cloud_id: &str, body: &str) {
         let payload = serde_json::json!({
             "body": format!("<cas-peer-intent kind=\"ask\"/>\n{body}"),
         });
         conn.execute(
             "INSERT INTO peer_message_outbox (sender_agent_id, sender_name, recipient, payload, state, created_at, next_attempt_at, cloud_id)
-             VALUES ('sup-soundwave', 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now'), 0, ?2)",
-            rusqlite::params![payload.to_string(), cloud_id],
+             VALUES (?3, 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now'), 0, ?2)",
+            rusqlite::params![payload.to_string(), cloud_id, sender],
         )
         .unwrap();
     }
@@ -206,5 +210,44 @@ mod tests {
         );
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
+    }
+
+    fn fixture() -> (crate::test_support::TestEnvGuard, tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::store::open_prompt_queue_store(&root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        (env, temp, root, conn)
+    }
+
+    fn pr_merge(root: &std::path::Path, sender: &str, pr: u64) -> Option<String> {
+        merge_refusal(root, sender, "cosmic-shark-29", None, &MergeSubject { pr: Some(pr), ..Default::default() })
+    }
+
+    /// Verifier ver-37f17bf1f171 (1): every way an ask writes the PR holds it.
+    #[test]
+    fn every_pr_reference_form_in_an_ask_holds_its_merge_cas_bddf9() {
+        let (_env, _temp, root, conn) = fixture();
+        let forms = ["PR#4249", "gabber-studio#4249", "Richards-LLC/gabber-studio#4249", "pull request 4249", "PR-4249"];
+        for (index, form) in forms.iter().enumerate() {
+            let sender = format!("sup-{index}");
+            sent_ask_from(&conn, &sender, &format!("ask-{index}"), &format!("Please review {form} tonight."));
+            assert!(pr_merge(&root, &sender, 4249).is_some(), "{form} must hold PR 4249");
+        }
+    }
+
+    /// Verifier ver-37f17bf1f171 (3): a bare acknowledgement is not an answer.
+    #[test]
+    fn a_receipt_reply_does_not_answer_an_ask_cas_bddf9() {
+        let (_env, _temp, root, conn) = fixture();
+        sent_ask(&conn, "ask-ok", "Can you review PR #4249?");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+             '<cas-peer-message v=\"1\" id=\"r2\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-ok\" kind=\"receipt\"/>\nok')",
+            [],
+        )
+        .unwrap();
+        assert!(pr_merge(&root, "sup-soundwave", 4249).is_some(), "an \"ok\" receipt leaves the ask open");
     }
 }

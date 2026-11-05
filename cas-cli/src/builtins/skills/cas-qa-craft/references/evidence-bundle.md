@@ -197,10 +197,15 @@ add the per-surface limits.
 
 ## Affected journeys
 
+<!-- cas-src:begin -->
 For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
 while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
 affected, four workers) or `--affected <base>`. Close and QA do not require a
 journey receipt.
+<!-- cas-src:else -->
+For browser deliveries, run the project's unit, type and source-impact-selected
+journey checks while iterating. Close and QA do not require a journey receipt.
+<!-- cas-src:end -->
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 Workers produce affected-journey evidence; independent QA consumes matching

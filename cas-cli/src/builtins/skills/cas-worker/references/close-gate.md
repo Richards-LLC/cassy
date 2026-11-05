@@ -12,9 +12,14 @@ will check. A refused park lists every failed gate: fix them all, retry once.
 ## Commit and push
 
 Commit scoped work; push once before parking, once per review round, unless
+<!-- cas-src:begin -->
 `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
 `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
 CI owns fast-row proof; local receipts are pre-push feedback. Park reads
+<!-- cas-src:else -->
+`delivery_mode=local_merge`. Each push starts CI. A configured pre-push hook
+gives early feedback; CI owns that proof. Park reads
+<!-- cas-src:end -->
 exact-tip capped test receipts, never runs checks. For changelog scope and
 format, follow [Changelog at park](#changelog-at-park).
 
@@ -99,14 +104,18 @@ make. The reviewer and QA see each escape, so a vague reason costs a round.
 
 ## Changelog at park
 
+<!-- cas-src:begin -->
 For a delivery that changes shipped Rust, `hub-web/src`, user-run scripts or
-builtin skills, add or extend a titled Unreleased entry, grouped under a
+builtin skills,
+<!-- cas-src:else -->
+For a delivery that changes shipped product code or user-run scripts,
+<!-- cas-src:end -->
+add or extend a titled Unreleased entry, grouped under a
 category and product area (for example `### Fixed — Commander` with a
 per-delivery `- **Title** — description` line). Where the repository has a
 `changelog.d/` directory, write the entry as its own `changelog.d/<task-id>.md`
-fragment and leave `CHANGELOG.md` alone: GitHub's merge queue ignores the
-local changelog merge driver, so two pull requests that both insert at the
-top of `## [Unreleased]` conflict and the later one is dequeued. The release
+fragment and leave `CHANGELOG.md` alone: two pull requests that both insert
+at the top of `## [Unreleased]` conflict. The release
 cut folds the fragments into the version section. Elsewhere, edit
 `CHANGELOG.md` under `## [Unreleased]`.
 If the delivery is test-only, docs-only or internal QA, record a typed

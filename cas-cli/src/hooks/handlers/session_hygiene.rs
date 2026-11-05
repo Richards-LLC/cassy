@@ -688,6 +688,36 @@ pub fn build_session_start_stale_reference_banner_sized(
     Some(render_stale_reference_banner(&skipped))
 }
 
+/// cas-3199: managed-file conflicts that made the last `cas update` skip this
+/// project's whole skill sync. The update summary used to count such a project
+/// as refreshed, so 17 projects ran 27 releases stale with nothing visible.
+pub fn build_session_start_managed_conflict_banner_sized(
+    cas_root: &Path,
+) -> Option<SessionStartBanner> {
+    let conflicts = crate::cli::project_files::recorded_conflicts(cas_root);
+    if conflicts.is_empty() {
+        return None;
+    }
+    let compact = format!(
+        "⚠ Cassy skills are NOT syncing into this project: {} managed file conflict(s) block \
+         `cas update`. Run `cas update --sync --json` for the paths.\n",
+        conflicts.len()
+    );
+    let mut full = format!(
+        "⚠ Cassy skills are NOT syncing into this project: the last `cas update` found {} \
+         managed file conflict(s) and skipped the whole sync, so builtin skills here are stale.\n",
+        conflicts.len()
+    );
+    for path in &conflicts {
+        full.push_str(&format!("  ! {path}\n"));
+    }
+    full.push_str(
+        "  Resolve or commit each file (it differs from what Cassy wrote), then rerun \
+         `cas update --sync`.\n",
+    );
+    Some(SessionStartBanner { full, compact })
+}
+
 /// Pure renderer for the stale-reference banner — separated from the ledger
 /// read so tests (and the SessionStart budget test) can drive it directly.
 pub(crate) fn render_stale_reference_banner(

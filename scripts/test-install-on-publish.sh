@@ -38,6 +38,9 @@ if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
 [[ "${FAKE_UPDATE_FAILS:-}" == 1 ]] && exit 1
 [[ "$1 $2 $3" == "update --yes --version" ]] && printf '%s\n' "$4" >"$FAKE_INSTALLED"
+# The binary is current but a project refresh failed.
+[[ "${FAKE_REFRESH_FAILS:-}" == 1 ]] && exit 1
+exit 0
 EOF
 cat >"$tmp/bin/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -81,10 +84,12 @@ cat >"$FAKE_BODY" <<EOF
 <!-- cas-release-timer pr=4242 opened=$opened published=$published -->
 EOF
 
-# 1. A newer release installs and completes the timer.
+# 1. A newer release installs and completes the timer, even when a project
+# refresh failed after the binary became current.
 echo 9.99.1 >"$FAKE_INSTALLED"
 : >"$FAKE_LOG"
-FAKE_LATEST=v9.99.2 RELEASE_INSTALL_NOW="$installed" "$installer" --once >"$tmp/out"
+FAKE_LATEST=v9.99.2 FAKE_REFRESH_FAILS=1 RELEASE_INSTALL_NOW="$installed" "$installer" --once >"$tmp/out" 2>&1
+check 'grep -q "cas update exited 1 after installing v9.99.2" "$tmp/out"' 'a failed project refresh is logged, not treated as a failed install'
 check 'grep -q "^cas update --yes --version 9.99.2$" "$FAKE_LOG"' 'a newer release runs cas update for that version'
 check '[[ "$(cat "$FAKE_INSTALLED")" == 9.99.2 ]]' 'the host converges on the published version'
 check 'grep -q "Installed on testhost 2025-10-15T04:10:40Z.*PR #4242 opened → installed: 24 min" "$FAKE_BODY"' 'the release notes print the PR-opened -> installed timer'

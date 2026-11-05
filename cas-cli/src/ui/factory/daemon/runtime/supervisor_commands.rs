@@ -283,6 +283,25 @@ fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &
         agent.metadata.get("supervisor_account_dir").map(String::as_str))
 }
 
+/// Read the running session, not `claude --version`: an install can replace
+/// that executable while an older supervisor is still alive.
+fn verify_claude_reload_version(root: &std::path::Path, session: &str, supervisor: &str) -> anyhow::Result<()> {
+    const MINIMUM: [u64; 3] = [2, 1, 318];
+    let observed = supervisor_transcript(root, session, supervisor, cas_mux::SupervisorCli::Claude)
+        .and_then(|path| crate::mcp::tools::service::worker_liveness::read_jsonl_tail(&path, 256 * 1024))
+        .and_then(|(_, tail)| tail.split_inclusive('\n').filter(|line| line.ends_with('\n')).rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|row| row.get("version").and_then(serde_json::Value::as_str).map(str::to_owned)));
+    let parsed = observed.as_deref().and_then(|version| {
+        let mut parts = version.split('.');
+        let triple = [parts.next()?.parse::<u64>().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?];
+        parts.next().is_none().then_some(triple)
+    });
+    anyhow::ensure!(parsed.is_some_and(|version| version >= MINIMUM),
+        "Reload Cassy was not sent: Claude Code has an unverified version ({}). This action requires observed Claude Code 2.1.318 or newer.", observed.as_deref().unwrap_or("unknown"));
+    Ok(())
+}
+
 /// Codex streams silently for seconds under an idle-looking prompt (cas-3980),
 /// so its rollout decides: busy while the last turn marker is a start. Only the
 /// last marker counts; a killed or forked session leaves earlier starts unclosed.
@@ -466,7 +485,10 @@ impl FactoryDaemon {
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(),
                     "Reload Cassy is unavailable for {}. It requires Claude Code.", format!("{:?}", pane.harness()).to_lowercase());
                 let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-                Some(tokio::task::spawn_blocking(move || registered_cassy_server(&root, &session, &supervisor)).await?
+                Some(tokio::task::spawn_blocking(move || {
+                    verify_claude_reload_version(&root, &session, &supervisor)?;
+                    Ok::<_, anyhow::Error>(registered_cassy_server(&root, &session, &supervisor))
+                }).await??
                     .ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable. Check Claude's /mcp panel."))?.pid)
             } else { None };
             tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await

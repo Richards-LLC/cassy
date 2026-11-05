@@ -11830,6 +11830,7 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         std::fs::write(worker_path.join("unmerged.txt"), "earlier PR work\n").unwrap();
         git_stdout(&worker_path, &["add", "unmerged.txt"]);
         git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
+        std::fs::write(worker_path.join("untracked-draft.txt"), "untracked work\n").unwrap();
         let beside = assign(&env, &task_b, assignee)
             .await
             .expect("a clean idle worker with an earlier PR on its lane may take new work");
@@ -11838,6 +11839,10 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
                 && beside.contains("epic/foreign"),
             "{beside}"
         );
+        assert!(beside.contains("tracked files unchanged") && !beside.contains("its clean"),
+            "the assignment check excludes untracked files and cannot claim a clean worktree: {beside}");
+        assert!(worker_path.join("untracked-draft.txt").exists());
+        std::fs::remove_file(worker_path.join("untracked-draft.txt")).unwrap();
         store.update(&targeted).unwrap();
         git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
 
@@ -13815,14 +13820,15 @@ async fn cas99d2_inbox_poll_withholds_a_consumed_assignment_gh127() {
          re-rendered verbatim: {text}"
     );
     assert!(
-        text.contains(&format!("{assignment_id}")) && text.contains("already done"),
+        text.contains(&format!("{assignment_id}")) && text.contains("task start already recorded"),
         "the withheld row must be named, not silently dropped: {text}"
     );
+    assert!(!text.contains("already done"), "an in-progress task is not done: {text}");
 }
 
 /// cas-8aee (GH #336): a task can reach a terminal state while an assignment
 /// or spawn-intro prompt is queued. `inbox_poll` must name each withheld row
-/// and say it is already done, but must never repeat its task-start imperative.
+/// and name its current status, but must never repeat its task-start imperative.
 #[tokio::test]
 async fn cas8aee_inbox_poll_names_terminal_assignment_and_spawn_intro_gh336() {
     let _guard = EnvGuard::set(&[
@@ -13894,7 +13900,8 @@ async fn cas8aee_inbox_poll_names_terminal_assignment_and_spawn_intro_gh336() {
         );
     }
     assert!(
-        text.contains("already done"),
+        text.contains("task status closed") && text.contains("task status cancelled")
+            && !text.contains("already done"),
         "a terminal assignment must explain why it is not actionable: {text}"
     );
     assert!(

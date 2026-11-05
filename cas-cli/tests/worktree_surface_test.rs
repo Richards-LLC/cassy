@@ -693,6 +693,35 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
     );
 }
 
+/// A stored merge is a lifecycle record, not a fresh containment check: the
+/// branch can receive more commits after that record was written.
+#[tokio::test]
+async fn worktree_status_labels_stored_merge_without_claiming_current_containment_cas_4c6f() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = true\n").unwrap();
+    let path = cas_root.join("worktrees/recorded-merge");
+    repo.add_worktree(&path, "feature/recorded-merge");
+    std::fs::write(path.join("later.txt"), "not merged into main\n").unwrap();
+    run_git(&["add", "later.txt"], &path);
+    run_git(&["commit", "-m", "later work"], &path);
+    let mut row = Worktree::new("recorded-merge".into(), "feature/recorded-merge".into(),
+        "main".into(), path);
+    row.status = cas::types::WorktreeStatus::Merged;
+    open_worktree_store(&cas_root).unwrap().add(&row).unwrap();
+    let svc = make_service(cas_root);
+    for action in ["worktree_list", "worktree_show"] {
+        let mut req = coord_req(action);
+        req.all = Some(true);
+        req.id = Some(row.id.clone());
+        let text = get_text(&svc.factory(Parameters(req)).await.unwrap());
+        assert!(text.contains("recorded status: merged"),
+            "{action} must identify the stored lifecycle status rather than promise live containment: {text}");
+    }
+    assert!(!repo.root.join("later.txt").exists(), "the later work remains unmerged");
+}
+
 /// AC4 (regression): when NO worktrees exist and System A is off, `worktree_list`
 /// returns an informational "No worktrees" message — not the misleading
 /// "experimental and disabled" gate message.

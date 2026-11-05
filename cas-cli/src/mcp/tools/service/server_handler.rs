@@ -1207,6 +1207,8 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "answered within the grace, not the 10s budget");
         let text = result_text(&answered);
         assert!(text.contains("COMMITTED") && text.contains("cas-note") && text.contains("Do not") && text.contains("retry"), "{text}");
+        assert!(text.contains("write committed") && !text.contains("is done"),
+            "a committed write must not claim the still-running action is done: {text}");
         assert!(!finished.load(Ordering::SeqCst), "answered while post-commit work was still running");
         for _ in 0..50 {
             if finished.load(Ordering::SeqCst) {
@@ -1468,6 +1470,8 @@ mod tests {
             .expect("a committed merge answers once its grace runs out");
         let text = format!("{answered:?}");
         assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
+        assert!(text.contains("write committed") && !text.contains("is done"),
+            "a committed merge must not claim its pending close is done: {text}");
         assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
     }
 

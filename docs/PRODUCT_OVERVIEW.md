@@ -9,6 +9,10 @@ The `cas` binary runs a supervisor with isolated workers; `cas serve` gives codi
 Tasks, memories, rules, skills and repository knowledge live in one local store; Cloud sync, the machine hub and the Commander browser app are optional.
 Every delivery is checked before it merges: tests, the journeys a change touches, documentation upkeep and, after release, a live post-release check.
 
+`cas doctor` also identifies guidance that still explicitly names an absent or
+disabled MCP server, listing record IDs and file locations for review while
+preserving the original rules, skills, memories and brief templates.
+
 ## Personas
 
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.

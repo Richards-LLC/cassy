@@ -61,6 +61,11 @@ fn record_memory_access(entry: &mut Entry, promote_on_access: bool) {
 /// the harness critical path, so a telemetry database error must never hide a
 /// successfully built context prompt.
 fn record_context_session_start_query(cas_root: &Path, input: &HookInput, memory_ids: &[String]) {
+    // A pull-only SessionStart lists no memories; an empty query row would
+    // still read as a session_context sample in the friction ledger (cas-71b2).
+    if memory_ids.is_empty() {
+        return;
+    }
     let query_id = format!(
         "qry-context-session-start-{}",
         uuid::Uuid::new_v4().simple()

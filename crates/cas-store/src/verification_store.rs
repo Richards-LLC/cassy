@@ -1239,15 +1239,21 @@ pub fn resolve_verification_dispatch_with_conn(
     // A server handoff consumed by the same atomic verdict transaction has
     // already passed expiry or the current-premerge exception. Keep raw bearer
     // capability expiry strict, and never cross into a newer proof cycle.
-    let consumed_current_server = if let Some(id) = capability_id.filter(|id| id.starts_with(SERVER_HANDOFF_ID_PREFIX)) {
+    let consumed_current_server = if let Some(id) =
+        capability_id.filter(|id| id.starts_with(SERVER_HANDOFF_ID_PREFIX))
+    {
         let consumed: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM verification_handoffs h JOIN verification_capabilities c ON c.id=h.capability_id
              WHERE c.id=?1 AND c.dispatch_id=?2 AND c.verifier_agent_id=?3 AND c.consumed_at IS NOT NULL
                AND h.state='consumed' AND h.verifier_agent_id=?3 AND h.consumed_at IS NOT NULL)",
             params![id, dispatch_id, verifier_agent_id], |row| row.get(0),
         )?;
-        consumed && get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?.is_some_and(|current| current.id == dispatch.id)
-    } else { false };
+        consumed
+            && get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?
+                .is_some_and(|current| current.id == dispatch.id)
+    } else {
+        false
+    };
     let authorized = match capability_id {
         Some(capability_id) => {
             dispatch.state == VerificationDispatchState::Claimed
@@ -2915,17 +2921,31 @@ pub fn consume_server_verifier_handoff_with_conn(
 /// transaction rechecks the exact latest dispatch and proof before consumption.
 /// Generic bearer tokens and unbound handoffs never use this exception.
 pub fn consume_current_premerge_verifier_handoff_with_conn(
-    conn: &Connection, capability_id: &str, task_id: &str, verifier_agent_id: &str,
+    conn: &Connection,
+    capability_id: &str,
+    task_id: &str,
+    verifier_agent_id: &str,
     expected: &VerificationDispatch,
 ) -> Result<VerifierCapability> {
     if conn.is_autocommit() {
-        return Err(StoreError::Parse("late premerge verdict requires an atomic verdict transaction".into()));
+        return Err(StoreError::Parse(
+            "late premerge verdict requires an atomic verdict transaction".into(),
+        ));
     }
-    consume_server_handoff_with_conn(conn, capability_id, task_id, verifier_agent_id, Some(expected))
+    consume_server_handoff_with_conn(
+        conn,
+        capability_id,
+        task_id,
+        verifier_agent_id,
+        Some(expected),
+    )
 }
 
 fn consume_server_handoff_with_conn(
-    conn: &Connection, capability_id: &str, task_id: &str, verifier_agent_id: &str,
+    conn: &Connection,
+    capability_id: &str,
+    task_id: &str,
+    verifier_agent_id: &str,
     expected: Option<&VerificationDispatch>,
 ) -> Result<VerifierCapability> {
     let capability = load_capability_with_conn(conn, capability_id)?;
@@ -2940,14 +2960,26 @@ fn consume_server_handoff_with_conn(
     let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     let now = Utc::now();
     let late_current = expected.is_some_and(|expected| {
-        *expected == dispatch && dispatch.repository.is_some()
-            && matches!(dispatch.state, VerificationDispatchState::Claimed | VerificationDispatchState::TimedOut)
-            && capability.bound_at.is_some_and(|bound| capability.issued_at <= bound
-                && bound < capability.expires_at && bound < dispatch.deadline_at)
+        *expected == dispatch
+            && dispatch.repository.is_some()
+            && matches!(
+                dispatch.state,
+                VerificationDispatchState::Claimed | VerificationDispatchState::TimedOut
+            )
+            && capability.bound_at.is_some_and(|bound| {
+                capability.issued_at <= bound
+                    && bound < capability.expires_at
+                    && bound < dispatch.deadline_at
+            })
     });
-    if expected.is_some() && (!late_current || get_latest_verification_dispatch_with_conn(conn, task_id)?
-        .is_none_or(|current| current.id != dispatch.id)) {
-        return Err(StoreError::Parse("late verifier dispatch was changed or superseded".into()));
+    if expected.is_some()
+        && (!late_current
+            || get_latest_verification_dispatch_with_conn(conn, task_id)?
+                .is_none_or(|current| current.id != dispatch.id))
+    {
+        return Err(StoreError::Parse(
+            "late verifier dispatch was changed or superseded".into(),
+        ));
     }
     let handoff_valid: i64 = conn.query_row(
         "SELECT COUNT(*) FROM verification_handoffs
@@ -2974,14 +3006,23 @@ fn consume_server_handoff_with_conn(
         ));
     }
     if late_current && dispatch.state == VerificationDispatchState::TimedOut {
-        conn.execute("UPDATE verification_dispatches SET state='claimed' WHERE id=?1 AND state='timed_out'", [&dispatch.id])?;
+        conn.execute(
+            "UPDATE verification_dispatches SET state='claimed' WHERE id=?1 AND state='timed_out'",
+            [&dispatch.id],
+        )?;
     }
     let changed = conn.execute(
         "UPDATE verification_capabilities
          SET consumed_at = ?2
          WHERE id = ?1 AND consumed_at IS NULL AND verifier_agent_id = ?3
                AND task_id = ?4 AND (expires_at > ?2 OR ?5 = 1)",
-        params![capability.id, now.to_rfc3339(), verifier_agent_id, task_id, late_current as i64],
+        params![
+            capability.id,
+            now.to_rfc3339(),
+            verifier_agent_id,
+            task_id,
+            late_current as i64
+        ],
     )?;
     if changed != 1 {
         return Err(StoreError::Parse(

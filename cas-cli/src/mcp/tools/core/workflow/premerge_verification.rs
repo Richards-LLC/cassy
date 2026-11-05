@@ -338,7 +338,9 @@ impl Candidate {
         self.validate(root, task)?;
         let target = review_target(&self.repository, &self.target_branch)?;
         if self.tree_on(&target)? != self.tree {
-            return Err("late verifier candidate tree changed; review the current candidate".into());
+            return Err(
+                "late verifier candidate tree changed; review the current candidate".into(),
+            );
         }
         Ok(())
     }

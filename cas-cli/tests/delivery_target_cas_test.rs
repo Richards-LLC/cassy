@@ -507,7 +507,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         ("advisory-pending-docs", "pending", Some("approved"), true),
         ("red-override", "failure", Some("approved"), false),
         ("fresh-branch", "success", Some("approved"), true),
-    ]).await;
+    ])
+    .await;
 }
 
 /// cas-62c3: accepting an exact late verdict must never silently discard it
@@ -520,10 +521,16 @@ async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
         ("late-moved-target", "success", Some("approved"), true),
         ("late-child", "success", Some("approved"), true),
         ("late-child-moved-target", "success", Some("approved"), true),
-        ("late-child-target-changed", "success", Some("approved"), false),
+        (
+            "late-child-target-changed",
+            "success",
+            Some("approved"),
+            false,
+        ),
         ("late-child-superseded", "success", Some("approved"), false),
         ("late-child-changed", "success", Some("approved"), false),
-    ]).await;
+    ])
+    .await;
 }
 
 async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
@@ -623,9 +630,16 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             })))).await.expect("record the original delivery branch through real start");
         }
         if row.ends_with("moved-target") {
-            std::fs::write(worker_path.join("sibling.txt"), "already reviewed sibling\n").unwrap();
+            std::fs::write(
+                worker_path.join("sibling.txt"),
+                "already reviewed sibling\n",
+            )
+            .unwrap();
             run_git(&["add", "sibling.txt"], &worker_path);
-            run_git(&["commit", "-m", "sibling already carried by source"], &worker_path);
+            run_git(
+                &["commit", "-m", "sibling already carried by source"],
+                &worker_path,
+            );
         }
         std::fs::create_dir_all(worker_path.join("docs")).unwrap();
         std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
@@ -775,14 +789,44 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         }
         if row.ends_with("moved-target") {
             let source = git_stdout(&repo.root, &["rev-parse", &delivery_branch]);
-            let tree = git_stdout(&repo.root, &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)]);
+            let tree = git_stdout(
+                &repo.root,
+                &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)],
+            );
             let sibling = git_stdout(&repo.root, &["rev-parse", &format!("{delivery_branch}^1")]);
-            run_git(&["merge", "--no-ff", &sibling, "-m", "queued sibling landing while review runs"], &repo.root);
+            run_git(
+                &[
+                    "merge",
+                    "--no-ff",
+                    &sibling,
+                    "-m",
+                    "queued sibling landing while review runs",
+                ],
+                &repo.root,
+            );
             run_git(&["push", "origin", "main"], &repo.root);
-            assert_ne!(git_stdout(&repo.root, &["rev-parse", "origin/main"]), target_before);
-            assert_eq!(git_stdout(&repo.root, &["rev-parse", &delivery_branch]), source);
-            let recomputed = git_stdout(&repo.root, &["merge-tree", "--write-tree", "origin/main", &delivery_branch]);
-            assert_eq!(recomputed.lines().next(), Some(tree.as_str()), "moved target keeps the reviewed candidate tree");
+            assert_ne!(
+                git_stdout(&repo.root, &["rev-parse", "origin/main"]),
+                target_before
+            );
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", &delivery_branch]),
+                source
+            );
+            let recomputed = git_stdout(
+                &repo.root,
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "origin/main",
+                    &delivery_branch,
+                ],
+            );
+            assert_eq!(
+                recomputed.lines().next(),
+                Some(tree.as_str()),
+                "moved target keeps the reviewed candidate tree"
+            );
         }
         let late_child = if row.starts_with("late-child") {
             let child_id = format!("{slug}-verifier-session");
@@ -792,18 +836,37 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             child.parent_id = Some(supervisor_id.clone());
             child.factory_session = Some(session.clone());
             child.heartbeat();
-            cas_store::issue_server_verifier_handoff(&cas_root, &task.id, &dispatch.id, &supervisor_id, "late-verifier-tool").unwrap();
-            cas_store::bind_server_verifier_handoff_and_register_child(&cas_root, &supervisor_id, &child).unwrap();
+            cas_store::issue_server_verifier_handoff(
+                &cas_root,
+                &task.id,
+                &dispatch.id,
+                &supervisor_id,
+                "late-verifier-tool",
+            )
+            .unwrap();
+            cas_store::bind_server_verifier_handoff_and_register_child(
+                &cas_root,
+                &supervisor_id,
+                &child,
+            )
+            .unwrap();
             Some(child_id)
-        } else { None };
+        } else {
+            None
+        };
         if row.starts_with("late-") {
             // Advance the dispatch's clock, never sleep through a deadline.
             let now = chrono::Utc::now();
             let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
             conn.execute(
                 "UPDATE verification_dispatches SET requested_at=?2,deadline_at=?3 WHERE id=?1",
-                rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), (now - chrono::Duration::minutes(2)).to_rfc3339()],
-            ).unwrap();
+                rusqlite::params![
+                    dispatch.id,
+                    (now - chrono::Duration::minutes(12)).to_rfc3339(),
+                    (now - chrono::Duration::minutes(2)).to_rfc3339()
+                ],
+            )
+            .unwrap();
             if row.starts_with("late-child") {
                 conn.execute(
                     "UPDATE verification_capabilities SET issued_at=?2,bound_at=?2,expires_at=?3 WHERE dispatch_id=?1",
@@ -812,27 +875,48 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             }
             drop(conn);
             if row == "late-timedout-approved" || row.starts_with("late-child") {
-                let expired = cas_store::timeout_verification_dispatch(&cas_root, &task.id, now).unwrap().unwrap();
+                let expired = cas_store::timeout_verification_dispatch(&cas_root, &task.id, now)
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(expired.id, dispatch.id);
             }
         }
         if row == "late-child-superseded" {
             cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_root, &task.id).unwrap();
             let next = cas_store::create_verification_dispatch_bound(
-                &cas_root, &task.id, &supervisor_id, &supervisor_id,
+                &cas_root,
+                &task.id,
+                &supervisor_id,
+                &supervisor_id,
                 &cas::types::VerificationProofBoundary::task_at(proof.clone()),
-                chrono::Utc::now() + chrono::Duration::minutes(10), false,
-            ).unwrap();
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+                false,
+            )
+            .unwrap();
             assert_ne!(next.id, dispatch.id);
         }
         if row == "late-child-target-changed" {
-            std::fs::write(repo.root.join("README.md"), "unrelated target change during review\n").unwrap();
-            run_git(&["commit", "-am", "unrelated target tree changed during review"], &repo.root);
+            std::fs::write(
+                repo.root.join("README.md"),
+                "unrelated target change during review\n",
+            )
+            .unwrap();
+            run_git(
+                &[
+                    "commit",
+                    "-am",
+                    "unrelated target tree changed during review",
+                ],
+                &repo.root,
+            );
             run_git(&["push", "origin", "main"], &repo.root);
         }
         if row == "late-child-changed" {
             std::fs::write(worker_path.join(delivered_path), "changed after review\n").unwrap();
-            run_git(&["commit", "-am", "changed candidate after verifier started"], &worker_path);
+            run_git(
+                &["commit", "-am", "changed candidate after verifier started"],
+                &worker_path,
+            );
         }
         let verdict = verdict.expect("every publication needs a candidate verdict");
         let request = verification_req(serde_json::json!({
@@ -841,24 +925,58 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             "dispatch_id": dispatch.id,
         }));
         let result = if let Some(child_id) = late_child {
-            delivery_service(&cas_root, &child_id).verification(Parameters(request)).await
-        } else { supervisor.verification(Parameters(request)).await };
-        if matches!(row, "late-child-superseded" | "late-child-changed" | "late-child-target-changed") {
-            let refused = result.expect_err("late authority cannot cross a changed or superseded candidate");
-            assert!(refused.message.contains("superseded") || refused.message.contains("changed"), "{row}: {refused}");
-            assert!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().is_none());
+            delivery_service(&cas_root, &child_id)
+                .verification(Parameters(request))
+                .await
+        } else {
+            supervisor.verification(Parameters(request)).await
+        };
+        if matches!(
+            row,
+            "late-child-superseded" | "late-child-changed" | "late-child-target-changed"
+        ) {
+            let refused =
+                result.expect_err("late authority cannot cross a changed or superseded candidate");
+            assert!(
+                refused.message.contains("superseded") || refused.message.contains("changed"),
+                "{row}: {refused}"
+            );
+            assert!(
+                cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id)
+                    .unwrap()
+                    .is_none()
+            );
             if row == "late-child-superseded" {
-                assert_ne!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
+                assert_ne!(
+                    cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    dispatch.id
+                );
             }
             continue;
         }
         let recorded = get_text(&result.expect("an exact bound late verdict must be accepted"));
         if row.starts_with("late-") {
-            let resolved = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
-            let accepted = cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().unwrap();
-            assert_eq!(resolved.id, dispatch.id, "record keeps the reviewed dispatch");
-            assert_eq!(resolved.state, cas::types::VerificationDispatchState::Resolved);
-            assert!(accepted.created_at > resolved.deadline_at, "the record actually crossed the deadline");
+            let resolved = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                .unwrap()
+                .unwrap();
+            let accepted = cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                resolved.id, dispatch.id,
+                "record keeps the reviewed dispatch"
+            );
+            assert_eq!(
+                resolved.state,
+                cas::types::VerificationDispatchState::Resolved
+            );
+            assert!(
+                accepted.created_at > resolved.deadline_at,
+                "the record actually crossed the deadline"
+            );
             assert!(recorded.contains("approved"), "{recorded}");
         }
         assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed,

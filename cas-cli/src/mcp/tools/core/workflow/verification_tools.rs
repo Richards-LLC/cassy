@@ -427,25 +427,55 @@ impl CasCore {
                     data: None,
                 });
             }
-            if capability.expires_at <= chrono::Utc::now() || dispatch.deadline_at <= chrono::Utc::now() {
-                let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
-                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-                if latest.as_ref().is_none_or(|current| current.id != dispatch.id)
-                    || !matches!(dispatch.state, cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut)
+            if capability.expires_at <= chrono::Utc::now()
+                || dispatch.deadline_at <= chrono::Utc::now()
+            {
+                let latest =
+                    cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                        .map_err(|error| {
+                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                        })?;
+                if latest
+                    .as_ref()
+                    .is_none_or(|current| current.id != dispatch.id)
+                    || !matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Claimed
+                            | cas_types::VerificationDispatchState::TimedOut
+                    )
                 {
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "Verifier handoff rejected: late dispatch was superseded or invalidated."));
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "Verifier handoff rejected: late dispatch was superseded or invalidated.",
+                    ));
                 }
-                let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &dispatch)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                let candidate =
+                    super::premerge_verification::candidate_for_dispatch(&self.cas_root, &dispatch)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                 let Some(candidate) = candidate else {
                     if dispatch.state == cas_types::VerificationDispatchState::Claimed {
-                        cas_store::timeout_verification_dispatch(&self.cas_root, &req.task_id, chrono::Utc::now())
-                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                        cas_store::timeout_verification_dispatch(
+                            &self.cas_root,
+                            &req.task_id,
+                            chrono::Utc::now(),
+                        )
+                        .map_err(|error| {
+                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                        })?;
                     }
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "Verifier handoff rejected: expired non-premerge handoff is timed_out; registered-supervisor recovery is required."));
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "Verifier handoff rejected: expired non-premerge handoff is timed_out; registered-supervisor recovery is required.",
+                    ));
                 };
-                candidate.validate_late_verdict(&self.cas_root, &task)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Verifier handoff rejected: candidate changed: {error}")))?;
+                candidate
+                    .validate_late_verdict(&self.cas_root, &task)
+                    .map_err(|error| {
+                        Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!("Verifier handoff rejected: candidate changed: {error}"),
+                        )
+                    })?;
                 late_premerge_dispatch = Some(dispatch);
             }
             bound_server_handoff = Some(capability);

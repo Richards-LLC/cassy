@@ -901,6 +901,7 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
     use wiremock::matchers::{method, path};
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
+    crate::migration::run_migrations(&f.cas_dir(), false).unwrap();
     std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
@@ -973,7 +974,7 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
             "created_at":chrono::Utc::now().to_rfc3339(),
         }]}))).mount(&server).await;
     Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"peer-proof-1", "status":200}]})))
         .mount(&server).await;
     let mut recipient = open_agent_store(&f.cas_dir()).unwrap().get("br-supervisor-session").unwrap();
     recipient.factory_session = Some("worker-factory".into());

@@ -83,6 +83,10 @@ pub(crate) fn park(
         serde_json::to_vec(&current).map_err(io::Error::other)?,
     )?;
     fs::rename(temporary, path)?;
+    // cas-49163: the retained warm cache keeps its compiled dependencies but
+    // not incremental state or per-commit test executables, which otherwise
+    // grow without bound across every task the worker takes.
+    trim_debug(&current.worktree)?;
     drop(lane);
 
     let gc = OpenOptions::new()
@@ -105,6 +109,11 @@ pub(crate) fn park(
         })
         .filter_map(|entry| {
             let record: ParkedCache = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            // cas-49163: a removed worktree's marker can never resume; drop it.
+            if !record.worktree.exists() {
+                let _ = fs::remove_file(entry.path());
+                return None;
+            }
             let now = identity(cas_root, &record.worktree)?;
             if record.generation.is_empty()
                 || now.admin != record.admin
@@ -136,11 +145,99 @@ pub(crate) fn park(
         {
             continue;
         }
-        prune_debug(&parked.worktree)?;
+        prune_debug(&parked.worktree, None)?;
         drop(lane);
+    }
+    let budget = crate::config::Config::load(cas_root)
+        .map(|config| config.factory().target_cache_budget_gb)
+        .unwrap_or(0)
+        .saturating_mul(1 << 30);
+    if budget > 0 {
+        enforce_budget(cas_root, &current.worktree, budget, BUDGET_MIN_IDLE)?;
     }
     FileExt::unlock(&gc)?;
     Ok(())
+}
+
+/// A worker cache built within this window is never evicted for the budget.
+const BUDGET_MIN_IDLE: Duration = Duration::from_secs(30 * 60);
+
+/// cas-49163: prune the least recently built idle worker caches until all
+/// worker `target/debug` trees fit `budget` bytes. Busy workers that never
+/// park otherwise keep 15-50 GB each until the disk watermark refuses lanes.
+/// Called under the GC lock; `keep` is the cache that was just parked.
+fn enforce_budget(cas_root: &Path, keep: &Path, budget: u64, min_idle: Duration) -> io::Result<()> {
+    let Ok(entries) = fs::read_dir(cas_root.join("worktrees")) else {
+        return Ok(());
+    };
+    let mut seen = HashSet::new();
+    let mut caches: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter_map(|worktree| {
+            identity(cas_root, &worktree)?;
+            let debug = crate::factory_scratch::worker_target_dir(&worktree).join("debug");
+            let built = ["deps", ".fingerprint"]
+                .iter()
+                .filter_map(|name| debug.join(name).metadata().ok()?.modified().ok())
+                .max()?;
+            Some((built, disk_bytes(&debug, &mut seen), worktree))
+        })
+        .collect();
+    let mut total: u64 = caches.iter().map(|(_, bytes, _)| bytes).sum();
+    caches.sort();
+    let keep = keep.canonicalize().ok();
+    let now = SystemTime::now();
+    for (built, bytes, worktree) in caches {
+        if total <= budget {
+            break;
+        }
+        if worktree.canonicalize().ok() == keep
+            || now.duration_since(built).unwrap_or_default() < min_idle
+        {
+            continue;
+        }
+        let Some(lane) = crate::factory_worker_check::try_lock_lane(cas_root, &worktree)? else {
+            continue;
+        };
+        // Any process working in the checkout (cargo, rustc, nextest or a test
+        // binary) preserves its cache, not only one holding output open.
+        if prune_debug(&worktree, Some(&worktree))? {
+            total = total.saturating_sub(bytes);
+            tracing::info!(worktree = %worktree.display(), bytes, "worker cache pruned for target_cache_budget_gb");
+        }
+        drop(lane);
+    }
+    Ok(())
+}
+
+/// Allocated bytes under `path`, counting each hard-linked inode once across
+/// every call sharing `seen` (seeded dependencies are shared between workers).
+fn disk_bytes(path: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        WalkDir::new(path)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .filter(|metadata| metadata.nlink() < 2 || seen.insert((metadata.dev(), metadata.ino())))
+            .map(|metadata| metadata.blocks().saturating_mul(512))
+            .sum()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = seen;
+        WalkDir::new(path)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
 }
 
 fn marker_is_current(path: &Path, recorded: &ParkedCache) -> bool {
@@ -151,24 +248,26 @@ fn marker_is_current(path: &Path, recorded: &ParkedCache) -> bool {
             .is_some_and(|current| current == *recorded)
 }
 
-fn prune_debug(worktree: &Path) -> io::Result<()> {
+/// Lock and inspect `target/debug` for exclusive removal. `None` means the
+/// cache is unsafe, contended or in use (see [`in_use`]).
+fn lock_debug(worktree: &Path, checkout: Option<&Path>) -> io::Result<Option<(PathBuf, PathBuf, fs::File)>> {
     // cas-3f93: follow a target relocated under `[factory] scratch_root`.
     let target = crate::factory_scratch::worker_target_dir(worktree);
     let debug = target.join("debug");
     if !debug.exists() {
-        return Ok(());
+        return Ok(None);
     }
     // Refuse symlinks at both roots; neither source nor output may escape.
     if fs::symlink_metadata(&target)?.file_type().is_symlink()
         || fs::symlink_metadata(&debug)?.file_type().is_symlink()
         || debug.canonicalize()?.parent() != Some(target.canonicalize()?.as_path())
     {
-        return Ok(());
+        return Ok(None);
     }
     if fs::symlink_metadata(debug.join(".cargo-lock"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
-        return Ok(());
+        return Ok(None);
     }
     let cargo = OpenOptions::new()
         .create(true)
@@ -177,27 +276,80 @@ fn prune_debug(worktree: &Path) -> io::Result<()> {
         .write(true)
         .open(debug.join(".cargo-lock"))?;
     if cargo.try_lock_exclusive().is_err() {
-        return Ok(());
+        return Ok(None);
     }
-    // Ignore only this process's own lock handle. An unrelated open artifact
-    // (including a still-running test binary) preserves the complete cache.
-    if output_in_use(&debug, &cargo) {
-        return Ok(());
+    if in_use(checkout, &debug, &cargo) {
+        return Ok(None);
     }
+    Ok(Some((target, debug, cargo)))
+}
+
+/// Ignore only this process's own lock handle. An unrelated open artifact
+/// (including a still-running test binary) preserves the complete cache; with
+/// `checkout`, so does any process whose cwd or executable is in the checkout.
+fn in_use(checkout: Option<&Path>, debug: &Path, cargo: &fs::File) -> bool {
+    match checkout {
+        None => output_in_use(debug, cargo),
+        #[cfg(unix)]
+        Some(checkout) => {
+            use std::os::fd::AsRawFd;
+            process_uses(checkout, debug, Some(cargo.as_raw_fd()))
+        }
+        #[cfg(not(unix))]
+        Some(_) => true,
+    }
+}
+
+/// Remove the whole `target/debug`; true when it was removed.
+fn prune_debug(worktree: &Path, checkout: Option<&Path>) -> io::Result<bool> {
+    let Some((target, debug, cargo)) = lock_debug(worktree, checkout)? else {
+        return Ok(false);
+    };
     let quarantine = target.join(format!(".cas-parked-debug-{}", std::process::id()));
     if quarantine.exists() {
-        return Ok(());
+        return Ok(false);
     }
     fs::rename(&debug, &quarantine)?;
-    if output_in_use(&quarantine, &cargo) || output_in_use(&debug, &cargo) {
+    if in_use(checkout, &quarantine, &cargo) || output_in_use(&debug, &cargo) {
         if !debug.exists() {
             fs::rename(&quarantine, &debug)?;
         }
-        return Ok(());
+        return Ok(false);
     }
     let result = fs::remove_dir_all(quarantine);
     FileExt::unlock(&cargo)?;
-    result
+    result.map(|()| true)
+}
+
+/// cas-49163: drop regenerable per-build state from a retained cache while
+/// keeping compiled dependencies: `incremental/` and test executables in
+/// `deps/` (regular files with an execute bit and no extension).
+fn trim_debug(worktree: &Path) -> io::Result<()> {
+    let Some((_, debug, cargo)) = lock_debug(worktree, None)? else {
+        return Ok(());
+    };
+    let incremental = debug.join("incremental");
+    if fs::symlink_metadata(&incremental).is_ok_and(|metadata| metadata.is_dir()) {
+        let quarantine = debug.join(format!(".cas-trim-incremental-{}", std::process::id()));
+        if !quarantine.exists() {
+            fs::rename(&incremental, &quarantine)?;
+            fs::remove_dir_all(&quarantine)?;
+        }
+    }
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(debug.join("deps")) {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let executable = fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+            if executable && path.extension().is_none() {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+    FileExt::unlock(&cargo)?;
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -238,6 +390,76 @@ mod tests {
         fs::create_dir_all(path.join("target/nextest")).unwrap();
         fs::write(path.join("target/nextest/proof.json"), "evidence").unwrap();
         path
+    }
+
+    /// cas-49163: parking trims the retained cache to its compiled
+    /// dependencies and drops a removed worktree's marker.
+    #[test]
+    fn park_trims_retained_cache_and_stale_markers_cas_49163() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, root) = fixture();
+        let reclaim = super::super::tests::reclamation_available();
+        let worker = worker(&root, "trimmed");
+        let debug = worker.join("target/debug");
+        fs::create_dir_all(debug.join("incremental/cas-1")).unwrap();
+        fs::write(debug.join("incremental/cas-1/query.bin"), "state").unwrap();
+        fs::write(debug.join("deps/libcas-1.rlib"), "dependency").unwrap();
+        fs::write(debug.join("deps/cas-1.d"), "depinfo").unwrap();
+        let test_binary = debug.join("deps/integration_factory-1");
+        fs::write(&test_binary, "executable").unwrap();
+        fs::set_permissions(&test_binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = root.join("worker-target-parks/stale.json");
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(
+            &stale,
+            r#"{"worktree":"/nonexistent/removed","admin":"/x","head":"y","generation":"z"}"#,
+        )
+        .unwrap();
+
+        park(&root, &worker, 1, None).unwrap();
+
+        assert_eq!(debug.join("incremental").exists(), !reclaim);
+        assert_eq!(test_binary.exists(), !reclaim);
+        assert!(debug.join("deps/libcas-1.rlib").exists());
+        assert!(debug.join("deps/cas-1.d").exists());
+        assert!(debug.join("deps/output").exists());
+        assert!(!stale.exists(), "a removed worktree's marker is swept");
+        assert!(park_path(&root, &worker).exists());
+    }
+
+    /// cas-49163: over budget, the least recently built idle cache goes first;
+    /// the just-parked cache, a held lane and a recent build are kept.
+    #[test]
+    fn budget_prunes_least_recently_built_idle_cache_cas_49163() {
+        let (_temp, root) = fixture();
+        let reclaim = super::super::tests::reclamation_available();
+        let [oldest, newer, held, parked] =
+            ["oldest", "newer", "held", "parked"].map(|name| worker(&root, name));
+        let hour = |hours: u64| {
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(hours * 3600))
+        };
+        for (path, hours) in [(&held, 9), (&oldest, 8), (&newer, 7), (&parked, 9)] {
+            filetime::set_file_mtime(path.join("target/debug/deps"), hour(hours)).unwrap();
+        }
+        let total: u64 = [&oldest, &newer, &held, &parked]
+            .map(|path| disk_bytes(&path.join("target/debug"), &mut HashSet::new()))
+            .iter()
+            .sum();
+        assert!(total > 0);
+        let _lane = crate::factory_worker_check::try_lock_lane(&root, &held)
+            .unwrap()
+            .unwrap();
+
+        // One cache over budget: the held lane and the kept cache are skipped.
+        enforce_budget(&root, &parked, total - 1, Duration::ZERO).unwrap();
+        assert_eq!(oldest.join("target/debug").exists(), !reclaim);
+        for path in [&newer, &held, &parked] {
+            assert!(path.join("target/debug").exists(), "{}", path.display());
+        }
+        // A recent build is never evicted for the budget.
+        enforce_budget(&root, &parked, 0, Duration::from_secs(365 * 24 * 3600)).unwrap();
+        assert!(newer.join("target/debug").exists());
+        assert!(oldest.join("target/worker-check.log").exists());
     }
 
     #[test]

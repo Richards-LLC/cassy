@@ -300,6 +300,10 @@ impl Config {
                 factory.target_cache_retention_count.to_string(),
             ),
             (
+                "factory.target_cache_budget_gb".to_string(),
+                factory.target_cache_budget_gb.to_string(),
+            ),
+            (
                 "factory.nice_cargo".to_string(),
                 factory.nice_cargo.to_string(),
             ),

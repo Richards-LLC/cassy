@@ -1108,6 +1108,13 @@ pub struct FactoryConfig {
     #[serde(default = "default_target_cache_retention_count")]
     pub target_cache_retention_count: usize,
 
+    /// Total size budget in GiB for all private worker `target/debug` caches
+    /// (hard-linked seed data counted once). When parking a delivery exceeds it,
+    /// the least recently built idle worker caches are pruned, never one with a
+    /// held build lane or a live process using it. 0 disables the budget.
+    #[serde(default = "default_target_cache_budget_gb")]
+    pub target_cache_budget_gb: u64,
+
     /// AI enrichment for Commander summaries and events. DEFAULT OFF: enabling this sends
     /// redacted terminal transcript excerpts to a third-party API from a
     /// machine that may hold secrets. Configure an OpenAI-compatible local
@@ -1284,6 +1291,10 @@ fn default_target_cache_retention_count() -> usize {
     1
 }
 
+fn default_target_cache_budget_gb() -> u64 {
+    160
+}
+
 fn default_worker_denied_clis() -> Vec<String> {
     vec!["vercel".to_string(), "neonctl".to_string()]
 }
@@ -1346,6 +1357,7 @@ impl Default for FactoryConfig {
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),
             target_cache_min_idle_secs: default_target_cache_min_idle_secs(),
             target_cache_retention_count: default_target_cache_retention_count(),
+            target_cache_budget_gb: default_target_cache_budget_gb(),
             ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
             retired_merge_sweep: None,
             retired_merge_sweep_timeout_secs: None,

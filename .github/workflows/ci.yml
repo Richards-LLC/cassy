@@ -86,6 +86,7 @@ jobs:
       docs-only: ${{ steps.classify-diff.outputs.class == 'docs-only' }}
       rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
       web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
+      web-dist-check-needed: ${{ steps.classify-diff.outputs.web-dist-check-needed }}
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
       script-tests-needed: ${{ steps.script-tests.outputs.needed }}
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
@@ -1031,9 +1032,16 @@ jobs:
       - name: Build Commander and check the committed bundle
         id: build
         if: ${{ !cancelled() }}
+        env:
+          CHECK_COMMITTED_DIST: ${{ needs.ci-diff.outputs.web-dist-check-needed }}
         run: |
           npm run build
-          git diff --exit-code -- dist
+          # Only source-only lanes defer committed output to release.sh prepare.
+          # Missing policy retains equality, including unknown comparison bases.
+          if [[ "$CHECK_COMMITTED_DIST" != false ]]; then
+            git diff --exit-code -- dist
+            test -z "$(git ls-files --others --exclude-standard -- dist)"
+          fi
 
       - name: Visual QA
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

@@ -222,6 +222,71 @@ print('/locked/chromium')
         self.commit()
         self.assertEqual(self.classify()['web-check-needed'], 'false')
 
+    def test_queue_bundle_ownership_cas_0acc(self):
+        # Execute the classifier action and the actual queue build body. The
+        # npm boundary models the production build, including a failing build.
+        self.write('hub-web/src/main.ts', 'old source\n')
+        self.write('hub-web/dist/app.js', 'old source\n' + (self.repo / 'cas-cli/Cargo.toml').read_text())
+        self.write('bin/npm', '''#!/usr/bin/env python3
+from pathlib import Path
+import os, sys
+assert sys.argv[1:] == ['run', 'build'], sys.argv
+if os.environ.get('FAIL_BUILD') == 'true':
+    sys.exit(7)
+Path('dist/app.js').write_text(Path('src/main.ts').read_text() + Path('../cas-cli/Cargo.toml').read_text())
+if os.environ.get('EXTRA_OUTPUT') == 'true':
+    Path('dist/new-chunk.js').write_text('new chunk')
+''')
+        (self.repo / 'bin/npm').chmod(0o755)
+        self.commit()
+        seed = self.git('rev-parse', 'HEAD').stdout.strip()
+        workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        build = next(step for step in workflow['jobs']['fast-validation-web']['steps']
+                     if step.get('id') == 'build')
+        action = yaml.safe_load((ROOT / '.github/actions/classify-required-diff/action.yml').read_text())
+        self.assertEqual(action['outputs']['web-dist-check-needed']['value'],
+                         '${{ steps.classify.outputs.web-dist-check-needed }}')
+        self.assertEqual(workflow['jobs']['ci-diff']['outputs']['web-dist-check-needed'],
+                         '${{ steps.classify-diff.outputs.web-dist-check-needed }}')
+        # Same source-only delivery, then each reason it must retain equality.
+        cases = [
+            ('source-only', 'source', False, False, 'false', 0),
+            ('version-only stale release', 'version', False, False, 'true', 1),
+            ('matching release', 'matched-version', False, False, 'true', 0),
+            ('changed integration dist', 'dist', False, False, 'true', 1),
+            ('unknown base', 'source', True, False, 'true', 1),
+            ('unreadable version', 'invalid-version', False, False, 'true', 1),
+            ('failed source build', 'source', False, True, 'false', 7),
+            ('new release output', 'new-output', False, False, 'true', 1),
+        ]
+        for label, change, unknown, fail_build, equality, exit_code in cases:
+            with self.subTest(label=label):
+                self.git('reset', '--hard', seed)
+                self.base = 'missing-base' if unknown else seed
+                if change in ('version', 'matched-version', 'new-output'):
+                    self.write('cas-cli/Cargo.toml', '[package]\nversion = "9.99.8"\n')
+                    if change in ('matched-version', 'new-output'):
+                        self.write('hub-web/dist/app.js', 'old source\n' + (self.repo / 'cas-cli/Cargo.toml').read_text())
+                elif change == 'dist':
+                    self.write('hub-web/dist/app.js', 'wrong integration bundle\n')
+                elif change == 'invalid-version':
+                    self.write('cas-cli/Cargo.toml', '[package]\nversion.workspace = true\n')
+                else:
+                    self.write('hub-web/src/main.ts', 'new source\n')
+                self.commit()
+                decision = self.classify()
+                self.assertEqual(decision['web-check-needed'], 'true')
+                result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', build['run']],
+                                        cwd=self.repo / 'hub-web', text=True, capture_output=True,
+                                        env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'],
+                                                 CHECK_COMMITTED_DIST=decision.get('web-dist-check-needed', ''),
+                                                 EXTRA_OUTPUT=str(change == 'new-output').lower(),
+                                                 FAIL_BUILD=str(fail_build).lower()))
+                self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+                self.assertEqual(decision['web-dist-check-needed'], equality)
+                self.assertEqual(build['env']['CHECK_COMMITTED_DIST'],
+                                 '${{ needs.ci-diff.outputs.web-dist-check-needed }}')
+
     def test_classifier_cli_ci_workflow_false_and_web_inputs_true(self):
         script = str(ROOT / 'scripts/classify-web-inputs.py')  # the fixture copy may be overwritten below
         cases = [('.github/workflows/ci.yml', 'false')]

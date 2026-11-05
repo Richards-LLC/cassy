@@ -1310,7 +1310,9 @@ pub(crate) fn reconcile_blocked_task_alert(
         }
         return Ok(());
     }
-    if super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some() {
+    if super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
+        || worker_owns_task_reminder(root, agents.as_ref(), actor, task_id, now)
+    {
         return Ok(());
     }
     let mut deadline = start + chrono::Duration::minutes(5);
@@ -1337,6 +1339,33 @@ pub(crate) fn reconcile_blocked_task_alert(
         )?;
     }
     Ok(())
+}
+
+/// cas-d511: a blocked worker that holds its own live reminder for this task
+/// has named its next wake, so the deadline escalation would only repeat the
+/// initial receipt. Unreadable stores keep the escalation.
+fn worker_owns_task_reminder(
+    root: &Path,
+    agents: &dyn cas_store::AgentStore,
+    worker: &str,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    use cas_store::{ReminderStore, ReminderTriggerType};
+    let Some(worker) = crate::mcp::tools::core::task::resolve_agent_identity(agents, worker) else {
+        return false;
+    };
+    let Ok(reminders) = cas_store::SqliteReminderStore::open(root) else { return false };
+    reminders.list_pending(&worker.id).is_ok_and(|pending| pending.iter().any(|reminder| {
+        let ttl_start = match reminder.trigger_type {
+            ReminderTriggerType::Time => reminder.trigger_at.unwrap_or(reminder.created_at),
+            ReminderTriggerType::Event => reminder.created_at,
+        };
+        reminder.task_id.as_deref() == Some(task_id)
+            && reminder.target_id == worker.id
+            && (reminder.ttl_secs == 0
+                || now.signed_duration_since(ttl_start).num_seconds() <= reminder.ttl_secs)
+    }))
 }
 
 /// Source marker for the verification-dispatch handoff (cas-8725).

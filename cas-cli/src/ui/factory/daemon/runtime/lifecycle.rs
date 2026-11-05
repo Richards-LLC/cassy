@@ -779,7 +779,10 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     if !worker.is_empty() && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
-        &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
+        // cas-d511: the worker can only wait for the supervisor here, so its
+        // copy rides the next turn instead of waking it.
+        &format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
+            cas_store::QUIET_MESSAGE_MARKER),
         factory_session.as_deref(),
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
@@ -861,6 +864,7 @@ fn enqueue_delivery_pr_merged_wake(
     worker: &str,
     pr_number: u64,
     merge_commit: &str,
+    release_wait: bool,
 ) -> Result<(), String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
@@ -887,6 +891,7 @@ fn enqueue_delivery_pr_merged_wake(
         worker,
         pr_number,
         merge_commit,
+        release_wait,
     );
     queue
         .enqueue_idempotent(
@@ -1119,6 +1124,7 @@ fn apply_delivery_pr_observation(
                 &observation.worker,
                 observation.pr_number,
                 merge_commit,
+                crate::qa_batch::awaits_release_verdict(cas_dir, &task),
             )?;
         }
         task.deliverables.delivery_pr_merge_commit = Some(merge_commit.to_string());
@@ -1157,7 +1163,11 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
         let Ok(age) = (now - merged_at).to_std() else {
             continue;
         };
-        if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE {
+        // cas-d511 (cas-6c03): a close waiting on the release verdict is the
+        // designed batch state, not a stuck merge.
+        if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE
+            || crate::qa_batch::awaits_release_verdict(cas_dir, &task)
+        {
             continue;
         }
         let detail = format!(
@@ -3078,7 +3088,7 @@ mod worker_attention_tests {
                 .count(),
             1
         );
-        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
+        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234", false).unwrap();
         // A replayed ejection is one failure; the later merge is the pass.
         let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
             .unwrap()

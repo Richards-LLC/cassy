@@ -728,7 +728,11 @@ fn provenance_is_written_off_the_lane_before_the_submit() {
 /// cas-922d: the same for each member of an urgent all-workers broadcast.
 #[tokio::test]
 async fn urgent_row_holds_for_an_in_flight_tool_call_then_names_cassy_cas_73f7() {
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // A broadcast needs an Agent Teams tree (see the broadcast test above).
+    let claude_config = env.home().join(".claude");
+    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &claude_config);
     for target in [WORKER, "all_workers"] {
         let (root, cas_dir) = project_with_worker();
         super::queue_and_events::reminder_dispatch_tests::write_agent_transcript(root.path(), &cas_dir,
@@ -737,6 +741,7 @@ async fn urgent_row_holds_for_an_in_flight_tool_call_then_names_cassy_cas_73f7()
         ]);
         let id = enqueue_urgent_to(&cas_dir, target, "start the task C4A-HOLD");
         let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+        daemon.teams = Some(super::teams::TeamsManager::new(SESSION));
         ready_claude_worker(&mut daemon).await;
         let held = passes_until(&mut daemon, Duration::from_secs(2), |_| false).await;
         assert!(!held.contains('\x1b') && !held.contains("C4A-HOLD"), "{target}: no Esc into the call: {held:?}");

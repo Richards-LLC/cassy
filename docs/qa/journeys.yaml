@@ -196,6 +196,10 @@ invariants:
   HUB-J13-COMPATIBLE-CLAUDE:
     statement: Commander and factory launches prefer a verified native Claude over stale PATH clients, or refuse with an actionable version error. Hub readiness keeps missing, outdated and unverifiable clients visible with their own repair action.
     check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME and CAS_TEST_HUB_PATH; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.
+  HUB-J4-GROK-NATIVE-REPLY:
+    statement: Completed Grok replies appear once in durable conversation history and answer the originating terminal or verified Commander question; thoughts, tool progress, cancelled turns and native synthetic-input bindings stay excluded; image-paste chunks retain their shared prompt.
+    check: Replay the captured native updates.jsonl through commander_mirror::tests::grok_native_reply_reaches_commander_cas_44f0; verify incomplete turns stay absent, integer timestamps parse, verified sends retain reply_to and device, text/image chunks retain their prompt, syntheticPrompt cannot claim operator input, cancelled completions stay absent while errors remain visible, and restart adds no duplicate. Walk a real Grok conversation on the batch candidate.
+    bug: {task: cas-44f0}
   HUB-J4-API-ERROR-VISIBLE:
     statement: The first native Claude API failure appears in the conversation and session preview within that turn.
     check: Run commander_mirror::tests::claude_api_error_reaches_commander_in_one_scan_cas_d8e0 through a real transcript scan and queue; verify the error reply and summary before another turn, and dedupe on replay.
@@ -1012,6 +1016,7 @@ journeys:
   invariants:
   - HUB-J4-GOAL
   - HUB-J4-API-ERROR-VISIBLE
+  - HUB-J4-GROK-NATIVE-REPLY
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-IMAGE-INSPECTION
   - HUB-J4-READABLE-PROSE-TABLES

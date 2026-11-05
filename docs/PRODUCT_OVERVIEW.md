@@ -76,6 +76,8 @@ preserving the original rules, skills, memories and brief templates.
 
 ## Primary Journeys
 
+Completed native Claude, Codex and Grok turns mirror into durable Commander history, including answers to questions typed in the terminal. Grok text streams appear only after native turn completion; thoughts, text before tool calls and cancelled turns stay out of the reply. Native synthetic prompts never become operator questions, and text/image chunks in one pasted prompt keep the answer linked to that question. OpenCode transcript mirroring remains unsupported.
+
 Commander omits unsolicited supervisor replies that only acknowledge a message or say there is no action. Direct answers, substantive status updates and native Claude API errors remain visible; a failed turn appears in the conversation and session preview without waiting for another turn.
 
 Claude factory launches prefer the native installer’s active binary, then its newest installed version, then PATH. Commander checks the same executable before launch. Each launch verifies Claude Code 2.1.280 or newer and refuses with the detected path and version when no compatible client is available. Hub service status gives missing, outdated and unverifiable Claude clients their own install, update or repair action; missing clients remain not installed in doctor and the account picker.

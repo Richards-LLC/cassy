@@ -1,0 +1,4 @@
+title: Native Grok completions mirror into the Commander conversation
+tasks: [cas-44f0]
+invariants: [HUB-J4-GROK-NATIVE-REPLY]
+journeys: [HUB-J4]

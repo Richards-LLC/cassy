@@ -6553,6 +6553,33 @@ mod tests {
         }
     }
 
+    /// cas-f9bf: pushing a docs tip cancels the code commit's lane run while the
+    /// tip's own run is still starting. The auto-retry rebinds to that newer run
+    /// and keeps waiting. With no newer run it still stops.
+    #[cfg(unix)]
+    #[test]
+    fn retry_rebinds_to_the_tip_run_that_cancelled_the_watched_run_cas_f9bf() {
+        use crate::factory_ci_retry::CiStatus;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let cancelled = serde_json::json!({"check_runs": [{
+            "name": "Scoped Validation (factory/PR)", "status": "completed", "conclusion": "cancelled",
+            "html_url": "https://github.com/acme/cas/actions/runs/41910660428/job/1",
+        }]}).to_string();
+        let (repo, code_sha, tip) = delivery_ci_fixture_with(true, &cancelled, "");
+        let fake_gh = repo.path().join("gh-fixture");
+        for (tip_response, expected) in [
+            (r#"{"check_runs":[{"name":"Classify CI diff","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/41910920188/job/2"}]}"#, CiStatus::Pending),
+            (r#"{"check_runs":[]}"#, CiStatus::Stopped(
+                "CI was cancelled and no replacement check is running; inspect CI and request the merge again".into())),
+        ] {
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) printf '%s\\n' '{cancelled}' ;;\n*/{tip}/check-runs) printf '%s\\n' '{tip_response}' ;;\n*) exit 97 ;;\nesac\n"
+            ));
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
+        }
+    }
+
     /// A target-sync merge can contain code in its first-parent diff even
     /// though the lane delivers only documentation relative to that target.
     #[cfg(unix)]

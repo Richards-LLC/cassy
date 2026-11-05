@@ -17,15 +17,15 @@ The same Markdown reaches the pane and Commander, which draws diagrams, colored 
 | A command, config or code | Code block | a fence with a language tag; `bash`, `ts`, `js`, `json`, `python` and `rust` are colored, `diff` opens a change view | a code block |
 | A comparison of options, workers, gates or before/after | Table | a pipe table with a header and dash rule row; start and end every row with a pipe | the table |
 
-Asked how a merge reaches main while the queue is red:
+Asked how a merge reaches main while CI is red:
 
 ````markdown
-Merges reach main only through the merge queue, which reruns the full suite first.
+Merges reach main only after CI reruns the full suite on the merged tree.
 
 ```mermaid
 flowchart TD
   A[Worker parks the task] --> B[Supervisor merges to the epic]
-  B --> C[Merge queue runs the suite]
+  B --> C[CI runs the full suite]
   C -->|green| D[main]
   C -->|red| B
 ```
@@ -36,10 +36,10 @@ gh run list --branch "main" --limit 3
 ```
 
 > [!WARNING]
-> **Blocked:** the queue is red on two Commander browser checks, so nothing reaches main until they pass.
+> **Blocked:** CI is red on two browser checks, so nothing reaches main until they pass.
 
 | Gate | Runs | Blocks main |
 |---|---|---|
 | Worker check | capped check and named tests | no |
-| Merge queue | full suite and browser checks | yes |
+| CI on the merged tree | full suite and browser checks | yes |
 ````

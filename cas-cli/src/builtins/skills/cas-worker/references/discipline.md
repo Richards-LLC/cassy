@@ -5,8 +5,13 @@ contract carries the lifecycle rules.
 
 ## Scope and test design
 
-Run the tests that cover the code you touched; name each file or filter you ran. `CONTRIBUTING` names the
-scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
+Run the tests that cover the code you touched; name each file or filter you ran.
+<!-- cas-src:begin -->
+`CONTRIBUTING` names the scoped commands.
+<!-- cas-src:else -->
+The project's CLAUDE.md or AGENTS.md names the scoped commands.
+<!-- cas-src:end -->
+Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
 [Test hygiene](../../cas-tdd/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
 tests to add. Docs-only and no-code tasks prove their acceptance check instead
 (e.g. markdownlint, `cas codemap status`, a published artifact); don't add code
@@ -16,6 +21,7 @@ are not a pass. Report a subset by what it ran (`412 tests, 38 files`), never as
 
 ## Check the committed change before parking
 
+<!-- cas-src:begin -->
 Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --lib` or
 the same command with `--tests`. Choose `--lib` for lib-only edits and `--tests`
 when test files changed; never combine the target flags. Select the affected
@@ -53,6 +59,14 @@ Commit first; zero matched tests fail. Success records
 receipts. Run the red test before fixing it, then commit and run the green test.
 
 Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
+<!-- cas-src:else -->
+In a Rust project, Cassy's capped runner admits only
+`cargo check -p <crate> --lib` (or `--tests`) and
+`cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`, each
+committed first and backgrounded with a Git-ignored log; the hook's refusal names
+the exact shapes. Otherwise run the project's own targeted test commands
+directly and record their exit status and test count.
+<!-- cas-src:end -->
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run
 in the close reason.
@@ -82,11 +96,17 @@ Report an actual need for supervisor action through the ordinary blocker path.
 ## Browser checks
 
 Workers and independent QA run vitest, tsc and source-impact-selected journeys.
+<!-- cas-src:begin -->
 Where available, use `scripts/journey-eval.sh <task-artifact-dir>`, which picks
 the affected journeys and writes an explicit empty receipt when none are;
 `--affected <base>` binds an explicit ancestor base. Spec or grep filters cannot
 substitute for that selection, though named-spec runs stay available for
-iteration. The hook denies workers `--full`, unfiltered Playwright and
+iteration.
+<!-- cas-src:else -->
+Select the journeys the diff affects with the project's own test commands;
+named-spec runs stay available for iteration.
+<!-- cas-src:end -->
+The hook denies workers `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. A failure control runs only the failing spec
 with one worker and never reports that failure as PASS.
 

@@ -108,7 +108,12 @@ Merge each completed lane into the epic branch, then have other workers sync. Fo
 factory action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
-It admits a lane on its CI state and the preflight's conflict and dirt checks, and its refusals name the gate. Lane CI admits lanes; the merge queue is the Rust compile and suite proof.
+It admits a lane on its CI state and the preflight's conflict and dirt checks, and its refusals name the gate. Lane CI admits lanes;
+<!-- cas-src:begin -->
+the merge queue is the Rust compile and suite proof.
+<!-- cas-src:else -->
+the Phase 4 final gate is the full suite proof.
+<!-- cas-src:end -->
 
 ### Wall-clock is a resource
 
@@ -118,7 +123,11 @@ A green push alone is not ready: a test-first checkpoint can be green and incomp
 2. Give each held delivery a named blocker, next owner and event or reminder: missing candidate, review, QA, red CI or merge conflict. Staff those gaps before new noncritical work; for a correction, use [correction proof](correction-proof.md).
 3. If every delivery waits on an external event, dispatch only already-authorized independent work. An idle worker is valid; keeping one busy is no reason to expand scope.
 
-Report the oldest held delivery and its next action, not utilization. The default merge keeps the worker checkout; `cleanup=true` belongs at end of lane. A merge into an `epic/` branch runs no local suite; when the epic PR leaves the queue unmerged, one `merge_queue_ejected` wake names the PR and failing job. A `focus_epic` pin is a display filter, never merge authority.
+Report the oldest held delivery and its next action, not utilization. The default merge keeps the worker checkout; `cleanup=true` belongs at end of lane. A merge into an `epic/` branch runs no local suite.
+<!-- cas-src:begin -->
+When the epic PR leaves the merge queue unmerged, one `merge_queue_ejected` wake names the PR and failing job.
+<!-- cas-src:end -->
+A `focus_epic` pin is a display filter, never merge authority.
 
 ### Required merge-review discipline
 
@@ -165,7 +174,13 @@ git diff <base>...factory/<worker> | git patch-id --stable
 - **Same patch-id:** reuse the source-review verdict; inspect changed base dependencies for integration risk, then continue through current QA and CI gates.
 - **Different patch-id:** review only what changed: `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
-A matching patch-id does not prove integration with the new base; the merge queue run still does. Runtime evidence and independent QA have separate reuse limits in [correction proof](correction-proof.md).
+A matching patch-id does not prove integration with the new base;
+<!-- cas-src:begin -->
+the merge queue run still does.
+<!-- cas-src:else -->
+the final gate on the epic PR still does.
+<!-- cas-src:end -->
+Runtime evidence and independent QA have separate reuse limits in [correction proof](correction-proof.md).
 
 ## Phase 3: Review (Shared Mode)
 
@@ -189,10 +204,16 @@ When a walk needs records only your credentials can create, the worker drafts a 
 
 Batch QA is the default; `qa.mode=per_task` enables per-delivery reviews. Run one round per release, after the fix-diff re-review: build a candidate at the frozen tip, walk the combined matrix and report every failing row in one ledger. Fix them in one batch and re-walk only those rows, once; a row still failing is reverted to the next release unless it loses operator data. Record `verification action=batch_receipt` with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author` (who walked it and implemented no listed task); every listed delivery must be in that commit. Then close those deliveries.
 
-A lane not merged at freeze ships next release. After freeze, a new finding waits for the next board unless it loses data, hides state or hurts someone today; a fix for something hurting the operator ships alone with `scripts/release.sh --hotfix`.
+A lane not merged at freeze ships next release. After freeze, a new finding waits for the next board unless it loses data, hides state or hurts someone today; a fix for something hurting the operator ships alone
+<!-- cas-src:begin -->
+with `scripts/release.sh --hotfix`.
+<!-- cas-src:else -->
+as a hotfix release.
+<!-- cas-src:end -->
 
 ## Interim queue precheck
 
+<!-- cas-src:begin -->
 Until a hosted precheck ships, run this diagnostic in a new, clean checkout at the reviewed or corrected SHA. Replace the source path, destination and SHA; the destination must not exist. Use a shell with Node, Cargo/nextest and Chromium system dependencies:
 
 ```bash
@@ -215,13 +236,31 @@ make -C cas-cli test-ci-tiers
 ```
 
 Keep both test logs and their exit codes. This is not merged-tree proof; the queue still owns that. Do not substitute `assembly-proof.py`: its scrubbed environment cannot resolve the browser installation.
+<!-- cas-src:else -->
+This precheck belongs to the Cassy source repository. In other projects, CI
+check-runs on the reviewed SHA (or the supervisor's integrated run of the
+commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
+<!-- cas-src:end -->
 
 ## Phase 4: Complete
 
-1. Verify every child is closed and merged with `factory action=epic_status id=<epic-id>`. Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round; enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Hand off to a fresh context at freeze, after the batch fix and after the QA receipt, keeping supervisor context under 200K tokens.
+1. Verify every child is closed and merged with `factory action=epic_status id=<epic-id>`.
+   <!-- cas-src:begin -->
+   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round; enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Hand off to a fresh context at freeze, after the batch fix and after the QA receipt, keeping supervisor context under 200K tokens.
+   <!-- cas-src:else -->
+   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round; merge or enqueue. Fix tasks run only their touched tests. The final gate (step 4) is the one full-suite proof. Hand off to a fresh context at freeze, after the batch fix and after the QA receipt, keeping supervisor context under 200K tokens.
+   <!-- cas-src:end -->
 2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
-3. Hold the main merge until the assembled diff passes review and the final gate. With a merge queue, enqueueing the reviewed PR is the hold.
-4. Run the final assembled-tree gate: the epic's single full-suite run on the tree that lands; skip it when the queue or CI already ran it. With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Do not run a local full suite before the PR. Without a queue or check-runs, run the project's assembly gate on that SHA; with `scripts/assembly-proof.py` it is `python3 scripts/assembly-proof.py prove <epic-worktree>`. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
+3. Hold the main merge until the assembled diff passes review and the final gate.
+   <!-- cas-src:begin -->
+   With a merge queue, enqueueing the reviewed PR is the hold.
+   <!-- cas-src:end -->
+4. Run the final assembled-tree gate:
+   <!-- cas-src:begin -->
+   the epic's single full-suite run on the tree that lands; skip it when the queue or CI already ran it. With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Do not run a local full suite before the PR. Without a queue or check-runs, run the project's assembly gate on that SHA; with `scripts/assembly-proof.py` it is `python3 scripts/assembly-proof.py prove <epic-worktree>`. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
+   <!-- cas-src:else -->
+   the epic's single full-suite run on the tree that lands; skip it when CI already ran it. Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Without check-runs on the exact default-branch SHA, run the project's full suite (the commands its CLAUDE.md or AGENTS.md names) on that SHA. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
+   <!-- cas-src:end -->
 5. Put every review, precheck and QA finding that needs worker action into one batch: a bounded epic-child fix-round task per worker, started together, each description carrying the finding, fix, acceptance criteria and proof command.
 6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR, or rerun the local gate and record a fresh `ASSEMBLY_PROOF` from its real exit code:
 

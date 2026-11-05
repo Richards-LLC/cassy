@@ -38,8 +38,13 @@ binding limits below.
   correction path. Policy text grants no bypass.
 - **CI:** the new code or test tip needs its own CI before merge; red holds.
   For a documentation tail, use only the code-check SHA the merge receipt
-  accepts. Neither patch-id equality nor an old candidate is a CI result. The
-  merge queue owns final integration proof; add no duplicate build or suite.
+  accepts. Neither patch-id equality nor an old candidate is a CI result.
+  <!-- cas-src:begin -->
+  The merge queue owns final integration proof; add no duplicate build or suite.
+  <!-- cas-src:else -->
+  The final integration gate (CI on the landing SHA) owns that proof; add no
+  duplicate build or suite.
+  <!-- cas-src:end -->
 
 ## Share one immutable candidate
 

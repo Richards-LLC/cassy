@@ -3412,8 +3412,10 @@ command away.
 
 `finish` is a shared builtin skill; Claude Code exposes it as `/finish`, and the
 other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
-Update also refreshes finish in named Claude/Codex accounts and their shared
-bases. The exact old cas-f4ea command seed is removed in favor of the skill.
+Update also refreshes finish in named Claude/Codex accounts. The shared bases
+(`~/.cas/claude-base`, `~/.cas/codex-base`), which every account's `skills`
+links to, receive the full builtin set. The exact old cas-f4ea command seed is
+removed in favor of the skill.
 A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
 entrypoints untouched and skips installing its finish skill for that profile.
 An existing customized finish `SKILL.md` is preserved, even when it retains
@@ -3431,6 +3433,15 @@ account-discovery failures appear in `account_discovery_warnings` and do not
 abort default-profile or shared-base refresh.
 
 Every file in a managed builtin skill directory other than its `SKILL.md` (references, scripts, examples, templates) is owned by that skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`. The ledger keeps deleted files too: sync prunes an installed file Cassy no longer ships only when its content proves it is Cassy's (a shipped hash, the recorded baseline, or `managed_by: cas`). Retired managed agents are pruned the same way, and `cas doctor` reports installed-vs-catalog drift as `host install parity`.
+
+Builtin Markdown that only applies in this repository (Cargo and nextest
+shapes, `CONTRIBUTING`, `scripts/journey-eval.sh`, `scripts/assembly-proof.py`,
+hub-web, the merge queue) sits between whole-line (optionally indented) `<!-- cas-src:begin -->` and
+`<!-- cas-src:end -->` markers, optionally split by `<!-- cas-src:else -->`
+with a project-neutral replacement. Sync renders the cas-src branch only into
+this checkout's harness dirs; every other target, including the personal dirs
+that outrank project skills, gets the neutral branch. Markers never reach an
+installed file, and the history ledger records both renders.
 
 **After changing, adding or deleting any builtin skill file — and before cutting a release — run:**
 

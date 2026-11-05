@@ -265,3 +265,13 @@ captures live with task cas-edb0's evidence.
 
 Design: `DESIGN.md@b43940e43`. Renderer, palette and grouping are unchanged.
 Exact-revision candidate terminal captures are recorded in the task artifacts.
+
+## Retired MCP references (cas-1ad4d)
+
+The Config group warns when stored or installed guidance explicitly names an
+absent or disabled MCP registration. Each finding identifies the server and its
+record ID/database or file/line; `--json` and `--verbose` retain all locations.
+The short terminal report keeps its existing line budget. The action is review
+of the named guidance or restoration of the registration. Historical and
+retirement instructions remain review candidates, with no automatic edits.
+An incomplete inventory warns without printing registration contents.

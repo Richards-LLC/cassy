@@ -16,7 +16,7 @@ impl Approval {
         if let Err(error) = self.try_share_published() {
             tracing::warn!(task = %self.candidate.task_id, %error, "peer approval sharing failed after publication");
             let note = format!(
-                "Peer approval sharing failed after confirmed publication: {error}. Publication remains confirmed; other peers were attempted and the outbox retains retryable sends."
+                "Peer approval sharing failed after confirmed publication: {error}. Publication remains confirmed. Eligible peers are attempted independently; retryable sends remain in the outbox."
             );
             let recorded = (|| -> Result<(), String> {
                 let tasks = crate::store::open_task_store(&self.candidate.cas_root)
@@ -416,12 +416,11 @@ fn import_receipt(
     verdict.created_at = at;
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
     cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
-        |error| match error {
-            cas_store::StoreError::Parse(_)
-            | cas_store::StoreError::VerificationDispatchConflict { .. } => {
-                ReceiptFailure::reject(error)
-            }
-            _ => ReceiptFailure::retry(error),
+        |error| {
+            let permanent = matches!(&error, cas_store::StoreError::Parse(_) | cas_store::StoreError::VerificationDispatchConflict { .. })
+                || matches!(&error, cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(cause, _))
+                    if cause.code == rusqlite::ErrorCode::ConstraintViolation);
+            if permanent { ReceiptFailure::reject(error) } else { ReceiptFailure::retry(error) }
         },
     )?;
     Ok(())

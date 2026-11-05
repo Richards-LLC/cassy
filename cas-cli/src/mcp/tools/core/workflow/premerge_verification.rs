@@ -98,21 +98,18 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// cas-4af9: review against origin's tip when the local target merely lags
-/// it. The merge fast-forwards a lagging target before publishing, so a
-/// candidate built on the stale local ref reviews a base that never lands.
+/// Review the fetched published target. An unpublished local merge can be
+/// rolled back after a failed push; binding its SHA would invalidate an
+/// approval when the published target later advances normally (cas-015e).
+/// Local-only repositories retain their existing target fallback.
 fn review_target(repo: &Path, target: &str) -> Result<String, String> {
-    let local = git(repo, &["rev-parse", target])?;
-    let Ok(remote) = git(
+    if let Ok(remote) = git(
         repo,
         &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{target}^{{commit}}")],
-    ) else {
-        return Ok(local);
-    };
-    if remote != local && git(repo, &["merge-base", "--is-ancestor", &local, &remote]).is_ok() {
+    ) {
         return Ok(remote);
     }
-    Ok(local)
+    git(repo, &["rev-parse", target])
 }
 
 /// Refresh origin's copy of the target and refuse a diverged target before

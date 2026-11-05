@@ -1444,10 +1444,11 @@ mod tests {
         let mut rule = Rule::new("rule-source".into(), "Stored instruction".into());
         rule.status = RuleStatus::Proven;
         rule.helpful_count = 1;
-        core.open_rule_store().unwrap().add(&rule).unwrap();
         let mut legacy = rule.clone();
         legacy.id = "rule-held".into();
+        // A legacy source must exist before projection receipts start.
         crate::store::open_rule_store_local(&core.cas_root).unwrap().add(&legacy).unwrap();
+        core.open_rule_store().unwrap().add(&rule).unwrap();
         std::fs::write(temp.path().join(".claude/rules/team.md"), "Repository instruction").unwrap();
         let result = core.cas_rules_list().await.unwrap();
         let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");

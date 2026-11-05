@@ -562,6 +562,38 @@ mod tests {
             "changing the configured target is not proof of repository deletion");
     }
 
+    #[test]
+    fn post_marker_local_arrivals_project_and_bad_receipts_do_not_disable_rules_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = crate::store::open_rule_store_local(&root).unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner.clone(), target.clone(), 1, queue.clone())
+            .with_project_root(temp.path().to_path_buf());
+        assert!(store.list().unwrap().is_empty()); // Start projection receipts.
+        drop(store);
+        // Cloud pull uses this unwrapped store; remote creation time may be old.
+        let mut incoming = make_rule("rule-from-peer", Scope::Project);
+        incoming.created = chrono::Utc::now() - chrono::Duration::days(30);
+        incoming.status = RuleStatus::Proven;
+        incoming.helpful_count = 1;
+        inner.add(&incoming).unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner, target.clone(), 1, queue.clone())
+            .with_project_root(temp.path().to_path_buf());
+        assert_eq!(store.get(&incoming.id).unwrap().status, RuleStatus::Proven);
+        assert!(target.join("rule-from-peer.md").is_file());
+        assert!(queue.pending(100, 5).unwrap().is_empty(), "pull projection must not echo into the push queue");
+        for bytes in [b"not JSON".to_vec(), vec![0xff]] {
+            std::fs::write(SyncingRuleStore::receipt_path(temp.path(), &incoming.id), bytes).unwrap();
+            assert_eq!(store.list_proven().unwrap().len(), 1, "bad metadata must not break rule injection");
+            assert!(target.join("rule-from-peer.md").is_file());
+        }
+    }
+
     /// cas-caae (skills audit M27): a proven rule naming another registered
     /// project is never written to this project's rule files, and an
     /// existing file for it is removed on its next write.

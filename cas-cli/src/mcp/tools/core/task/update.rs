@@ -487,14 +487,12 @@ fn clean_idle_assignment_note(
     {
         return None;
     }
+    // cas-8aa1: only a started task holds the worktree. A queued Open task
+    // gets its own branch from its target at start, like this one.
     let active = task_store
         .ids_by_assignees_and_statuses(
             &[&worker.name, &worker.id],
-            &[
-                TaskStatus::Open,
-                TaskStatus::InProgress,
-                TaskStatus::Blocked,
-            ],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
         )
         .ok()?;
     if !active.is_empty() {

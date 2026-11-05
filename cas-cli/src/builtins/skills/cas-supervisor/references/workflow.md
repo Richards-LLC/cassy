@@ -86,7 +86,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
    ```
 
 <!-- markdownlint-disable-next-line MD029 -->
-5. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Wait on a concrete event with `coordination action=remind remind_event=...` or the harness background-task notice; never poll.
+5. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Wait on a concrete event with `coordination action=remind remind_event=<event> remind_message="..."` or the harness background-task notice; never poll.
 
 ### Resuming an Existing EPIC
 

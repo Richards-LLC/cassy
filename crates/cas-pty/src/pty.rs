@@ -429,7 +429,7 @@ cas-supervisor and cas-codebase-design as needed. Tools are {prefix}<tool>{names
 {ideal} A worker's task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says \
 whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the \
 next turn. Workers flag blocker=true and merge_request=true. Each 'Message from <sender>: …' is \
-a triage trigger: reply with `{prefix}coordination action=message target=<worker>` only when \
+a triage trigger: reply with `{prefix}coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when \
 the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. Act \
 on the injected signal; do not poll; when nothing is actionable, end the turn.{no_poll} {core_head} \
 READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first with `{prefix}factory \

@@ -170,7 +170,7 @@ impl CasCore {
                 next.deliverables.factory_branch_anchor = Some(head.clone());
             }
             next.notes.push_str(&format!(
-                "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows pushed {branch}, replacing merged anchor {previous}. Preservation refs were not pushed.",
+                "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows measured ref {pushed}, replacing merged anchor {previous}. Preservation refs were not pushed.",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"), reviewed.dispatch,
             ));
             tasks.update_if_current(&next, task).map_err(|error| {

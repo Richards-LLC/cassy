@@ -1439,6 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn rule_list_labels_store_repo_and_held_sources_cas_83c3() {
+        use crate::store::RuleStore as _;
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");

@@ -6366,6 +6366,15 @@ impl CasCore {
         {
             detail = compact;
         }
+        // cas-fee3: repeated merges into one branch each rerun its open PR's
+        // CI and cancel the previous run; say so as a batching signal.
+        if let Some(notice) = crate::ci_waste::merge_batching_notice(
+            cas_root.parent().unwrap_or(cas_root.as_path()),
+            &worktree.parent_branch,
+        ) {
+            detail.push('\n');
+            detail.push_str(&notice);
+        }
         Ok(Self::success(detail))
     }
 

@@ -4890,14 +4890,17 @@ esac
     let response = service.factory(Parameters(request.clone())).await.unwrap();
     let text = get_text(&response);
     if queued {
+        // pin: no attempted remote main update is the queue-before-merge contract.
         assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().lines().any(|line| line == "refs/heads/main"),
             "a known queue must route the source PR before attempting a local default-branch publication: {text}");
         assert!(!response.is_error.unwrap_or(false) && text.contains(pr_url), "{text}");
         assert!(armed.exists(), "the PR must have auto-merge enabled");
+        // pin: the remote delivery ref must name the exact source commit.
         assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/factory/bob"]), source);
         let retry = service.factory(Parameters(request)).await.unwrap();
         assert!(!retry.is_error.unwrap_or(false), "{}", get_text(&retry));
         let calls = std::fs::read_to_string(&gh_calls).unwrap();
+        // pin: one external PR creation is the idempotency contract on retry.
         assert_eq!(calls.lines().filter(|line| line.starts_with("pr create ")).count(), 1,
             "retry must reuse the same PR: {calls}");
         let stored = tasks.get(&task.id).unwrap();

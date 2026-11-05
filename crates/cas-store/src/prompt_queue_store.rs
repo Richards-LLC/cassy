@@ -62,6 +62,10 @@ pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
 /// the drain agree on which rows the operator lane owns.
 const OPERATOR_LANE_EXCLUSION: &str =
     "lower(target) <> 'operator' AND lower(target) NOT LIKE 'commander:%'";
+// Completed supervisor transcript copies already exist in the local pane.
+// Expiring their queue replay never removes the independent delivery snapshot.
+const TRANSCRIPT_MIRROR: &str =
+    "lower(target) = 'operator' AND source = 'supervisor' AND dedupe_key LIKE 'commander-mirror:%'";
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// Exact-content worker reports are collapsed only while a recent,
@@ -10212,7 +10216,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 &format!(
                     "SELECT EXISTS(SELECT 1 FROM prompt_queue
                       WHERE processed_at IS NULL AND created_at < ?
-                        AND {OPERATOR_LANE_EXCLUSION})"
+                        AND ({OPERATOR_LANE_EXCLUSION} OR ({TRANSCRIPT_MIRROR})))"
                 ),
                 params![cutoff],
                 |row| row.get(0),
@@ -10222,6 +10226,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
+
+            // Retire only aged transcript duplicates, without fabricating a
+            // device receipt or altering their durable operator outbox retry.
+            tx.execute(
+                &format!(
+                    "UPDATE prompt_queue
+                     SET processed_at = ?1, highest_stage = 'suppressed',
+                         last_pending_reason = 'superseded_stale',
+                         last_pending_detail = 'expired completed supervisor transcript mirror',
+                         next_attempt_at = NULL
+                     WHERE processed_at IS NULL AND created_at < ?2 AND {TRANSCRIPT_MIRROR}"
+                ),
+                params![now, cutoff],
+            )?;
 
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
             // rows, so this roster-independent expiry skips them as the roster
@@ -16476,6 +16494,12 @@ mod tests {
         );
         assert_eq!(notices_to(&store, "lead-sup"), 1, "one notice, for the unread row only");
         assert_eq!(notices_to(&store, "other-sender"), 1);
+        // The read-only fast path must also find a mirror-only backlog.
+        backdate(&store, mirrors[1], PROMPT_QUEUE_STALE_TTL_SECS + 60);
+        assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
+        assert_eq!(store.message_delivery_report(mirrors[1]).unwrap().unwrap().stage,
+                   DeliveryStage::Suppressed);
+
     }
 
     fn register_agent_at(

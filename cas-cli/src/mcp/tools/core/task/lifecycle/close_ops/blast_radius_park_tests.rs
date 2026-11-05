@@ -893,6 +893,116 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }
 
+/// cas-8f19d: a verdict belongs to the delivery, even when its verifier and
+/// the worker's close gate use separate stores and repository paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine_cas_8f19d() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+
+    let reviewer = tempfile::tempdir().unwrap();
+    git(reviewer.path(), &["clone", "-q", f._origin.path().to_str().unwrap(), "."]);
+    git(reviewer.path(), &["checkout", "-q", "-b", LANE, &format!("origin/{LANE}")]);
+    git(reviewer.path(), &["checkout", "-q", "main"]);
+    let remote_root = crate::store::init_cas_dir(reviewer.path()).unwrap();
+    std::fs::write(remote_root.join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
+    open_task_store(&remote_root).unwrap().add(&f.task()).unwrap();
+    let remote_agent = Agent::new_with_role("peer-supervisor".into(), "peer-supervisor".into(), AgentRole::Supervisor);
+    open_agent_store(&remote_root).unwrap().register(&remote_agent).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let remote = CasCore::with_daemon(remote_root.clone(), None, None);
+    remote.set_agent_id_for_testing(remote_agent.id.clone());
+    let preflight = remote.prepare_premerge_verification(&f.task(), reviewer.path(), LANE, "main");
+    assert!(preflight.is_err(), "review must precede publication");
+    let dispatch = cas_store::get_latest_verification_dispatch(&remote_root, ID).unwrap().unwrap();
+    let service = CasService::new(remote, None);
+    service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":ID, "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"reviewed on peer", "confidence":1.0,
+    })).unwrap())).await.unwrap();
+    let verdict = cas_store::get_verification_for_dispatch(&remote_root, &dispatch.id).unwrap().unwrap();
+    let candidate = crate::mcp::tools::core::workflow::premerge_verification::candidate_for_dispatch(&remote_root, &dispatch).unwrap().unwrap();
+    git(reviewer.path(), &["merge", "-q", "--no-ff", LANE, "-m", "merge reviewed lane"]);
+    git(reviewer.path(), &["push", "-q", "origin", "main"]);
+    let landed = git(reviewer.path(), &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["fetch", "-q", "origin", "main"]);
+    git(f.dir.path(), &["merge", "-q", "--ff-only", "origin/main"]);
+    open_task_store(&f.cas_dir()).unwrap().record_merge_admission(ID, &landed, cas_types::MergeCiAdmission::Green).unwrap();
+    assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().is_none());
+
+    // The wire body is data; authority comes only from the claimed envelope
+    // and the authenticated registry's supervisor row.
+    let receipt = serde_json::json!({
+        "project_id":PROJECT, "supervisor_id":remote_agent.id,
+        "task_id":ID, "source_branch":LANE, "source_sha":tip,
+        "target_branch":"main", "target_sha":candidate.target_sha,
+        "candidate_tree":candidate.tree, "landed_sha":landed,
+        "dispatch_id":dispatch.id, "verdict_id":verdict.id,
+        "task_context": {
+            "id":f.task().id, "title":f.task().title, "description":f.task().description,
+            "design":f.task().design, "acceptance_criteria":f.task().acceptance_criteria,
+            "depth":f.task().depth, "labels":f.task().labels, "risk":f.task().risk,
+            "proof_targets":f.task().proof_targets, "execution_note":f.task().execution_note,
+            "work_target":f.task().deliverables.work_target,
+            "proof":f.task().deliverables.parked_close_reason,
+        },
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[{
+            "id":remote_agent.id, "name":"peer-supervisor", "agent_type":"primary",
+            "status":"active", "machine_id":"peer-machine", "active_tasks":0,
+            "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"peer-factory"},
+        }]}))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[{
+            "id":"peer-proof-1", "project_id":PROJECT, "recipient_agent_id":"br-supervisor-session",
+            "sender_agent_id":remote_agent.id, "sender_name":"peer-supervisor",
+            "sender_machine_id":"peer-machine", "sender_session":"peer-factory",
+            "body":format!("CAS_PEER_PREMERGE_V1 {}", receipt),
+            "created_at":chrono::Utc::now().to_rfc3339(),
+        }]}))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok"})))
+        .mount(&server).await;
+    let mut recipient = open_agent_store(&f.cas_dir()).unwrap().get("br-supervisor-session").unwrap();
+    recipient.factory_session = Some("worker-factory".into());
+    recipient.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut recipient, std::process::id());
+    open_agent_store(&f.cas_dir()).unwrap().register(&recipient).unwrap();
+    crate::cloud::CloudConfig {endpoint:server.uri(), token:Some("test-token".into()), ..Default::default()}
+        .save_to_cas_dir(&f.cas_dir()).unwrap();
+    for _ in 0..2 {
+        let root = f.cas_dir();
+        let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+    let imported = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap()
+        .expect("authenticated mailbox admission must persist the peer verdict independently of prompts");
+    assert_eq!(imported.state, cas_types::VerificationDispatchState::Resolved);
+    let local = cas_store::get_verification_for_dispatch(&f.cas_dir(), &imported.id).unwrap().unwrap();
+    assert_eq!(local.id, verdict.id);
+    assert_ne!(imported.repository.as_ref().unwrap().repository_root, dispatch.repository.as_ref().unwrap().repository_root);
+    // Removing the receiving queue and all source-machine state cannot erase proof.
+    drop(service);
+    drop(reviewer);
+    let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+    for row in queue.peek_all(100).unwrap() { queue.ack(row.id).unwrap(); }
+    env.set("CAS_AGENT_ROLE", "worker");
+    let closed = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
+    assert_eq!(f.task().status, TaskStatus::Closed, "{closed}");
+}
+
 /// cas-3d70, through the real close: the commit-time anchor names a commit on
 /// a separate pushed helper branch, the worker's own lane has since synced the
 /// target, and park refuses because that anchor is absent from the lane. The

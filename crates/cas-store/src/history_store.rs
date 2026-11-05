@@ -5084,6 +5084,48 @@ mod tests {
         assert_eq!(m.links[0].confidence, LinkConfidence::Medium);
     }
 
+    /// cas-5590: the daemon's 500-commit repair batch must not scan `tasks`
+    /// once per commit. It holds the process's shared connection, and two
+    /// scans per SHA over the live notes froze every MCP call for ~40 s.
+    #[test]
+    fn a_repair_batch_reads_tasks_once_not_once_per_commit_cas_5590() {
+        let (_t, store) = store();
+        let shas: Vec<String> = (0..500).map(|i| format!("{i:08x}{}", "c".repeat(32))).collect();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, title TEXT, notes TEXT, updated_at TEXT,
+                     assignee TEXT, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            // Receipts are dense in hex and digits, as live close notes are.
+            let receipts = "PASS 0000a1b2 at 2026-11-05T00:00:00Z; merged 00c0ffee0, 0 failed. "
+                .repeat(110);
+            let mut insert = conn
+                .prepare("INSERT INTO tasks (id, title, notes) VALUES (?1, 't', ?2)")
+                .unwrap();
+            for i in 0..3_000 {
+                insert.execute(params![format!("cas-{i}"), receipts]).unwrap();
+            }
+            // LIKE is ASCII case-insensitive, and a probe inside a longer hex run matches.
+            let mention = format!("{receipts} receipt {}", shas[7].to_uppercase());
+            insert.execute(params!["cas-mention", mention]).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let resolved = store.resolve_provenance("/repo", &shas).unwrap();
+        let elapsed = started.elapsed();
+
+        let links = &resolved[&shas[7]].links;
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].task_id.as_deref(), Some("cas-mention"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "500 commits over 25 MB of notes took {elapsed:?} holding the shared connection"
+        );
+    }
+
     /// The `shas` filter must narrow in SQL. `Some(empty)` means "this filter
     /// matched nothing", and the one thing it must never do is widen back out
     /// to every commit.

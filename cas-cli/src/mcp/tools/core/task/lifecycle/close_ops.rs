@@ -43034,6 +43034,9 @@ mod zero_change_close_tests {
             (TaskStatus::InProgress, Some(worker.into()), TaskType::Spike, vec![TaskRisk::None]);
         plain.deliverables.work_target = task.deliverables.work_target.clone();
         store.add(&plain).unwrap();
+        // The worker's lane exists at the epic tip with no commit of its own.
+        git(p, &["branch", "factory/cas-defb-worker", "epic/live"]);
+        git(p, &["push", "-q", "origin", "factory/cas-defb-worker"]);
         let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": plain.id, "reason": "investigation written up in the artifact",
         })).unwrap();

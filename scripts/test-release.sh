@@ -234,6 +234,9 @@ write_valid_draft "$epic/$original_notes"
 mkdir -p "$epic/changelog.d"
 printf 'How fragments work.\n' >"$epic/changelog.d/README.md"
 printf '### Fixed — Fragments\n\n- **Fragment entry** — fragment shipped.\n' >"$epic/changelog.d/cas-0001.md"
+# cas-7f95: same-area fragments (and the epic's own [Unreleased] area) share one heading.
+printf '### Added — alpha\n\n- **Second alpha** — second alpha shipped.\n' >"$epic/changelog.d/cas-0002.md"
+printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipped.\n' >"$epic/changelog.d/cas-0003.md"
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
@@ -245,6 +248,11 @@ check '[[ "$(grep -c "^version = \"9.100.0\"" "$epic/Cargo.lock")" -eq 6 ]] && g
 check 'grep -A8 "^## \[9.100.0\] - 2026-10-15" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'CHANGELOG promotes [Unreleased] to the dated version'
 check 'awk "/^## \\[Unreleased\\]/{getline; getline; print; exit}" "$epic/CHANGELOG.md" | grep -q "^## \[9.100.0\]"' '[Unreleased] is left empty'
 check 'sed -n "/^## \[9.100.0\]/,/^## \[9.99.0\]/p" "$epic/CHANGELOG.md" | grep -q "fragment shipped" && [[ "$(git -C "$epic" ls-files changelog.d)" == changelog.d/README.md ]] && [[ -z "$(git -C "$epic" status --porcelain)" ]]' 'cas-f2be: changelog.d fragments fold into the version section and the release commit deletes them'
+released_section="$(sed -n '/^## \[9.100.0\]/,/^## \[9.99.0\]/p' "$epic/CHANGELOG.md")"
+heading_line() { grep -n -m1 -F -- "$1" <<<"$released_section" | cut -d: -f1; }
+check '[[ "$(grep -c "^### Fixed — Fragments$" <<<"$released_section")" -eq 1 && "$(grep -c "^### Added — alpha$" <<<"$released_section")" -eq 1 ]]' 'cas-7f95: entries sharing a section title share one heading'
+check '(( $(heading_line "### Fixed — Fragments") < $(heading_line "third fragment shipped") && $(heading_line "third fragment shipped") < $(heading_line "### Added — alpha") && $(heading_line "### Added — alpha") < $(heading_line "- alpha shipped.") ))' 'cas-7f95: headings keep first-seen order and gather every entry under them'
+check 'python3 "$script_dir/markdownlint.py" --config "$script_dir/../.markdownlint-cli2.jsonc" "$epic/CHANGELOG.md" >"$tmp/lint.out" 2>&1 || { cat "$tmp/lint.out"; false; }' 'cas-7f95: the promoted CHANGELOG passes the Docs Lint markdownlint policy (MD024)'
 check 'grep -q "Live on production — User — Cassy v9.100.0" "$epic/docs/release-notes/2026-10-15-v9.100.0-slack.md"' 'the draft is named and filled for the version'
 check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$head_files" == *slack.md* ]]' 'one commit carries bump, lock, CHANGELOG and draft'
 check '[[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$(git -C "$epic" rev-parse HEAD)" ]]' 'the release commit is pushed'

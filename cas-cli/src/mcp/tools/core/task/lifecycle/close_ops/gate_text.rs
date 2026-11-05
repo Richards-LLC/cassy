@@ -242,7 +242,7 @@ pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; 
 /// cas-5597: a successful park answers the worker as done. It keeps the
 /// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
 /// remediation meant for genuine refusals, and keeps any conflict finding.
-pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Option<&str>) -> String {
+pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Option<&str>, target: &str) -> String {
     // Other parked outcomes (e.g. DELIVERY CONTENT DROPPED) keep their own text.
     if !super::gate_preflight::is_merge_handoff(merge_required) {
         return merge_required.to_string();
@@ -252,7 +252,7 @@ pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Opti
         .find_map(|marker| merge_required.find(marker))
         .map_or("", |at| &merge_required[at..]);
     format!(
-        "⚠️ MERGE REQUIRED: PARKED {} on {}; awaiting merge verdict; nothing more to do.\n\n\
+        "⚠️ MERGE REQUIRED: PARKED {} on {} for {target}; awaiting merge verdict; nothing more to do.\n\n\
          {WORKER_CLOSE_OWNERSHIP} {PARK_SIGNAL}{conflict}",
         tip.unwrap_or("the pushed tip"),
         branch.unwrap_or("the factory branch"),

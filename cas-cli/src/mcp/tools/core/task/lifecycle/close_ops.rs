@@ -9515,7 +9515,12 @@ impl CasCore {
                             &resolved_parent_branch, head).err()
                     }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
                         .unwrap_or_default();
-                    let msg = gate_text::parked_reply(&msg, qa_anchor.as_deref(), measured_branch.as_deref());
+                    // Supervisors keep the full text: it names their exits.
+                    let msg = if crate::harness_policy::is_worker_from_env() {
+                        gate_text::parked_reply(&msg, qa_anchor.as_deref(), measured_branch.as_deref(), &resolved_parent_branch)
+                    } else {
+                        msg
+                    };
                     let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,

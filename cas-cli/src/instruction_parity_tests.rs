@@ -99,7 +99,7 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
     // OpenCode's short worker text defers checks and polling to the skill.
     let pty_workers = workers.iter().filter(|(h, _)| *h != "opencode").map(|(h, t)| (*h, t.as_str()));
     let assignment = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY;
-    let parked = gate_text::parked_reply("⚠️ MERGE REQUIRED\n\nRemediation: 5. Retry", Some("abc123"), Some("factory/w"));
+    let parked = gate_text::parked_reply("⚠️ MERGE REQUIRED\n\nRemediation: 5. Retry", Some("abc123"), Some("factory/w"), "main");
     let batch_wait = gate_text::waiting_for_release_verdict("cas-0000", "abc123", "mcp__cas__");
     let dispatch_gate = |handoff_queued| {
         gate_text::worker_dispatch_gate(&gate_text::WorkerDispatchGate {

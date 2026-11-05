@@ -5375,28 +5375,6 @@ impl CasCore {
                 });
             }
 
-            if let Some((task_id, source_branch, target_branch, source_tip, actor)) =
-                pending_observation.as_ref()
-            {
-                cas_store::record_pending_observed_delivery_merge(
-                    &cas_root,
-                    task_id,
-                    source_branch,
-                    target_branch,
-                    source_tip,
-                    actor,
-                )
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(delivery_observation_intent_failure_message(
-                        &worktree.id,
-                        task_id,
-                        error,
-                    )),
-                    data: None,
-                })?;
-            }
-
             // A parked pushed ref is independent of the worker's next task.
             // Only the preserving path may bypass the source checkout gate;
             // exact origin/anchor agreement is verified inside the manager.
@@ -5455,6 +5433,90 @@ impl CasCore {
                 approval.validate_for_merge(&cas_root, &current)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
             }
+            // A confirmed default-branch queue requires a PR. Route it before
+            // target mutation, after the same review/CI/source admission as a merge.
+            if worktree.parent_branch == manager.git().detect_default_branch()
+                && let Some(slug) = branch_ci_lookup.repo.as_deref()
+            {
+                if !force && source_worktree_live {
+                    let dirty = manager.git().classify_dirty_status(&worktree.path)
+                        .map_err(|error| worktree_merge_mcp_error(error.into(), &worktree.branch, &worktree.parent_branch))?;
+                    if (dirty.is_blocked() && dirty_pushed_anchor.is_none())
+                        || (do_cleanup && !dirty.warnings.is_empty())
+                    {
+                        return Err(worktree_merge_mcp_error(
+                            crate::worktree::WorktreeError::UncommittedChanges(dirty.describe_blocking()),
+                            &worktree.branch, &worktree.parent_branch,
+                        ));
+                    }
+                }
+                let source = parked_source_tip.as_deref().or(observed_source_tip.as_deref())
+                    .map(str::to_string).or_else(|| manager.git().resolve_commit(&worktree.branch))
+                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "PR source tip is unresolved"))?;
+                let pr = super::protected_pr::prepare(
+                    &cwd, slug, &worktree.branch, &worktree.parent_branch, &source, scoped_task.as_deref(),
+                ).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
+                    format!("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: {error}. Local target and source retained.")))?;
+                if let Some(pr) = pr {
+                    if manager.git().resolve_commit(&worktree.branch).is_some_and(|head| head != source) {
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "PR source moved before auto-merge; no auto-merge was enabled"));
+                    }
+                    if let Some(approval) = premerge_approval.as_ref() {
+                        let current = self.open_task_store()?.get(&approval.candidate.task_id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                        approval.validate_for_merge(&cas_root, &current)
+                            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    }
+                    if let Some(task) = scoped_task.as_deref() {
+                        let store = self.open_task_store()?;
+                        let current = store.get(&task.id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                        if current.is_terminal() || current.assignee != task.assignee
+                            || current.deliverables.work_target != task.deliverables.work_target
+                            || current.deliverables.factory_branch_anchor.as_deref().is_some_and(|head| head != source)
+                        {
+                            return Err(Self::error(ErrorCode::INVALID_PARAMS, "Delivery changed before PR auto-merge; no auto-merge was enabled"));
+                        }
+                        let mut next = current.clone();
+                        next.status = cas_types::TaskStatus::AwaitingMerge;
+                        next.pending_worktree_merge = true;
+                        next.deliverables.factory_branch_anchor = Some(source.clone());
+                        next.deliverables.parked_branch = Some(worktree.branch.clone());
+                        next.deliverables.delivery_pr_number = Some(pr.number);
+                        next.updated_at = chrono::Utc::now();
+                        store.update_if_current(&next, &current)
+                            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                    }
+                    super::protected_pr::arm(&cwd, &pr)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    return Ok(Self::success(format!(
+                        "{ci_prefix}PR queued: {} (source {} at {source}, target {}). Auto-merge enabled for this exact head; no local merge or default-branch push was attempted. Source worktree retained. The merge queue owns landing; Cassy reconciles the task after publication.",
+                        pr.url, worktree.branch, worktree.parent_branch,
+                    )));
+                }
+            }
+            if let Some((task_id, source_branch, target_branch, source_tip, actor)) =
+                pending_observation.as_ref()
+            {
+                cas_store::record_pending_observed_delivery_merge(
+                    &cas_root,
+                    task_id,
+                    source_branch,
+                    target_branch,
+                    source_tip,
+                    actor,
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(delivery_observation_intent_failure_message(
+                        &worktree.id,
+                        task_id,
+                        error,
+                    )),
+                    data: None,
+                })?;
+            }
+
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);

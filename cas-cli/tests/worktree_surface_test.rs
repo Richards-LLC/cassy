@@ -4868,7 +4868,7 @@ pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{source}","headRefN
 case "$1 $2" in
 'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
 'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":{{"id":"queue-main"}}}}}}}}' ;;
-'api repos/org/protected/commits/'*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
+'api '*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
 'pr list') if [ -f '{exists}' ]; then printf '[%s]\n' "$pr"; else printf '[]\n'; fi ;;
 'pr create') touch '{exists}'; printf '%s\n' '{url}' ;;
 'pr view') printf '%s\n' "$pr" ;;

@@ -374,9 +374,13 @@ export function replyOf(turn: ThreadTurn): OperatorReply | undefined {
 
 /* ---- evidence tables inside a message ---------------------------------- */
 
+export type ColumnAlign = "left" | "center" | "right";
+
 export interface EvidenceTable {
   header: string[] | undefined;
   rows: string[][];
+  /** Per column, from the `|:--|--:|:-:|` rule under the header; absent when unmarked. */
+  align?: (ColumnAlign | undefined)[];
 }
 
 export type MessageBlock = { type: "text"; text: string } | { type: "table"; table: EvidenceTable; source: string };
@@ -443,11 +447,17 @@ export function messageBlocks(message: string): MessageBlock[] {
     if (!splitCells(line)) { appendTextLine(index); continue; }
     const rows: string[][] = [];
     let header: string[] | undefined;
+    let align: (ColumnAlign | undefined)[] | undefined;
     const start = index;
     while (index < lines.length) {
       const cells = splitCells(lines[index]!);
       if (!cells) break;
-      if (cells.every(cell => /^:?-{2,}:?$/.test(cell))) { if (rows.length === 1 && header === undefined) header = rows.pop(); }
+      if (cells.every(cell => /^:?-{2,}:?$/.test(cell))) {
+        if (rows.length === 1 && header === undefined) {
+          header = rows.pop();
+          align = cells.map(cell => cell.endsWith(":") ? (cell.startsWith(":") ? "center" : "right") : cell.startsWith(":") ? "left" : undefined);
+        }
+      }
       else rows.push(cells);
       index += 1;
     }
@@ -455,7 +465,7 @@ export function messageBlocks(message: string): MessageBlock[] {
     index -= 1;
     if (rows.length === 0 && header === undefined) continue;
     flushText();
-    blocks.push({ type: "table", table: { header, rows }, source });
+    blocks.push({ type: "table", table: align?.some(Boolean) ? { header, rows, align } : { header, rows }, source });
   }
   flushText();
   return blocks;

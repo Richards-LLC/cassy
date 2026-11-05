@@ -70,12 +70,17 @@ reviewer challenges a reason that does not hold.
 
 ## Run them and keep the evidence
 
+<!-- cas-src:begin -->
 Workers run the project's journey suite, for example
 `scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id>`. It resolves
 the task target, selects affected journeys itself and runs four workers.
 `--affected <base>` sets an explicit base. The producer owns the native ID
 filter, including supplemental specs and parts. No selected IDs writes an
 explicit empty receipt without launching a browser. Independent QA first
+<!-- cas-src:else -->
+Workers run the project's journey suite, selecting the journeys the diff
+affects with the command its CLAUDE.md or AGENTS.md names. Independent QA first
+<!-- cas-src:end -->
 consumes matching worker receipts under [independent-pass.md](independent-pass.md).
 Factory workers and QA cannot use `--full` or an unfiltered Playwright run.
 
@@ -84,11 +89,13 @@ With a merge queue, the queue owns the full suite; without one, the full suite m
 Each journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.
 
+<!-- cas-src:begin -->
 For hub-web, the Playwright config never reuses a running server. Each
 checkout gets its own default port pair in 20000–32767, and a port that is
 already held fails the run loudly. Set `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a
 distinct pair in that range for runs in parallel from one checkout, and name
 the ports in the evidence.
+<!-- cas-src:end -->
 
 The files are:
 

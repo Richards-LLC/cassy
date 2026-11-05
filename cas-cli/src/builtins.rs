@@ -20,7 +20,7 @@ use crate::config::Config;
 use cas_mux::SupervisorCli;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -2924,6 +2924,7 @@ pub fn preview_builtin(
     builtin: &BuiltinFile,
     target_dir: &Path,
 ) -> std::io::Result<Option<(String, String)>> {
+    let builtin = &scoped_catalog(std::slice::from_ref(builtin), target_dir)[0];
     let target = target_dir.join(builtin.path);
     let content = builtin.content;
 
@@ -3415,6 +3416,69 @@ pub fn skipped_owned_references(cas_root: &Path) -> BTreeMap<String, Vec<String>
 }
 
 /// Sync all built-in files to the target directory
+/// Line markers fencing builtin text that only applies in the Cassy source
+/// repository (Cargo, CONTRIBUTING, journey-eval.sh, assembly-proof.py, the
+/// merge queue, hub-web). Everything between `begin` and `else` is cas-src
+/// text; the optional `else` branch is its project-neutral replacement.
+pub(crate) const CAS_SRC_BEGIN: &str = "<!-- cas-src:begin -->";
+pub(crate) const CAS_SRC_ELSE: &str = "<!-- cas-src:else -->";
+pub(crate) const CAS_SRC_END: &str = "<!-- cas-src:end -->";
+
+/// Render one builtin body for its install scope (cas-3199). The cas-src
+/// checkout keeps the cas-src branch; every other target, including the
+/// personal dirs every project reads first, keeps only the neutral branch.
+pub(crate) fn render_for_scope(content: &str, cas_src: bool) -> std::borrow::Cow<'_, str> {
+    if !content.contains(CAS_SRC_BEGIN) {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut branch: Option<bool> = None;
+    for line in content.split_inclusive('\n') {
+        match line.trim_end() {
+            CAS_SRC_BEGIN => branch = Some(true),
+            CAS_SRC_ELSE => branch = Some(false),
+            CAS_SRC_END => branch = None,
+            _ if branch.is_none_or(|cas_src_branch| cas_src_branch == cas_src) => out.push_str(line),
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// A harness dir belongs to the cas-src checkout (or one of its worktrees).
+fn cas_src_target(target_dir: &Path) -> bool {
+    target_dir
+        .parent()
+        .is_some_and(crate::cli::project_files::authoring)
+}
+
+/// `files` with each body rendered for `target_dir`'s scope. Rendered bodies
+/// are interned, so every downstream hash, ledger and comparison sees the
+/// bytes actually written.
+fn scoped_catalog(files: &[BuiltinFile], target_dir: &Path) -> Vec<BuiltinFile> {
+    static RENDERED: std::sync::OnceLock<std::sync::Mutex<HashMap<(usize, bool), &'static str>>> =
+        std::sync::OnceLock::new();
+    let cas_src = cas_src_target(target_dir);
+    files
+        .iter()
+        .map(|file| {
+            let content = match render_for_scope(file.content, cas_src) {
+                std::borrow::Cow::Borrowed(_) => file.content,
+                std::borrow::Cow::Owned(rendered) => {
+                    let mut cache = RENDERED
+                        .get_or_init(Default::default)
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *cache
+                        .entry((file.content.as_ptr() as usize, cas_src))
+                        .or_insert_with(|| Box::leak(rendered.into_boxed_str()))
+                }
+            };
+            BuiltinFile { path: file.path, content }
+        })
+        .collect()
+}
+
 fn sync_all_builtins_inner(
     target_dir: &Path,
     agents: &[BuiltinFile],
@@ -3429,6 +3493,7 @@ fn sync_all_builtins_with_finish_policy(
     skills: &[BuiltinFile],
     install_finish: bool,
 ) -> std::io::Result<SyncResult> {
+    let (agents, skills) = (&scoped_catalog(agents, target_dir), &scoped_catalog(skills, target_dir));
     let mut result = SyncResult::default();
     let mut reference_state = BuiltinReferenceState::load(target_dir)?;
 
@@ -4467,6 +4532,7 @@ pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> 
 }
 
 fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFile]) -> InstallParity {
+    let (agents, skills) = (&scoped_catalog(agents, target_dir), &scoped_catalog(skills, target_dir));
     let state = BuiltinReferenceState::load(target_dir).unwrap_or_default();
     let mut parity = InstallParity::default();
     for builtin in agents.iter().chain(skills) {
@@ -4764,6 +4830,40 @@ mod tests {
     use crate::builtins::*;
     use cas_factory::{embedded_registry, render_route_table, render_spawn_recipes};
     use std::process::Command;
+
+    /// cas-3199: personal dirs outrank project skills everywhere, so syncing
+    /// them must not spread cas-src tooling; only the cas-src checkout keeps it.
+    #[test]
+    fn cas_src_only_text_installs_only_into_the_cas_src_checkout_cas_3199() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_src = temp.path().join("cassy");
+        std::fs::create_dir_all(cas_src.join("cas-cli/src")).unwrap();
+        std::fs::write(cas_src.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(cas_src.join("cas-cli/src/builtins.rs"), "").unwrap();
+        let cas_src_only = ["scripts/journey-eval.sh", "assembly-proof.py", "release.sh --hotfix", "hub-web/dist", "HUB_E2E_PORT"];
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let personal = temp.path().join("home").join(format!("{harness:?}"));
+            let source = cas_src.join(format!(".{harness:?}"));
+            sync_all_builtins_for_harness(harness, &personal).unwrap();
+            sync_all_builtins_for_harness(harness, &source).unwrap();
+            let mut leaks = Vec::new();
+            for file in skill_catalog_for_harness(harness).iter().filter(|file| file.path.ends_with(".md")) {
+                let Ok(installed) = std::fs::read_to_string(personal.join(file.path)) else { continue };
+                if file.path.starts_with("skills/cas-cut-release/") {
+                    continue; // The Cassy runtime release skill is cas-src by definition.
+                }
+                leaks.extend(cas_src_only.iter().chain(&[CAS_SRC_BEGIN, CAS_SRC_END])
+                    .filter(|token| installed.contains(**token)).map(|token| format!("{}: {token}", file.path)));
+            }
+            assert!(leaks.is_empty(), "{harness:?}: {leaks:#?}");
+            let discipline = "skills/cas-worker/references/discipline.md";
+            let kept = std::fs::read_to_string(source.join(discipline)).unwrap();
+            assert!(kept.contains("scripts/journey-eval.sh") && !kept.contains(CAS_SRC_ELSE), "{harness:?}");
+            assert!(std::fs::read_to_string(personal.join(discipline)).unwrap().contains("CLAUDE.md or AGENTS.md"));
+            let parity = install_parity_for_harness(harness, &personal);
+            assert!(parity.stale.is_empty() && parity.missing.is_empty(), "{harness:?}: {parity:?}");
+        }
+    }
 
     #[test]
     fn installed_role_skills_preserve_acceptance_and_codex_checklist_selection() {
@@ -8946,7 +9046,11 @@ pub(crate) fn matches_shipped_project_file(path: &str, bytes: &[u8]) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|f| f.path == relative && f.content.as_bytes() == bytes)
+    .any(|f| {
+        f.path == relative
+            && (f.content.as_bytes() == bytes
+                || render_for_scope(f.content, false).as_bytes() == bytes)
+    })
         || is_shipped_builtin_reference_version(relative, &hash)
 }
 

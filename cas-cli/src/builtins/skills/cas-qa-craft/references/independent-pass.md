@@ -37,8 +37,12 @@ execution identities; a carried verdict must be recorded for this tip.
 Check out the reviewed tip in your own worktree with
 `git switch --detach <bound_head>`. Use an existing build with verified identity
 or build once with the project's real build, then serve it through `cas-servers`.
+<!-- cas-src:begin -->
 For hub-web without a matching build, run `npm run build`, then serve
 `hub-web/dist`. A build or serve failure is a **Blocking** finding. Record the
+<!-- cas-src:else -->
+A build or serve failure is a **Blocking** finding. Record the
+<!-- cas-src:end -->
 command, the URL, and `npx playwright --version` in the ledger header. Where
 the build guard refuses you a compile (a factory agent cannot build Rust), run
 the immutable candidate the supervisor provides for `<bound_head>` instead, named as
@@ -80,12 +84,18 @@ hold is a Normal finding.
 If that evidence is absent, failed, incomplete, or belongs to different inputs
 or an incompatible environment, run the missing checks. For affected journeys:
 
+<!-- cas-src:begin -->
 ```bash
 scripts/journey-eval.sh <ledger-dir> --affected <base> --workers=4
 ```
+<!-- cas-src:else -->
+Use the project's affected-journey selection (its CLAUDE.md or AGENTS.md
+names the command).
+<!-- cas-src:end -->
 
 A hand-picked subset cannot replace the source-impact selection. Keep an
 original failure and rerun only its spec at one worker for a failure control.
+<!-- cas-src:begin -->
 The merge queue owns the full run on the final integration tree.
 
 Ports: hub-web's Playwright config never reuses a running server. Each
@@ -94,6 +104,10 @@ path. A port that is already taken fails the run instead of testing another
 checkout's build. For runs in parallel from one checkout, set
 `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a distinct pair in 20000–32767 (below
 Linux's ephemeral range), and name the ports in the ledger header.
+<!-- cas-src:else -->
+The final integration gate (merge queue, or CI on the landing SHA) owns the
+full run.
+<!-- cas-src:end -->
 
 Add any journey whose Goal the demo statement names. Walk each journey from
 its real entry point to the user's goal, across feature boundaries. When a

@@ -7,8 +7,13 @@ covers capped check/test evidence and non-Rust suites without restating those ru
 ## Scope and test design
 
 Run affected targeted tests: the whole test module of each changed production
-function plus every integration harness that calls it. `CONTRIBUTING` names the
-scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
+function plus every integration harness that calls it.
+<!-- cas-src:begin -->
+`CONTRIBUTING` names the scoped commands.
+<!-- cas-src:else -->
+The project's CLAUDE.md or AGENTS.md names the scoped commands.
+<!-- cas-src:end -->
+Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
 [Test hygiene](../../cas-tdd/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
 tests to add. Docs-only and no-code tasks prove their acceptance check instead
 (e.g. markdownlint, `cas codemap status`, a published artifact); don't add code
@@ -18,6 +23,7 @@ are not a pass. Report a subset by what it ran (`412 tests, 38 files`), never as
 
 ## Check the committed change before parking
 
+<!-- cas-src:begin -->
 Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --lib` or
 the same command with `--tests`. Choose `--lib` for lib-only edits and `--tests`
 when test files changed; never combine the target flags.
@@ -76,6 +82,14 @@ a size or count claim on a real tree as well as a fixture. List each module run
 in the close reason. Named-only proofs missed same-module assertions
 and other callers' tests, so five deliveries failed at merge or review.
 
+<!-- cas-src:else -->
+In a Rust project, Cassy's capped runner admits only
+`cargo check -p <crate> --lib` (or `--tests`) and
+`cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`, each
+committed first and backgrounded with a Git-ignored log; the hook's refusal names
+the exact shapes. Otherwise run the project's own targeted test commands
+directly and record their exit status and test count.
+<!-- cas-src:end -->
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
@@ -106,11 +120,17 @@ A source/test failure or a required decision still follows its own workflow.
 ## Browser checks
 
 Browser suites use the same tiering as Rust: workers and independent QA run
-vitest, tsc and source-impact-selected journeys. Where available, use
+vitest, tsc and source-impact-selected journeys.
+<!-- cas-src:begin -->
+Where available, use
 `scripts/journey-eval.sh <task-artifact-dir>`: default task-target selection,
 four workers, explicit empty receipt when nothing is affected. Pass
 `--affected <base>` to bind an explicit ancestor base. Arbitrary spec/grep
-filters cannot substitute for the producer's selection. Manual named-spec or
+filters cannot substitute for the producer's selection.
+<!-- cas-src:else -->
+Select the journeys the diff affects with the project's own test commands.
+<!-- cas-src:end -->
+Manual named-spec or
 canonical-ID runs remain available for iteration and failure controls.
 
 The hook denies factory workers/reviewers `--full`, unfiltered Playwright and

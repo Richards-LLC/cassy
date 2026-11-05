@@ -13820,7 +13820,7 @@ async fn cas99d2_inbox_poll_withholds_a_consumed_assignment_gh127() {
          re-rendered verbatim: {text}"
     );
     assert!(
-        text.contains(&format!("{assignment_id}")) && text.contains("task start already recorded"),
+        text.contains(&format!("{assignment_id}")) && text.contains("task status in_progress"),
         "the withheld row must be named, not silently dropped: {text}"
     );
     assert!(!text.contains("already done"), "an in-progress task is not done: {text}");

@@ -7222,6 +7222,9 @@ mod tests {
         let repo = Some("Richards-LLC/cassy");
 
         let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
+        assert!(check.name == "release-tagged issues" && check.message.contains("release tags")
+            && !check.message.contains("shipped"),
+            "tag containment does not prove publication or installation: {check:?}");
         assert!(
             matches!(check.status, CheckStatus::Warning),
             "{}",

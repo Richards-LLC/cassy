@@ -3464,9 +3464,11 @@ mod tests {
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
         assert!(
-            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
+            report.contains("| Changes listed | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
             "{report}"
         );
+        assert!(!report.contains("shipped") && !report.contains("ships 2"),
+            "CHANGELOG entries without publication evidence cannot prove shipment: {report}");
         assert!(report.contains(
             "| Sessions | 1 | The factory daemon loop no longer stalls on reminder probes |"
         ));

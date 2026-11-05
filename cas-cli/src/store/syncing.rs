@@ -5,6 +5,7 @@
 //! and the rule passes the T1 filter policy, the write is dual-enqueued
 //! to both the personal queue and the team queue.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -126,7 +127,13 @@ impl SyncingRuleStore {
             return Ok(None);
         };
         match std::fs::read_to_string(Self::receipt_path(root, id)) {
-            Ok(state) => Ok(Some(state)),
+            Ok(receipt) => {
+                let (state, target): (String, PathBuf) = serde_json::from_str(&receipt)
+                    .map_err(|error| cas_store::StoreError::Parse(format!("invalid rule projection receipt: {error}")))?;
+                // A configuration change is not evidence that the old file
+                // was deleted. A held source still requires a keep decision.
+                Ok((state == "held" || target == self.syncer.target_dir()).then_some(state))
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -135,16 +142,25 @@ impl SyncingRuleStore {
     fn record_projection(&self, id: &str, state: &str) -> Result<()> {
         if let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) {
             let path = Self::receipt_path(root, id);
-            std::fs::create_dir_all(path.parent().expect("receipt parent"))?;
-            std::fs::write(path, state)?;
+            let data = serde_json::to_vec(&(state, self.syncer.target_dir()))
+                .map_err(|error| cas_store::StoreError::Parse(error.to_string()))?;
+            if std::fs::read(&path).is_ok_and(|existing| existing == data) {
+                return Ok(());
+            }
+            let parent = path.parent().expect("receipt parent");
+            std::fs::create_dir_all(parent)?;
+            let mut receipt = tempfile::NamedTempFile::new_in(parent)?;
+            receipt.write_all(&data)?;
+            receipt.persist(path).map_err(|error| error.error)?;
         }
         Ok(())
     }
 
     /// A held source remains visible in rule listing, but is not active policy.
     pub(crate) fn is_held(project_root: &Path, id: &str) -> bool {
-        std::fs::read_to_string(Self::receipt_path(project_root, id))
-            .is_ok_and(|state| state == "held")
+        std::fs::read(Self::receipt_path(project_root, id)).ok()
+            .and_then(|bytes| serde_json::from_slice::<(String, PathBuf)>(&bytes).ok())
+            .is_some_and(|(state, _)| state == "held")
     }
 
     fn live(rule: &Rule) -> bool {
@@ -533,6 +549,10 @@ mod tests {
         store.restore_version(&rule.id, None, Some("operator"), Some("keep this rule")).unwrap();
         assert_eq!(store.list_proven().unwrap().len(), 1);
         assert!(target.join("rule-legacy.md").exists());
+        let moved = SyncingRuleStore::new(inner, temp.path().join("custom-rules"), 1)
+            .with_project_root(temp.path().to_path_buf());
+        assert_eq!(moved.get(&rule.id).unwrap().status, RuleStatus::Stale,
+            "changing the configured target is not proof of repository deletion");
     }
 
     /// cas-caae (skills audit M27): a proven rule naming another registered

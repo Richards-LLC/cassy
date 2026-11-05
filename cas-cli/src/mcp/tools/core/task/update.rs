@@ -492,7 +492,7 @@ fn clean_idle_assignment_note(
     let active = task_store
         .ids_by_assignees_and_statuses(
             &[&worker.name, &worker.id],
-            &[TaskStatus::Open, TaskStatus::InProgress, TaskStatus::Blocked],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
         )
         .ok()?;
     if !active.is_empty() {

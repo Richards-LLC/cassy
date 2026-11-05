@@ -15649,6 +15649,44 @@ mod tests {
         assert!(rendered.contains("task state unknown"), "{rendered}");
     }
 
+    /// cas-2879 (QA cas-881f): a worker holding an unpushed commit is
+    /// measured from its real worktree, refused with an exact remedy, and a
+    /// forced shutdown keeps the commit on a pushed rescue ref and says so.
+    #[test]
+    fn forced_shutdown_rescues_unpushed_commit_and_refusal_names_remedy_cas_2879() {
+        let origin = tempfile::tempdir().unwrap();
+        run_git_ok(origin.path(), &["init", "--bare", "-b", "main"]);
+        let (tmp, _) = setup_git_repo_with_factory_branch("held-work");
+        let repo = tmp.path();
+        run_git_ok(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        run_git_ok(repo, &["push", "origin", "main", "factory/held-work"]);
+        std::fs::write(repo.join("late.rs"), "// after push\n").unwrap();
+        run_git_ok(repo, &["add", "late.rs"]);
+        run_git_ok(repo, &["commit", "-m", "unpushed"]);
+        let head = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        let (worktree_state, unsafe_worktree) = shutdown_worktree_safety(repo, false, &[]);
+        assert!(worktree_state.contains("unpushed_commits=1"), "{worktree_state}");
+        let snapshot = ShutdownWorkerSnapshot {
+            worker_name: "held-work".into(),
+            worker_id: "held-id".into(),
+            task_states: Vec::new(),
+            has_in_progress_task: false,
+            worktree_state,
+            worktree_cleanup_verdict: String::new(),
+            unsafe_worktree,
+            clone_path: Some(repo.to_path_buf()),
+        };
+        assert!(snapshot.requires_force());
+        assert!(snapshot.remedy().contains("message held-work to commit, push"), "{}", snapshot.remedy());
+
+        let line = snapshot.rescue_for_forced_shutdown().expect("unsafe work is rescued");
+        assert!(line.contains("preserved 1 unpushed commit(s)"), "{line}");
+        assert!(line.contains("pushed to origin"), "{line}");
+        let refname = line.split(" at ").nth(1).unwrap().split(' ').next().unwrap();
+        assert_eq!(run_git(origin.path(), &["rev-parse", refname]).unwrap(), head, "{line}");
+    }
+
     #[tokio::test]
     async fn shutdown_live_successor_keeps_unread_mail_cas_c653() {
         use cas_types::AgentStatus;

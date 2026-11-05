@@ -9,6 +9,8 @@ pub(super) mod operator_credentials;
 mod pre_tool;
 mod slack_transport;
 mod worker_denied_tools;
+#[cfg(test)]
+pub(crate) use worker_denied_tools::blocker_steps;
 mod write_roots;
 mod publication_gate;
 pub(crate) mod project_overview;

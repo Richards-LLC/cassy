@@ -2313,6 +2313,19 @@ pub fn generate_prompt_at(
     }
 }
 
+/// cas-5597: the built supervisor merge relay, read by the instruction parity test.
+#[cfg(test)]
+pub(crate) fn merge_relay_for_parity() -> String {
+    let task = ActiveLeaseSummary {
+        task_id: "cas-0000".to_string(),
+        task_title: "Parity".to_string(),
+        task_status: TaskStatus::AwaitingMerge,
+        close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+        pending_qa: None,
+    };
+    merge_required_idle_prompt_text("parity-worker", &task, &tests::make_data(0), "mcp__cas__", None)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, TaskSummary};
@@ -2328,7 +2341,7 @@ mod tests {
         Path::new("/nonexistent/cas-6eab")
     }
 
-    fn make_data(ready_count: usize) -> DirectorData {
+    pub(super) fn make_data(ready_count: usize) -> DirectorData {
         let ready_tasks: Vec<TaskSummary> = (0..ready_count)
             .map(|i| TaskSummary {
                 id: format!("task-{i}"),

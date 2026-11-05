@@ -106,7 +106,7 @@ fn operator_credential_refusal() -> String {
 const NEED: &str = "<what you need and why>";
 
 /// The one blocker recipe every worker denial names: note, block, then message.
-pub(super) fn blocker_steps(summary: &str, message: &str) -> String {
+pub(crate) fn blocker_steps(summary: &str, message: &str) -> String {
     let prefix = crate::harness_policy::own_tool_prefix();
     format!(
         "Add a `note_type=blocker` task note, run `{prefix}task action=update id=<task-id> status=blocked`, \

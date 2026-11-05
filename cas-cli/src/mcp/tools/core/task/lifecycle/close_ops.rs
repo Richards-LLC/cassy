@@ -10453,9 +10453,9 @@ impl CasCore {
                                 };
                                 return Ok(Self::tool_error(gate_text::worker_verification_required(
                                     &req.id,
-                                    &format!(
-                                        "Task {} close is pending existing dispatch {}, owned by {}, deadline {}. {} Ask the supervisor to finish this exact dispatch's verdict, then retry task close.",
-                                        req.id, dispatch.id, dispatch.owner_agent_id, dispatch.deadline_at, conflict,
+                                    &gate_text::worker_pending_dispatch(
+                                        &req.id, &dispatch.id, &dispatch.owner_agent_id,
+                                        &dispatch.deadline_at.to_string(), conflict,
                                     ),
                                 )));
                             }
@@ -10562,14 +10562,6 @@ impl CasCore {
                             // and buries the row that can. The command stays
                             // as the stated fallback for the case where the
                             // enqueue failed or the supervisor stays silent.
-                            let handoff_line = if dispatch_handoff_queued {
-                                "Cassy has already delivered this dispatch to the supervisor \
-                                 (they are woken with it, not left to find it). Wait for the \
-                                 verdict; re-send only if the supervisor does not respond:\n\n"
-                            } else {
-                                "Forward to supervisor (workers cannot spawn task-verifier \
-                                 directly):\n\n"
-                            };
                             let bound_head = dispatch
                                 .repository
                                 .as_ref()
@@ -10579,21 +10571,16 @@ impl CasCore {
                                 .as_deref()
                                 .map(|id| format!(" Previous approved verdict: {id}."))
                                 .unwrap_or_default();
-                            format!(
-                                "Factory worker verification gate: task {id} close is pending \
-                                     dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
-                                     {bound_head}{superseded_verdict}\
-                                     This close will only succeed after a legitimate verifier records a verdict.\n\n\
-                                     {handoff_line}\
-                                     {coord} action=message target=supervisor \
-                                     summary=\"Ready to close {id}\" \
-                                     message=\"Task {id} is ready to close.{close_reason_hint} \
-                                     Please run task-verifier for task {id} and close on my behalf if approved.\"",
-                                id = req.id,
-                                dispatch_id = dispatch.id,
-                                owner = dispatch.owner_agent_id,
-                                deadline = dispatch.deadline_at,
-                            )
+                            gate_text::worker_dispatch_gate(&gate_text::WorkerDispatchGate {
+                                task_id: &req.id,
+                                dispatch_id: &dispatch.id,
+                                owner: &dispatch.owner_agent_id,
+                                deadline: &dispatch.deadline_at.to_string(),
+                                context: &format!("{bound_head}{superseded_verdict}"),
+                                handoff_queued: dispatch_handoff_queued,
+                                coord: &coord,
+                                close_reason_hint: &close_reason_hint,
+                            })
                         } else if supervisor_is_assignee {
                             // cas-7998: the supervisor self-verifies in their
                             // own harness, so the direct verification alias

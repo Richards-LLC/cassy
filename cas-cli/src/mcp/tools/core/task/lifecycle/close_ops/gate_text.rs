@@ -259,6 +259,69 @@ pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Opti
     )
 }
 
+/// A factory worker's close parked on a verification dispatch (cas-8725).
+pub(crate) struct WorkerDispatchGate<'a> {
+    pub task_id: &'a str,
+    pub dispatch_id: &'a str,
+    pub owner: &'a str,
+    pub deadline: &'a str,
+    /// Bound head and superseded-verdict sentences, already formatted.
+    pub context: &'a str,
+    /// Whether Cassy queued the supervisor handoff itself.
+    pub handoff_queued: bool,
+    pub coord: &'a str,
+    pub close_reason_hint: &'a str,
+}
+
+pub(crate) fn worker_dispatch_gate(gate: &WorkerDispatchGate<'_>) -> String {
+    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, coord, close_reason_hint } = gate;
+    // cas-8725: when CAS queued the handoff itself, say so — a worker told to
+    // "forward this" sends a second, free-text copy that cannot wake anyone.
+    let handoff_line = if *handoff_queued {
+        "Cassy has already delivered this dispatch to the supervisor \
+         (they are woken with it, not left to find it). Wait for the \
+         verdict; re-send only if the supervisor does not respond:\n\n"
+    } else {
+        "Forward to supervisor (workers cannot spawn task-verifier \
+         directly):\n\n"
+    };
+    format!(
+        "Factory worker verification gate: task {id} close is pending \
+         dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
+         {context}\
+         This close will only succeed after a legitimate verifier records a verdict.\n\n\
+         {handoff_line}\
+         {coord} action=message target=supervisor \
+         summary=\"Ready to close {id}\" \
+         message=\"Task {id} is ready to close.{close_reason_hint} \
+         Please run task-verifier for task {id} and close on my behalf if approved.\""
+    )
+}
+
+/// A worker's close that found another requester's dispatch already pending.
+pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &str, deadline: &str, conflict: &str) -> String {
+    format!(
+        "Task {task_id} close is pending existing dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. {conflict} Ask the supervisor to finish this exact dispatch's verdict, then retry task close."
+    )
+}
+
+/// `task action=start` on a clean parked delivery.
+pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
+    format!(
+        "Cannot start a task that is awaiting merge. The worker work is \
+         already complete; wait for the supervisor to merge the factory \
+         branch, then retry task close. If review fails — the supervisor \
+         declines the delivery, or requires an amendment after merging — \
+         they must first run \
+         `{tool_prefix}task action=request_changes id={task_id} reason=\"state what remains and what must be corrected or reverted\"`; \
+         a worker cannot self-reject or start a clean parked delivery. When \
+         the parked tip genuinely conflicts with the current target (a \
+         merge-queue conflict dequeue or a moved target), its assigned worker \
+         can start task {task_id} to resolve it; Cassy measures the local target and \
+         origin/<target>, so `git fetch origin <target>` first if that ref is stale."
+    )
+}
+
 /// cas-5597: the one completion signal a worker sends (or does not).
 pub(crate) const PARK_SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
 

@@ -29114,7 +29114,8 @@ mod merge_state_gate_tests {
             queue = head_sha(p);
             git(p, &["checkout", "-q", "main"]);
         }
-        assert_ne!(head_sha(p), queue);
+        let landed = head_sha(p);
+        assert_ne!(landed, queue);
         let before_delivery = rev_parse_local(p, "main~1");
         let before_tree = rev_parse_local(p, "main~1^{tree}");
         std::fs::write(p.join("later.txt"), "unrelated later main change\n").unwrap();
@@ -29145,6 +29146,7 @@ mod merge_state_gate_tests {
         crate::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
 case "$1 $2" in
 'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api repos/acme/epic/actions/artifacts?name=merge-queue-validated-tree-'*) printf '%s\n' '{{"artifacts":[{{"name":"merge-queue-validated-tree-{tree}","expired":false,"workflow_run":{{"id":4386}}}}]}}' ;;
 'api repos/acme/epic/actions/runs/4386') printf '%s\n' '{run}' ;;
 'api repos/acme/epic/actions/runs/4386/artifacts?per_page=100') printf '%s\n' '{{"total_count":{},"artifacts":{artifacts}}}' ;;
 'api repos/acme/epic/git/commits/'*) printf '%s\n' '{{"sha":"{proof_head}","tree":{{"sha":"{tree}"}}}}' ;;
@@ -29184,8 +29186,11 @@ esac
         // worker tested its exact tip, then the queue landed the delivery.
         // Its capped receipt deliberately has no SCOPED_PROOF base/head.
         task.notes = format!("WORKER TEST test: PASS {delivery} cas test(queue_proof) 1");
+        if case == "automatic" {
+            task.deliverables.green_merge_commit = Some(landed);
+        }
         store.add(&task).unwrap();
-        let reason = if case == "no-citation" { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
+        let reason = if matches!(case, "no-citation" | "automatic") { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
         let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "commit_receipt": delivery,
             "supervisor_override": supervisor_override, "reason": reason,
@@ -29205,11 +29210,13 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831() {
-        let (task, text) = queue_proof_close_cas_4386("green", false).await;
-        assert_eq!(task.status, TaskStatus::Closed, "{text}");
-        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
-        assert!(!task.notes.contains("supervisor_override=true accepted"), "{}", task.notes);
-        assert!(!task.notes.contains("SCOPED_PROOF:"), "{}", task.notes);
+        for case in ["green", "automatic"] {
+            let (task, text) = queue_proof_close_cas_4386(case, false).await;
+            assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
+            assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
+            assert!(!task.notes.contains("supervisor_override=true accepted"), "{case}: {}", task.notes);
+            assert!(!task.notes.contains("SCOPED_PROOF:"), "{case}: {}", task.notes);
+        }
     }
 
     #[cfg(unix)]

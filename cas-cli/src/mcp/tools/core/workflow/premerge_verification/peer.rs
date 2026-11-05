@@ -417,7 +417,10 @@ fn import_receipt(
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
     cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
         |error| {
-            let permanent = matches!(&error, cas_store::StoreError::Parse(_) | cas_store::StoreError::VerificationDispatchConflict { .. })
+            // Payload and existing-cycle refusals were checked before Git work.
+            // A store Parse here can be its updated_at compare losing a race;
+            // retry so the next pass can classify the now-current local cycle.
+            let permanent = matches!(&error, cas_store::StoreError::VerificationDispatchConflict { .. })
                 || matches!(&error, cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(cause, _))
                     if cause.code == rusqlite::ErrorCode::ConstraintViolation);
             if permanent { ReceiptFailure::reject(error) } else { ReceiptFailure::retry(error) }

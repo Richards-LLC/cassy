@@ -97,7 +97,7 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     git(repo, &["checkout", "-q", "main"]);
 
     let cas_dir = repo.join(".cas");
-    std::fs::create_dir_all(&cas_dir).unwrap();
+    crate::store::init_cas_dir(repo).unwrap();
     env.set("CAS_ROOT", &cas_dir);
     env.set("CAS_FACTORY_MODE", "1");
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
@@ -901,7 +901,6 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
     use wiremock::matchers::{method, path};
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
-    crate::migration::run_migrations(&f.cas_dir(), false).unwrap();
     std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(

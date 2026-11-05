@@ -112,7 +112,7 @@ For multi-step workers, choose the lane default. `ultra` is not a Cassy effort v
 
 ### `max` effort (explicit request only)
 
-`max` is never a lane default; use it only when a task already failed at `high`/`xhigh` and the operator asked for it. Accepted where the recipe lists it: Claude Fable 5.1 and Opus 5 (Claude effort doc, https://platform.claude.com/docs/en/build-with-claude/effort), Codex GPT-6 Astra, GPT-6 Sol, GPT-6 Luna, and GPT-5.6 Sol (`codex-rs/protocol/src/openai_models.rs`). Refused elsewhere:
+`max` is never a lane default; use it only when a task already failed at `high`/`xhigh` and the operator asked for it. Accepted where the recipe lists it: Claude Fable 5.1 and Opus 5 (Claude effort doc, <https://platform.claude.com/docs/en/build-with-claude/effort>), Codex GPT-6 Astra, GPT-6 Sol, GPT-6 Luna, and GPT-5.6 Sol (`codex-rs/protocol/src/openai_models.rs`). Refused elsewhere:
 
 | Recipe | `max` |
 |---|---|
@@ -128,7 +128,7 @@ The canonical copy-paste recipes are maintained once in [workflow.md](workflow.m
 
 Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
 
-```
+```text
 factory action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 

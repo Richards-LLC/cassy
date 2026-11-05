@@ -242,7 +242,7 @@ fn playwright_debug_is_selected_by_playwright_detection() {
     fs::create_dir_all(plain.path().join(".cas")).unwrap();
     fs::write(
         plain.path().join("package.json"),
-        r#"{"dependencies":{"vite":"^5.0.0"}}"#,
+        r#"{"dependencies":{"vite":"^9.99.0"}}"#,
     )
     .unwrap();
     assert!(!installed(plain.path()), "no Playwright, no skill");

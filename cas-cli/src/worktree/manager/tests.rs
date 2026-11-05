@@ -759,6 +759,33 @@ fn test_attempt_remove_worker_clean_removes_tree_and_branch() {
     assert!(manager.get_worker("clean-wolf").is_none());
 }
 
+/// cas-2879 (QA cas-881f): a clean worktree whose branch holds a commit on
+/// no remote or other branch keeps that commit on a rescue ref before the
+/// branch is deleted, and the outcome names it.
+#[test]
+fn test_attempt_remove_worker_preserves_unpushed_commit_on_rescue_ref() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut manager = WorktreeManager::new(&repo_path, WorktreeConfig::default()).unwrap();
+    let path = manager.ensure_worker_worktree("lone-owl").unwrap().path.clone();
+    std::fs::write(path.join("only-here.txt"), "work").unwrap();
+    for args in [&["add", "only-here.txt"][..], &["commit", "-m", "only copy"][..]] {
+        assert!(Command::new("git").args(args).current_dir(&path).status().unwrap().success());
+    }
+    let commit = crate::worktree::GitOperations::new(path.clone()).ref_sha("HEAD").unwrap();
+
+    let outcome = manager.attempt_remove_worker("lone-owl").unwrap();
+
+    let RemoveOutcome::RemovedPreserved(rescued) = outcome else {
+        panic!("expected the commit to be preserved, got {outcome:?}");
+    };
+    assert_eq!(rescued.len(), 1);
+    assert_eq!(rescued[0].unpushed_commits, 1);
+    assert_eq!(manager.git.ref_sha(&rescued[0].refname).unwrap(), commit);
+    assert!(rescued[0].refname.starts_with("refs/cas/rescue/lone-owl/"));
+    assert!(!path.exists());
+    assert!(!manager.git.branch_exists(&manager.branch_name_for_worker("lone-owl")).unwrap());
+}
+
 #[test]
 fn test_attempt_remove_worker_dirty_modified_defers() {
     let (_temp, repo_path) = create_test_repo();

@@ -300,6 +300,7 @@ impl CasCore {
             });
         }
         let mut bound_server_handoff = None;
+        let mut late_premerge_dispatch = None;
         let mut requested_dispatch_id = if let Some(capability_token) =
             req.verifier_capability.as_deref()
         {
@@ -426,36 +427,61 @@ impl CasCore {
                     data: None,
                 });
             }
-            if capability.expires_at <= chrono::Utc::now()
-                || dispatch.deadline_at <= chrono::Utc::now()
-            {
-                let timed_out = cas_store::timeout_verification_dispatch(
-                    &self.cas_root,
-                    &req.task_id,
-                    chrono::Utc::now(),
-                )
-                .map_err(|_| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "Verifier handoff rejected: exact timeout transition could not be persisted; retry with current dispatch state.",
-                    ),
-                    data: None,
-                })?
-                .ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "Verifier handoff rejected: dispatch changed before exact timeout persistence; retry with current dispatch state.",
-                    ),
-                    data: None,
-                })?;
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "Verifier handoff rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
-                        timed_out.id
-                    )),
-                    data: None,
-                });
+            let now = chrono::Utc::now();
+            if capability.expires_at <= now {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Verifier handoff rejected: capability expired; registered-supervisor recovery is required.",
+                ));
+            }
+            if dispatch.deadline_at <= now {
+                let latest =
+                    cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                        .map_err(|error| {
+                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                        })?;
+                if latest
+                    .as_ref()
+                    .is_none_or(|current| current.id != dispatch.id)
+                    || !matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Claimed
+                            | cas_types::VerificationDispatchState::TimedOut
+                    )
+                {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "Verifier handoff rejected: late dispatch was superseded or invalidated.",
+                    ));
+                }
+                let candidate =
+                    super::premerge_verification::candidate_for_dispatch(&self.cas_root, &dispatch)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                let Some(candidate) = candidate else {
+                    if dispatch.state == cas_types::VerificationDispatchState::Claimed {
+                        cas_store::timeout_verification_dispatch(
+                            &self.cas_root,
+                            &req.task_id,
+                            chrono::Utc::now(),
+                        )
+                        .map_err(|error| {
+                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                        })?;
+                    }
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "Verifier handoff rejected: expired non-premerge handoff is timed_out; registered-supervisor recovery is required.",
+                    ));
+                };
+                candidate
+                    .validate_late_verdict(&self.cas_root, &task)
+                    .map_err(|error| {
+                        Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!("Verifier handoff rejected: candidate changed: {error}"),
+                        )
+                    })?;
+                late_premerge_dispatch = Some(dispatch);
             }
             bound_server_handoff = Some(capability);
             dispatch_id
@@ -842,12 +868,15 @@ impl CasCore {
                         data: None,
                     })?
             } else if let Some(bound_handoff) = bound_server_handoff.as_ref() {
-                let capability = cas_store::consume_server_verifier_handoff_with_conn(
-                    &tx,
-                    &bound_handoff.id,
-                    &req.task_id,
-                    &caller_id,
-                )
+                let capability = if let Some(expected) = late_premerge_dispatch.as_ref() {
+                    cas_store::consume_current_premerge_verifier_handoff_with_conn(
+                        &tx, &bound_handoff.id, &req.task_id, &caller_id, expected,
+                    )
+                } else {
+                    cas_store::consume_server_verifier_handoff_with_conn(
+                        &tx, &bound_handoff.id, &req.task_id, &caller_id,
+                    )
+                }
                 .map_err(|_| McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(

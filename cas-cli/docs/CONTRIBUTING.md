@@ -1080,6 +1080,17 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. Candidate preparation binds to the fetched published `origin/<target>` tip, including when the local target carries an unpublished merge; a local-only repository uses its local target. Rolling back an unpublished local merge therefore cannot invalidate a review of an unchanged delivery when the published target advances. The merge queue still checks CI for interactions with other deliveries. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A server-bound task verifier may finish a pre-merge review after its dispatch
+work deadline, including a TimedOut dispatch, when the same source, candidate
+tree, plan and proof remain current and no newer dispatch supersedes it. The
+record transaction rechecks that exact boundary and consumes the original
+one-time handoff. The original deadline remains in the audit; it drives missing
+verdict alerts and recovery, not the validity of completed work. Raw bearer
+capabilities and unbound handoffs retain their expiry rules. Official server
+credentials keep the existing hard 30-minute lifetime, independently of the
+10-minute dispatch work deadline; expired credentials always refuse. Changed
+or superseded candidates cannot reuse late authority.
+
 A merge queue need not publish the synthetic premerge candidate commit itself.
 Close validates that candidate's immutable task/proof and exact target/source
 parents, requires the bound delivery source in the authoritative target history,

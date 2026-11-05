@@ -1080,6 +1080,16 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A merge queue need not publish the synthetic premerge candidate commit itself.
+Close validates that candidate's immutable task/proof and exact target/source
+parents, requires the bound delivery source in the authoritative target history,
+and reverse-checks the complete binary source-versus-reviewed-base patch in an
+isolated index at the first first-parent target commit containing that source.
+Source ancestry is still checked against the current target. Later ordinary
+edits, including edits to the same lines, do not revoke the landed approval;
+a merge that dropped delivery content and another task's candidate still refuse.
+Commit subjects and messages locate candidate metadata but grant no authority.
+
 A confirmed publication shares a portable approval through the existing project
 peer mailbox. The daemon checks the Cloud-stamped sender against the project
 supervisor registry, matches the task/source/candidate/landing, and atomically

@@ -29151,6 +29151,111 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-fee3 / PR #1527: GitHub lands its own merge commit, never the
+    /// immutable synthetic commit the premerge verifier actually reviewed.
+    #[tokio::test]
+    async fn queue_landed_premerge_candidate_closes_cas_192b0() {
+        use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
+        use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
+        for row in ["queue-landed", "same-line-evolved", "source-absent", "partial-patch", "foreign-candidate"] {
+            let mut env = TestEnvGuard::temp_home();
+            let (dir, _bare) = handoff_repo();
+            let p = dir.path();
+            git(p, &["config", "user.name", "CAS fixture"]);
+            git(p, &["config", "user.email", "cas@example.test"]);
+            std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+            std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
+            git(p, &["add", ".gitignore", "second.rs"]);
+            git(p, &["commit", "-q", "-m", "fix(cas-fee3): delivery before queue landing"]);
+            let source = head_sha(p);
+            git(p, &["push", "-q", "origin", "factory/worker"]);
+            git(p, &["checkout", "-q", "main"]);
+            let wt = tempfile::tempdir().unwrap();
+            git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
+            let root = p.join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'cas-192b0-fixture'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n").unwrap();
+            open_store(&root).unwrap().init().unwrap();
+            open_rule_store(&root).unwrap().init().unwrap();
+            open_skill_store(&root).unwrap().init().unwrap();
+            let tasks = open_task_store(&root).unwrap(); tasks.init().unwrap();
+            let agents = open_agent_store(&root).unwrap(); agents.init().unwrap();
+            agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+            let worktrees = open_worktree_store(&root).unwrap(); worktrees.init().unwrap();
+            let worktree = Worktree::new(Worktree::generate_id(), "factory/worker".into(), "main".into(), wt.path().to_path_buf());
+            worktrees.add(&worktree).unwrap();
+            let mut task = worker_task("worker");
+            task.id = "cas-fee3".into(); task.status = TaskStatus::AwaitingMerge;
+            task.risk = vec![TaskRisk::None]; task.worktree_id = Some(worktree.id.clone());
+            task.deliverables.factory_branch_anchor = Some(source.clone());
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
+            tasks.add(&task).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing("supervisor-id".into());
+            let mut reviewed_task = task.clone();
+            if row == "foreign-candidate" {
+                reviewed_task.id = "cas-other".into(); tasks.add(&reviewed_task).unwrap();
+            }
+            let candidate = core.build_completion_candidate(&reviewed_task, p, "factory/worker", "main").unwrap();
+            let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
+            let recorded = core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
+                task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed premerge candidate before queue publication".into(), confidence: Some(1.0),
+                issues: None, files_reviewed: Some("delivery.rs,second.rs".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+            })).await;
+            if row == "foreign-candidate" {
+                let error = recorded.expect_err("another task's candidate cannot mint this task's verdict");
+                assert!(error.message.contains("immutable dispatch proof"), "{error}");
+                // Legacy record reports this metadata error after persistence;
+                // close must still refuse the foreign candidate's approval.
+            } else {
+                recorded.unwrap();
+            }
+            if row == "source-absent" {
+                // Identical patch content without the bound source identity is insufficient.
+                std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
+                std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
+                std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+                git(p, &["add", ".gitignore", "delivery.rs", "second.rs"]);
+            } else {
+                git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
+                if row == "partial-patch" { git(p, &["rm", "-q", "-f", "second.rs"]); }
+            }
+            git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
+            let landed = head_sha(p);
+            assert_ne!(landed, candidate.proof.head_commit);
+            assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
+            if row == "same-line-evolved" {
+                std::fs::write(p.join("delivery.rs"), "// later main work replaces the delivered line\n").unwrap();
+                git(p, &["add", "delivery.rs"]);
+                git(p, &["commit", "-q", "-m", "ordinary later evolution of the same delivered line"]);
+            }
+            // Later unrelated progress prevents full-target-tree equality being the proof.
+            std::fs::write(p.join("later.txt"), "unrelated target progress\n").unwrap();
+            git(p, &["add", "later.txt"]); git(p, &["commit", "-q", "-m", "advance target after queue publication"]);
+            git(p, &["push", "-q", "origin", "main"]);
+            // Probe the same containment guard as well as full close, so a
+            // prior content gate cannot conceal a permissive partial-patch rule.
+            match verified_delivery::current(&root, &task) {
+                Err(_) if row == "foreign-candidate" => {},
+                Ok(Some(reviewed)) => assert_eq!(
+                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                    matches!(row, "queue-landed" | "same-line-evolved"), "containment guard: {row}",
+                ),
+                _ => panic!("missing task-bound review: {row}"),
+            }
+            let mut req = base_req(&task.id); req.commit_receipt = Some(landed);
+            req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
+            let result = core.cas_task_close(Parameters(req)).await;
+            let closed = tasks.get(&task.id).unwrap();
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "same-line-evolved"), "{row}: {result:?}");
+            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
+                "close cannot silently replace the reviewed dispatch: {row}");
+        }
+    }
+
     #[tokio::test]
     async fn approved_correction_must_land_after_rejected_anchor_cas_53bb() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};

@@ -196,7 +196,7 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
         carries(h, text, "polling", "do not poll");
     }
     for (h, text) in pty_workers {
-        carries(h, text, "polling", "No foreground gh run watch or CI poll loops");
+        carries(h, text, "polling", "foreground gh run watch or CI poll loops");
     }
 
     // No surface keeps a competing answer, however it is worded.

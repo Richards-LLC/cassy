@@ -16405,6 +16405,29 @@ mod tests {
             backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
         }
 
+        // Only completed supervisor transcript mirrors may expire. Real operator
+        // messages, fresh mirrors and copies still owed to an outbox survive.
+        let mut mirrors = Vec::new();
+        for label in ["aged", "fresh", "outbox"] {
+            let outcome = store.enqueue_idempotent(
+                "supervisor", "operator", label, Some("factory-a"), None, None,
+                &format!("commander-mirror:factory-a:{label}"), None,
+            ).unwrap();
+            let id = match outcome {
+                EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+            };
+            if label != "fresh" {
+                backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
+            }
+            mirrors.push(id);
+        }
+        store.conn.lock().unwrap().execute(
+            "INSERT INTO operator_delivery_outbox
+             (event_id, prompt_id, factory_session, payload_snapshot, created_at)
+             VALUES ('mirror-outbox', ?, 'factory-a', '{}', ?)",
+            params![mirrors[2], Utc::now().to_rfc3339()],
+        ).unwrap();
+
         let expired = store
             .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
             .unwrap()
@@ -16412,6 +16435,16 @@ mod tests {
             .map(|row| row.id)
             .collect::<Vec<_>>();
         assert_eq!(expired, vec![unread, unknown], "only undelivered roster-lane rows expire");
+
+        let report = store.message_delivery_report(mirrors[0]).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Suppressed);
+        assert!(report.delivered_at.is_none(), "expiry cannot fabricate a device receipt");
+        for id in [mirrors[1], mirrors[2]] {
+            let pending: bool = store.conn.lock().unwrap().query_row(
+                "SELECT processed_at IS NULL FROM prompt_queue WHERE id = ?", [id], |row| row.get(0),
+            ).unwrap();
+            assert!(pending, "fresh mirrors and undelivered outbox rows survive");
+        }
 
         for id in [operator, commander] {
             let report = store.message_delivery_report(id).unwrap().unwrap();

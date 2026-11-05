@@ -44,3 +44,32 @@ doctor --host``. `cas doctor --full` expands that row into the host rows.
 plan before applying it; a purge safety refusal is never followed by an apply
 or sync. A plain TTY may offer the safe auto-fix set with one key; piped, JSON,
 and explicit consent-fix modes remain non-interactive.
+
+## Retired MCP guidance references
+
+`cas doctor --json` and `cas doctor --verbose` retain every matching location.
+The compact terminal report limits the displayed lines. Each hit names the
+server and either the record ID with its database path or a file and line.
+These are review candidates: historical notes and instructions to avoid a
+retired tool also appear, and doctor never edits or deletes them.
+
+The inventory covers project and user SQLite rules, skills and memories
+(including retained history), Markdown entry/rule stores, installed Claude,
+Codex and Grok skill trees and their references, `.claude/rules`,
+`.claude/memory`, `.cas/templates`, `.cas/briefs`, and compiled builtin skills,
+agents and factory guidance. Shared skill symlinks are deduplicated and cycles
+terminate. Unreadable or oversized guidance and malformed registrations produce
+an incomplete-scan warning.
+
+Explicit references include `mcp__server__tool`, capitalized `Name MCP`,
+`Neon MCP` and `Vercel MCP` regardless of case, quoted `MCP server` names,
+and server-qualified invocations on stored MCP skills. Ordinary CLI mentions
+are ignored. This is a syntactic check; it does not infer arbitrary unqualified
+tool names or dependencies from natural language.
+
+Availability means registration in the merged user/project proxy configuration
+or the default Claude, Codex or Grok configuration. Project harness entries
+override user entries of the same name; `disabled = true` and `enabled = false`
+exclude that registration. A server available through another registration is
+still available. Missing credentials and connection failures have their own
+checks. Alternate harness configuration files are outside this inventory.

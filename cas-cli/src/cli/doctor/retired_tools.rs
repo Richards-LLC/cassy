@@ -80,6 +80,7 @@ fn scan(cas_root: &Path) -> Result<BTreeSet<String>> {
     }
 
     let mut documents = BTreeMap::new();
+    let mut visited = BTreeSet::new();
     for root in [
         Some(cas_root.to_path_buf()),
         crate::config::global_cas_dir(),
@@ -88,8 +89,10 @@ fn scan(cas_root: &Path) -> Result<BTreeSet<String>> {
     .flatten()
     {
         scan_database(&root.join("cas.db"), &mut documents)?;
+        for relative in ["entries", "rules", "templates", "briefs"] {
+            scan_files(&root.join(relative), &mut documents, &mut visited)?;
+        }
     }
-    let mut visited = BTreeSet::new();
     for base in [project, home.as_path()] {
         for relative in [
             ".claude/rules",
@@ -138,37 +141,38 @@ fn scan(cas_root: &Path) -> Result<BTreeSet<String>> {
     let mut findings = BTreeSet::new();
     for (source, body) in documents {
         for (index, line) in body.lines().enumerate() {
-            for pattern in &patterns {
+            for (pattern_index, pattern) in patterns.iter().enumerate() {
                 for capture in pattern.captures_iter(line) {
                     let server = capture[1].to_ascii_lowercase();
                     // These are prose qualifiers, not server names.
-                    if [
-                        "the",
-                        "a",
-                        "an",
-                        "use",
-                        "any",
-                        "all",
-                        "no",
-                        "external",
-                        "upstream",
-                        "retired",
-                        "removed",
-                        "disabled",
-                        "configured",
-                        "existing",
-                        "own",
-                        "native",
-                        "local",
-                        "remote",
-                        "direct",
-                        "every",
-                        "each",
-                        "server",
-                        "http",
-                        "mcp",
-                    ]
-                    .contains(&server.as_str())
+                    if pattern_index == 1
+                        && [
+                            "the",
+                            "a",
+                            "an",
+                            "use",
+                            "any",
+                            "all",
+                            "no",
+                            "external",
+                            "upstream",
+                            "retired",
+                            "removed",
+                            "disabled",
+                            "configured",
+                            "existing",
+                            "own",
+                            "native",
+                            "local",
+                            "remote",
+                            "direct",
+                            "every",
+                            "each",
+                            "server",
+                            "http",
+                            "mcp",
+                        ]
+                        .contains(&server.as_str())
                     {
                         continue;
                     }
@@ -225,7 +229,7 @@ fn scan_database(path: &Path, documents: &mut BTreeMap<String, String>) -> Resul
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("cannot open {}", path.display()))?;
     for (table, kind, wanted) in [
-        ("rules", "rule", &["content"][..]),
+        ("rules", "rule", &["content", "auto_approve_tools"][..]),
         (
             "entries",
             "memory",
@@ -262,13 +266,39 @@ fn scan_database(path: &Path, documents: &mut BTreeMap<String, String>) -> Resul
             .map(|name| format!("coalesce({name}, '')"))
             .collect::<Vec<_>>()
             .join(" || char(10) || ");
+        let invocation = if table == "skills" && columns.contains("invocation") {
+            "coalesce(invocation, '')"
+        } else {
+            "''"
+        };
+        let skill_type = if table == "skills" && columns.contains("skill_type") {
+            "coalesce(skill_type, '')"
+        } else {
+            "''"
+        };
         let mut stmt = conn
-            .prepare(&format!("SELECT id, {selected} FROM {table}"))
+            .prepare(&format!(
+                "SELECT id, {selected}, {invocation}, {skill_type} FROM {table}"
+            ))
             .with_context(|| format!("cannot read {table} in {}", path.display()))?;
         for row in stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })? {
-            let (id, body) = row?;
+            let (id, mut body, invocation, skill_type) = row?;
+            if skill_type == "mcp" {
+                if let Ok(route) =
+                    cmcp_core::config::ExternalToolConfig::parse_allowlist_entry(&invocation)
+                {
+                    if route.server != "*" {
+                        body.push_str(&format!("\nMCP server `{}`", route.server));
+                    }
+                }
+            }
             documents.insert(format!("{} [{kind} {id}]", path.display()), body);
         }
     }
@@ -325,7 +355,7 @@ mod tests {
     use crate::store::{
         init_cas_dir, open_rule_store_local, open_skill_store_local, open_store_local,
     };
-    use crate::types::{Entry, Rule, Skill};
+    use crate::types::{Entry, Rule, Skill, SkillType};
     use std::fs;
 
     #[test]
@@ -349,7 +379,8 @@ mod tests {
             ))
             .unwrap();
         let mut skill = Skill::new("skill-removed".into(), "old database tool".into());
-        skill.invocation = "mcp__neon__run_sql".into();
+        skill.skill_type = SkillType::Mcp;
+        skill.invocation = "neon.run_sql".into();
         open_skill_store_local(&root).unwrap().add(&skill).unwrap();
         let brief = root.join("templates/worker-brief.md");
         fs::create_dir_all(brief.parent().unwrap()).unwrap();

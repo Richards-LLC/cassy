@@ -1114,8 +1114,15 @@ fn render_status(
             .as_deref()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
+        let local = local_pairing_origin(record);
+        // cas-b790: name the origin a local browser pairs with, never the shim.
+        let shim = record
+            .tailscale_serve_target
+            .as_deref()
+            .map(|target| format!("\n  ({target} is the Tailscale Serve shim, not a pairing origin)"))
+            .unwrap_or_default();
         format!(
-            "Cassy hub is running and ready at {endpoint}\n  pid {}, version {}, binary: {binary_version}",
+            "Cassy hub is running and ready at {endpoint}\n  pid {}, version {}, binary: {binary_version}\n  Pair from this machine: cas hub pair --origin {local} --hub-url {local}{shim}",
             record.pid, record.version
         )
     } else {
@@ -2701,8 +2708,40 @@ fn pairing_origin_refusal(
     origin: &str,
     hub_url: Option<&str>,
 ) -> Option<String> {
-    let _ = (record, origin, hub_url);
-    None
+    let record = record?;
+    let target = record.tailscale_serve_target.as_deref()?;
+    let shim_port = url::Url::parse(target).ok()?.port_or_known_default()?;
+    let through_shim = |candidate: &str| {
+        url::Url::parse(candidate).ok().is_some_and(|url| {
+            url.port_or_known_default() == Some(shim_port)
+                && url.host().is_some_and(|host| match host {
+                    url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+                    url::Host::Ipv4(ip) => ip.is_loopback(),
+                    url::Host::Ipv6(ip) => ip.is_loopback(),
+                })
+        })
+    };
+    if !through_shim(origin) && !hub_url.is_some_and(through_shim) {
+        return None;
+    }
+    let local = local_pairing_origin(record);
+    let remote = record
+        .public_url
+        .as_deref()
+        .map(|url| format!(" From another device, pair with the Tailscale URL {}.", url.trim_end_matches('/')))
+        .unwrap_or_default();
+    Some(format!(
+        "Refused: {target} is this hub's Tailscale Serve shim, a loopback listener for Tailscale's TLS proxy, not a Commander origin. A device paired through it gets 401 on every API call, and no invitation was minted. Pair from this machine with: cas hub pair --origin {local} --hub-url {local}.{remote}"
+    ))
+}
+
+/// The loopback origin the hub itself serves Commander from.
+fn local_pairing_origin(record: &HubProcessRecord) -> String {
+    let host = match record.bind.as_str() {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        bind => bind,
+    };
+    format!("http://{host}:{}", record.port)
 }
 
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
@@ -2724,6 +2763,13 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
         }
         println!("launch check: the operator may pair a Commander device");
         return Ok(());
+    }
+    // cas-b790: refuse the Tailscale Serve shim before any prompt or mint.
+    let live = HubRuntimePaths::default_for_user()
+        .ok()
+        .and_then(|paths| paths.read_process_record().ok());
+    if let Some(refusal) = pairing_origin_refusal(live.as_ref(), &args.origin, args.hub_url.as_deref()) {
+        anyhow::bail!(refusal);
     }
     // cas-3c26: only the operator mints an invitation for their own machine
     // hub, and only after confirming the origin and scopes at their own

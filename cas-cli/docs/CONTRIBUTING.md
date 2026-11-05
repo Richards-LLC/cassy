@@ -2504,8 +2504,17 @@ journey receipt.
 
 Workers may run the capped compile checks and named targeted tests described
 above, but the full Rust build and suite run in the merge queue. Child closes
-reference the epic integration proof. Non-Rust suites retain their own task
-checks; a documentation-only change proves its documentation acceptance check.
+reference the epic integration proof. For a delivery targeting the default
+branch directly, close can reuse the queue's full-suite proof without a
+supervisor-run scoped `--proof`. Cassy discovers the run through the tree
+artifact for its recorded published landing; a close reason can instead cite
+`merge_group_run=<id>`. Both paths verify completed successful repository CI,
+the live Fast Validation artifact, and the exact tested tree's first-parent
+landing containing the delivery. An ordinary close needs no override. Missing,
+expired or mismatched queue evidence retains the scoped-proof requirement;
+declared-risk, content, CI and QA gates still apply. Non-Rust suites retain
+their own task checks; a documentation-only change proves its documentation
+acceptance check.
 
 The opt-in assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make

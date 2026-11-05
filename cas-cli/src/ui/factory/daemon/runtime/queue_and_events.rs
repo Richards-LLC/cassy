@@ -19205,9 +19205,11 @@ mod tests {
             });
         super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(6), "ready-jay-12", &[
             "EPIC BRANCH UNPUBLISHED: 'epic/x' (ccc) could not be published to origin.".into(),
+            // Any warning not known to be informational still names a repair.
+            "WORKER BASE MISMATCH: resolved base 'epic/x' (ddd) does not contain the task's start commit.".into(),
         ]);
         let sent = rows();
-        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert_eq!(sent.len(), 4, "{sent:?}");
         assert!(sent.iter().any(|s| s.starts_with("Worker spawn failed at provision")), "{sent:?}");
         assert!(sent.iter().any(|s| s.starts_with("Worker shutdown: 1 stopped, 1 failed")), "{sent:?}");
         assert!(sent.iter().any(|s| s.starts_with("Worker spawn base warning")), "{sent:?}");

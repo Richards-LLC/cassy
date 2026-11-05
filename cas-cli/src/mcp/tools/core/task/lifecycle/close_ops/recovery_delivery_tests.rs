@@ -1446,14 +1446,16 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             ],
         );
         env.set("CAS_AGENT_ROLE", "worker");
-        f.core
-            .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+        let start = || {
+            f.core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
                 id: TASK.into(),
                 brief: Some(true),
                 force: None,
             }))
-            .await
-            .unwrap();
+        };
+        // cas-cff4: the first start surfaces the queued request_changes notice.
+        assert!(start().await.is_err(), "the worker must see the decision before restarting");
+        start().await.unwrap();
         close(&f).await;
         let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
         assert_eq!(

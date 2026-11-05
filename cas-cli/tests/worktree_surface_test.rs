@@ -4861,6 +4861,11 @@ done
     if queued {
         run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), "https://github.com/org/protected"], &repo.root);
         run_git(&["config", "remote.origin.url", "https://github.com/org/protected"], &repo.root);
+        // The source hook must inspect its exact clean tree, not dirty main.
+        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/pre-push"), &format!(r#"#!/bin/sh
+[ "$(git rev-parse HEAD)" = '{source}' ] || exit 1
+[ -z "$(git status --porcelain --untracked-files=no)" ] || exit 1
+"#));
         let gh = env.home().join("protected-gh");
         cas::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{calls}'

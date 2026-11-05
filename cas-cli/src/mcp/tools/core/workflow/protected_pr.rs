@@ -115,15 +115,11 @@ pub(super) fn prepare(
         None,
     )
     .map_err(|_| "cannot prepare the delivery PR review body")?;
-    let mut command = Command::new("git");
-    command
-        .current_dir(repo)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["push", "origin", &format!("{head}:refs/heads/{source}")]);
-    let output = run_command(&mut command, Deadline::after(WRITE), WRITE).map_err(
-        |_| "source publication unavailable or timed out; default branch was not merged",
-    )?;
-    if !output.status.success() {
+    let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+    if !operations
+        .publish_pinned_source_to_origin(source, head, WRITE)
+        .is_published()
+    {
         return Err("source publication failed; default branch was not merged".into());
     }
     if let Some(pr) = find_pr(repo, slug, source, target, head)? {

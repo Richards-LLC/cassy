@@ -1890,8 +1890,9 @@ pub fn generate_prompt_at(
                         "Worker {worker} is idle while task {} ({}) is still {}{}.\n\
                          This is a worker-lifecycle idle signal, not a task completion.\n\
                          Check live state: `{supervisor_prefix}task action=show id={}`\n\
-                         If close was rejected, resolve the rejection before acting on the task as closed.",
-                        task.task_id, task.task_title, task.task_status, rejection, task.task_id
+                         If close was rejected, resolve the rejection before acting on the task as closed.\n\
+                         Next action: message {worker} with its next step, or reassign {}.",
+                        task.task_id, task.task_title, task.task_status, rejection, task.task_id, task.task_id
                     )
                 };
 
@@ -3666,6 +3667,10 @@ mod tests {
         assert!(prompt.text.contains("MERGE REQUIRED"));
         // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("not a task completion"));
+        // cas-73fa: an idle relay names what the supervisor must do.
+        // pin: the named next action is the relay's contract with the supervisor.
+        assert!(prompt.text.contains("Next action: message swift-fox with its next step, or reassign cas-1234"),
+            "{}", prompt.text);
         assert!(
             !lower.contains("done") && !lower.contains("finished"),
             "idle close-rejection prompt must not use completion-flavored wording: {}",

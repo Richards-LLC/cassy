@@ -26,7 +26,7 @@ use crate::types::{AgentRole, AgentStatus};
 
 mod outbox;
 mod runtime;
-pub use outbox::{OUTBOX_TTL_SECS, PeerSendError, outbox_status_text, retry_peer_send};
+pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
 pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
 
 /// Tag of the envelope line.

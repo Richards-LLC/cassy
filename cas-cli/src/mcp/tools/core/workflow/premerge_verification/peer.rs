@@ -68,7 +68,7 @@ impl Approval {
             landed_sha: record.landed_sha,
             dispatch_id: self.dispatch_id.clone(),
             verdict_id: self.verdict_id.clone(),
-            task_context: task_context(&task),
+            plan_digest: portable_plan_digest(root, &task)?,
         };
         let body = format!(
             "{TAG}{}",
@@ -114,7 +114,7 @@ fn validate_receipt(
         || task.is_terminal()
         || task.deliverables.factory_branch_anchor.as_deref() != Some(receipt.source_sha.as_str())
         || task.deliverables.parked_branch.as_deref() != Some(receipt.source_branch.as_str())
-        || task_context(task) != receipt.task_context
+        || portable_plan_digest(root, task)? != receipt.plan_digest
         || task
             .deliverables
             .work_target

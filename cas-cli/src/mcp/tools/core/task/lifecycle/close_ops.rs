@@ -7782,9 +7782,9 @@ impl CasCore {
             if !held.is_empty() {
                 return Ok(Self::tool_error(format!(
                     "Cannot close task {}: blocking dependencies are still open: {}. Close those blocker tasks first, \
-                     or remove an incorrect `blocks` dependency with `task action=dep_remove id={} to_id=<blocker-id> dep_type=blocks`. \
+                     or remove an incorrect `blocks` dependency with `{}task action=dep_remove id={} to_id=<blocker-id> dep_type=blocks`. \
                      A blocker whose delivery is already on its target no longer holds a close; these have none there.",
-                    req.id, held.join(", "), req.id
+                    req.id, held.join(", "), crate::mcp::tools::core::guidance::caller_prefix(), req.id
                 )));
             }
         }

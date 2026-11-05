@@ -4202,11 +4202,12 @@ mod tests {
             custom_config.to_str().expect("UTF-8 config dir"),
         )]);
 
+        let ranked_memory = "custom profile ambient memory sentinel";
         open_store(&cas_dir)
             .unwrap()
             .add(&Entry::new(
                 "ambient-launch-shape".to_string(),
-                "custom profile ambient memory sentinel".to_string(),
+                ranked_memory.to_string(),
             ))
             .unwrap();
 
@@ -4237,12 +4238,21 @@ mod tests {
             1,
             "startup fallback must appear once in the deduplicated envelope"
         );
+        // The fallback is the SessionStart bundle for a launch whose hook did
+        // not fire, so it carries what SessionStart carries. Since cas-71b2
+        // that is the pull pointer, not a preloaded ranked memory list: the
+        // list was measured unopened, and `search action=context` returns it.
+        let prompt = &rows[0].prompt;
         assert!(
-            rows[0]
-                .prompt
-                .contains("custom profile ambient memory sentinel"),
-            "custom-config supervisor launch must receive ambient context even when Claude skips SessionStart: {}",
-            rows[0].prompt
+            cas_core::hooks::context::MEMORY_PULL_POINTER
+                .lines()
+                .next()
+                .is_some_and(|heading| prompt.contains(heading)),
+            "custom-config supervisor launch must receive the session-start context even when Claude skips SessionStart: {prompt}"
+        );
+        assert!(
+            !prompt.contains(ranked_memory),
+            "the fallback must match SessionStart and not preload ranked memories: {prompt}"
         );
     }
 

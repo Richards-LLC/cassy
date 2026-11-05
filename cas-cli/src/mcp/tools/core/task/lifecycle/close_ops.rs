@@ -14668,6 +14668,125 @@ fn without_regenerated_ledger(
     (Some(note), paths.into_iter().filter(|path| path != REFERENCE_HISTORY_LEDGER).collect())
 }
 
+/// cas-7f95: `scripts/release.sh` folds each `changelog.d/<task>.md` fragment
+/// into CHANGELOG.md and deletes the file in its `release: vX.Y.Z` commit, so
+/// a delivery closing after a release no longer finds its fragment. A
+/// fragment named for one of `owners` was promoted, not dropped, when the
+/// commit that deleted it on the target is a release commit that added every
+/// entry line of the fragment to CHANGELOG.md, and the target still has them.
+/// Headings are not compared: promotion merges same-title headings.
+fn without_promoted_changelog_fragments(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+    owners: &[&str],
+) -> (Option<String>, Vec<String>) {
+    let owned = |path: &str| {
+        path.strip_prefix("changelog.d/")
+            .and_then(|name| name.strip_suffix(".md"))
+            .is_some_and(|owner| owners.contains(&owner))
+    };
+    if !paths.iter().any(|path| owned(path)) {
+        return (None, paths);
+    }
+    let origin = format!("origin/{parent_branch}");
+    let target_ref = if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin) {
+        origin
+    } else {
+        parent_branch.to_string()
+    };
+    let git_text = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .measurement_output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let Some(changelog) = git_text(&["show", &format!("{target_ref}:CHANGELOG.md")]) else {
+        return (None, paths);
+    };
+    let current: std::collections::HashSet<&str> = changelog.lines().map(str::trim_end).collect();
+    let is_release = |subject: &str| {
+        subject.trim().strip_prefix("release: v").is_some_and(|version| {
+            let parts: Vec<&str> = version.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+    };
+    let mut promoted = Vec::new();
+    let remaining = paths
+        .into_iter()
+        .filter(|path| {
+            if !owned(path) {
+                return true;
+            }
+            let Some(body) = git_text(&["show", &format!("{anchor}:{path}")]) else {
+                return true;
+            };
+            let entries: Vec<&str> = body
+                .lines()
+                .map(str::trim_end)
+                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .collect();
+            let Some(release) = git_text(&["log", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
+                .map(|sha| sha.trim().to_string())
+                .filter(|sha| !sha.is_empty())
+            else {
+                return true;
+            };
+            if !git_text(&["log", "-1", "--format=%s", &release]).is_some_and(|subject| is_release(&subject)) {
+                return true;
+            }
+            // Only lines this release commit added to CHANGELOG.md count; an
+            // older section holding the same text is not this promotion.
+            let Some(diff) = git_text(&["diff", "--no-color", "--unified=0", &format!("{release}^1"), &release, "--", "CHANGELOG.md"]) else {
+                return true;
+            };
+            let added: std::collections::HashSet<&str> = diff
+                .lines()
+                .filter(|line| !line.starts_with("+++"))
+                .filter_map(|line| line.strip_prefix('+'))
+                .map(str::trim_end)
+                .collect();
+            if entries.is_empty() || !entries.iter().all(|line| added.contains(line) && current.contains(line)) {
+                return true;
+            }
+            promoted.push(format!("{path} by {}", &release[..release.len().min(12)]));
+            false
+        })
+        .collect();
+    if promoted.is_empty() {
+        return (None, remaining);
+    }
+    (
+        Some(format!(
+            "changelog fragment {} was promoted into CHANGELOG.md on `{target_ref}` by its release commit, not dropped (cas-7f95)",
+            promoted.join(", ")
+        )),
+        remaining,
+    )
+}
+
+/// Both history-derived drop exceptions, with their notes joined. `owners`
+/// are the task ids whose changelog fragments this close may account for.
+fn without_regenerated_history(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+    owners: &[&str],
+) -> (Option<String>, Vec<String>) {
+    let (ledger, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+    let (fragments, paths) = without_promoted_changelog_fragments(repo_path, anchor, parent_branch, paths, owners);
+    let note = match (ledger, fragments) {
+        (Some(ledger), Some(fragments)) => Some(format!("{ledger}; {fragments}")),
+        (ledger, fragments) => ledger.or(fragments),
+    };
+    (note, paths)
+}
+
 /// cas-2ea6: the ledger keys whose `anchor` hashes `target` lacks, when each
 /// of their `target` entries equals the target generator's `--rev --only`
 /// run. `None` when the drop must stand or cannot be decided.
@@ -14988,7 +15107,12 @@ fn epic_anchor_content_presence(
         return (presence, None);
     };
     // cas-2ea6: the history-derived ledger is judged by regeneration.
-    let (ledger_note, remaining) = without_regenerated_ledger(repo, anchor, target, paths.clone());
+    // Supervisor decision (cas-7f95): an epic close also accounts for its
+    // children's changelog fragments.
+    let owners: Vec<&str> = std::iter::once(task.id.as_str())
+        .chain(children.iter().map(|child| child.id.as_str()))
+        .collect();
+    let (ledger_note, remaining) = without_regenerated_history(repo, anchor, target, paths.clone(), &owners);
     if remaining.is_empty() {
         return (DeliveryContentPresence::Present { paths: paths.clone() }, ledger_note);
     }
@@ -15508,7 +15632,7 @@ fn anchored_delivery_content_gate_unbounded(
         DeliveryContentPresence::Dropped { paths } => {
             // cas-2ea6: the history-derived ledger is judged by regeneration,
             // and its note rides on whichever check accepts the rest.
-            let (ledger_note, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+            let (ledger_note, paths) = without_regenerated_history(repo_path, anchor, parent_branch, paths, &[task_id.as_str()]);
             let with_ledger = |note: String| match &ledger_note {
                 Some(ledger) if note.is_empty() => ledger.clone(),
                 Some(ledger) => format!("{note}; {ledger}"),
@@ -35475,6 +35599,111 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         ));
         let status = git_command(p, &["status", "--porcelain"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&status.stdout), "", "the gate must not rewrite the checkout");
+    }
+
+    /// cas-7f95: the cas-db9d shape. A delivery's changelog.d fragment lands,
+    /// then the release commit promotes it into CHANGELOG.md with the real
+    /// scripts/release_changelog.py and deletes the file. Closing afterwards
+    /// is no drop. It still is when the target later loses the entry, when a
+    /// non-release commit deleted the fragment, when the release commit did
+    /// not add the fragment's lines (they only sit in an older section), and
+    /// when the fragment names another task. An epic close also accepts its
+    /// children's fragments (supervisor decision).
+    #[test]
+    fn a_release_promoted_changelog_fragment_is_not_a_dropped_delivery_cas_7f95() {
+        const PROMOTER: &str = include_str!("../../../../../../../scripts/release_changelog.py");
+        const ENTRY: &str = "- **Kept entry** — Was: lost at release. Now: kept.";
+        // (fragment owner, how the target removes the fragment)
+        let build = |owner: &str, removal: &str| {
+            let dir = init_factory_repo("worker");
+            let p = dir.path().to_path_buf();
+            let fragment = format!("changelog.d/{owner}.md");
+            let write = |relative: &str, body: &str| {
+                let path = p.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, body).unwrap();
+            };
+            let older = if removal == "older section" { format!("{ENTRY}\n") } else { String::new() };
+            git(&p, &["checkout", "-q", "main"]);
+            write("CHANGELOG.md", &format!("# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-11-01\n\n- The base release.\n{older}"));
+            write("scripts/release_changelog.py", PROMOTER);
+            git(&p, &["add", "-A"]);
+            git(&p, &["commit", "-q", "-m", "changelog"]);
+            git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+            write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
+            write("src/feature.rs", "pub fn feature() {}\n");
+            git(&p, &["add", "-A"]);
+            git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
+            let anchor = head_sha(&p);
+            git(&p, &["checkout", "-q", "main"]);
+            git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
+            match removal {
+                "release" => {
+                    let promoted = std::process::Command::new("python3")
+                        .args(["scripts/release_changelog.py", "promote", "CHANGELOG.md", "1.0.1", "2026-11-04", "1.0.0"])
+                        .current_dir(&p)
+                        .output()
+                        .unwrap();
+                    assert!(promoted.status.success(), "{}", String::from_utf8_lossy(&promoted.stderr));
+                    assert!(!p.join(&fragment).exists(), "the release promotion deletes the fragment");
+                    git(&p, &["add", "-A"]);
+                    git(&p, &["commit", "-q", "-m", "release: v1.0.1"]);
+                }
+                "chore" => {
+                    let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
+                    write("CHANGELOG.md", &changelog.replace("## [Unreleased]\n", &format!("## [Unreleased]\n\n{ENTRY}\n")));
+                    git(&p, &["rm", "-q", &fragment]);
+                    git(&p, &["commit", "-q", "-am", "chore: tidy changelog"]);
+                }
+                _ => {
+                    let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
+                    write("CHANGELOG.md", &changelog.replace("## [Unreleased]\n", "## [Unreleased]\n\n## [1.0.1] - 2026-11-04\n\n- Something else shipped.\n"));
+                    git(&p, &["rm", "-q", &fragment]);
+                    git(&p, &["commit", "-q", "-am", "release: v1.0.1"]);
+                }
+            }
+            let mut task = worker_task("worker");
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            (dir, task, anchor, fragment)
+        };
+        let refused = |dir: &TempDir, task: &Task, fragment: &str, case: &str| {
+            match run_factory_branch_merge_gate(task, &base_req(&task.id), "main", dir.path()) {
+                MergeStateGateOutcome::Reject(message) => assert!(
+                    message.contains("DELIVERY CONTENT DROPPED") && message.contains(fragment),
+                    "{case}: {message}"
+                ),
+                other => panic!("{case} must still refuse: {other:?}"),
+            }
+        };
+
+        let (dir, task, _, fragment) = build("cas-test1", "release");
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", dir.path()) {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("cas-7f95") && note.contains(&fragment), "{note}")
+            }
+            other => panic!("a release-promoted fragment is delivered: {other:?}"),
+        }
+        let p = dir.path();
+        let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
+        std::fs::write(p.join("CHANGELOG.md"), changelog.replace(&format!("{ENTRY}\n"), "")).unwrap();
+        git(p, &["commit", "-q", "-am", "lose the promoted entry"]);
+        refused(&dir, &task, &fragment, "a target that later loses the promoted entry");
+
+        let (dir, task, _, fragment) = build("cas-test1", "chore");
+        refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
+        let (dir, task, _, fragment) = build("cas-test1", "older section");
+        refused(&dir, &task, &fragment, "a release that did not add the fragment's lines");
+
+        let (dir, task, anchor, fragment) = build("cas-other", "release");
+        refused(&dir, &task, &fragment, "another task's fragment");
+        let sibling = Task { id: "cas-other".into(), ..task.clone() };
+        let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");
+        assert!(
+            matches!(presence, DeliveryContentPresence::Present { .. })
+                && note.as_deref().is_some_and(|note| note.contains("cas-7f95") && note.contains(&fragment)),
+            "an epic close accepts its child's promoted fragment: {presence:?} {note:?}"
+        );
     }
 
     /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a

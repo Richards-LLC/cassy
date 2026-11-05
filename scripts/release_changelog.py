@@ -11,7 +11,9 @@
       renames the section instead of stacking two. Idempotent.
       Per-delivery fragments (changelog.d/*.md beside <file>, except
       README.md; cas-f2be) are unreleased entries too: their bodies lead
-      the section in file-name order and the files are deleted.
+      the section in file-name order and the files are deleted. Entries
+      under the same `### ` title share one heading, in first-seen order
+      (cas-7f95), so same-area fragments cannot fail MD024.
 
   release_changelog.py rebase <ours-file> <base-file> <merge-base-version> <out-file>
       Resolve a CHANGELOG merge conflict with the base branch: the result is
@@ -83,13 +85,46 @@ def fragment_paths(changelog):
     return sorted(path for path in folder.glob('*.md') if path.name != 'README.md')
 
 
+def grouped(lines):
+    """One `### ` heading per section title, in first-seen order (cas-7f95).
+
+    Each fragment brings its own category heading, so three Factory fixes
+    otherwise promote as three identical sibling headings and fail MD024.
+    Entries keep their text and order within each heading.
+    """
+    preamble, order, bodies, current = [], [], {}, None
+    for line in lines:
+        if line.startswith('### '):
+            current = line.rstrip()
+            if current not in bodies:
+                order.append(current)
+                bodies[current] = []
+            bodies[current].append([])
+        elif current is None:
+            preamble.append(line)
+        else:
+            bodies[current][-1].append(line)
+    out = tidy(preamble) + ([''] if tidy(preamble) else [])
+    for heading in order:
+        out += [heading, '']
+        for chunk in (tidy(chunk) for chunk in bodies[heading]):
+            if not chunk:
+                continue
+            # Consecutive bullet lists stay one list; other blocks keep a gap.
+            if out[-1].strip() and not (chunk[0].startswith('- ') and out[-1].startswith(('- ', '  '))):
+                out.append('')
+            out += chunk
+        out.append('')
+    return tidy(out)
+
+
 def promote(text, version, date, base_version, fragments=()):
     if version_key(version) is None:
         raise ChangelogError(f'release version is not x.y.z: {version!r}')
     lines = text.splitlines()
     entries, start, end = region_entries(lines, base_version)
     folded = [line for fragment in fragments for line in fragment.splitlines() + ['']]
-    entries = tidy(folded + [''] + entries)
+    entries = grouped(tidy(folded + [''] + entries))
     if not entries:
         raise ChangelogError(
             'CHANGELOG.md [Unreleased] has no entries; write the release entries before releasing')

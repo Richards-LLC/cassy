@@ -1,8 +1,8 @@
 //! Read the existing CI tree receipt instead of repeating a proven suite.
 //!
-//! This is called only after close authenticates a supervisor override and
-//! only for its mandatory scoped-proof obligation. A passing workflow alone
-//! is insufficient: ci.yml publishes the tree artifact after Fast Validation
+//! Ordinary default-branch closes and authenticated supervisor overrides
+//! can reuse this evidence for their mandatory scoped-proof obligation. A
+//! passing workflow alone is insufficient: ci.yml publishes the tree artifact after Fast Validation
 //! passes, including any authoritative full-gate reuse. Docs-only admission
 //! never publishes it. Content, CI, QA and declared-risk admission remain in
 //! the ordinary close path.
@@ -37,7 +37,64 @@ fn api(repo: &Path, binary: &Path, endpoint: &str, deadline: Deadline) -> Result
     serde_json::from_slice(&output.stdout).map_err(|_| "invalid merge-group evidence JSON".into())
 }
 
-/// The current override's reason must explicitly cite `merge_group_run=<id>`.
+/// An ordinary default-target close can discover the queue run from the
+/// published landing Cassy recorded. Artifact lookup only discovers a run ID;
+/// `verify` still checks the authoritative workflow, tree and Git containment.
+pub(super) fn verify_for_target(
+    reason: &str,
+    repo: &Path,
+    delivery: Option<&str>,
+    landed: Option<&str>,
+    target: &str,
+) -> Result<Option<String>, String> {
+    let default = super::resolve_close_gate_default_branch(repo)?;
+    if target.strip_prefix("origin/").unwrap_or(target) != default {
+        return Ok(None);
+    }
+    if reason
+        .split_whitespace()
+        .any(|word| word.starts_with("merge_group_run="))
+    {
+        return verify(reason, repo, delivery);
+    }
+    let Some(landed) = landed.filter(|sha| full_sha(sha)) else {
+        return Ok(None);
+    };
+    let tree = super::resolve_branch_sha(repo, &format!("{landed}^{{tree}}"))
+        .filter(|sha| full_sha(sha))
+        .ok_or("recorded landing tree is unresolved")?;
+    let deadline = Deadline::after(Duration::from_secs(12));
+    let binary = crate::github_repo::gh_binary();
+    let github = crate::github_repo::resolve_origin(repo, &binary, PROBE_TIMEOUT)?;
+    let marker = format!("merge-queue-validated-tree-{tree}");
+    let artifacts = api(
+        repo,
+        &binary,
+        &format!(
+            "repos/{}/actions/artifacts?name={marker}&per_page=100",
+            github.canonical
+        ),
+        deadline,
+    )?;
+    let Some(artifacts) = artifacts["artifacts"].as_array() else {
+        return Ok(None);
+    };
+    // Bound discovery work. A caller can cite an older valid run explicitly;
+    // an unavailable/expired receipt leaves the existing scoped gate intact.
+    for run_id in artifacts
+        .iter()
+        .filter(|artifact| artifact["name"] == marker && artifact["expired"] == false)
+        .filter_map(|artifact| artifact.pointer("/workflow_run/id").and_then(Value::as_u64))
+        .take(3)
+    {
+        if let Ok(Some(proof)) = verify(&format!("merge_group_run={run_id}"), repo, delivery) {
+            return Ok(Some(proof));
+        }
+    }
+    Ok(None)
+}
+
+/// The current close reason must explicitly cite `merge_group_run=<id>`.
 /// Old notes, free-form claims of green CI and workflow success without the
 /// canonical tree receipt never authorize this substitution.
 pub(super) fn verify(

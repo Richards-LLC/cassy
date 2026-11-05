@@ -22491,7 +22491,7 @@ mod delivery_probe_tests;
 
 #[cfg(test)]
 #[path = "reminder_dispatch_tests.rs"]
-mod reminder_dispatch_tests;
+pub(crate) mod reminder_dispatch_tests;
 
 #[cfg(test)]
 #[path = "relay_retry_exhaustion_tests.rs"]

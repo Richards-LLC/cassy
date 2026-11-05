@@ -1089,6 +1089,21 @@ verdict alerts and recovery, not the validity of completed work. Raw bearer
 capabilities and unbound handoffs retain their expiry rules. Changed or
 superseded candidates cannot reuse late authority.
 
+A confirmed publication shares a portable approval through the existing project
+peer mailbox. The daemon checks the Cloud-stamped sender against the project
+supervisor registry, matches the task/source/candidate/landing, and atomically
+imports a peer-attested dispatch and verdict into the receiving store. Repository
+paths are rebound locally; acknowledging or retiring a prompt never removes the
+proof. Generic verification writes cannot claim peer authority, and replay cannot
+replace an existing cycle or revive a reopened delivery. Publication sharing is best-effort: a failed peer never changes confirmed
+publication, other peers are still attempted, and the task records the failure.
+A later publication retry can recover its abandoned outbox send with the same
+logical identity. Receipts must explicitly say approved. Permanent refusals
+(malformed, unauthorized, stale, closed or an existing local proof cycle) are
+acknowledged as rejected; only transient store, sync, registry or transport
+availability failures remain unacknowledged for retry.
+
+
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.

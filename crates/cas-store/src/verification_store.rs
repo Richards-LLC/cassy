@@ -75,7 +75,7 @@ fn validate_verification_authority_with_conn(
             }
             Ok(())
         }
-        VerificationProvenance::System => Err(fail()),
+        VerificationProvenance::System | VerificationProvenance::PeerAttested => Err(fail()),
         VerificationProvenance::SupervisorDirect => {
             let agent_id = verification.agent_id.as_deref().ok_or_else(fail)?;
             let issuer_id = verification.issuer_agent_id.as_deref().ok_or_else(fail)?;
@@ -579,6 +579,68 @@ pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> R
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&store.conn)?;
     insert_verification_with_conn(&conn, verification)
+}
+
+/// Atomically admit daemon-validated peer authority into the existing proof
+/// records. Generic store writes cannot mint this provenance. A replay never
+/// updates a verdict or replaces a newer local verification cycle.
+pub fn import_peer_premerge_verification(
+    cas_dir: &Path,
+    expected_task: &Task,
+    dispatch: &VerificationDispatch,
+    verification: &Verification,
+) -> Result<bool> {
+    let fail = || StoreError::Parse("peer pre-merge proof does not match the current delivery cycle".into());
+    let attestation = dispatch.repository.as_ref()
+        .and_then(|proof| proof.peer_premerge.as_ref()).ok_or_else(fail)?;
+    let receipt = &attestation.receipt;
+    if receipt.status != VerificationStatus::Approved
+        || verification.provenance != VerificationProvenance::PeerAttested
+        || verification.status != VerificationStatus::Approved
+        || dispatch.state != VerificationDispatchState::Resolved
+        || dispatch.id != receipt.dispatch_id || verification.id != receipt.verdict_id
+        || dispatch.task_id != receipt.task_id || verification.task_id != receipt.task_id
+        || verification.dispatch_id.as_deref() != Some(dispatch.id.as_str())
+        || verification.issuer_agent_id.as_deref() != Some(receipt.supervisor_id.as_str())
+        || expected_task.id != receipt.task_id || expected_task.is_terminal()
+        || expected_task.deliverables.factory_branch_anchor.as_deref() != Some(receipt.source_sha.as_str())
+        || attestation.message_id.is_empty() || attestation.sender_machine_id.is_empty()
+        || attestation.sender_session.is_empty()
+    { return Err(fail()); }
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let updated: String = tx.query_row("SELECT updated_at FROM tasks WHERE id=?1", [&expected_task.id], |row| row.get(0))?;
+    if DateTime::parse_from_rfc3339(&updated).map_err(|_| fail())?.with_timezone(&Utc) != expected_task.updated_at {
+        return Err(fail());
+    }
+    if let Some(existing) = get_latest_verification_dispatch_with_conn(&tx, &expected_task.id)? {
+        if existing == *dispatch {
+            // The exact imported row is immutable, including transport identity.
+            let existing_verdict: Option<String> = tx.query_row(
+                "SELECT id FROM verifications WHERE dispatch_id=?1 AND provenance='peer_attested' AND status='approved'",
+                [&dispatch.id], |row| row.get(0),
+            ).optional()?;
+            if existing_verdict.as_deref() == Some(verification.id.as_str()) { return Ok(false); }
+        }
+        return Err(fail());
+    }
+    // Legacy local verdicts also represent an existing proof cycle.
+    let has_verdict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM verifications WHERE task_id=?1)", [&expected_task.id], |row| row.get(0))?;
+    if has_verdict { return Err(fail()); }
+    tx.execute(
+        "INSERT INTO verification_dispatches
+         (id,task_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
+         VALUES (?1,?2,?3,?4,?5,'resolved',?6,?7,?8,?9)",
+        params![dispatch.id,dispatch.task_id,
+            serde_json::to_string(&dispatch.repository).map_err(|_| fail())?,
+            dispatch.requester_agent_id,dispatch.owner_agent_id,
+            dispatch.requested_at.to_rfc3339(),dispatch.deadline_at.to_rfc3339(),
+            dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string()],
+    )?;
+    insert_verification_with_conn(&tx, verification)?;
+    tx.commit()?;
+    Ok(true)
 }
 
 /// Update mutable result fields on an existing internal close-flow record.
@@ -4566,6 +4628,7 @@ mod tests {
     fn superseded_task_dispatch_resolves_to_current_cycle_when_proof_is_unchanged() {
         let (_store, dir) = create_test_store();
         let repository = cas_types::RepositoryProofBoundary {
+        peer_premerge: None,
             repository_root: "/repo".to_string(),
             worktree_root: "/repo-worker".to_string(),
             head_commit: "head-a".to_string(),
@@ -4907,6 +4970,15 @@ mod tests {
         assert_eq!(row.provenance, VerificationProvenance::Legacy);
         assert!(row.capability_id.is_none());
         assert!(row.issuer_agent_id.is_none());
+
+        for provenance in [VerificationProvenance::System, VerificationProvenance::PeerAttested,
+            VerificationProvenance::SupervisorDirect, VerificationProvenance::TaskVerifier] {
+            let mut forged = Verification::new(format!("ver-forged-{provenance}"), "cas-legacy".into());
+            forged.provenance = provenance;
+            let error = store.add(&forged).expect_err("generic writes cannot mint typed authority");
+            assert!(error.to_string().contains("provenance lacks exact durable authority"), "{error}");
+            assert!(store.get(&forged.id).is_err());
+        }
     }
 }
 

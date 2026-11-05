@@ -625,6 +625,20 @@ mod tests {
             }
             let old = process();
             record(&daemon, old.0.id(), Some("4.0.4"));
+            let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+            let mut agent = store.get("single-sup").unwrap();
+            agent.cc_session_id = Some("reload-version".into());
+            store.update(&agent).unwrap();
+            let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+            std::fs::create_dir_all(&projects).unwrap();
+            let transcript = projects.join("reload-version.jsonl");
+            for version in [None, Some("2.1.317")] {
+                std::fs::write(&transcript, format!("{}\n", serde_json::json!({"type":"user","sessionId":"reload-version","version":version}))).unwrap();
+                let error = daemon.dispatch_supervisor_command(run.clone(), "reload-unverified".into(), owner.clone()).await.unwrap_err();
+                assert!(error.to_string().contains("unverified version") && error.to_string().contains("2.1.318"), "{error}");
+                assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+            }
+            std::fs::write(&transcript, "{\"type\":\"user\",\"sessionId\":\"reload-version\",\"version\":\"2.1.318\"}\n").unwrap();
             let receipt = daemon.dispatch_supervisor_command(run.clone(), "reload".into(), owner.clone()).await.unwrap();
             assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
             daemon.dispatch_supervisor_command(run, "reload".into(), owner.clone()).await.unwrap();

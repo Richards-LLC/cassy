@@ -476,9 +476,14 @@ mod tests {
         let root = crate::store::init_cas_dir(&repo).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&root, REPO).unwrap();
         let mut config = crate::config::Config::load(&root).unwrap();
-        config.set("factory.max_concurrent_builders", "0").unwrap();
+        config.set("factory.max_concurrent_builders", "1").unwrap();
         config.set("factory.stale_threshold_commits", "1").unwrap();
         config.save(&root).unwrap();
+        let slots = root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let occupied = std::fs::OpenOptions::new().read(true).write(true).create(true)
+            .truncate(false).open(slots.join("slot-0.lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&occupied).unwrap();
         crate::cloud::CloudConfig {
             endpoint: server.uri(),
             token: Some("synthetic-test-token".into()),

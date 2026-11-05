@@ -10362,8 +10362,11 @@ impl CasCore {
                                     // cas-defb: a no-code delivery is its external
                                     // proof; pin the reviewed commit so a sibling
                                     // merge or the lane's next task cannot stale it.
+                                    // cas-f43d: a measured no-delivery close is a
+                                    // read-only investigation whose evidence is its
+                                    // artifact, so it is pinned the same way.
                                     if epic_proof_ref.is_none()
-                                        && task.execution_note.as_deref() == Some("no-code")
+                                        && (empty_delivery || task.execution_note.as_deref() == Some("no-code"))
                                     {
                                         crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
                                     } else {

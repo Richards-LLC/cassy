@@ -16443,6 +16443,7 @@ mod tests {
         ).unwrap();
         assert!(fresh_pending, "fresh mirrors survive");
         let outbox_pending: bool = conn.query_row(
+            // pin: expiry must retain the immutable durable outbox snapshot byte-for-byte.
             "SELECT payload_snapshot = ? AND retained_at IS NULL AND lease_token IS NULL
              FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
         ).unwrap();

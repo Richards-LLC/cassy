@@ -4089,17 +4089,25 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let harness = r#"exec -a claude /bin/bash --noprofile --norc -c 'printf "idle\n"; read -r _' fixture --agent-name sandboxed-worker"#;
-        let mut sandbox = Sandbox(Command::new("/bin/bash")
-            .arg0("bwrap")
-            .args(["--noprofile", "--norc", "-c", &format!("({harness}) <&0 & wait \"$!\""),
-                "fixture", "--agent-name", "sandboxed-worker"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
-        let mut line = String::new();
-        BufReader::new(sandbox.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
-        assert_eq!(line.trim(), "idle");
-        let observed = background_processes_for(sandbox.0.id());
-        assert_eq!(observed, BackgroundProcessState::Available(vec![]), "{observed:?}");
+        // The job deliberately carries the same flag as the harness. Identity
+        // alone cannot exempt a real job, either beside or below the harness.
+        for (program, active) in [
+            (r#"exec -a claude /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, false),
+            (r#"exec -a cargo /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, true),
+            (r#"exec -a claude /bin/bash --noprofile --norc -c '(/bin/bash --noprofile --norc -c '\''printf "ready\n"; read -r _'\'' fixture --agent-name sandboxed-worker) <&0 & wait "$!"' fixture --agent-name sandboxed-worker"#, true),
+        ] {
+            let mut sandbox = Sandbox(Command::new("/bin/bash")
+                .arg0("bwrap")
+                .args(["--noprofile", "--norc", "-c", &format!("({program}) <&0 & wait \"$!\""),
+                    "fixture", "--agent-name", "sandboxed-worker"])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+            let mut line = String::new();
+            BufReader::new(sandbox.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "ready");
+            let observed = background_processes_for(sandbox.0.id());
+            assert!(matches!(observed, BackgroundProcessState::Available(_)), "{observed:?}");
+            assert_eq!(has_active_work(false, &observed), active, "{program}: {observed:?}");
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

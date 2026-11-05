@@ -194,7 +194,6 @@ mod tests {
     /// supervisor notice per release SHA naming the exact batch_receipt call.
     #[test]
     fn batch_receipt_offer_names_live_parked_deliveries_once_per_sha() {
-        use cas_store::{AgentStore, SupervisorQueueStore, TaskStore};
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let git = |args: &[&str]| {

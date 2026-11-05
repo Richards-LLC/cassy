@@ -5,6 +5,7 @@
 //! and the rule passes the T1 filter policy, the write is dual-enqueued
 //! to both the personal queue and the team queue.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -36,6 +37,8 @@ pub struct SyncingRuleStore {
     /// than on every store open.
     project_root: Option<PathBuf>,
     project_guard: OnceLock<ForeignProjectGuard>,
+    /// Only these pre-existing IDs may be legacy sources with deleted files.
+    legacy_rule_ids: OnceLock<HashSet<String>>,
 }
 
 impl SyncingRuleStore {
@@ -49,6 +52,7 @@ impl SyncingRuleStore {
             team_only: false,
             project_root: None,
             project_guard: OnceLock::new(),
+            legacy_rule_ids: OnceLock::new(),
         }
     }
 
@@ -67,6 +71,7 @@ impl SyncingRuleStore {
             team_only: false,
             project_root: None,
             project_guard: OnceLock::new(),
+            legacy_rule_ids: OnceLock::new(),
         }
     }
 
@@ -122,21 +127,50 @@ impl SyncingRuleStore {
         project_root.join(".cas/rule-projections").join(filename)
     }
 
-    fn receipt(&self, id: &str) -> Result<Option<String>> {
+    fn start_receipts(&self) -> Result<()> {
         let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) else {
-            return Ok(None);
+            return Ok(());
         };
-        match std::fs::read_to_string(Self::receipt_path(root, id)) {
-            Ok(receipt) => {
-                let (state, target): (String, PathBuf) = serde_json::from_str(&receipt)
-                    .map_err(|error| cas_store::StoreError::Parse(format!("invalid rule projection receipt: {error}")))?;
-                // A configuration change is not evidence that the old file
-                // was deleted. A held source still requires a keep decision.
-                Ok((state == "held" || target == self.syncer.target_dir()).then_some(state))
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+        if self.legacy_rule_ids.get().is_some() {
+            return Ok(());
         }
+        let path = root.join(".cas/rule-projections/started.json");
+        let decode = |bytes: &[u8]| serde_json::from_slice::<HashSet<String>>(bytes)
+            .map_err(|error| cas_store::StoreError::Parse(format!("invalid receipt-start marker: {error}")));
+        let ids = match std::fs::read(&path) {
+            Ok(bytes) => decode(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Snapshot identity, not creation time: a later Cloud arrival
+                // may have been authored long before receipt tracking began.
+                let ids: HashSet<String> = self.inner.list()?.into_iter().map(|rule| rule.id).collect();
+                std::fs::create_dir_all(path.parent().expect("marker parent"))?;
+                let mut marker = tempfile::NamedTempFile::new_in(path.parent().expect("marker parent"))?;
+                let bytes = serde_json::to_vec(&ids)
+                    .map_err(|error| cas_store::StoreError::Parse(error.to_string()))?;
+                marker.write_all(&bytes)?;
+                match marker.persist_noclobber(&path) {
+                    Ok(_) => ids,
+                    // Concurrent wrappers must share the first published cut.
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        decode(&std::fs::read(&path)?)?
+                    }
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let _ = self.legacy_rule_ids.set(ids);
+        Ok(())
+    }
+
+    fn receipt(&self, id: &str) -> Option<String> {
+        let root = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty())?;
+        let bytes = std::fs::read(Self::receipt_path(root, id)).ok()?;
+        let (state, target): (String, PathBuf) = serde_json::from_slice(&bytes).ok()?;
+        // Unreadable/invalid metadata is missing evidence, not a reason to
+        // break all rule injection. A held source still needs a keep decision.
+        (matches!(state.as_str(), "held" | "projected" | "unprojected")
+            && (state == "held" || target == self.syncer.target_dir())).then_some(state)
     }
 
     fn record_projection(&self, id: &str, state: &str) -> Result<()> {
@@ -173,16 +207,20 @@ impl SyncingRuleStore {
         {
             return Ok(rule);
         }
-        let receipt = self.receipt(&rule.id)?;
+        self.start_receipts()?;
+        let receipt = self.receipt(&rule.id);
         let file = self.syncer.target_dir().join(format!("{}.md", rule.id));
         if file.is_file() && receipt.as_deref() != Some("held") {
             // Adopt an existing pre-receipt projection without re-writing it.
             self.record_projection(&rule.id, "projected")?;
             return Ok(rule);
         }
-        if receipt.as_deref() == Some("unprojected") {
-            // An explicit write below the sync floor intentionally made no
-            // file. It is known new policy, not an unknown legacy absence.
+        if receipt.as_deref() == Some("unprojected")
+            || (receipt.is_none() && !self.legacy_rule_ids.get().expect("receipts started").contains(&rule.id))
+        {
+            // Known new writes and post-marker Cloud arrivals are new policy,
+            // not unknown legacy absence; projection must not re-enqueue pull.
+            self.record_projection(&rule.id, "unprojected")?;
             self.try_sync(&rule)?;
             return Ok(rule);
         }
@@ -206,7 +244,7 @@ impl SyncingRuleStore {
             return Ok(());
         }
         // A held rule cannot be revived by helpful/update or a remote replay.
-        if self.receipt(&rule.id)?.as_deref() == Some("held") {
+        if self.receipt(&rule.id).as_deref() == Some("held") {
             return Ok(());
         }
         // File sync remains best-effort; never claim a projection on failure.
@@ -234,14 +272,14 @@ impl SyncingRuleStore {
         let before = self.get(id)?;
         // A draft promoted through the explicit write path is new policy;
         // an already active/held rule must respect its missing projection.
-        Ok(!Self::live(&before) && self.receipt(id)?.is_none())
+        Ok(!Self::live(&before) && self.receipt(id).is_none())
     }
 
     fn after_write(&self, id: &str, new_projection: bool) -> Result<()> {
         let stored = self.inner.get(id)?;
         let stored = if new_projection { stored } else { self.reconcile(stored)? };
         self.try_sync(&stored)?;
-        if self.receipt(id)?.as_deref() != Some("held") { self.queue_upsert(&stored); }
+        if self.receipt(id).as_deref() != Some("held") { self.queue_upsert(&stored); }
         Ok(())
     }
 
@@ -314,11 +352,13 @@ impl RuleStore for SyncingRuleStore {
     }
 
     fn add(&self, rule: &Rule) -> Result<()> {
+        self.start_receipts()?;
         self.inner.add(rule)?;
         self.after_write(&rule.id, true)
     }
 
     fn get(&self, id: &str) -> Result<Rule> {
+        self.start_receipts()?;
         self.reconcile(self.inner.get(id)?)
     }
 
@@ -419,7 +459,7 @@ impl RuleStore for SyncingRuleStore {
     ) -> Result<()> {
         // Reconcile first so a legacy row's original state is in history.
         self.get(id)?;
-        let version = if version.is_none() && self.receipt(id)?.as_deref() == Some("held") {
+        let version = if version.is_none() && self.receipt(id).as_deref() == Some("held") {
             // Repeated edits/votes while held may record additional Stale
             // snapshots; the keep decision restores the newest live source.
             self.inner.list_versions(id)?.into_iter().find_map(|version| {
@@ -433,16 +473,19 @@ impl RuleStore for SyncingRuleStore {
     }
 
     fn list(&self) -> Result<Vec<Rule>> {
+        self.start_receipts()?;
         self.inner.list()?.into_iter().map(|rule| self.reconcile(rule)).collect()
     }
 
     fn list_proven(&self) -> Result<Vec<Rule>> {
+        self.start_receipts()?;
         Ok(self.inner.list_proven()?.into_iter().map(|rule| self.reconcile(rule))
             .collect::<Result<Vec<_>>>()?.into_iter()
             .filter(|rule| rule.status == RuleStatus::Proven).collect())
     }
 
     fn list_critical(&self) -> Result<Vec<Rule>> {
+        self.start_receipts()?;
         Ok(self.inner.list_critical()?.into_iter()
             .map(|rule| self.reconcile(rule)).collect::<Result<Vec<_>>>()?
             .into_iter().filter(|rule| matches!(rule.status, RuleStatus::Proven | RuleStatus::Draft)).collect())

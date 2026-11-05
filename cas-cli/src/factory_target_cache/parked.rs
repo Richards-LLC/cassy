@@ -278,8 +278,18 @@ fn trim_debug(worktree: &Path, proc_root: &Path) {
             .map(|metadata| metadata.len())
             .sum();
         let quarantine = debug.join(format!(".cas-trim-incremental-{}", std::process::id()));
-        match fs::rename(&incremental, &quarantine).and_then(|()| fs::remove_dir_all(&quarantine)) {
-            Ok(()) => freed += bytes,
+        match fs::rename(&incremental, &quarantine) {
+            // Descriptors now resolve through the quarantine; a user that
+            // appeared during the rename gets the directory back.
+            Ok(()) if in_use(proc_root, &incremental, &quarantine, &cargo) => {
+                if !incremental.exists() {
+                    let _ = fs::rename(&quarantine, &incremental);
+                }
+            }
+            Ok(()) => match fs::remove_dir_all(&quarantine) {
+                Ok(()) => freed += bytes,
+                Err(error) => tracing::warn!(%error, path = %quarantine.display(), "incremental trim failed"),
+            },
             Err(error) => tracing::warn!(%error, path = %incremental.display(), "incremental trim failed"),
         }
     }

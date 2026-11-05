@@ -527,7 +527,12 @@ fn finished(cas: &Path, record: &Owner) -> Result<()> {
             );
             true
         }
-        None => false,
+        // cas-49163: candidate walks carry no dispatch id. A verdict recorded
+        // after the walk's last use frees it while the task awaits merge; a
+        // pending or claimed dispatch still keeps it (checked below).
+        None => cas_store::get_latest_verification_dispatch(cas, &task.id)?
+            .and_then(|dispatch| dispatch.resolved_at)
+            .is_some_and(|at| at >= record.last_used_at.unwrap_or(record.created_at)),
     };
     ensure!(
         task.is_terminal() || finished,

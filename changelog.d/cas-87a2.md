@@ -1,0 +1,3 @@
+### Added — Ledger
+
+- **Every identified Cassy problem is a friction-ledger row** — Filing a bug task in the Cassy repository, or filing an issue on the Cassy tracker through `system action=report_cas_bug`, now records a friction row automatically; nobody has to remember the ledger. `cas ledger report` has a "Friction found" section with a count by state and one line per problem showing whether it is open, in progress, fixed in vX.Y.Z or closed. An issue whose fix task has its own row is counted once. `cas ledger backfill` imports earlier Cassy bug tasks and, through `gh`, issues on `issues.components.cassy`, and says why when `gh` is unavailable. Friction rows stay on this machine until Cloud accepts the kind.

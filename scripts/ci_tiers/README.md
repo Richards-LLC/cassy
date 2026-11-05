@@ -4,7 +4,7 @@
 
 1. `policy.py check` parses the workflow YAML and the branch-protection JSON.
    Since cas-a1b0, `policy.json` holds only the required-context contract: each
-   context the main ruleset requires (`Fast Validation`, `macOS Check`) is
+   context the main ruleset requires (`Fast Validation`) is
    required exactly once and is produced by a CI job of that name. It no longer
    pins workflow text, step layout or gate-row parity: those pins (564 `text`
    and 112 `absent` needles) caught no recorded defect and failed 59 of 90

@@ -43,6 +43,9 @@ struct Promotion {
     landed_sha: String,
 }
 
+mod peer;
+pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
+
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
@@ -57,6 +60,17 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
         return Err("candidate context identity is invalid".into());
     }
     Ok(Some(key.to_string()))
+}
+
+/// Outputs scripts/regenerate-generated-artifacts.sh commits after a merge.
+fn is_regenerated_output(path: &str) -> bool {
+    path.starts_with("hub-web/dist/")
+        || matches!(
+            path,
+            "cas-cli/src/builtins/reference-history.json"
+                | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
+                | ".codex/agents/task-verifier.toml"
+        )
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -192,9 +206,7 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
-fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
     hash.update(serde_json::to_vec(&task_context(task)).map_err(|error| error.to_string())?);
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let specs = crate::store::open_spec_store(root).map_err(|error| error.to_string())?;
@@ -219,6 +231,20 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
         linked.sort_by(|a, b| a.id.cmp(&b.id));
         hash.update(serde_json::to_vec(&linked).map_err(|error| error.to_string())?);
     }
+    Ok(())
+}
+
+fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-peer-premerge-plan-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-premerge-candidate-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",
@@ -381,7 +407,40 @@ impl Candidate {
         Ok(tree)
     }
 
+    /// cas-7a8f: worktree_merge may add a regeneration commit
+    /// (scripts/regenerate-generated-artifacts.sh) on top of the delivery
+    /// merge. The landing is the first-parent commit below any such
+    /// single-parent commits that touch only generated outputs.
+    fn delivery_landing(&self, landed: &str) -> Result<String, String> {
+        let mut landed = landed.to_string();
+        while landed != self.source_sha {
+            let parents = git(&self.repository, &["rev-list", "--parents", "-n", "1", &landed])?;
+            let [_, parent] = parents.split_whitespace().collect::<Vec<_>>()[..] else {
+                break;
+            };
+            let generated_only = git(
+                &self.repository,
+                &["diff", "--name-only", "--no-renames", parent, &landed],
+            )?
+            .lines()
+            .all(is_regenerated_output);
+            if !generated_only
+                || git(
+                    &self.repository,
+                    &["merge-base", "--is-ancestor", &self.source_sha, parent],
+                )
+                .is_err()
+            {
+                break;
+            }
+            landed = parent.to_string();
+        }
+        Ok(landed)
+    }
+
     fn landing_base(&self, landed: &str) -> Result<String, String> {
+        let landed = self.delivery_landing(landed)?;
+        let landed = landed.as_str();
         git(
             &self.repository,
             &["merge-base", "--is-ancestor", &self.source_sha, landed],
@@ -403,6 +462,7 @@ impl Candidate {
 
     fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
+        let landed = self.delivery_landing(landed)?;
         if git(
             &self.repository,
             &["rev-parse", &format!("{landed}^{{tree}}")],
@@ -529,6 +589,7 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
+        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -573,6 +634,7 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
+            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -623,6 +685,9 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
+        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
+            return Ok(());
+        }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {
             return Ok(());
@@ -1057,5 +1122,72 @@ impl CasCore {
             store.update_if_current(&current, &expected).map_err(fail)?;
         }
         Ok(candidate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(repo: &Path, args: &[&str]) -> String {
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@example.invalid"].iter().chain(args).copied().collect::<Vec<_>>()).unwrap()
+    }
+
+    fn commit_file(repo: &Path, path: &str, body: &str, message: &str) -> String {
+        let file = repo.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+        run(repo, &["add", "-A"]);
+        run(repo, &["commit", "-q", "-m", message]);
+        run(repo, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn landing_verifies_past_a_regenerated_artifact_commit_cas_7a8f() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let target = commit_file(repo, "README.md", "base\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "cas-cli/src/builtins/skills/s.md", "new\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        run(repo, &["merge", "-q", "--no-ff", "-m", "merge delivery", "factory/w"]);
+        let regenerated = commit_file(
+            repo,
+            "cas-cli/src/builtins/reference-history.json",
+            "{}\n",
+            "build(builtins): regenerate reference-history from merged history",
+        );
+        let tree = run(repo, &["rev-parse", &format!("{source}^{{tree}}")]);
+        let candidate = Candidate {
+            cas_root: repo.to_path_buf(),
+            task_id: "cas-7a8f".into(),
+            repository: repo.to_path_buf(),
+            source_branch: "factory/w".into(),
+            source_sha: source,
+            target_branch: "main".into(),
+            target_sha: target,
+            tree,
+            context_digest: String::new(),
+            proof: RepositoryProofBoundary {
+                peer_premerge: None,
+                repository_root: String::new(),
+                worktree_root: String::new(),
+                head_commit: String::new(),
+                state_digest: String::new(),
+                target_branch: None,
+                anchor_commits: Vec::new(),
+            },
+            preparation_ms: 0,
+        };
+        assert_eq!(candidate.verify_landing(&regenerated), Ok(()));
+
+        // Adversarial probe: an ordinary commit on top is still later target
+        // progress, never a landing of this delivery.
+        let later = commit_file(repo, "README.md", "edited\n", "unrelated");
+        assert_eq!(
+            candidate.verify_landing(&later),
+            Err("this is subsequent target progress, not the delivery landing".to_string())
+        );
     }
 }

@@ -24,6 +24,9 @@ outputs:
   web-check-needed:
     description: Whether the Commander web build and tests must run.
     value: ${{ steps.classify.outputs.web-check-needed }}
+  web-dist-check-needed:
+    description: Whether this tree must match committed Commander release assets.
+    value: ${{ steps.classify.outputs.web-dist-check-needed }}
   bridge-check-needed:
     description: Whether the Slack bridge build and tests must run.
     value: ${{ steps.classify.outputs.bridge-check-needed }}
@@ -94,9 +97,15 @@ runs:
         # Rust's class, including Markdown fixtures. An unavailable diff or a
         # failed classifier must still run the checks.
         web_check_needed=true
+        web_dist_check_needed=true
         if [[ -n "${merge_base:-}" ]]; then
-          if web_signal="$(python3 scripts/classify-web-inputs.py "$merge_base" HEAD)"; then
-            [[ "$web_signal" != false ]] || web_check_needed=false
+          if web_policy="$(python3 scripts/classify-web-inputs.py "$merge_base" HEAD --dist-policy)"; then
+            case "$web_policy" in
+              'true true'|'true false'|'false false')
+                read -r web_check_needed web_dist_check_needed <<< "$web_policy"
+                ;;
+              *) echo "::warning title=CI web check::Invalid web policy; running all web checks" ;;
+            esac
           else
             echo "::warning title=CI web check::Could not classify web test inputs; running their checks"
           fi
@@ -124,6 +133,7 @@ runs:
         printf 'class=%s\n' "$class" >> "$GITHUB_OUTPUT"
         printf 'rust-unaffected=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
         printf 'web-check-needed=%s\n' "$web_check_needed" >> "$GITHUB_OUTPUT"
+        printf 'web-dist-check-needed=%s\n' "$web_dist_check_needed" >> "$GITHUB_OUTPUT"
         printf 'bridge-check-needed=%s\n' "$bridge_check_needed" >> "$GITHUB_OUTPUT"
         printf 'fast-pass=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
         fast_admission=false

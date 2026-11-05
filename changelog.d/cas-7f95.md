@@ -1,4 +1,0 @@
-### Fixed — Release
-
-- **One heading per changelog section** — When a release promotes several changelog fragments for the same area, their entries now share a single heading in first-seen order. Previously each fragment kept its own heading, and the duplicate headings failed the release PR's markdownlint check (MD024).
-- **Closes after a release keep their changelog entry** — Closing a delivery after a release has promoted its `changelog.d` fragment into CHANGELOG.md no longer fails with "delivery content dropped", so a supervisor override is no longer needed. Only the closing task's own fragment counts, or for an epic close a child task's fragment, and only when a `release: vX.Y.Z` commit added its lines to CHANGELOG.md. A fragment deleted by any other commit, or whose entry later leaves CHANGELOG.md, is still refused.

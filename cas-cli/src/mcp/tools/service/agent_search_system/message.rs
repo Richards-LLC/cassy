@@ -2141,6 +2141,13 @@ impl CasService {
                 req.task_id.as_deref(),
             );
         }
+        // cas-922d: a worker's ask or answer is the conversation; keep its
+        // kind on the row so the supervisor's wake cap and debounce skip it.
+        if role == "worker"
+            && let Some(kind @ ("ask" | "answer")) = req.kind.as_deref()
+        {
+            message = crate::supervisor_message_wakes::attach_waking_kind(&message, kind);
+        }
 
         // cas-bc8c: a genuine merge request receives an immutable envelope so
         // transport can suppress it once its requested tip has landed. That

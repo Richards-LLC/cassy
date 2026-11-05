@@ -53,6 +53,7 @@ pub(crate) fn pure_ack(text: &str) -> bool {
         .and_then(|s| s.split_once('\n').map(|(_, s)| s))
         .unwrap_or(text);
     let text = text.split("<cas-worker-action ").next().unwrap_or(text);
+    let text = text.split(WAKING_KIND_TAG).next().unwrap_or(text);
     let words: Vec<_> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -124,6 +125,27 @@ fn sender_fields(
 
 fn wants_wake(row: &QueuedPrompt) -> bool {
     wants_wake_text(&row.prompt)
+}
+
+const WAKING_KIND_TAG: &str = "<cas-message-kind kind=\"";
+
+/// cas-922d: carry a local sender's `kind=ask|answer` on its row. Appended,
+/// so an answer that is a pure acknowledgement stays quiet.
+pub(crate) fn attach_waking_kind(message: &str, kind: &str) -> String {
+    format!("{message}\n{WAKING_KIND_TAG}{kind}\"/>")
+}
+
+/// cas-73f7: asks, answers and blockers are the conversation itself, so the
+/// sender-pair cap never holds them. It bounds status chatter only.
+/// cas-922d: nor does the burst debounce delay them, and a local worker's
+/// kind counts as a peer's does.
+fn waking_kind(prompt: &str) -> bool {
+    use crate::cloud::peer_mailbox::PeerMessageKind::{Answer, Ask, Blocker};
+    prompt.contains("<cas-blocker ")
+        || prompt.contains(&format!("{WAKING_KIND_TAG}ask\"/>"))
+        || prompt.contains(&format!("{WAKING_KIND_TAG}answer\"/>"))
+        || crate::cloud::peer_mailbox::parse_envelope(prompt)
+            .is_some_and(|peer| matches!(peer.kind, Some(Ask | Answer | Blocker)))
 }
 
 fn wants_wake_text(prompt: &str) -> bool {
@@ -263,13 +285,16 @@ pub(crate) fn schedule(
         let Ok(deadline) = DateTime::parse_from_rfc3339(&row.deadline) else { continue };
         let deadline = deadline.with_timezone(&Utc);
         let Some(sender) = sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents) else { continue };
-        if wants_wake_text(&row.prompt) && !pair_capped(&sender)? {
+        if wants_wake_text(&row.prompt) && (waking_kind(&row.prompt) || !pair_capped(&sender)?) {
             inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
         }
     }
     drop(conn);
+    let held = |row: &QueuedPrompt, sender: &String| {
+        capped[sender] && wants_wake(row) && !waking_kind(&row.prompt)
+    };
     for (row, sender) in &candidates {
-        if capped[sender] && wants_wake(row) {
+        if held(row, sender) {
             let notice = format!(
                 "Wake cap: messages from {} to {supervisor} reached {cap} wakes/hour. Batched into this turn; read the pending messages before replying.",
                 row.source
@@ -291,16 +316,20 @@ pub(crate) fn schedule(
     }
     let wakers: Vec<_> = candidates
         .iter()
-        .filter(|(row, sender)| wants_wake(row) && !capped[sender])
+        .filter(|(row, sender)| wants_wake(row) && !held(row, sender))
         .collect();
-    let deadline = wakers.iter().map(|(row, _)| row.created_at + debounce)
+    let deadline = wakers
+        .iter()
+        .map(|(row, _)| {
+            row.created_at + if waking_kind(&row.prompt) { chrono::Duration::zero() } else { debounce }
+        })
         .chain(inherited_deadline).min();
     let due = deadline.is_some_and(|deadline| now >= deadline);
     let ids: HashSet<_> = candidates.iter().map(|(row, _)| row.id).collect();
     rows.retain(|row| !ids.contains(&row.id));
     if !due {
         for (row, sender) in &candidates {
-            let (detail, recheck) = if capped[sender] && wants_wake(row) {
+            let (detail, recheck) = if held(row, sender) {
                 (
                     "directed supervisor message held by sender-pair wake cap",
                     now + chrono::Duration::minutes(1),
@@ -353,7 +382,7 @@ pub(crate) fn schedule(
             } else if lead_id.is_some() {
                 passengers.push(row.clone());
             }
-        } else if wants_wake(row) && !capped[sender] {
+        } else if wants_wake(row) && !held(row, sender) {
             facts.entry(row.id).or_default().message_senders = vec![sender.clone()];
             rows.push(row.clone());
         }
@@ -691,9 +720,12 @@ mod tests {
                 "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
                 Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
             ).unwrap().id();
-            let blocker = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_blocker_envelope(
-                "A decision is required", &peer.name, None,
-            ));
+            // cas-922d: a blocker skips the debounce, so it would make the
+            // batch due and leave nothing to park in the park-failure case.
+            let blocker = (failure != "park").then(|| enqueue(&cas, &peer,
+                &crate::prompt_revalidation::attach_blocker_envelope(
+                    "A decision is required", &peer.name, None,
+                )));
             let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
                 "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
                     task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
@@ -735,7 +767,7 @@ mod tests {
                 warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later + Duration::from_secs(1));
                 selected
             });
-            for id in [ordinary, lifecycle, blocker, merge] {
+            for id in [Some(ordinary), Some(lifecycle), blocker, Some(merge)].into_iter().flatten() {
                 assert!(selected.rows.iter().any(|row| row.id == id),
                     "{failure}: batching failure must not lose selected row #{id}");
                 assert!(selected.facts[&id].message_batch.is_empty());

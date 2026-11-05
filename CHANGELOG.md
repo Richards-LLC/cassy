@@ -7,6 +7,41 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-11-05
+
+### Fixed — Peer supervisor messages
+
+- **Untyped peer messages wake the peer again** — A supervisor message to a peer supervisor (another machine, another project, or both) that named no `kind` was stamped as a quiet receipt, so asks, ETA questions and urgent requests waited unread until the peer's next turn; one stalled a frozen, green release for seven hours. An untyped peer message is now an ask that wakes an idle peer, and an untyped reply is an answer that wakes the asker. Only an explicit `kind=receipt`, `kind=quiet`, `wake=false` or a bare acknowledgement stays quiet.
+
+## [4.0.2] - 2026-11-05
+
+### Fixed — Factory
+
+- **One pre-merge review per delivery** — A delivery's approval now stays valid when only the target branch moved and the merge result is unchanged. That covers a fast-forwarded local target and a merge-queue landing of the same tree, so the work is no longer reviewed twice and a worker's close no longer fails after a queue landing. The review is built on origin's tip when the local target lags. A target that diverged from origin is refused before any review starts. When candidate preparation fails, the error now names the full git command and its exit status instead of an empty message.
+- **One idle wake per delivery state** — The director no longer re-sends the same worker-idle wake every few seconds once a worker's delivery has merged. A read that misses the worker's state no longer counts as a change, and the last wake sent is saved so a daemon restart does not send it again. A finished background job is reported once. A task that has left the merge queue is no longer described as "close rejected (MERGE REQUIRED)".
+- **Fewer pointless wakes, and every turn has a role** — A worker's ejected merge-queue PR, and a merged delivery that only waits on the release verdict, no longer wake anyone. The supervisor no longer gets a "PR merged but task still awaiting merge" alarm for those deliveries, or a blocker-deadline alarm while the blocked worker has its own reminder set for that task. The friction ledger now counts merges, worker spawns, verifier launches and Codex code-mode checks and edits as actions, and records who woke each turn: background-task notifications go to the agent's own role, worker startup and watchdog nudges to the daemon, and other typed input to the terminal.
+- **Protected main stays clean** — Was: a protected-branch refusal without a pre-merge dispatch left an unpublished merge on local main. Now: both paths share guarded rollback and retain the source. Confirmed default-branch queues create or reuse an exact-source PR and enable auto-merge before attempting a local merge.
+- **Merge auto-retry follows the newest CI run** — When a push cancels the CI run on a lane's last code commit, the automatic merge retry now waits on the new tip's running checks. Before, it stopped with "CI was cancelled and no replacement check is running" and blocked the worker while the replacement run was still going.
+- **Reuse the queue proof at close** — Was: direct-to-main deliveries needed a supervisor to repeat scoped tests after the merge queue had proved their tree. Now: close verifies the successful queue run and its exact landed tree, discovered from the recorded landing or cited by run ID, while retaining the risk, content, CI and QA gates.
+
+### Changed — Session start
+
+- **Memories are fetched on demand** — Session start no longer pre-ranks memories. It used to list "Helpful Memories" and "Related to Current Work", but those lists were cut for space in every measured worker session and were never opened. Session start now shows one line pointing to `search action=context`, which returns the full ranked list when asked. Set `hooks.session_start_memories = true` to list them at start again. By default the friction ledger records no session-context memories, and the current handoff no longer counts as one.
+
+### Fixed — Release
+
+- **One heading per changelog section** — When a release promotes several changelog fragments for the same area, their entries now share a single heading in first-seen order. Previously each fragment kept its own heading, and the duplicate headings failed the release PR's markdownlint check (MD024).
+- **Closes after a release keep their changelog entry** — Closing a delivery after a release has promoted its `changelog.d` fragment into CHANGELOG.md no longer fails with "delivery content dropped", so a supervisor override is no longer needed. Only the closing task's own fragment counts, or for an epic close a child task's fragment, and only when a `release: vX.Y.Z` commit added its lines to CHANGELOG.md. A fragment deleted by any other commit, or whose entry later leaves CHANGELOG.md, is still refused.
+
+### Fixed — Commander
+
+- **Finish waits for your supervisor** — Background shell output no longer makes an idle supervisor refuse Finish. During a model turn, Finish waits in the command queue and runs when the turn ends and the native prompt is empty. Commander keeps watching queued commands and shows the supervisor's reply.
+- **Pairing refuses the Tailscale Serve shim** — `cas hub pair` now refuses an origin or hub URL that points at the hub's Tailscale Serve shim (for example `127.0.0.1:34501`), before minting an invitation. It names the hub origin to pair with locally and the Tailscale URL for other devices. Previously the pairing succeeded but every Commander call returned 401. `cas hub status` now prints the local `cas hub pair` command and labels the shim port.
+
+### Fixed — Sessions
+
+- **/finish leaves nothing running, and the session can end** — /finish now stops the background shells, monitors, workflows, servers and reminders the session started and lists them, so Claude Code's exit no longer stops to ask about leftover background tasks. A session whose handoff names each task it still holds may now end with those tasks left open for the next session, instead of being told to close them first.
+
 ## [4.0.1] - 2026-11-04
 
 ### Fixed — Factory

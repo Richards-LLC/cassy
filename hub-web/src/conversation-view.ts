@@ -2004,6 +2004,9 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
       const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
       return values.length > 0 && values.every(evidence);
     });
+    // One alignment per column, header included: the rule's, else right only for
+    // an all-numeric column. Per-cell alignment zig-zagged mixed columns (cas-72ff).
+    const alignments = evidenceColumns.map((numeric, index) => block.table.align?.[index] ?? (numeric ? "right" : "left"));
     const row = (cells: string[], head: boolean): HTMLElement => {
       const line = document.createElement("tr"); line.className = head ? "evi-row evi-head" : "evi-row";
       for (let index = 0; index < columns; index += 1) {
@@ -2012,7 +2015,8 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
         const header = head && text.trim() !== "";
         const cell = document.createElement(header ? "th" : "td"); if (header) cell.setAttribute("scope", "col");
         appendInline(document, cell, text);
-        if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
+        cell.dataset.align = alignments[index]!;
+        if (evidenceColumns[index]) cell.classList.add("evi-number");
         const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
         line.append(cell);
       }

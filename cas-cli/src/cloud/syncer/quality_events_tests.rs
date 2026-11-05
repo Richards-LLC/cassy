@@ -285,6 +285,17 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
                 });
             }
             emit(&root, "before turn");
+            // cas-87a2: Friction is local-only until Cloud knows the kind.
+            let friction = NewQualityEvent::new(
+                "friction|task|cas-87a2",
+                QualityPayload::Friction {
+                    source: cas_store::FrictionSource::Task,
+                    reference: "cas-87a2".into(),
+                    severity: None,
+                    project: None,
+                },
+            );
+            cas_store::record_quality_event(&root, &friction).unwrap();
             let turn = NewQualityEvent::new(
                 "native turn",
                 QualityPayload::Turn {
@@ -310,8 +321,12 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
             );
             assert_eq!(summary.pushed, 2, "both non-Turn rows must push");
             assert_eq!(cloud.0.lock().unwrap().rows.len(), 3);
+            assert!(
+                cloud.0.lock().unwrap().rows.iter().all(|row| row["kind"] != "friction"),
+                "Friction never reaches an endpoint that may not know it"
+            );
             let pending = cas_store::quality_events_after(&root, 0, 10).unwrap();
-            assert_eq!(pending.len(), 3, "the local outbox loses no events");
+            assert_eq!(pending.len(), 4, "the local outbox loses no events");
             assert_eq!(
                 pending
                     .iter()

@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **Fewer pointless wakes, and every turn has a role** — A worker's ejected merge-queue PR, and a merged delivery that only waits on the release verdict, no longer wake anyone. The supervisor no longer gets a "PR merged but task still awaiting merge" alarm for those deliveries, or a blocker-deadline alarm while the blocked worker has its own reminder set for that task. The friction ledger now counts merges, worker spawns, verifier launches and Codex code-mode checks and edits as actions, and records who woke each turn: background-task notifications go to the agent's own role, worker startup and watchdog nudges to the daemon, and other typed input to the terminal.

@@ -1080,6 +1080,21 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A confirmed publication shares a portable approval through the existing project
+peer mailbox. The daemon checks the Cloud-stamped sender against the project
+supervisor registry, matches the task/source/candidate/landing, and atomically
+imports a peer-attested dispatch and verdict into the receiving store. Repository
+paths are rebound locally; acknowledging or retiring a prompt never removes the
+proof. Generic verification writes cannot claim peer authority, and replay cannot
+replace an existing cycle or revive a reopened delivery. Publication sharing is best-effort: a failed peer never changes confirmed
+publication, other peers are still attempted, and the task records the failure.
+A later publication retry can recover its abandoned outbox send with the same
+logical identity. Receipts must explicitly say approved. Permanent refusals
+(malformed, unauthorized, stale, closed or an existing local proof cycle) are
+acknowledged as rejected; only transient store, sync, registry or transport
+availability failures remain unacknowledged for retry.
+
+
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
@@ -2817,13 +2832,14 @@ The from-main full gate still reuses no row cache, sweep receipt or row proof
 (cas-846f), and refuses `--reuse` and `--only`. It reuses only the recorded
 integration proof, through `CAS_RELEASE_GATE_INTEGRATION_PROOF`. A
 `merge-queue` proof stands for the rows the queue ran: `ci-script-tests`,
-`hub-web-tests`, `hub-web-dist-drift`, `hub-web-visual-qa`, `macos-check`,
+`hub-web-tests`, `hub-web-dist-drift`, `hub-web-visual-qa`,
 `fixture-paths`, `nextest`, `doctests` and `archive-mode`. The gate's offline
 `assembly-proof.py check-merge-queue` revalidates the receipt: same repository
 and code input, under 24 hours old, the queue-proved commit's tree and code
 input, and that commit an ancestor of HEAD. An `assembly` proof stands for its
-three rows (`ci-script-tests`, `nextest`, `archive-mode`). Every other row runs
-fresh, including the version-delta rows: `workspace-tests` (the compile check of
+three rows (`ci-script-tests`, `nextest`, `archive-mode`). The queue no longer
+proves `macos-check`; the standalone gate runs its own macOS proof. Every other
+row runs fresh, including the version-delta rows: `workspace-tests` (the compile check of
 the bumped manifests and lock), `release-binary-isa`, `builtin-projections`,
 `snapshot-portability`, `version-literals` and `changelog-and-versions`. A
 receipt miss prints `MISS merge-queue key=…` and runs that row fresh.
@@ -3248,7 +3264,7 @@ builds reuse their private Cargo target without a compiler-cache daemon.
 
 Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
-only the required Fast Validation and macOS Check admission lanes. The release
+the required Fast Validation admission lane and an advisory macOS notice. The release
 merge queue runs the complete workspace suite on its synthetic tree once. Only
 at this queue stage, `scripts/ci-queue-flakes.py run` reruns the exact failed Rust
 tests or failed journey specs once in the same job on the same tracked tree.
@@ -3285,13 +3301,15 @@ only a throwaway-branch workflow proof using synthetic native runner fixtures;
 normal script tests use local HTTP fixtures and never create live issues.
 
 When the queue's successful tree is pushed unchanged to main, the main-push Fast Validation lane
-reuses that receipt and names the validating run. The main-push macOS Check
-still runs, after the merge, because only main's Darwin cargo and sccache entries
-are readable by later queue entries. Without them every queue entry compiled
-cold, taking 12–14 minutes and making macOS the queue's slowest required check.
-The trade-off is one post-merge macOS compile per Rust-touching main push.
-Only main saves the macOS cargo cache, so queue and tag refs don't evict it
-(see [branch protection](../../docs/branch-protection/README.md#macos-check-latency-a-warm-cache-from-main)).
+reuses that receipt and names the validating run. `macOS Check` is advisory and
+never runs on `merge_group` (cas-04c3): GitHub-hosted runner non-acquisition
+must not eject a green release. Its existing non-queue routes remain: a cheap
+protected-PR notice, main-push Darwin cache maintenance, tag pushes, schedules
+and dispatches. On a queue-proven main tree, a dependency-cache hit skips Cargo;
+a miss compiles to seed the cache. This does not prove every landed source change
+on Darwin. Release Prebuild's `build-macos` remains the pre-publish macOS proof;
+its queue builds are non-required and publication still requires packaged-asset
+audits (see the [release-flow map](../../docs/ci/release-fast-publication.md)).
 Direct pushes, bypass merges, receipt lookup failures, and changed trees still
 run every lane. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
@@ -3304,8 +3322,8 @@ diffs (paths under `docs/` or Markdown files outside embedded
 `cas-cli/src/` content) on pull-request, push, and merge-group events route
 only to the `Docs Lint` job; it runs Markdown lint, validates any changed
 release-note drafts, and checks that generated AGENTS.md files are current.
-The existing required Fast Validation and macOS Check
-contexts remain present and skip their full work for that class. Mixed and
+The required Fast Validation context remains present and skips its full work
+for that class; the advisory macOS job is skipped. Mixed and
 code diffs keep the full required tier.
 
 ### Build profiles and the binary
@@ -3770,9 +3788,16 @@ Standalone named journeys use the same scratch builder, defaulting to ignored
 Background reuse keys include the source/build inputs and retain the original
 build provenance rather than rebinding a snapshot to a different source tip.
 
-The integration owner still rebuilds merged sources into committed dist for the
-release. The merge queue proves that integrated tree through its existing
-Commander checks; this adds no CI stage or duplicate gate.
+The integration owner produces and commits canonical dist in `scripts/release.sh`
+preparation, after merging sources and setting the release version. The queue's
+existing Commander build requires committed-output equality for version changes,
+dist changes, or unreadable base/version inputs. A proven unchanged-version,
+unchanged-dist source-only lane builds and tests without requiring generated
+commits. A version-only change selects the same Commander step even with no web
+path diff, so omitting release bundle generation still rejects stale assets.
+Journey manifests bind scratch proof to its source/hash; final release equality
+binds that source output to the committed assets embedded by the prebuild and
+adopted by commit/tree. This adds no CI stage or duplicate gate.
 
 ### Test shape and runner evidence
 
@@ -3821,8 +3846,9 @@ build, visual QA, dist drift and journeys) is narrower: `scripts/classify-web-in
 lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
 worker-memory wrapper with its imports, and the classifier itself. Any other
 `scripts/` or `.github/` change skips them, including a `.github/workflows/ci.yml`
-edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead; a
-classifier failure runs them.
+edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead.
+Release-version changes and unreadable versions also select the existing web
+checks, because the bundle embeds that version; a classifier failure runs them.
 `scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
 the list omits. Markdown fixtures beneath hub-web still require web tests. The
 scoped lane and merge queue select web checks from their changed inputs.

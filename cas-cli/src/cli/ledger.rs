@@ -19,7 +19,7 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print wakes, usage, interventions, speed, escapes and feature verdicts for a release
+    /// Print wakes, usage, interventions, speed, escapes, friction found and feature verdicts for a release
     Report {
         /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
@@ -28,7 +28,7 @@ enum LedgerCommand {
         #[arg(long)]
         offline: bool,
     },
-    /// Turn history already on disk into events (safe to rerun)
+    /// Turn history already on disk into events, including filed Cassy problems (safe to rerun)
     Backfill {
         /// How many days of task notes and verifications to read
         #[arg(long, default_value_t = 30)]
@@ -58,12 +58,33 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
             }
         }
         LedgerCommand::Backfill { days } => {
-            let inserted =
-                crate::quality_ledger::backfill(cas_root, Utc::now() - Duration::days(*days))?;
+            let since = Utc::now() - Duration::days(*days);
+            let inserted = crate::quality_ledger::backfill(cas_root, since)?;
+            let gh = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| std::path::PathBuf::from("gh"), std::path::PathBuf::from);
+            let friction = crate::quality_ledger::backfill_friction(cas_root, since, &gh)?;
             if cli.json {
-                println!("{}", serde_json::json!({ "inserted": inserted }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "inserted": inserted + friction.tasks + friction.issues,
+                        "friction_tasks": friction.tasks,
+                        "friction_issues": friction.issues,
+                        "friction_issues_skipped": friction.issues_skipped,
+                    })
+                );
             } else {
                 println!("Recorded {inserted} events from the last {days} days of history.");
+                println!(
+                    "Recorded {} friction row(s): {} Cassy bug task(s), {} Cassy issue(s).",
+                    friction.tasks + friction.issues,
+                    friction.tasks,
+                    friction.issues
+                );
+                if let Some(reason) = &friction.issues_skipped {
+                    println!("Cassy issues skipped: {reason}");
+                }
             }
         }
         LedgerCommand::RecordRelease { receipt } => {
@@ -477,6 +498,19 @@ struct EscapeRow {
     missed_stage: Option<String>,
 }
 
+/// One identified Cassy problem and where it stands now (cas-87a2).
+#[derive(Debug, Serialize)]
+struct FrictionRow {
+    reference: String,
+    severity: Option<String>,
+    title: Option<String>,
+    project: Option<String>,
+    link: Option<String>,
+    /// open, in progress, blocked, awaiting merge, fixed, closed, cancelled or filed.
+    state: &'static str,
+    status: String,
+}
+
 #[derive(Debug, Default, Serialize)]
 struct CheckRow {
     pass: u32,
@@ -531,6 +565,7 @@ struct LedgerReport {
     checks: BTreeMap<String, CheckRow>,
     features: BTreeMap<String, FeatureRow>,
     excluded_unscoped_measurements: usize,
+    friction: Vec<FrictionRow>,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -605,7 +640,86 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         report.main_to_published_minutes,
         published_at,
     );
+    report.friction = friction_rows(cas_root, repo, &events);
     Ok(report)
+}
+
+/// Where a task stands: `fixed in vX` once a release tag holds its delivery.
+fn task_state(repo: &Path, task: &cas_types::Task) -> (&'static str, String) {
+    use cas_types::TaskStatus;
+    match task.status {
+        TaskStatus::Closed => crate::issue_reconcile::delivery_commits(task)
+            .into_iter()
+            .find_map(|sha| crate::issue_reconcile::release_tag_containing(repo, sha))
+            .map_or(("closed", "closed, not in a release yet".to_string()), |tag| {
+                ("fixed", format!("fixed in {tag}"))
+            }),
+        TaskStatus::Open => ("open", "open".into()),
+        TaskStatus::InProgress => ("in progress", "in progress".into()),
+        TaskStatus::Blocked => ("blocked", "blocked".into()),
+        TaskStatus::AwaitingMerge => ("awaiting merge", "awaiting merge".into()),
+        TaskStatus::Cancelled => ("cancelled", "cancelled".into()),
+    }
+}
+
+/// cas-87a2: every identified problem in the window with its found→fixed
+/// status. An issue whose local task has its own row is counted once.
+fn friction_rows(cas_root: &Path, repo: &Path, events: &[QualityEvent]) -> Vec<FrictionRow> {
+    use cas_store::FrictionSource;
+    let tasks: BTreeMap<String, cas_types::Task> = crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .map(|tasks| tasks.into_iter().map(|task| (task.id.clone(), task)).collect())
+        .unwrap_or_default();
+    let default_repo = crate::github_issue_attach::default_repo_for(cas_root);
+    let task_rows: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            QualityPayload::Friction { source: FrictionSource::Task, reference, .. }
+                if event.project_id.is_empty() => Some(reference.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for event in events {
+        let QualityPayload::Friction { source, reference, severity, project } = &event.payload
+        else {
+            continue;
+        };
+        let (state, status) = if !event.project_id.is_empty() {
+            ("filed", format!("reported by {}", event.project_id))
+        } else if *source == FrictionSource::Task {
+            tasks.get(reference).map_or(("filed", "task not found here".into()), |task| {
+                task_state(repo, task)
+            })
+        } else {
+            let fixing = tasks.values().find(|task| {
+                crate::issue_reconcile::task_issue_refs(task, default_repo.as_deref())
+                    .iter()
+                    .any(|issue| {
+                        format!("{}/{}/issues/{}", issue.owner, issue.repo, issue.number)
+                            .eq_ignore_ascii_case(reference)
+                    })
+            });
+            if fixing.is_some_and(|task| task_rows.contains(&task.id.as_str())) {
+                continue;
+            }
+            fixing.map_or(("filed", "filed; no task here yet".into()), |task| {
+                let (state, status) = task_state(repo, task);
+                (state, format!("{status} ({})", task.id))
+            })
+        };
+        rows.push(FrictionRow {
+            reference: reference.clone(),
+            severity: severity.clone(),
+            title: event.title.clone(),
+            project: project.clone(),
+            link: event.link.clone(),
+            state,
+            status,
+        });
+    }
+    rows
 }
 
 fn project_name(event: &QualityEvent) -> String {
@@ -650,6 +764,7 @@ fn aggregate(
         checks: BTreeMap::new(),
         features: BTreeMap::new(),
         excluded_unscoped_measurements: 0,
+        friction: Vec::new(),
     };
     for event in events {
         let project = project_name(event);
@@ -700,6 +815,8 @@ fn aggregate(
                     report.ejections = *ejections;
                 }
             }
+            // Status needs the task store; build_report resolves these rows.
+            QualityPayload::Friction { .. } => {}
             QualityPayload::FeatureFeedback { feature, verdict, source, injected, opened, used } => {
                 // Old backfills dated lifetime totals as new measured rows.
                 // Their keys were hashed and the rows may already be synced, so
@@ -813,6 +930,25 @@ fn render(report: &LedgerReport) -> String {
             escape.found_in,
             escape.missed_stage.as_deref().unwrap_or("unknown stage"),
             escape.project,
+        );
+    }
+
+    let mut states: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for row in &report.friction {
+        *states.entry(row.state).or_default() += 1;
+    }
+    let _ = writeln!(out, "\nFriction found: {}", report.friction.len());
+    if !states.is_empty() {
+        let _ = writeln!(out, "  {}", tally(&states));
+    }
+    for row in &report.friction {
+        let severity = row.severity.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  {}{severity} {}: {}",
+            row.reference,
+            row.title.as_deref().unwrap_or("untitled"),
+            row.status,
         );
     }
 
@@ -996,6 +1132,81 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected}:\n{text}");
         }
+    }
+
+    /// cas-87a2: filed Cassy problems become friction rows, a rerun adds none,
+    /// and the report shows each with its found→fixed status. An issue whose
+    /// local task has its own row counts once; feature requests are not friction.
+    #[test]
+    fn friction_backfill_and_report_show_found_to_fixed() {
+        use cas_types::{Priority, Task, TaskStatus, TaskType};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("cas-cli")).unwrap();
+        std::fs::write(repo.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        let commit = Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-q", "--allow-empty", "-m", "fix"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.test")
+            .env("GIT_AUTHOR_DATE", "2026-10-01T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-01T12:00:00Z")
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        git_in(repo, &["tag", "v1.0.0"]);
+        let fix = git(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        let mut config = crate::config::Config::load(&cas_root).unwrap_or_default();
+        config.set("issues.components.cassy", "owner/cassy").unwrap();
+        config.save(&cas_root).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut fixed = Task::new("cas-f1x".into(), "Shutdown loses work".into());
+        fixed.task_type = TaskType::Bug;
+        fixed.priority = Priority(0);
+        fixed.status = TaskStatus::Closed;
+        fixed.deliverables.merge_commit = Some(fix);
+        let mut open = Task::new("cas-0pen".into(), "Status lies (owner/cassy#7)".into());
+        open.task_type = TaskType::Bug;
+        let feature = Task::new("cas-feat".into(), "A new idea".into());
+        for task in [&fixed, &open, &feature] {
+            store.add(task).unwrap();
+        }
+
+        let since = Utc::now() - Duration::days(30);
+        let missing = crate::quality_ledger::backfill_friction(&cas_root, since, Path::new("/nonexistent/gh")).unwrap();
+        assert_eq!((missing.tasks, missing.issues), (2, 0));
+        assert!(missing.issues_skipped.is_some_and(|reason| reason.contains("gh issue list")));
+
+        let created = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let issues = format!(
+            r#"[{{"url":"https://github.com/owner/cassy/issues/7","title":"Status lies","createdAt":"{created}","labels":[]}},
+               {{"url":"https://github.com/owner/cassy/issues/8","title":"Exit strands commits","createdAt":"{created}","labels":[{{"name":"bug"}}]}},
+               {{"url":"https://github.com/owner/cassy/issues/9","title":"Wish","createdAt":"{created}","labels":[{{"name":"enhancement"}}]}}]"#
+        );
+        let gh = repo.join("fake-gh");
+        std::fs::write(repo.join("issues.json"), issues).unwrap();
+        std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", repo.join("issues.json").display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = crate::quality_ledger::backfill_friction(&cas_root, since, &gh).unwrap();
+        assert_eq!(found, crate::quality_ledger::FrictionBackfill { tasks: 0, issues: 2, issues_skipped: None });
+        assert_eq!(crate::quality_ledger::backfill_friction(&cas_root, since, &gh).unwrap().issues, 0);
+
+        let report = build_report(&cas_root, repo, None).unwrap();
+        let text = render(&report);
+        assert!(text.contains("Friction found: 3"), "{text}");
+        assert!(text.contains("cas-f1x [p0] Shutdown loses work: fixed in v1.0.0"), "{text}");
+        assert!(text.contains("cas-0pen [p2]"), "{text}");
+        assert!(text.contains("owner/cassy/issues/8 Exit strands commits: filed; no task here yet"), "{text}");
+        assert!(!text.contains("issues/7 ") && !text.contains("issues/9"), "{text}");
+        assert!(text.contains("filed 1, fixed 1, open 1"), "{text}");
     }
 
     /// The train's receipt becomes a release event, and the report for that

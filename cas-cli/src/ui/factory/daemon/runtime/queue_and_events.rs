@@ -2605,6 +2605,26 @@ pub(crate) const COMMANDER_PANE_HOLD: &str = "Held: your pane draft is unsent";
 pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2 * 60);
 
+/// cas-73f7: how long an urgent row waits for the recipient's in-flight tool
+/// call to end before it interrupts anyway, and what the hold and the late
+/// interrupt say.
+pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
+    "urgent held: recipient has a tool call in flight; surfaces when the call ends";
+pub(super) const URGENT_TOOL_CALL_NOTICE: &str =
+    "Cassy interrupted your in-flight tool call to deliver this; this was not the operator.\n\n";
+
+/// cas-73f7: first recheck of a declined supervisor wake. Doubles per
+/// consecutive decline, capped at [`DECLINED_WAKE_RECHECK_MAX`] (cas-922d).
+pub(super) const DECLINED_WAKE_RECHECK_BASE: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const DECLINED_WAKE_RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(super) fn declined_wake_recheck(prior_declines: u32) -> std::time::Duration {
+    DECLINED_WAKE_RECHECK_BASE
+        .saturating_mul(1 << prior_declines.min(4))
+        .min(DECLINED_WAKE_RECHECK_MAX)
+}
+
 /// cas-d1659: whether a wake-starved row is escalated to the supervisor. A
 /// recipient still writing its transcript (or holding a tool call open, or
 /// still booting) is busy, not failed: its next turn start or tool call
@@ -7498,6 +7518,7 @@ impl FactoryDaemon {
     /// transcript evidence the ordinary policy decides. cas-e6d7: that
     /// evidence is a turn end seen after the last turn start; a read tail with
     /// no turn record (a turn longer than the read window) does not count.
+    /// cas-73f7: the same evidence now decides every supervisor wake row.
     pub fn supervisor_self_reminder_wake(
         pane_target: &str,
         supervisor_name: &str,
@@ -7508,7 +7529,7 @@ impl FactoryDaemon {
             return None;
         }
         Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
-            WakeDecision::allow("fired self-reminder to a supervisor whose transcript shows its turn ended")
+            WakeDecision::allow("supervisor transcript shows its turn ended; pane repaint is not work")
         }))
     }
 
@@ -10426,6 +10447,21 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
+                    // cas-922d: the cas-73f7 in-flight hold, per member. The
+                    // released claim lets this worker's hook surface the
+                    // broadcast when its call ends.
+                    let member_in_call = queued.urgent
+                        && self.prepared_tool_call_evidence(name) == ToolCallEvidence::InFlight;
+                    if member_in_call
+                        && chrono::Utc::now() - queued.created_at
+                            < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
+                    {
+                        self.queue_jobs.stamp(self.app.cas_dir(), queued.id, name,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
+                        tally.failed += 1;
+                        tally.notes.push(format!("{name}: {URGENT_TOOL_CALL_DETAIL}"));
+                        continue;
+                    }
                     tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
                         target_agent = %name, "Attempting prompt injection to '{}': {}", name,
                         queued.prompt.chars().take(50).collect::<String>());
@@ -10437,12 +10473,17 @@ impl FactoryDaemon {
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
                         let harness = self.app.harness_for(name);
+                        let member_prompt = if member_in_call {
+                            format!("{URGENT_TOOL_CALL_NOTICE}{prompt_with_instructions}")
+                        } else {
+                            prompt_with_instructions.clone()
+                        };
                         let payload = super::delivery::prepare_pty_machine_delivery(
                             self.app.cas_dir(),
                             name,
                             harness,
                             &inbox_source,
-                            &prompt_with_instructions,
+                            &member_prompt,
                             Some(queued.id),
                         );
                         let settle = self.urgent_settle_duration(name);
@@ -10592,7 +10633,19 @@ impl FactoryDaemon {
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
                             // cas-c0d0 (GH #1246): the supervisor's own fired reminder.
-                            self_addressed_reminder(&queued)
+                            // cas-73f7: and every other supervisor wake row (peer
+                            // ask, directed message, lifecycle). An idle Claude
+                            // supervisor with a background task repaints, so the
+                            // 2 s silence bar held peer ask 4226945 for 76 s.
+                            // Verified operator text keeps its own path.
+                            (self_addressed_reminder(&queued)
+                                || (wake_sender != WakeSender::Operator
+                                    && Self::row_is_supervisor_wake(
+                                        &wake_sender,
+                                        self.app.supervisor_name(),
+                                        &queued.source,
+                                        &queued.prompt,
+                                    )))
                                 .then(|| {
                                     Self::supervisor_self_reminder_wake(
                                         &pane_target,
@@ -10659,12 +10712,25 @@ impl FactoryDaemon {
                     if pane_state.composer_dirty {
                         self.note_operator_draft_hold(&queued, &pane_target);
                     }
+                    // cas-73f7: the in-memory re-offer below decides on the
+                    // transcript snapshot taken at this decline, so it never
+                    // sees the turn end. A declined wake comes back to fresh
+                    // selection on a short backoff; a draft waits for the
+                    // composer to clear, as before.
+                    let recheck = if wake_decision.kind == WakeOutcome::DeclinedByPolicy
+                        && !pane_state.composer_dirty
+                    {
+                        declined_wake_recheck(facts.wake_gate.map_or(0, |(declines, _)| declines))
+                    } else {
+                        BUSY_RECIPIENT_RECHECK_INTERVAL
+                    };
+                    let recheck_at = chrono::Utc::now() + chrono::Duration::from_std(recheck).unwrap();
                     for (member, token) in &batch_claims {
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
                         self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
                             super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: pending_detail.clone(),
-                                recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
+                                recheck_at });
                         self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
                     }
                     // No transport admission, cadence spend or attempt: keep the
@@ -10676,13 +10742,41 @@ impl FactoryDaemon {
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::ParkBusy {
                             detail: pending_detail,
-                            recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
+                            recheck_at,
                         });
                     self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                     tracing::info!(target: "cas::coordination", stage = "inline_wake_parked",
                         message_id = queued.id, target_agent = %pane_target, reason = wake_decision.reason,
                         "inline body parked until recipient turn end or bounded recheck");
                     continue;
+                }
+                // cas-73f7: an urgent break (Esc) into an in-flight tool call
+                // reads to Claude as the operator rejecting it. Hold the row,
+                // claim released, so the recipient's hook surfaces it when
+                // the call ends; past the bound, interrupt and say who did.
+                let urgent_into_tool_call = queued.urgent
+                    && self.prepared_tool_call_evidence(&pane_target) == ToolCallEvidence::InFlight;
+                if urgent_into_tool_call
+                    && chrono::Utc::now() - queued.created_at
+                        < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
+                {
+                    let recheck_at = chrono::Utc::now()
+                        + chrono::Duration::from_std(DECLINED_WAKE_RECHECK_BASE / 2).unwrap();
+                    for (member, token) in batch_claims.iter().map(|(member, token)| (member.clone(), *token))
+                        .chain(std::iter::once((queued.clone(), claim_token)))
+                    {
+                        self.queue_jobs.stamp(self.app.cas_dir(), member.id, &member.target,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: token });
+                        self.queue_jobs.stamp(self.app.cas_dir(), member.id, &member.target,
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                                detail: URGENT_TOOL_CALL_DETAIL.into(),
+                                recheck_at,
+                            });
+                    }
+                    continue;
+                }
+                if urgent_into_tool_call {
+                    prompt_with_instructions.insert_str(0, URGENT_TOOL_CALL_NOTICE);
                 }
                 let inject_generation = match self.queue_jobs.admit_claimed(
                     self.app.cas_dir(),
@@ -22573,7 +22667,7 @@ mod delivery_probe_tests;
 
 #[cfg(test)]
 #[path = "reminder_dispatch_tests.rs"]
-mod reminder_dispatch_tests;
+pub(crate) mod reminder_dispatch_tests;
 
 #[cfg(test)]
 #[path = "relay_retry_exhaustion_tests.rs"]

@@ -85,7 +85,9 @@ cas-4cb8 implements this with the release train's own full-gate receipt rather
 than the PR run's: a `cas/full-gate` status on the proven SHA, naming its tree.
 On a matching queue tree, the suite, doctests and gate-covered preflight
 steps are skipped. The Commander journeys (no full-gate row), the compile
-checks and `macOS Check` still run. The branch-protection review is section 3 of
+checks still run. The November 4 operator decision (cas-04c3) subsequently
+removed `macOS Check` from merge-group events and the required set; Release
+Prebuild retains pre-publish macOS proof. The branch-protection review is section 3 of
 `docs/branch-protection/README.md`.
 
 cas-9f70 closes the journeys gap. Suppose the supervisor's full journey-eval

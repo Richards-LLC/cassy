@@ -207,11 +207,11 @@ describe("threadModel", () => {
 });
 
 describe("messageBlocks", () => {
-  it("splits prose from a markdown table and reads the header rule", () => {
-    const blocks = messageBlocks("Yes — pass two is green. Every pack:\n\n| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |\n\nTagged and pushed.");
+  it("splits prose from a markdown table and reads the header rule and its alignment", () => {
+    const blocks = messageBlocks("Yes — pass two is green. Every pack:\n\n| pack | cases | result |\n| :-- | ---: | :--: |\n| core | 412 | pass |\n| cli | 318 | 1 flake |\n\nTagged and pushed.");
     expect(blocks).toEqual([
       { type: "text", text: "Yes — pass two is green. Every pack:" },
-      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]] }, source: "| pack | cases | result |\n| --- | ---: | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |" },
+      { type: "table", table: { header: ["pack", "cases", "result"], rows: [["core", "412", "pass"], ["cli", "318", "1 flake"]], align: ["left", "right", "center"] }, source: "| pack | cases | result |\n| :-- | ---: | :--: |\n| core | 412 | pass |\n| cli | 318 | 1 flake |" },
       { type: "text", text: "Tagged and pushed." },
     ]);
   });

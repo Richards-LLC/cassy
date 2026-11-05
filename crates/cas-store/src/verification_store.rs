@@ -4234,6 +4234,9 @@ mod tests {
         )
         .expect("sealed handoff");
         assert!(handoff.id.starts_with(SERVER_HANDOFF_ID_PREFIX));
+        assert!(handoff.expires_at > dispatch.deadline_at,
+            "official credential TTL must outlive the shorter dispatch work deadline");
+        assert_eq!(handoff.expires_at, handoff.issued_at + Duration::minutes(VERIFIER_CAPABILITY_TTL_MINUTES));
         assert!(
             !serde_json::to_string(&handoff)
                 .expect("serialize")

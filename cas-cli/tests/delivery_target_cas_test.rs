@@ -529,6 +529,7 @@ async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
         ),
         ("late-child-superseded", "success", Some("approved"), false),
         ("late-child-changed", "success", Some("approved"), false),
+        ("late-child-capability-expired", "success", Some("approved"), false),
     ])
     .await;
 }
@@ -868,9 +869,21 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             )
             .unwrap();
             if row.starts_with("late-child") {
+                // Move the existing credential's clock by the same 12 minutes:
+                // its actual issuance TTL, not a fabricated expiry, must permit late work.
+                let issued_expiry: String = conn.query_row(
+                    "SELECT expires_at FROM verification_capabilities WHERE dispatch_id=?1",
+                    [&dispatch.id], |record| record.get(0),
+                ).unwrap();
+                let expires_at = if row == "late-child-capability-expired" {
+                    now - chrono::Duration::minutes(2)
+                } else {
+                    chrono::DateTime::parse_from_rfc3339(&issued_expiry).unwrap()
+                        .with_timezone(&chrono::Utc) - chrono::Duration::minutes(12)
+                };
                 conn.execute(
                     "UPDATE verification_capabilities SET issued_at=?2,bound_at=?2,expires_at=?3 WHERE dispatch_id=?1",
-                    rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), (now - chrono::Duration::minutes(2)).to_rfc3339()],
+                    rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), expires_at.to_rfc3339()],
                 ).unwrap();
             }
             drop(conn);
@@ -933,12 +946,13 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         };
         if matches!(
             row,
-            "late-child-superseded" | "late-child-changed" | "late-child-target-changed"
+            "late-child-superseded" | "late-child-changed" | "late-child-target-changed" | "late-child-capability-expired"
         ) {
             let refused =
-                result.expect_err("late authority cannot cross a changed or superseded candidate");
+                result.expect_err("late authority must refuse changed candidates or expired credentials");
             assert!(
-                refused.message.contains("superseded") || refused.message.contains("changed"),
+                refused.message.contains("superseded") || refused.message.contains("changed")
+                    || (row == "late-child-capability-expired" && refused.message.contains("expired")),
                 "{row}: {refused}"
             );
             assert!(

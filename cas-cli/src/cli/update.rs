@@ -2510,9 +2510,12 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
         Ok(report) if report.commit_error.is_some() => {
             ProjectPhase::Failed(report.commit_error.unwrap())
         }
-        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
-            "{} managed file conflict(s); run `cas update --sync --json`",
-            report.conflicts.len()
+        // cas-3199: a conflict skips the whole skill sync, so it is a failure,
+        // not a warning that lets the summary count the project as refreshed.
+        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Failed(format!(
+            "skills not synced: {} managed file conflict(s) ({}); run `cas update --sync --json`",
+            report.conflicts.len(),
+            report.conflicts.join(", ")
         )),
         Ok(report) if report.commit_warning.is_some() => {
             ProjectPhase::Warning(report.commit_warning.unwrap())
@@ -3171,13 +3174,20 @@ fn sync_claude_files_into(
     // because its rendered files are intentional tracked fixtures.
     let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
     let reconciliation =
-        match crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)? {
-            Some(plan) if plan.blocked() => {
-                report_managed_files(cli, &plan.report)?;
-                return Ok(plan.report);
-            }
-            plan => plan,
-        };
+        crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
+    // A worker's worktree sync shares this store; only the project's own sync
+    // owns the conflict record that SessionStart reports.
+    if _refresh_host_integration {
+        let conflicts = reconciliation.as_ref().map(|plan| plan.report.conflicts.as_slice());
+        crate::cli::project_files::record_conflicts(&cas_root, conflicts.unwrap_or_default())?;
+    }
+    let reconciliation = match reconciliation {
+        Some(plan) if plan.blocked() => {
+            report_managed_files(cli, &plan.report)?;
+            return Ok(plan.report);
+        }
+        plan => plan,
+    };
     // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
     if _refresh_host_integration {
@@ -3721,7 +3731,11 @@ fn sync_user_builtins_with_discovery(
     };
 
     // Named accounts and linked shared bases can outlive the retired default
-    // dirs. Refresh only finish here; their other configuration stays local.
+    // dirs. Every account profile links `skills` (and agents) to its shared
+    // base, and personal skills outrank project skills, so the bases get the
+    // full catalog (cas-3199: they sat frozen while only ~/.claude, which no
+    // account reads, was refreshed). Named accounts still get only finish;
+    // their other configuration stays local.
     let mut finish_accounts = Vec::new();
     let mut account_discovery_warnings = Vec::new();
     for (provider, harness) in [
@@ -3753,17 +3767,27 @@ fn sync_user_builtins_with_discovery(
             .collect();
         let base = provider.base_dir(&home);
         if base.is_dir() {
-            accounts.push(base);
+            accounts.push(base.clone());
         }
         for account in accounts {
-            let result = crate::builtins::sync_finish_builtins(harness, &account)?;
+            let shared_base = account == base;
+            let mut result = if shared_base {
+                crate::builtins::sync_all_builtins_for_harness(harness, &account)?
+            } else {
+                crate::builtins::sync_finish_builtins(harness, &account)?
+            };
+            if shared_base {
+                let orphans = prune_stale_user_skills_for_harness(harness, &account)?;
+                result.pruned_files.extend(orphans.into_iter().map(|name| format!("skills/{name}")));
+            }
             let preserved: Vec<_> = result.modified_reference_files.iter()
                 .chain(&result.skipped_files).map(String::as_str)
                 .chain((!result.warnings.is_empty()).then_some("skills/finish/SKILL.md"))
                 .collect();
             if !cli.json {
                 let location = format!("~/{}", account.strip_prefix(&home).unwrap_or(&account).display());
-                let receipt = format!("{location}: finish {} updated, {} preserved, {} removed", result.total_updated(), preserved.len(), result.pruned_files.len());
+                let scope = if shared_base { "built-ins" } else { "finish" };
+                let receipt = format!("{location}: {scope} {} updated, {} preserved, {} removed", result.total_updated(), preserved.len(), result.pruned_files.len());
                 let mut out = io::stdout();
                 let mut fmt = Formatter::stdout(&mut out, theme.clone());
                 let lines = wrap_builtin_receipt(&receipt, usize::from(fmt.width()).saturating_sub(4));
@@ -3772,7 +3796,7 @@ fn sync_user_builtins_with_discovery(
                 for warning in &result.warnings { report_builtin_advisory(warning, &theme)?; }
             }
             finish_accounts.push(serde_json::json!({
-                "path": account, "updated": result.total_updated(), "preserved": preserved,
+                "path": account, "full_catalog": shared_base, "updated": result.total_updated(), "preserved": preserved,
                 "removed": result.pruned_files, "warnings": result.warnings,
             }));
         }

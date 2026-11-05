@@ -327,8 +327,8 @@ invariants:
     check: 'Run the inspect images in a turn part of read-history.journey.ts at 390 and 1440 in light and dark, including three failed viewer-chunk clicks, a single note, failed decode, fully visible Try again without scrolling at 390x844, focus boundaries, wheel/drag, synthetic touch pinch and accessibility media captures. The attachment-sheet unit regression covers the same entry path, recovery and preserved scroll offset.'
     bug: {task: cas-3dd8}
   HUB-J4-READABLE-PROSE-TABLES:
-    statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, and wide tables scroll inside the message without widening the page.
-    check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
+    statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, each column takes one alignment for its header and cells (the markdown rule's, otherwise right only when every body cell is numeric), columns size to their content, and wide tables scroll inside the message without widening the page.
+    check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, # / What / Starts with C2/C3, and the operator''s mixed gabber supervisor / soundwave / prowl table, whose every cell starts flush left and whose table is narrower than the sheet at 1280, at 1280 and 390 in light and dark. The numeric-evidence and per-column alignment cases in conversation-view.test.ts keep numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
   HUB-J4-TABLE-COPY:
     statement: Evidence, including short status replies, uses native table headers and cells; adjacent plain progress stays quiet, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.
@@ -359,6 +359,10 @@ invariants:
     statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
     bug: {task: cas-fc10}
+  FACTORY-IDLE-STALE-ASSIGNMENT:
+    statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
+    check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
+    bug: {task: cas-8aa1}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'

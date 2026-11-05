@@ -97,7 +97,7 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     git(repo, &["checkout", "-q", "main"]);
 
     let cas_dir = repo.join(".cas");
-    std::fs::create_dir_all(&cas_dir).unwrap();
+    crate::store::init_cas_dir(repo).unwrap();
     env.set("CAS_ROOT", &cas_dir);
     env.set("CAS_FACTORY_MODE", "1");
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
@@ -398,7 +398,7 @@ async fn start_lists_close_requirements_and_park_reports_every_failure() {
     git(&f.worker_path, &["commit", "-qam", &format!("fix({ID}): local only")]);
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     let unpushed = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    for expected in ["is not on origin", "FOCUSED PROOF REQUIRED", &tip[..12]] {
+    for expected in ["is absent from the cached origin ref", "FOCUSED PROOF REQUIRED", &tip[..12]] {
         assert!(unpushed.contains(expected), "{expected}: {unpushed}");
     }
     assert_eq!(f.task().deliverables.factory_branch_anchor, anchor);
@@ -891,6 +891,265 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let closed = f.task();
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
+}
+
+/// cas-8f19d: a verdict belongs to the delivery, even when its verifier and
+/// the worker's close gate use separate stores and repository paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine_cas_8f19d() {
+    peer_premerge_case(PeerReceiptCase::Normal).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_premerge_publication_failures_are_best_effort_cas_8f19d() {
+    peer_premerge_case(PeerReceiptCase::PublicationFailures).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_premerge_nonapproved_verdict_is_refused_cas_8f19d() {
+    peer_premerge_case(PeerReceiptCase::Unapproved).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerReceiptCase { Normal, PublicationFailures, Unapproved }
+
+async fn peer_premerge_case(case: PeerReceiptCase) {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+
+    let reviewer = tempfile::tempdir().unwrap();
+    git(reviewer.path(), &["clone", "-q", f._origin.path().to_str().unwrap(), "."]);
+    git(reviewer.path(), &["config", "user.name", "CAS Test"]);
+    git(reviewer.path(), &["config", "user.email", "cas@example.test"]);
+    git(reviewer.path(), &["checkout", "-q", "-b", LANE, &format!("origin/{LANE}")]);
+    git(reviewer.path(), &["checkout", "-q", "main"]);
+    let remote_root = crate::store::init_cas_dir(reviewer.path()).unwrap();
+    std::fs::write(remote_root.join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
+    open_task_store(&remote_root).unwrap().add(&f.task()).unwrap();
+    let remote_agent = Agent::new_with_role("peer-supervisor".into(), "peer-supervisor".into(), AgentRole::Supervisor);
+    open_agent_store(&remote_root).unwrap().register(&remote_agent).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let remote = CasCore::with_daemon(remote_root.clone(), None, None);
+    remote.set_agent_id_for_testing(remote_agent.id.clone());
+    let preflight = remote.prepare_premerge_verification(&f.task(), reviewer.path(), LANE, "main");
+    assert!(preflight.is_err(), "review must precede publication");
+    let dispatch = cas_store::get_latest_verification_dispatch(&remote_root, ID).unwrap().unwrap();
+    let service = CasService::new(remote, None);
+    service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":ID, "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"reviewed on peer", "confidence":1.0,
+    })).unwrap())).await.unwrap();
+    let verdict = cas_store::get_verification_for_dispatch(&remote_root, &dispatch.id).unwrap().unwrap();
+    let candidate = crate::mcp::tools::core::workflow::premerge_verification::candidate_for_dispatch(&remote_root, &dispatch).unwrap().unwrap();
+    git(reviewer.path(), &["merge", "-q", "--no-ff", LANE, "-m", "merge reviewed lane"]);
+    git(reviewer.path(), &["push", "-q", "origin", "main"]);
+    let landed = git(reviewer.path(), &["rev-parse", "HEAD"]);
+    open_task_store(&f.cas_dir()).unwrap().record_merge_admission(ID, &landed, cas_types::MergeCiAdmission::Green).unwrap();
+    assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().is_none());
+
+    let server = MockServer::start().await;
+    let mut registry = serde_json::json!({"agents":[{
+            "id":remote_agent.id, "name":"peer-supervisor", "agent_type":"primary",
+            "status":"active", "machine_id":"peer-machine", "active_tasks":0,
+            "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"peer-factory"},
+        }, {
+            "id":"br-supervisor-session", "name":"supervisor", "agent_type":"primary",
+            "status":"active", "machine_id":"worker-machine", "active_tasks":0,
+            "last_heartbeat":chrono::Utc::now().to_rfc3339(),
+            "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"worker-factory"},
+        }]});
+    if case == PeerReceiptCase::PublicationFailures {
+        let mut blocked = registry["agents"][1].clone();
+        blocked["id"] = serde_json::json!("blocked-peer");
+        blocked["name"] = serde_json::json!("a-blocked-peer");
+        registry["agents"].as_array_mut().unwrap().push(blocked);
+    }
+    Mock::given(method("GET")).and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(registry)).mount(&server).await;
+    let fail_peer = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let response_failure = fail_peer.clone();
+    Mock::given(method("POST")).and(path("/api/peer-messages"))
+        .respond_with(move |request: &wiremock::Request| {
+            let send: crate::cloud::peer_mailbox::PeerSend = serde_json::from_slice(&request.body).unwrap();
+            if send.recipient_agent_id == "blocked-peer" && response_failure.load(std::sync::atomic::Ordering::SeqCst) {
+                ResponseTemplate::new(403).set_body_string("peer unavailable")
+            } else { ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"peer-proof-1", "status":"queued"})) }
+        }).mount(&server).await;
+    crate::cloud::CloudConfig {endpoint:server.uri(), token:Some("test-token".into()), ..Default::default()}
+        .save_to_cas_dir(&remote_root).unwrap();
+    let approval = crate::mcp::tools::core::workflow::premerge_verification::Approval {
+        candidate, dispatch_id:dispatch.id.clone(), verdict_id:verdict.id.clone(),
+    };
+    let operations = crate::worktree::GitOperations::new(reviewer.path().to_path_buf());
+    approval.promote(&landed).unwrap();
+    assert!(server.received_requests().await.unwrap().iter().all(|request| request.url.path() != "/api/peer-messages"), "local promotion alone cannot share authority");
+    // Both publication entry points must survive a failed peer, then recover
+    // the abandoned logical outbox send without duplicating the good peer.
+    tokio::task::block_in_place(|| {
+        approval.finish_publication(&operations, &crate::worktree::git::TargetPushOutcome::Pushed {sha:landed.clone()}, &landed)
+            .expect("peer sharing must never fail a confirmed publication");
+        approval.confirmed_publication(&operations)
+            .expect("an abandoned peer send must never wedge publication retry").unwrap();
+    });
+    if case == PeerReceiptCase::PublicationFailures {
+        let task = open_task_store(&remote_root).unwrap().get(ID).unwrap();
+        assert!(task.notes.contains("Peer approval sharing failed"), "{}", task.notes);
+        let attempts = server.received_requests().await.unwrap().into_iter().filter(|request| request.url.path() == "/api/peer-messages")
+            .map(|request| serde_json::from_slice::<crate::cloud::peer_mailbox::PeerSend>(&request.body).unwrap()).collect::<Vec<_>>();
+        assert!(attempts.iter().any(|send| send.recipient_agent_id == "br-supervisor-session"), "another peer must still receive proof");
+        fail_peer.store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::block_in_place(|| approval.confirmed_publication(&operations).unwrap().unwrap());
+        let attempts = server.received_requests().await.unwrap().into_iter().filter(|request| request.url.path() == "/api/peer-messages")
+            .map(|request| serde_json::from_slice::<crate::cloud::peer_mailbox::PeerSend>(&request.body).unwrap()).collect::<Vec<_>>();
+        let recovered = attempts.iter().filter(|send| send.recipient_agent_id == "blocked-peer").collect::<Vec<_>>();
+        assert_eq!(recovered.len(), 3, "the abandoned send is recoverable on later publication retries");
+        assert!(recovered.iter().all(|send| send.dedupe_key == recovered[0].dedupe_key), "retry keeps the logical Cloud identity");
+        assert_eq!(attempts.iter().filter(|send| send.recipient_agent_id == "br-supervisor-session").count(), 1);
+        return;
+    }
+    let sent = server.received_requests().await.unwrap().into_iter()
+        .find(|request| request.url.path() == "/api/peer-messages").expect("confirmed publication must send proof");
+    let sent: crate::cloud::peer_mailbox::PeerSend = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(sent.sender_agent_id, remote_agent.id);
+    assert_eq!(sent.recipient_agent_id, "br-supervisor-session");
+    let wire_body = sent.body;
+    let receipt: serde_json::Value = serde_json::from_str(wire_body.strip_prefix("CAS_PEER_PREMERGE_V1 ").unwrap()).unwrap();
+    let envelope = serde_json::json!({
+        "id":"peer-proof-1", "project_id":PROJECT, "recipient_agent_id":"br-supervisor-session",
+        "sender_agent_id":remote_agent.id, "sender_name":"peer-supervisor",
+        "sender_machine_id":"peer-machine", "sender_session":"peer-factory",
+        "body":wire_body, "created_at":chrono::Utc::now().to_rfc3339(),
+    });
+    let claimed = std::sync::Arc::new(std::sync::Mutex::new(envelope.clone()));
+    let response = claimed.clone();
+    Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+        .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"messages":[response.lock().unwrap().clone()]})))
+        .mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"peer-proof-1", "status":200}]})))
+        .mount(&server).await;
+    let mut recipient = open_agent_store(&f.cas_dir()).unwrap().get("br-supervisor-session").unwrap();
+    recipient.factory_session = Some("worker-factory".into());
+    recipient.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut recipient, std::process::id());
+    open_agent_store(&f.cas_dir()).unwrap().register(&recipient).unwrap();
+    crate::cloud::CloudConfig {endpoint:server.uri(), token:Some("test-token".into()), ..Default::default()}
+        .save_to_cas_dir(&f.cas_dir()).unwrap();
+    if case == PeerReceiptCase::Unapproved {
+        for status in [Some("rejected"), Some("skipped"), Some("error"), Some("pending"), Some("supervisor_call"), Some("future_status"), None] {
+            let mut payload = receipt.clone();
+            if let Some(status) = status { payload["status"] = serde_json::json!(status); }
+            else { payload.as_object_mut().unwrap().remove("status"); }
+            let mut bad = envelope.clone(); bad["body"] = serde_json::json!(format!("CAS_PEER_PREMERGE_V1 {}", payload));
+            *claimed.lock().unwrap() = bad;
+            let root = f.cas_dir();
+            let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+            assert!(report.errors.is_empty(), "permanent verdict refusal must be acknowledged: {:?}", report.errors);
+            assert_eq!(report.rejected, 1, "{status:?}: only an explicitly approved verdict is authority");
+            assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().is_none());
+            let requests = server.received_requests().await.unwrap();
+            let ack: serde_json::Value = serde_json::from_slice(&requests.iter().rev().find(|r| r.url.path() == "/api/peer-messages/ack").unwrap().body).unwrap();
+            assert_eq!(ack["acks"][0]["outcome"], "rejected");
+        }
+        return;
+    }
+    // Identity/candidate combinations share the same real mailbox boundary;
+    // none may create a dispatch or verdict in the worker's store.
+    for (field, value, in_body) in [
+        ("plan_digest", serde_json::json!("changed-plan"), true),
+        ("task_id", serde_json::json!("cas-wrong-task"), true),
+        ("source_sha", serde_json::json!(receipt["target_sha"]), true),
+        ("candidate_tree", serde_json::json!(tip), true),
+        ("landed_sha", serde_json::json!(receipt["target_sha"]), true),
+        ("supervisor_id", serde_json::json!("forged-supervisor"), true),
+        ("sender_agent_id", serde_json::json!("br-worker-session"), false),
+        ("sender_machine_id", serde_json::json!("forged-machine"), false),
+        ("sender_session", serde_json::json!("forged-session"), false),
+        ("scope", serde_json::json!("user"), false),
+    ] {
+        let mut bad = envelope.clone();
+        if in_body {
+            let mut payload = receipt.clone(); payload[field] = value;
+            bad["body"] = serde_json::json!(format!("CAS_PEER_PREMERGE_V1 {}", payload));
+        } else { bad[field] = value; }
+        *claimed.lock().unwrap() = bad;
+        let ack_count = server.received_requests().await.unwrap().iter().filter(|r| r.url.path() == "/api/peer-messages/ack").count();
+        let root = f.cas_dir();
+        let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        if field == "task_id" {
+            assert!(!report.errors.is_empty(), "an unsynced task is transient");
+            assert_eq!(requests.iter().filter(|r| r.url.path() == "/api/peer-messages/ack").count(), ack_count);
+        } else {
+            assert!(report.errors.is_empty(), "{field}: permanent refusal is not a retry: {:?}", report.errors);
+            assert_eq!(report.rejected, 1, "{field}");
+            let ack: serde_json::Value = serde_json::from_slice(&requests.iter().rev().find(|r| r.url.path() == "/api/peer-messages/ack").unwrap().body).unwrap();
+            assert_eq!(ack["acks"][0]["outcome"], "rejected", "{field}");
+        }
+        assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().is_none(), "{field}");
+        assert!(crate::store::open_verification_store(&f.cas_dir()).unwrap().get_latest_for_task(ID).unwrap().is_none(), "{field}");
+    }
+    *claimed.lock().unwrap() = envelope.clone();
+    for _ in 0..2 {
+        let root = f.cas_dir();
+        let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+    let imported = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap()
+        .expect("authenticated mailbox admission must persist the peer verdict independently of prompts");
+    assert_eq!(imported.state, cas_types::VerificationDispatchState::Resolved);
+    let local = cas_store::get_verification_for_dispatch(&f.cas_dir(), &imported.id).unwrap().unwrap();
+    assert_eq!(local.id, verdict.id);
+    assert_ne!(imported.repository.as_ref().unwrap().repository_root, dispatch.repository.as_ref().unwrap().repository_root);
+    // A changed duplicate must leave the admitted dispatch/verdict untouched.
+    let mut replay = receipt.clone(); replay["dispatch_id"] = serde_json::json!("vdispatch-forged-replay");
+    let mut bad = envelope.clone(); bad["body"] = serde_json::json!(format!("CAS_PEER_PREMERGE_V1 {}", replay));
+    *claimed.lock().unwrap() = bad;
+    let root = f.cas_dir();
+    let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.rejected, 1);
+    assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap(), imported);
+    assert_eq!(cas_store::get_verification_for_dispatch(&f.cas_dir(), &imported.id).unwrap().unwrap().id, local.id);
+    // Removing the receiving queue and all source-machine state cannot erase proof.
+    drop(service);
+    drop(reviewer);
+    let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+    for row in queue.peek_all(100).unwrap() {
+        if let Some(envelope) = crate::cloud::peer_mailbox::parse_envelope(&row.prompt) {
+            assert!(!envelope.wakes_idle(), "machine receipts must not wake a supervisor model");
+        }
+        queue.ack(row.id).unwrap();
+    }
+    git(f.dir.path(), &["merge", "-q", "--ff-only", "origin/main"]);
+    env.set("CAS_AGENT_ROLE", "worker");
+    let closed = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
+    assert_eq!(f.task().status, TaskStatus::Closed, "{closed}");
+    *claimed.lock().unwrap() = envelope.clone();
+    let root = f.cas_dir();
+    let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+    assert!(report.errors.is_empty()); assert_eq!(report.rejected, 1, "a closed task is terminal");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reopened = call(&f.supervisor, serde_json::json!({"action":"reopen", "id":ID, "reason":"a new proof cycle"})).await;
+    assert_eq!(f.task().status, TaskStatus::Open, "{reopened}");
+    *claimed.lock().unwrap() = envelope;
+    let root = f.cas_dir();
+    let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.rejected, 1, "a replay must not restore the reopened task's old authority");
+    assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().state, cas_types::VerificationDispatchState::Invalidated);
+
 }
 
 /// cas-3d70, through the real close: the commit-time anchor names a commit on

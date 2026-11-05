@@ -235,7 +235,7 @@ mkdir -p "$epic/changelog.d"
 printf 'How fragments work.\n' >"$epic/changelog.d/README.md"
 printf '### Fixed — Fragments\n\n- **Fragment entry** — fragment shipped.\n' >"$epic/changelog.d/cas-0001.md"
 # cas-7f95: same-area fragments (and the epic's own [Unreleased] area) share one heading.
-printf '### Added — alpha\n\n- **Second alpha** — second alpha shipped.\n' >"$epic/changelog.d/cas-0002.md"
+printf '### Added — alpha\n\n- **Second alpha** — the follow-up landed.\n' >"$epic/changelog.d/cas-0002.md"
 printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipped.\n' >"$epic/changelog.d/cas-0003.md"
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
@@ -245,7 +245,7 @@ head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd'
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
 check 'grep -q "^version = \"9.100.0\"" "$epic/cas-cli/Cargo.toml" && grep -q "^version = \"9.100.0\"" "$epic/crates/cas-mcp/Cargo.toml"' 'every release crate is bumped'
 check '[[ "$(grep -c "^version = \"9.100.0\"" "$epic/Cargo.lock")" -eq 6 ]] && grep -q "^version = \"0.1.0\"" "$epic/Cargo.lock"' 'Cargo.lock bumps the release packages and nothing else'
-check 'grep -A8 "^## \[9.100.0\] - 2026-10-15" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'CHANGELOG promotes [Unreleased] to the dated version'
+check 'grep -A16 "^## \[9.100.0\] - 2026-10-15" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'CHANGELOG promotes [Unreleased] to the dated version'
 check 'awk "/^## \\[Unreleased\\]/{getline; getline; print; exit}" "$epic/CHANGELOG.md" | grep -q "^## \[9.100.0\]"' '[Unreleased] is left empty'
 check 'sed -n "/^## \[9.100.0\]/,/^## \[9.99.0\]/p" "$epic/CHANGELOG.md" | grep -q "fragment shipped" && [[ "$(git -C "$epic" ls-files changelog.d)" == changelog.d/README.md ]] && [[ -z "$(git -C "$epic" status --porcelain)" ]]' 'cas-f2be: changelog.d fragments fold into the version section and the release commit deletes them'
 released_section="$(sed -n '/^## \[9.100.0\]/,/^## \[9.99.0\]/p' "$epic/CHANGELOG.md")"
@@ -312,7 +312,7 @@ rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
 check 'git -C "$epic" merge-base --is-ancestor origin/main HEAD' 'the base branch is merged in'
-check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A8 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
+check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A16 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
 check 'grep -A4 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "beta shipped" && ! grep -A6 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'the landed release section is kept intact'
 check '[[ "$(grep -c "alpha shipped" "$epic/CHANGELOG.md")" -eq 1 && "$(grep -c "^## \[9.100.0\]" "$epic/CHANGELOG.md")" -eq 1 ]]' 'no entry or heading is duplicated'
 check '! grep -q "<<<<<<<\|>>>>>>>" "$epic/CHANGELOG.md" "$epic/Cargo.lock" "$epic/cas-cli/Cargo.toml"' 'no conflict markers remain'

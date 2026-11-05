@@ -1518,13 +1518,14 @@ mod tests {
         assert_eq!(turns[0].commander_id, Some(42), "only an envelope beginning a row may bind");
     }
 
-    /// cas-44f0: replay a scrubbed Grok 1.0.70 capture from a real Linux
+    /// cas-44f0: replay a scrubbed Grok capture from a real Linux
     /// --single session through discovery, the daemon scanner and history.
     #[test]
     fn grok_native_reply_reaches_commander_cas_44f0() {
-        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
         for from_commander in [false, true] {
             let (temp, root, queue) = terminal_session(vec![]);
+            env.set("GROK_HOME", temp.path().join("account"));
             let store = SqliteAgentStore::open(&root).unwrap();
             let mut agent = store.get("supervisor-id").unwrap();
             agent.cc_session_id = Some("01a1adc1-8727-7443-8ca3-3de0d09ced72".into());

@@ -133,7 +133,7 @@ Before landing a lane, check that the worker's capped `check: PASS <sha>` and ta
 
 **READY TO MERGE / MERGE REQUIRED:**
 
-1. A park relay (awaiting_merge) naming a pushed tip is top priority: merge at once, even when a close gate refused park. A `READY TO MERGE` relay also counts. Green lane CI without a park is not ready. Hold deliveries below their plan target and their dependents; ship independent work. Drain ready merges before free-form replies.
+1. READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Green lane CI without a park is not ready. Hold deliveries below their plan target and their dependents; ship independent work. Drain ready merges before free-form replies.
 2. Confirm the tip and target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`.
    In qa.mode=per_task only, a user-facing delivery parks only after its own QA evidence bundle validates; send the worker the command the refusal names. When only a deployment can sign in, set `cas config set qa.deployed_origins <origin>` and cite a `deployed` bundle. Waive with `supervisor_override=true reason="…"` only when no evidence can be produced.
    On `INDEPENDENT QA DISPATCHED` or a `<cas-qa-dispatch>` wake, spawn a reviewer who is not the implementer, on the account with the most room and the cheapest recipe that has passed this kind of review:

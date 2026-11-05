@@ -25,7 +25,7 @@ const QA_TIMING: &str = "In qa.mode=batch (the default) the release's batch QA r
 const FULL_SUITE: &str = "The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
 const ASK_OPERATOR: &str = "Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs.";
 const PLAN_MISS: &str = "Hold deliveries below their plan target and their dependents; ship independent work.";
-const SUP_SIGNAL: &str = "awaiting_merge";
+const SUP_SIGNAL: &str = "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first";
 const MERGE_PATH: &str = "action=worktree_merge";
 const RELEASE_NOTES: &str = "The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.";
 

@@ -1,6 +1,6 @@
 //! Capture supervisor terminal input and completed answers in the durable Commander lane.
-//! The daemon observes both Claude and Codex transcripts; Codex has no Stop
-//! hook, so a hook-only mirror would silently omit its supervisor turns.
+//! The daemon observes Claude, Codex and Grok transcripts; native harness
+//! completions reach Commander even without a Claude Stop hook.
 
 use std::cell::RefCell;
 use chrono::{DateTime, Utc};
@@ -44,9 +44,10 @@ struct ClaudeInput {
 }
 
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.get("timestamp")?.as_str()?)
-        .ok()
+    let at = value.get("timestamp")?;
+    at.as_str().and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         .map(|at| at.with_timezone(&Utc))
+        .or_else(|| at.as_i64().and_then(|seconds| DateTime::from_timestamp(seconds, 0)))
 }
 
 fn text_blocks(value: &Value, path: &str, block_type: &str) -> Option<String> {
@@ -245,6 +246,19 @@ fn human_provenance(value: &Value) -> bool {
         .all(|key| value.get(key).is_none_or(Value::is_null))
 }
 
+/// Grok's ACP transcript carries text in an object, and has native numeric
+/// timestamps. Thought chunks and explicit machine input never become prompts.
+fn grok_prompt(value: &Value) -> Option<String> {
+    let params = value.get("params")?;
+    let update = params.get("update")?;
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("user_message_chunk")
+        || !human_provenance(value) || !human_provenance(params) || !human_provenance(update)
+        || update.pointer("/content/type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    update.pointer("/content/text").and_then(Value::as_str).map(str::to_owned)
+}
+
 struct TerminalInput {
     key: String,
     at: DateTime<Utc>,
@@ -280,7 +294,12 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
                 let Some(prompt) = text_blocks(value, "/payload/content", "input_text") else { continue };
                 (format!("{turn}:{}", at.to_rfc3339()), prompt)
             }
-            _ => continue,
+            cas_mux::SupervisorCli::Grok => {
+                let Some(prompt) = grok_prompt(value) else { continue };
+                let Some(key) = value.pointer("/params/_meta/eventId").and_then(Value::as_str) else { continue };
+                (key.to_owned(), prompt)
+            }
+            cas_mux::SupervisorCli::OpenCode => continue,
         };
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() || !human_provenance(value)
@@ -461,7 +480,40 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     }
                 }
             }
-            _ => {}
+            cas_mux::SupervisorCli::Grok => {
+                let update = &value["params"]["update"];
+                match update["sessionUpdate"].as_str() {
+                    Some("user_message_chunk") => {
+                        started = Some((String::new(), at, None));
+                        started_prompt = grok_prompt(value);
+                        final_text = None;
+                    }
+                    // Text before a tool is progress, not the final answer.
+                    Some("tool_call") => final_text = None,
+                    Some("agent_message_chunk") => {
+                        if update.pointer("/content/type").and_then(Value::as_str) == Some("text")
+                            && let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) {
+                            final_text.get_or_insert_with(String::new).push_str(chunk);
+                        }
+                    }
+                    Some("turn_completed") => {
+                        let key = update["prompt_id"].as_str()
+                            .or_else(|| value.pointer("/params/_meta/promptId").and_then(Value::as_str))
+                            .filter(|key| !key.is_empty());
+                        if let (Some((_, begun, _)), Some(text), Some(key)) =
+                            (started.take(), final_text.take(), key) {
+                            let ids = started_prompt.as_deref().map(commander_markers).unwrap_or_default();
+                            turns.push(CompletedTurn {
+                                key: key.to_owned(), started_at: begun, completed_at: at,
+                                text, commander_id: ids.last().copied(), commander_ids: ids,
+                                prompt: started_prompt.take(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            cas_mux::SupervisorCli::OpenCode => {}
         }
     }
     turns
@@ -1523,7 +1575,7 @@ mod tests {
     #[test]
     fn grok_native_reply_reaches_commander_cas_44f0() {
         let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-        for from_commander in [false, true] {
+        for (from_commander, machine_input) in [(false, false), (true, false), (true, true)] {
             let (temp, root, queue) = terminal_session(vec![]);
             env.set("GROK_HOME", temp.path().join("account"));
             let store = SqliteAgentStore::open(&root).unwrap();
@@ -1549,6 +1601,16 @@ mod tests {
                 records[0]["params"]["update"]["content"]["text"] =
                     format!("[cas #{id} operator Alice@phone verified 0s first] Mirror probe").into();
             }
+            if machine_input {
+                records[0]["params"]["update"]["origin"] = serde_json::json!({"kind":"daemon"});
+            }
+            // Exercise streaming progress before a tool, alongside the real
+            // thought and answer chunks in the captured native transcript.
+            let mut progress = records[2].clone();
+            progress["params"]["update"]["content"]["text"] = "Progress must not mirror.".into();
+            let mut tool = progress.clone();
+            tool["params"]["update"] = serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"probe-tool"});
+            records.splice(2..2, [progress, tool]);
             let path = temp.path().join("account/sessions/project")
                 .join(agent.cc_session_id.as_ref().unwrap()).join("updates.jsonl");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1567,8 +1629,13 @@ mod tests {
             assert_eq!(replies.len(), 1, "completed Grok answer must reach durable history");
             assert!(replies[0].message.contains("mirror probe complete"));
             assert!(!replies[0].message.contains("Private reasoning"));
-            assert_eq!(replies[0].kind, crate::ui::factory::OperatorTurnKind::Answer);
-            if let Some(id) = send {
+            assert!(!replies[0].message.contains("Progress must not mirror"));
+            assert_eq!(replies[0].kind, if machine_input {
+                crate::ui::factory::OperatorTurnKind::Status
+            } else { crate::ui::factory::OperatorTurnKind::Answer });
+            if machine_input {
+                assert_eq!(replies[0].reply_to, None, "machine input cannot claim an operator send");
+            } else if let Some(id) = send {
                 assert_eq!(replies[0].reply_to, Some(id));
                 assert_eq!(replies[0].device_id, "phone");
             } else {

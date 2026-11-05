@@ -1487,6 +1487,12 @@ fn report_spawn_warnings(
             "warning",
             warning,
         );
+        // cas-73fa: a purely informational base (chosen, refreshed, ready,
+        // materialized, preserved) stays in the audit above. Every other
+        // warning names a repair and is still sent.
+        if SPAWN_BASE_INFORMATIONAL.iter().any(|kind| warning.starts_with(kind)) {
+            continue;
+        }
         let _ = enqueue_spawn_warning_notice(
             cas_dir,
             supervisor_name,
@@ -1497,6 +1503,16 @@ fn report_spawn_warnings(
         );
     }
 }
+
+/// cas-73fa: spawn warnings that only report what happened and ask nothing.
+const SPAWN_BASE_INFORMATIONAL: &[&str] = &[
+    "SPAWN BASE: ",
+    "SPAWN BASE REFRESHED",
+    "SPAWN BASE MATERIALIZED",
+    "EPIC BRANCH READY",
+    "EPIC BRANCH MATERIALIZED",
+    "EPIC BRANCH PRESERVED",
+];
 
 /// cas-00d5: close out a shutdown request. The row gets a terminal
 /// `stopped` or `failed` state (deferred to the store worker when this pass's
@@ -1536,6 +1552,12 @@ fn record_shutdown_outcome(
     // cas-b06f (spec-6194 P2.6): the supervisor asked for this, so it gets
     // ONE receipt with every worker's outcome, never a Critical worker_died
     // alarm per worker. A failure is still named, with what to do next.
+    // cas-73fa: a clean shutdown that released no task asks nothing of the
+    // supervisor, who asked for it; the spawn audit above records it.
+    let released: Vec<&String> = report.stopped.iter().flat_map(|(_, tasks)| tasks).collect();
+    if report.failed.is_empty() && released.is_empty() {
+        return;
+    }
     let request = request_id
         .map(|id| format!("shutdown request {id}"))
         .unwrap_or_else(|| "direct shutdown request".to_string());
@@ -1556,11 +1578,17 @@ fn record_shutdown_outcome(
             ),
         )
     };
-    let body = if lines.is_empty() {
+    let mut body = if lines.is_empty() {
         format!("{headline}\nNo live workers matched the request.")
     } else {
         format!("{headline}\n- {}", lines.join("\n- "))
     };
+    if !released.is_empty() {
+        body.push_str(&format!(
+            "\nNext action: reassign {}.",
+            released.iter().map(|task| task.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
     notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, body);
 }
 
@@ -1763,7 +1791,12 @@ fn enqueue_spawn_outcome_notice(
     stage: &str,
     success: bool,
     detail: &str,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<Option<i64>> {
+    // cas-73fa: a verified spawn asks nothing of the supervisor; the spawn
+    // audit and worker_status record it. Only a failure is sent.
+    if success {
+        return Ok(None);
+    }
     let queue = open_prompt_queue_store(cas_dir)?;
     let request = request_id
         .map(|id| format!("request {id}"))
@@ -1807,7 +1840,7 @@ fn enqueue_spawn_outcome_notice(
         )?
     };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// cas-2327 (GH #170): a booted worker whose promised task did not bind is a
@@ -4641,17 +4674,11 @@ impl FactoryDaemon {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
-        // cas-ddae (GH #1500): work in flight with no real progress wakes the
-        // supervisor at N and pages the operator at 2N; store and git reads,
-        // off the loop.
-        let watchdog_dir = self.app.cas_dir().to_path_buf();
-        let watchdog_session = self.session_name.clone();
+        // cas-ddae (GH #1500): open work with no progress wakes the
+        // supervisor, then the operator; store and git reads, off the loop.
+        let (watchdog_dir, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
         self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", None, move || {
-            let interval = crate::config::Config::load(&watchdog_dir)
-                .unwrap_or_default()
-                .factory()
-                .progress_watchdog_secs;
-            super::progress_watchdog::sweep(&watchdog_dir, &watchdog_session, interval, chrono::Utc::now());
+            super::progress_watchdog::sweep(&watchdog_dir, &session, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
         // cas-786a6 (H3): the two pure-store sweeps run on the store
@@ -13351,42 +13378,26 @@ pub(super) fn fire_reminder(
             )
         };
 
-        // cas-ddae (GH #1500): a peer ask's deadline only matters while the
-        // peer is silent. Answered, the fired reminder is consumed unsent.
-        let peer_ask = reminder.trigger_filter.as_ref().and_then(|filter| {
-            filter.get(super::progress_watchdog::PEER_ASK_FILTER_KEY).and_then(|id| id.as_i64())
-        });
-        if let Some(ask) = peer_ask
-            && queue.ask_answered(ask).unwrap_or(false)
-        {
-            if let (Some(records), Some(id)) = (supervisor_queue, record_id) {
-                let _ = records.ack(id);
-            }
-            return;
-        }
         // cas-207e: a Commander ask's deadline wakes the supervisor as a
         // blocker, stamped by the daemon, so an idle pane acts on it now.
-        let deadline = if peer_ask.is_some() {
-            Some(("peer-ask-deadline", "peer ask deadline"))
-        } else if reminder
+        let enqueued = if reminder
             .trigger_filter
             .as_ref()
             .is_some_and(|filter| filter.get("operator_ask").is_some())
         {
-            Some(("operator-ask-deadline", "operator ask deadline"))
-        } else {
-            None
-        };
-        let enqueued = if let Some((source, label)) = deadline {
             queue
                 .enqueue_idempotent(
-                    &format!("{source}:{}", reminder.id),
+                    &format!("operator-ask-deadline:{}", reminder.id),
                     &target,
-                    &crate::prompt_revalidation::attach_blocker_envelope(&prompt, label, None),
+                    &crate::prompt_revalidation::attach_blocker_envelope(
+                        &prompt,
+                        "operator ask deadline",
+                        None,
+                    ),
                     Some(session_name),
-                    Some(label),
+                    Some("operator ask deadline"),
                     Some(cas_store::NotificationPriority::High),
-                    &format!("{source}:{}", reminder.id),
+                    &format!("operator-ask-deadline:{}", reminder.id),
                     Some(&cas_store::QueueOrigin::Daemon),
                 )
                 .map(|_| ())
@@ -14993,43 +15004,6 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-    }
-
-    /// cas-ddae (GH #1500): a peer ask's deadline wakes the asker as a
-    /// blocker only while the peer is silent; an answered ask stays quiet.
-    #[test]
-    fn a_peer_ask_deadline_wakes_the_asker_only_while_the_peer_is_silent_gh1500() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> =
-            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
-        reminder_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
-            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
-        prompt_store.init().unwrap();
-        let answered = prompt_store.enqueue_with_session("young-swan-22", "tender-finch-34", "review?", "factory").unwrap();
-        let silent = prompt_store.enqueue_with_session("young-swan-22", "tender-finch-35", "review?", "factory").unwrap();
-        prompt_store.enqueue_with_session("tender-finch-34", "young-swan-22", "approved", "peer").unwrap();
-        for (ask, peer) in [(answered, "tender-finch-34"), (silent, "tender-finch-35")] {
-            reminder_store
-                .create_with_scope("owner-id", None, &format!("Peer ask #{ask} to {peer} got no answer in 60 min."),
-                    cas_store::ReminderTriggerType::Time, Some(chrono::Utc::now() - chrono::Duration::seconds(1)), None,
-                    Some(&serde_json::json!({ "peer_ask": ask, "peer": peer })), 0, Some("factory"), None, false, None)
-                .unwrap();
-        }
-        for reminder in reminder_store.get_due_time_reminders().unwrap() {
-            super::fire_reminder(&reminder, &reminder_store, &None, &Some(Arc::clone(&prompt_store)), "factory",
-                "young-swan-22", &HashMap::from([("owner-id".into(), "young-swan-22".into())]), None, temp.path());
-        }
-        let wakes: Vec<_> = prompt_store.peek_all(10).unwrap().into_iter()
-            .filter(|row| row.source.starts_with("peer-ask-deadline:")).collect();
-        assert_eq!(wakes.len(), 1, "{wakes:?}");
-        // pin: the wake must name the unanswered ask and its peer, not the answered one
-        assert!(wakes[0].prompt.contains(&format!("#{silent} to tender-finch-35")), "{}", wakes[0].prompt);
-        assert_eq!(
-            FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, "young-swan-22", &wakes[0].source, &wakes[0].prompt),
-            Some(super::SupervisorWakeClass::Blocker)
-        );
-        assert!(reminder_store.list_all_pending().unwrap().is_empty(), "both deadlines are consumed");
     }
 
     /// cas-207e: a Commander ask's deadline reminder fires as a
@@ -19140,6 +19114,48 @@ mod tests {
             ),
             Some(SupervisorWakeClass::Blocker),
         );
+    }
+
+    /// cas-73fa: a supervisor notice that asks nothing of its recipient is not
+    /// sent. A verified spawn, a clean shutdown with nothing to reassign and an
+    /// informational spawn base stay in the spawn audit; failures and
+    /// unpublished, unverified, local-only or diverged bases still reach the
+    /// supervisor.
+    #[test]
+    fn notices_that_ask_nothing_are_not_sent_cas_73fa() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = || queue.peek_all(20).unwrap().into_iter().map(|row| row.summary.unwrap_or_default()).collect::<Vec<_>>();
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(1), "tender-owl-85",
+            "register", true, "Worker is active in the Cassy agent registry for this factory session.").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(2),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-claude".into(), Vec::new())], failed: Vec::new(),
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(3), "ready-jay-11", &[
+            "SPAWN BASE: 'main' — task cas-d8e0's WorkTarget; declared delivery branch wins over ambient trunk and pinned focus.".into(),
+            "SPAWN BASE REFRESHED: local 'main' (aaa) is 2 commit(s) behind 'origin/main' (bbb); local branch FAST-FORWARDED to the published tip.".into(),
+            "EPIC BRANCH READY: 'epic/x' already published on origin.".into(),
+        ]);
+        assert!(rows().is_empty(), "nothing here asks the supervisor to act: {:?}", rows());
+
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(4), "happy-shark-29",
+            "provision", false, "worktree add failed").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(5),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-codex".into(), vec!["cas-held1".into()])], failed: vec![("stuck".into(), "pid alive".into())],
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(6), "ready-jay-12", &[
+            "EPIC BRANCH UNPUBLISHED: 'epic/x' (ccc) could not be published to origin.".into(),
+            // Any warning not known to be informational still names a repair.
+            "WORKER BASE MISMATCH: resolved base 'epic/x' (ddd) does not contain the task's start commit.".into(),
+        ]);
+        let sent = rows();
+        assert_eq!(sent.len(), 4, "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn failed at provision")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker shutdown: 1 stopped, 1 failed")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn base warning")), "{sent:?}");
     }
 
     // -----------------------------------------------------------------------

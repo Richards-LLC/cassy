@@ -1,0 +1,3 @@
+### Changed — Factory
+
+- **Workers pick up an installed release between tasks** — A worker whose MCP server is older than the installed Cassy is now recycled onto the new build before it starts its next queued task, on the same path as `factory.restart_worker_between_tasks`. A worker is never recycled mid-task. The post-install notice now says what happens to each older process: workers move at their next queued task; an idle worker keeps its build until recycled; supervisors use `/mcp` or `restart_supervisor`; factory daemons keep their build until the factory is next relaunched. It no longer ends with "No process was recycled automatically".

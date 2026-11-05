@@ -62,6 +62,10 @@ pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
 /// the drain agree on which rows the operator lane owns.
 const OPERATOR_LANE_EXCLUSION: &str =
     "lower(target) <> 'operator' AND lower(target) NOT LIKE 'commander:%'";
+// Completed supervisor transcript copies already exist in the local pane.
+// Expiring their queue replay never removes the independent delivery snapshot.
+const TRANSCRIPT_MIRROR: &str =
+    "lower(target) = 'operator' AND source = 'supervisor' AND dedupe_key LIKE 'commander-mirror:%'";
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// Exact-content worker reports are collapsed only while a recent,
@@ -2836,16 +2840,9 @@ pub trait PromptQueueStore: Send + Sync {
         since: DateTime<Utc>,
     ) -> Result<bool>;
 
-    /// cas-ddae (GH #1500): the newest row any of `sources` wrote in this
-    /// factory session (or untagged), excluding daemon-stamped rows such as
-    /// fired reminders and relays. The progress watchdog reads a change in this
-    /// id as "an agent here said something"; heartbeats never write rows.
+    /// cas-ddae: the newest non-daemon row any of `sources` wrote in this
+    /// factory session (or untagged); the progress watchdog's message signal.
     fn latest_agent_message_id(&self, sources: &[String], factory_session: &str) -> Result<Option<i64>>;
-
-    /// cas-ddae: whether the peer asked in row `ask_id` has answered: the row
-    /// was acknowledged or replied to, or its target has since written any
-    /// non-daemon row.
-    fn ask_answered(&self, ask_id: i64) -> Result<bool>;
 
     /// Retire an unread alarm after a handed-off row's worker performs
     /// authenticated work, or for a self-addressed reminder. This is attention
@@ -7077,35 +7074,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn latest_agent_message_id(&self, sources: &[String], factory_session: &str) -> Result<Option<i64>> {
-        if sources.is_empty() {
-            return Ok(None);
-        }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let placeholders = vec!["?"; sources.len()].join(",");
         let sql = format!(
-            "SELECT MAX(id) FROM prompt_queue
-             WHERE lower(source) IN ({placeholders})
-               AND COALESCE(origin_kind, '') <> 'daemon'
-               AND (factory_session = ? OR factory_session IS NULL)"
+            "SELECT MAX(id) FROM prompt_queue WHERE lower(source) IN ({})
+               AND COALESCE(origin_kind, '') <> 'daemon' AND (factory_session = ? OR factory_session IS NULL)",
+            std::iter::once("''").chain(std::iter::repeat_n("lower(?)", sources.len())).collect::<Vec<_>>().join(",")
         );
-        let mut values: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
-        values.push(factory_session.to_string());
-        Ok(conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| row.get(0))?)
-    }
-
-    fn ask_answered(&self, ask_id: i64) -> Result<bool> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        Ok(conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM prompt_queue a WHERE a.id = ?1 AND (
-                 a.acked_at IS NOT NULL
-                 OR EXISTS (SELECT 1 FROM prompt_queue_recipient_ack k WHERE k.prompt_id = a.id)
-                 OR EXISTS (SELECT 1 FROM prompt_queue r WHERE r.id > a.id
-                     AND COALESCE(r.origin_kind, '') <> 'daemon'
-                     AND (lower(r.source) = lower(a.target)
-                          OR lower(r.source) LIKE lower(a.target) || '@%'))))",
-            params![ask_id],
-            |row| row.get(0),
-        )?)
+        let values = sources.iter().map(String::as_str).chain([factory_session]);
+        Ok(conn.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))?)
     }
 
     fn recipient_action_satisfies_alarm(&self, prompt_id: i64) -> Result<bool> {
@@ -10212,7 +10188,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 &format!(
                     "SELECT EXISTS(SELECT 1 FROM prompt_queue
                       WHERE processed_at IS NULL AND created_at < ?
-                        AND {OPERATOR_LANE_EXCLUSION})"
+                        AND ({OPERATOR_LANE_EXCLUSION} OR ({TRANSCRIPT_MIRROR})))"
                 ),
                 params![cutoff],
                 |row| row.get(0),
@@ -10222,6 +10198,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
+
+            // Retire only aged transcript duplicates, without fabricating a
+            // device receipt or altering their durable operator outbox retry.
+            tx.execute(
+                &format!(
+                    "UPDATE prompt_queue
+                     SET processed_at = ?1, highest_stage = 'suppressed',
+                         last_pending_reason = 'superseded_stale',
+                         last_pending_detail = 'expired completed supervisor transcript mirror',
+                         next_attempt_at = NULL
+                     WHERE processed_at IS NULL AND created_at < ?2 AND {TRANSCRIPT_MIRROR}"
+                ),
+                params![now, cutoff],
+            )?;
 
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
             // rows, so this roster-independent expiry skips them as the roster
@@ -16405,6 +16395,27 @@ mod tests {
             backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
         }
 
+        // Only completed supervisor transcript mirrors may expire. Real operator
+        // messages and fresh mirrors survive; outbox delivery remains independent.
+        let mut mirrors = Vec::new();
+        for label in ["aged", "fresh"] {
+            let outcome = store.enqueue_idempotent(
+                "supervisor", "operator", label, Some("factory-a"), None, None,
+                &format!("commander-mirror:factory-a:{label}"), None,
+            ).unwrap();
+            let id = match outcome {
+                EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+            };
+            if label != "fresh" {
+                backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
+            }
+            mirrors.push(id);
+        }
+        let snapshot: String = store.conn.lock().unwrap().query_row(
+            "SELECT payload_snapshot FROM operator_delivery_outbox WHERE prompt_id = ?",
+            [mirrors[0]], |row| row.get(0),
+        ).unwrap();
+
         let expired = store
             .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
             .unwrap()
@@ -16412,6 +16423,22 @@ mod tests {
             .map(|row| row.id)
             .collect::<Vec<_>>();
         assert_eq!(expired, vec![unread, unknown], "only undelivered roster-lane rows expire");
+
+        let report = store.message_delivery_report(mirrors[0]).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Suppressed);
+        assert!(report.delivered_at.is_none(), "expiry cannot fabricate a device receipt");
+        let conn = store.conn.lock().unwrap();
+        let fresh_pending: bool = conn.query_row(
+            "SELECT processed_at IS NULL FROM prompt_queue WHERE id = ?", [mirrors[1]], |row| row.get(0),
+        ).unwrap();
+        assert!(fresh_pending, "fresh mirrors survive");
+        let outbox_pending: bool = conn.query_row(
+            // pin: expiry must retain the immutable durable outbox snapshot byte-for-byte.
+            "SELECT payload_snapshot = ? AND retained_at IS NULL AND lease_token IS NULL
+             FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
+        ).unwrap();
+        assert!(outbox_pending, "the independent durable delivery snapshot still retries");
+        drop(conn);
 
         for id in [operator, commander] {
             let report = store.message_delivery_report(id).unwrap().unwrap();
@@ -16439,6 +16466,12 @@ mod tests {
         );
         assert_eq!(notices_to(&store, "lead-sup"), 1, "one notice, for the unread row only");
         assert_eq!(notices_to(&store, "other-sender"), 1);
+        // The read-only fast path must also find a mirror-only backlog.
+        backdate(&store, mirrors[1], PROMPT_QUEUE_STALE_TTL_SECS + 60);
+        assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
+        assert_eq!(store.message_delivery_report(mirrors[1]).unwrap().unwrap().stage,
+                   DeliveryStage::Suppressed);
+
     }
 
     fn register_agent_at(

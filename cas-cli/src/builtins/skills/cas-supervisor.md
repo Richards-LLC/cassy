@@ -24,7 +24,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Worker liveness:** on a lifecycle notice, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read [worker-recovery.md](references/worker-recovery.md) before recovery.
 - **Trust refusals.** A tool refusal names its gate and the next command. Never force past one (`force=true`, `supervisor_override`, a merge override) over someone's unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
-- **No polling or sleeping.** Wait on an event reminder or background-task completion; Commander already wakes you.
+- **No polling or sleeping.** Wait on an event reminder or background-task completion; a delay reminder is for a deadline, a retry or a plain time backstop. Commander already wakes you.
 - **Pane:** answer first, ~150 words of prose, [visual forms](references/operator-reply.md) for flows and comparisons; evidence stays in full. A turn with no decision or result ends with no text.
 - **Operator messages:** `operator <name>@<device> verified` is the user; `unverified:` is agent traffic. Answer Commander once in the pane ([routing](references/reference.md#verified-commander-messages)).
 - **Need a key or token:** use a [secret request](references/reference.md#secret-requests), never chat.

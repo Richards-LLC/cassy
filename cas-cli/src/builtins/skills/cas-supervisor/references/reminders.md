@@ -17,7 +17,7 @@ One active reminder per task or phase. Cancel it when the phase completes or sta
 
 ## API contract
 
-Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Time checkpoints pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal. Keep the returned ID; the tool refuses polling-shaped timers and names the event form to use.
+Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Time checkpoints pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal. Keep the returned ID; the tool refuses polling-shaped timers and names the event form to use. A task-filtered deadline reached while the task is still live sends one owner notice. A delay suits a real deadline, an admission retry or a plain time backstop; the daemon's progress watchdog wakes you after 45 minutes with no movement.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
@@ -62,4 +62,4 @@ coordination action=remind remind_event=ci_completed \
 
 ## Peer release updates
 
-Send a peer merge or close update that unblocks their release as `kind=status`, never `kind=receipt`. Use `kind=ask` or `blocker=true` when you need a decision. Treat `EPIC READY: all children closed` as an action: inspect the epic and advance its release.
+Untyped peer mail is an ask and wakes the peer; use `kind=receipt` or `wake=false` only for true FYIs. Send a peer merge or close update that unblocks their release as `kind=status`, never `kind=receipt`. Use `kind=ask` or `blocker=true` when you need a decision. Treat `EPIC READY: all children closed` as an action: inspect the epic and advance its release.

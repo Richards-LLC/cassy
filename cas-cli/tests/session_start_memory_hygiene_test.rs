@@ -53,9 +53,27 @@ fn cli_session_start_persists_surface_ledger_for_injected_rules_and_skills() {
         hook_event_name: "SessionStart".to_string(),
         ..Default::default()
     };
+    entry_store
+        .add(&Entry::new(
+            "unlisted-memory".to_string(),
+            "Pull-only memory".to_string(),
+        ))
+        .unwrap();
     let context = build_context_with_token_budget(&input, 10, &cas_root, None).unwrap();
     assert!(context.contains("Surface this rule"));
     assert!(context.contains("Surface this skill"));
+    // cas-71b2: memories are pull-only by default, so the friction ledger's
+    // session_context feature records nothing a session never saw.
+    assert!(!context.contains("unlisted-memory"), "{context}");
+    let recorded: i64 = Connection::open(cas_root.join("cas.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM retrieval_queries WHERE query_family = 'context_session_start'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(recorded, 0, "default SessionStart recorded session_context injection");
 
     let surface_store = SqliteSurfacedArtifactStore::open(&cas_root).unwrap();
     assert_eq!(

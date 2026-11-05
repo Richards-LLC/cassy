@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **Supervisors no longer get notices that ask nothing of them** — A worker that spawns successfully, a clean shutdown that freed no task, and a purely informational spawn note (base chosen, refreshed, materialized, ready or preserved) are recorded in the spawn audit instead of sent. Failures, shutdowns that released tasks, and every other spawn warning (an unpublished or diverged base, a base mismatch, a fallback base or a stale build cache) still reach the supervisor. An idle-worker relay now names its next action. A PR that leaves the merge queue with no failed run is reported only if it is still out of the queue on the next check, and a failed run listed later belongs to the same notice instead of a second one.

@@ -52,10 +52,7 @@ metadata:
    The report's "Prior-factory WIP candidates" section mirrors the banner and
    is safe to re-run at any time; it never auto-deletes.
 
-   For the full history of what prior sessions left behind, see
-   `.cas/logs/factory-session-{YYYY-MM-DD}.log` (written automatically on
-   `SessionEnd`; each block records session id, agent, worktree, and a
-   `git status --porcelain` snapshot).
+   Prior sessions' history: `.cas/logs/factory-session-{YYYY-MM-DD}.log`.
 
 ## Intake Gate (Before Planning)
 
@@ -88,8 +85,8 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 - Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error. `EPIC CLOSE CHECK INCOMPLETE` is resumable: retry the same close until it completes.
 - Confirm task deliverables exist on the epic branch
 - **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved.
-- Run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round using the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when any child has a demo statement; enqueue.
-- Require the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
+- Run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; the [batch QA round](../cas-supervisor/references/epic-flow-walk.md); enqueue. In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
+- Require the release `batch_receipt` ledger before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
 ## Session End
 

@@ -67,8 +67,7 @@ task action=update id=<task-id> state_patch='{"phase":"verify","receipts":[{"com
 ```
 
 Fields are `phase`, `receipts` (`command`, `exit_status`), `files_touched`,
-`decisions`, `next_step`; `null` deletes a field. Use `id` for the task and
-`notes` for appended notes. `platform_proof` supplies non-Rust platform evidence.
+`decisions`, `next_step`; `null` deletes a field.
 
 ## Credentials and routing
 
@@ -77,8 +76,7 @@ reason. The supervisor writes `DATABASE_URL` to `.env.cas-db`; source it without
 printing or committing it. Workers do not create branches or hold Neon credentials.
 Load `task` and `coordination`. For an assigned QA-pass task, also load
 `verification` and record your verdict with `verification action=qa_record
-task_id=<delivery-id>` and the round's ledger. Recording closes the QA task;
-implementation-task close verification remains supervisor-owned.
+task_id=<delivery-id>` and the round's ledger. Recording closes the QA task.
 `server_start`/`server_list`/`server_stop` (owned servers only) are the assigned
 server exception, with `cas-servers`. `factory action=candidate_request
 task_id=<own-task> revision=<full-sha>` is the candidate exception; never ask the
@@ -98,14 +96,14 @@ message and note schemas enforce the traffic limits.
 
 ## Batch QA
 
-`qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
-Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
-A batch park defers evidence and opens no automatic per-task round, including
-when older waived rounds exist. Capture visual before/after evidence while
-building. The supervisor owns the release's one epic-tip candidate, shared PASS ledger
-and `verification action=batch_receipt` listing delivery anchors. Close deferred
-deliveries after that receipt exists; "waiting for batch receipt" is a pending
-obligation. Explicit `qa_request` reviews remain available.
+In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
+`per_task` is the explicit opt-in. Project QA keys override user
+`~/.cas/config.toml`, then built-in defaults. A batch park opens no automatic
+per-task round, including when older waived rounds exist. Capture visual
+before/after evidence while building. The supervisor owns the release's one
+epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`
+listing delivery anchors. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane
 

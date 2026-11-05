@@ -234,10 +234,34 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
     )
 }
 
+/// cas-5597: the one answer to "who closes a worker's task", shared by every
+/// worker-facing refusal; the parity test pins it against the skill, launch
+/// contract and assignment text.
+pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
+
+/// cas-5597: a successful park answers the worker as done. It keeps the
+/// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
+/// remediation meant for genuine refusals, and keeps any conflict finding.
+pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Option<&str>) -> String {
+    let conflict = ["\n\n⚠️ This branch has a genuine", "\n\n⚠️ Cassy could not determine"]
+        .iter()
+        .find_map(|marker| merge_required.find(marker))
+        .map_or("", |at| &merge_required[at..]);
+    format!(
+        "⚠️ MERGE REQUIRED: PARKED {} on {}; awaiting merge verdict; nothing more to do.\n\n\
+         {WORKER_CLOSE_OWNERSHIP} {PARK_SIGNAL}{conflict}",
+        tip.unwrap_or("the pushed tip"),
+        branch.unwrap_or("the factory branch"),
+    )
+}
+
+/// cas-5597: the one completion signal a worker sends (or does not).
+pub(crate) const PARK_SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
+
 /// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
 pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
     format!(
-        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. Close is retried after that; the worker has nothing to do."
+        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing."
     )
 }
 

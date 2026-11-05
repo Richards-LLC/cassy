@@ -70,7 +70,7 @@ Before you shut down a pane that *looks* broken, spend 60 seconds on triage. The
 |---|---|---|---|
 | 0 | `alive` | PID up, transcript fresh, no crash signature — worker is running. | Wait. |
 | 1 | `wedged` | PID up, transcript fresh, Bun/React-Ink crash signature matched. | `cas factory kill` + respawn. |
-| 2 | `starved` | PID up, transcript cold (>60s since last write). Likely scheduler-starved or hung on a tool call. | Wait another 2 minutes, then re-classify. |
+| 2 | `starved` | PID up, transcript cold (>60s since last write). Likely scheduler-starved or hung on a tool call. | Re-classify on the next `worker_idle` or task event. |
 | 3 | `dead` | PID gone, AND a second signal corroborates it (transcript stale AND worktree not recently edited). | Cleanup only — no kill needed. |
 | 4 | `unverified` | PID probe says gone, but the transcript is still fresh or the worktree was recently edited — a contradiction. | **Do not treat as dead.** Run `cas factory debug <worker>` and check the worktree before doing anything destructive; this is what a stale or wrong tracked pid looks like while the real worker is alive. |
 | 5 | `approval-hang` | A permission request is parked for a team lead and no child process is running. | Answer it: `cas factory approve <worker>` or `cas factory deny <worker> --reason "<why>"` (`--request <perm-id>` names one request). |
@@ -82,7 +82,7 @@ The crash signature is the pane filling with minified paths like `/$bunfs/root/s
 **Step 3: recovery.** Only after `is-wedged` reports `wedged` or `dead` — never off `unverified`:
 
 - **Wedged:** `cas factory kill <worker>`, then respawn. It SIGKILLs the worker's process group and resets its leased tasks (same semantics as `task action=reset`) only once death is confirmed; `cas factory kill --help` documents process resolution and the PID-recycling guard. Investigate before passing `--force`.
-- **Starved:** do not kill. Come back in 2 minutes; if it re-classifies as `wedged`, proceed to the kill path.
+- **Starved:** do not kill. Wait on an event reminder, never a timed poll. Re-check on the next `worker_idle` or task event; if it re-classifies as `wedged`, proceed to the kill path.
 - **Dead:** no kill needed. The `kill` verb is still safe to run (`skipping SIGKILL` + task reset runs); or manually `task action=reset id=<task-id>`.
 - **Unverified:** do not kill and do not reset the lease. Run `cas factory debug <worker>` and inspect the worktree manually; re-run `is-wedged` once you've confirmed which process is actually the worker.
 
@@ -90,7 +90,7 @@ The crash signature is the pane filling with minified paths like `/$bunfs/root/s
 
 ## Verify Lifecycle Notifications Before Acting
 
-Director and task-lifecycle notifications are hints, not ground truth. A known bug (tracking pointer `cas-dbbe`) produced false `task_completed` notifications around task start, including five false completions in one session. Before closing, reassigning, respawning, or merging because of a notification:
+Director and task-lifecycle notifications are hints, not ground truth. Before closing, reassigning, respawning, or merging because of a notification:
 
 - Run `task action=show id=<task-id>` and trust the task status over the notification text.
 - Check the worker branch tip or worktree commits before assuming work exists: `git -C .cas/worktrees/<worker> log --oneline -5`.
@@ -125,7 +125,7 @@ Recurring failure modes and their recovery procedures.
 
 **Signature:** Worker stops responding to messages. No progress notes, no commits, no heartbeat updates. Task stays `in_progress` indefinitely.
 
-Run `factory action=worker_status`, then the `is-wedged` / `debug` / `kill` triad above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup, and message the replacement worker what already landed.
+Run `factory action=worker_status`, then the `is-wedged` / `debug` / `kill` triad above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup.
 
 ### Injected but Unwoken Worker
 
@@ -179,7 +179,7 @@ An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED
 **Pre-compaction recovery (context: near-limit):**
 
 1. Send: `coordination action=message target=<worker> summary="Context near limit — commit now" message="Your context is near the limit. Commit any in-progress work immediately (git add / git commit), then report what you committed."`
-2. Wait for the commit confirmation (watch `factory action=worker_activity`).
+2. Wait for the commit confirmation on a `task_*` or `worker_idle` event reminder.
 3. If the worker is mid-task and not responding: check the worktree manually: `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`
 4. Once work is committed, its `HANDOFF.md` written and the worker is idle: `factory action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
 
@@ -213,7 +213,7 @@ An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED
 # Cap on CARGO_BUILD_JOBS exported into workers.
 # "auto" (default) = max(2, num_cpus / 4).
 # Any numeric string like "4" is exported verbatim.
-cargo_build_jobs = "auto"
+worker_build_jobs = "auto"
 
 # When true, prefix each worker spawn with `nice -n 10`.
 # Default true. Flip false for single-worker or benchmarking.
@@ -224,11 +224,11 @@ Shell-level overrides (win over config): `CAS_FACTORY_CARGO_BUILD_JOBS=<N>`, `CA
 
 **When the defaults are wrong:**
 
-- Running more than 4 workers on a 16-thread host → set `cargo_build_jobs = "2"` (÷4 assumption no longer holds).
-- Host has 4–8 cores → the auto-cap floors at 2, which is still `workers × 2` rustc threads; on a 4-worker factory with 4 cores consider `cargo_build_jobs = "1"` manually.
+- Running more than 4 workers on a 16-thread host → set `worker_build_jobs = "2"` (÷4 assumption no longer holds).
+- Host has 4–8 cores → the auto-cap floors at 2, which is still `workers × 2` rustc threads; on a 4-worker factory with 4 cores consider `worker_build_jobs = "1"` manually.
 - Host has 32+ threads → `"auto"` is fine; can push higher if wall-time matters.
 - CPU-bound but not crashing → flip `nice_cargo = false` to let workers and supervisor compete on equal terms.
 
-**Repro runbook (for verifying the cap works on a given host):** spawn 4 workers on this repo, trigger simultaneous cargo builds in all of them (`cargo test` in each worktree), watch `uptime` over 60 s. 5-min load avg should stay below CPU count. If it still saturates, drop `cargo_build_jobs` one step (e.g. `"auto"` → `"2"`) and re-check.
+**Repro runbook (for verifying the cap works on a given host):** spawn 4 workers on this repo, trigger simultaneous cargo builds in all of them (`cargo test` in each worktree), watch `uptime` over 60 s. 5-min load avg should stay below CPU count. If it still saturates, drop `worker_build_jobs` one step (e.g. `"auto"` → `"2"`) and re-check.
 
-**If workers still wedge under these caps:** the scheduler storm is not the bottleneck. Likely candidates, in order of follow-up cost: (1) `sccache` shared across workers (cas-0bf4 Phase 2), (2) subagent concurrency cap (cas-0bf4 Phase 3), (3) operational — spawn fewer workers.
+**If workers still wedge under these caps:** the scheduler storm is not the bottleneck. Likely candidates, in order of follow-up cost: (1) subagent concurrency cap (cas-0bf4 Phase 3), (2) operational — spawn fewer workers.

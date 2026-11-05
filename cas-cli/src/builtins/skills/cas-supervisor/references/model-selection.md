@@ -164,11 +164,11 @@ For every worker, `effort=high` is the ceiling except for the registry's Luna/xh
 
 ## Workflow
 
-1. **Tag at breakdown** — tasks default to standard; tag deviations with `labels="tier:light"` / `"tier:heavy"` and note non-obvious rationale in the task's `design` field.
+1. **Tag at breakdown** — tasks default to standard; tag deviations with `labels="tier:light"` / `"tier:taste"` / `"tier:heavy"` and note non-obvious rationale in the task's `design` field.
 2. **Spawn the mix** — count the lanes in the ready backlog and spawn each with `lane=<lane>` or its complete explicit recipe, never a partial one.
 3. **Route by lane** — assign light, standard, taste, and heavy work to matching registry lanes. Use taste for public decisions and heavy for implementation risk.
 4. **Escalate on failure** — after repeated rejection or verification failure, move deliberately to another active lane with the needed capability; never silently mutate an explicit recipe.
 5. **Escalate on judgment** — the two-rejection rule is a floor, not a permission gate. Judge the output, not the price tag; use cheap lanes for information and drafts, then pay for what ships.
-6. **De-escalate the tail** — when only light tasks remain, do not leave a heavy worker idle-burning; shut it down and let the light lane sweep the tail.
+6. **De-escalate the tail** — shut down only workers on a heavier lane than the remaining work needs; let the light lane sweep the tail.
 
 Explicit per-spawn parameters beat `.cas/config.toml` `[factory.defaults]` / `[[factory.workers]]` for that spawn only — check the project config before assuming what the floor actually is.

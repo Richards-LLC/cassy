@@ -97,11 +97,21 @@ pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> O
 }
 
 fn operator_credential_refusal() -> String {
+    format!(
+        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read the operator's Neon or Vercel authentication stores. {}",
+        blocker_steps("need operator credential access", NEED)
+    )
+}
+
+const NEED: &str = "<what you need and why>";
+
+/// The one blocker recipe every worker denial names: note, block, then message.
+pub(super) fn blocker_steps(summary: &str, message: &str) -> String {
     let prefix = crate::harness_policy::own_tool_prefix();
     format!(
-        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read the operator's Neon or Vercel authentication stores. Ask the supervisor via blocker=true: \
-         `{prefix}coordination action=message target=supervisor blocker=true summary=\"need operator credential access\" \
-         message=\"<what you need and why>\"`, then wait."
+        "Add a `note_type=blocker` task note, run `{prefix}task action=update id=<task-id> status=blocked`, \
+         then send `{prefix}coordination action=message target=supervisor blocker=true \
+         summary=\"{summary}\" message=\"{message}\" task_id=<task-id>` and wait."
     )
 }
 
@@ -195,26 +205,22 @@ fn collect_dispatches(code: &Value, calls: &mut Vec<(String, String)>) {
 }
 
 fn cli_refusal(cli: &str) -> String {
-    let prefix = crate::harness_policy::own_tool_prefix();
     format!(
         "🚫 WORKER-DENIED CLI (GH #1219): factory workers do not run `{cli}`. Without credentials \
          it starts a login that prompts the operator, and the operator does not grant it; the \
-         supervisor owns this access. Ask the supervisor via blocker=true: \
-         `{prefix}coordination action=message target=supervisor blocker=true summary=\"need {cli}\" \
-         message=\"<what you need from {cli} and why>\"`, then wait. The list is \
-         factory.worker_denied_clis, which only the operator changes."
+         supervisor owns this access. {} The list is \
+         factory.worker_denied_clis, which only the operator changes.",
+        blocker_steps(&format!("need {cli}"), NEED)
     )
 }
 
 fn tool_refusal(tool: &str, pattern: &str) -> String {
-    let prefix = crate::harness_policy::own_tool_prefix();
     format!(
         "🚫 WORKER-DENIED TOOL (GH #1219): factory workers do not call `{tool}` (matches \
          `{pattern}`). Its service authenticates as the operator; the supervisor owns this \
-         access. Ask the supervisor via blocker=true: \
-         `{prefix}coordination action=message target=supervisor blocker=true summary=\"need {tool}\" \
-         message=\"<what you need and why>\"`, then wait. The patterns are \
-         factory.worker_denied_mcp_tools, which only the operator changes."
+         access. {} The patterns are \
+         factory.worker_denied_mcp_tools, which only the operator changes.",
+        blocker_steps(&format!("need {tool}"), NEED)
     )
 }
 

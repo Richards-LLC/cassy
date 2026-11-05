@@ -15,7 +15,7 @@ Before the close reason, read `task action=show id=<task-id>` and apply installe
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes and follow-ups outside the acceptance criteria only when the verdict threshold below leaves them non-blocking; accept "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes and follow-ups outside the acceptance criteria only when the verdict threshold below leaves them non-blocking; accept "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
 
 ### Step 2: Compare the delivery with the plan
 
@@ -81,7 +81,7 @@ Follow `verifier-evidence-gate.md` → Verdict recording for the issue template 
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 - Use the reference's defect categories; severity is `blocking` or `warning`, with impact in the problem.
 
-Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
+Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, record it with `rule action=observe` as `verifier-evidence-gate.md` describes under Rule candidates. Never observe a lesson mandating test counts, per-case fixtures, new test files or test scope beyond the changed code.
 
 ## Epic verification
 

@@ -7,12 +7,12 @@ metadata:
 
 Read at delivery. Review owns coding and test-quality judgments; this branch
 collects evidence and delivers the assigned task. Task start lists what close
-will check. A refused park lists every failed gate: fix them all, retry once.
+will check. A refused park lists every failed gate: fix them all silently, retry once.
 
 ## Commit and push
 
-Commit scoped work; push once before parking, once per review round, unless
-`delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
+Commit scoped work. Push at park, at checkpoint or stand-down, and once per review round; never otherwise
+(`delivery_mode=local_merge` never pushes). Each push starts CI. The pre-push hook runs
 `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
 CI owns fast-row proof; local receipts are pre-push feedback. Park reads
 exact-tip capped test receipts, never runs checks. For changelog scope and
@@ -45,12 +45,12 @@ of closing over them. This receipt applies at every depth.
 For `depth=light`, deliver the minimal working outcome with honest evidence.
 For deep or unset depth, map every criterion to executed proof or a named proof
 owner using `verify-before-claim`; trace affected consumers and registrations.
-Consume the receipts from [discipline.md](discipline.md); name unexecuted
-obligations and their assembly owner.
+Consume the receipts from [discipline.md](discipline.md). Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 
 ## Ledger preflight
 
-Create required evidence with `cas qa ledger init --task <id>`; it prints the
+When task start's close checks list a Ledger or `Adversarial probe` line,
+create the evidence with `cas qa ledger init --task <id>`; it prints the
 project-scoped path and preserves existing evidence. Fill it from the real
 walk, then run `cas qa ledger check <path> --task <id>`. Fix every line/row
 diagnostic. Close uses that check before verification dispatch, including
@@ -58,24 +58,23 @@ existing no-code ledgers. A structural PASS does not judge captures.
 
 ## Merge and freshness
 
-Close requires the delivered work on the named target. On MERGE REQUIRED:
+A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothing more to do`.
+Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
+The park relay is the completion signal; send merge_request=true only for local_merge.
+A dispatched verifier reviews the candidate before publication; PASS publishes
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
    unread supervisor messages and re-read the task before corrective edits.
 2. Capture the current tip: `git rev-parse factory/<name>` (use your per-task
    branch if active). Check `git merge-base --is-ancestor <delivered-tip> <target-tip>`.
    If already merged or closed, stop and await the verdict rather than amend stale state.
-3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
-   merge with its branch and SHA. Push only with explicit supervisor authorization.
-   Otherwise push the delivered branch, then send `merge_request=true` with the
-   target and SHA. The required task verifier reviews the candidate before publication, outside
-   the target lock. PASS publishes the reviewed tree and closes with the same
-   approval; FAIL or an unresolved verdict holds only that delivery. There is
-   no post-merge verifier or worker close retry. In `qa.mode=batch` a Tier 1 delivery opens no dispatch and waits for
-   the release verdict, which the supervisor records; you have nothing to do. Do not re-close or block on that verification. While it is pending, follow
-   [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
-4. For a protected target, follow its PR flow. Ask for an epic merge rather than
-   `gh pr create --base epic/...`; the supervisor owns the merge venue.
+3. For `delivery_mode=local_merge`, retain the local commit and send
+   `merge_request=true` with its branch and SHA; push only with explicit supervisor
+   authorization. Otherwise push the delivered branch and retry close once.
+   While a merge is pending, follow [recovery.md](recovery.md#while-the-merge-is-pending).
+4. Never open or merge a PR yourself (`gh pr create`); the supervisor owns the merge venue.
 
 If another assigned task follows a handed-off delivery, start its per-task branch
 from the epic tip (`factory/<name>-<task-id>`), preserving the parked branch.
@@ -84,7 +83,7 @@ Never set `status=closed` or invent a verification record to bypass close.
 
 ## Upkeep refusals at park
 
-Before the merge request, close checks that the delivery kept the journey
+At park, close checks that the delivery kept the journey
 registry, `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` true for the
 paths it changed (G1–G3, G5, G6). Old debt never refuses; it prints as a
 warning. On a refusal, fix it in this branch and commit (own the new file,
@@ -118,7 +117,7 @@ checks the entry format, fragments included.
 
 - `commit_receipt=<sha>` names this task's immutable, non-empty delivered commit.
   Close validates ancestry against the target; use it for squash/cherry-pick
-  identity drift. Forward a rejected receipt with the exact guard error.
+  identity drift. Fix a rejected receipt from the exact guard error.
 - `completion_receipt=<json>` requests transactional delivery of the current
   unpublished source tip for candidate verification before publication. Fields: `task_id`, `worker_agent_id`, `repo_selector`,
   `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`,
@@ -128,7 +127,8 @@ checks the entry format, fragments included.
 
 ## Conditional evidence
 
-- Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
+- In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
+- In qa.mode=per_task only: demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking; cite its commit-bound bundle or real-build ledger. A
   binary-driven ledger runs an exact-tip candidate from `factory
   action=candidate_request`, never a compile of your own (cas-qa-craft's
@@ -139,8 +139,8 @@ checks the entry format, fragments included.
   reads): put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
-- Risk: read task `risk` and `proof_targets`. Name the supervisor's
-  `ASSEMBLY_PROOF` for full Rust execution. Non-Rust platform risk needs a
+- Risk: read task `risk` and `proof_targets`. Full Rust execution is
+  the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
 - Spike: record the decision and evidence; `search_manifest` can record commands
   and hit counts for conclusions based on searches.
@@ -165,7 +165,7 @@ also carries its portable reference. Keep the receipt fields in the note.
 
 ### Loaded proof for non-Rust targets
 
-When the close gate requires a `loaded_proof` for `risk=concurrency`, add one
+Rust: never; non-Rust with `risk=concurrency`: one `LOADED_PROOF` note, a
 `task action=notes note_type=loaded_proof` body with all four fields on one line:
 
 ```text
@@ -173,12 +173,8 @@ LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/
 ```
 
 Replace the example target with the complete target actually exercised. Use
-`target=whole`, `target=entire` or `target=full` for a complete Rust target (an
-optional `target` word may follow). Use `target=explicit non-Rust (...)` for
-other ecosystems. Direct `target=vitest`, `target=jest`, `target=pytest` and
-`target=go test` runner forms also work. A Rust module/test-filter `target=`
-value does not establish whole-target scope. Legacy `non-Rust target: ...`
-and `whole/entire/full target` prose still works.
+`target=explicit non-Rust (...)`; direct `target=vitest`, `target=jest`, `target=pytest` and
+`target=go test` runner forms also work, as does legacy `non-Rust target: ...` prose.
 Record 16 actual concurrent processes/workers with `parallelism=16` or
 `concurrency=16`. `-j16` and `--jobs 16` also work when they describe the runner
 or harness used; the receipt does not require Cargo flags on a non-Rust runner.
@@ -186,8 +182,6 @@ Record at least three loops/runs and `result=PASS` (or SUCCESS, exit 0, status 0
 SHA and log fields are optional; include logs and passed/failed counts for review.
 Read the refusal's per-note `parsed=[...]` and `missing=[...]` lists and repair
 that note; fields split across notes do not combine into a valid receipt.
-Factory Rust checks still defer loaded execution to supervisor assembly under
-[discipline.md](discipline.md); this grammar adds no worker check obligation.
 
 ## cas-src surface checklist
 
@@ -204,10 +198,5 @@ Record applicable evidence and the reason for each inapplicable surface:
 | User-visible change | Release-note impact and the project's publication rubric. |
 
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
-criterion evidence, the linked plan section and its metric receipt, safety facts and deferred proof ownership. A missed plan metric is never non-blocking. Read actual tool
-rejections as state; forward verification-required guidance once to the supervisor.
-
-To wait blocked on a pending verification dispatch without waking the
-supervisor, set `status=blocked` and record exactly one blocker note:
-`Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
-A note with any other text or extra lines is a real blocker and wakes the supervisor.
+criterion evidence, the plan section and its metric receipt when the brief links one, and safety facts. A missed plan metric is never non-blocking. Read actual tool
+rejections as state.

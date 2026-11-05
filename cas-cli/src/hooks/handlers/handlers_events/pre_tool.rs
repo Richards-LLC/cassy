@@ -593,7 +593,6 @@ fn handle_pre_tool_use_inner(
     // In a workspace that is not fmt-clean, either shape spills unrelated
     // changes. Workers use scoped format commands and may run only capped,
     // package-scoped cargo check --lib or --tests (cas-3efd, cas-3051).
-    // Workers run targeted tests; the supervisor runs the full suite at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -627,10 +626,11 @@ fn handle_pre_tool_use_inner(
                 "deny",
                 &format!(
                     "🚫 NO WORKER RUST BUILDS: `{what}` is outside the capped worker exceptions. \
-                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
-                     The hook runs it under max_concurrent_builders using your private seeded target cache. \
+                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag. \
+                     The hook runs it under max_concurrent_builders. \
                      Commit first so a successful check records `check: PASS <sha>`. \
-                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly (cas-4cbb)."
+                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused (cas-4cbb). \
+                     Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic."
                 ),
             ));
         }

@@ -49,7 +49,7 @@ running Cargo another way.
 On success the runner records `check: PASS <sha>` against the clean commit.
 Close copies that receipt into task notes when it matches the delivered SHA.
 A changed or dirty tree needs a new check. `--tests` also compiles test code;
-neither shape executes tests or replaces the supervisor's assembly proof.
+neither shape executes tests.
 
 Run targeted Rust tests through the same capped runner:
 
@@ -74,17 +74,14 @@ in the close reason.
 
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Before the push, cut the tests you added to the
-[fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
-clippy, rustc, and scoped-test scripts remain supervisor-owned. Do not record
-a scoped `--proof`,
-`SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
-targeted-test exception, park and name the unverified crates for the supervisor.
+[fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Never run cargo test, clippy, rustc or
+scoped-test scripts. Rust: never record a scoped `--proof`, `SCOPED_PROOF:` or
+`loaded_proof` receipt. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-For a supervisor's integrated run, record
-`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child closes reference the epic's integration proof; final-gate
-failures return as follow-up tasks.
+After a CI failure, a worker reruns only the failing spec. Without a queue, the
+supervisor's run records `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>`
+on the epic.
 
 ## Capacity waits
 
@@ -101,8 +98,8 @@ A source/test failure or a required decision still follows its own workflow.
 
 ## Browser checks
 
-Browser suites use the same tiering as Rust: workers and independent QA run
-vitest, tsc and source-impact-selected journeys. Where available, use
+Workers run touched vitest files and tsc; journeys run in the batch QA round,
+or per task only in qa.mode=per_task. Where available, use
 `scripts/journey-eval.sh <task-artifact-dir>`: default task-target selection,
 four workers, explicit empty receipt when nothing is affected. Pass
 `--affected <base>` to bind an explicit ancestor base. Arbitrary spec/grep

@@ -9,7 +9,7 @@ authoritative task/worker state once before acting.
 
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge; if Cassy opened a dispatch, run the verifier on it (its verdict closes or returns the task; no worker message); a Tier 1 delivery in `qa.mode=batch` waits for the release verdict. Then cancel any phase reminder |
+| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. A verifier delivery's `worktree_merge` prepares a candidate and opens a pre-merge dispatch: run the verifier; PASS publishes and closes. Then cancel any phase reminder |
 | Parked merge refused only for pending CI | Let the exact-SHA retry Cassy armed finish | No — green retries automatically; red or a moved lane sends one notice | Act only on that notice |
 | Other GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
 | Long release, publication, or other detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice | Check the authoritative job/task state once |
@@ -20,7 +20,6 @@ authoritative task/worker state once before acting.
 Never create a reminder instead of checking authoritative task acceptance,
 reading inbox updates, or processing an authenticated typed lifecycle event. Do not sleep,
 watch CI, or repeatedly poll. One active reminder per task/phase is the limit.
-Never run a reminder loop to catch operator messages. If they do not wake you, file the defect.
 
 ## API contract
 
@@ -36,7 +35,7 @@ task must leave no stale phase reminder.
 ### Time checkpoint: a real deadline
 
 Use a delay only for work that becomes due at that time, such as an expiring
-context handoff or a build-admission retry. A timer that checks inbox, CI, task,
+context handoff, a build-admission retry or a post-release invariant run. A timer that checks inbox, CI, task,
 merge or detached-job status is refused with the matching event forms.
 
 ```text
@@ -107,7 +106,7 @@ true, delivering the existing supervisor notification and prompt-queue wake.
 
 ## Role patterns
 
-- **Supervisors:** after dispatch, end the turn. Wait for CI with `ci_completed`,
+- **Supervisors:** after dispatch, end the turn. An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt. Wait for CI with `ci_completed`,
   for landing with `branch_contained_in`, and for a task with its filtered event.
   Detached commands use the harness background-task completion notice. On the
   signal, inspect the official receipt once and advance the work.
@@ -123,5 +122,4 @@ as a defect and remove old inbox polling workarounds.
 
 ## Peer release updates
 
-Untyped peer mail is an ask and wakes the peer; only `kind=receipt` or
-`wake=false` waits for the peer's next turn, so use those for true FYIs. Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.
+Peer message kinds: [reference](reference.md#message-delivery-and-wake-authority). Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.

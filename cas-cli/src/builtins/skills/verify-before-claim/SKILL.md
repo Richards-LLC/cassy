@@ -7,7 +7,7 @@ metadata:
 
 # Verify Before You Claim
 
-Immediately before `task action=close`, treat your summary as a hypothesis, not a report: run the proof fresh and capture its result.
+Immediately before `task action=close`, treat your summary as a hypothesis, not a report. A receipt at the delivered tip is fresh; rerun only after a new commit.
 
 ## Claim verdicts
 
@@ -35,11 +35,11 @@ For a Rust change, the factory worker proof under `cas-worker/references/discipl
 
 - `git diff --stat` showing exactly the files you expected to change.
 - Wiring evidence: `rg '<symbol>'` or `git grep -n '<symbol>'` hits for every new or changed symbol outside its definition.
-- `check: PASS <sha>` for the delivered clean commit, or why checking is deferred.
-- Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit, or the exact runtime denial if execution is deferred.
+- `check: PASS <sha>` for the delivered clean commit.
+- Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit.
 - Any non-Rust suite the change touches, with its passed count.
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
 
 ## The Four-Step Protocol
 
@@ -47,7 +47,7 @@ Run this every time, immediately before `task action=close`.
 
 ### 1. Name the proof command, in plain prose
 
-State (in chat or a task note) the single command that, if it exits zero, proves the work is done. Be specific to this task's claim.
+State in a task note the single command that, if it exits zero, proves the work is done. Be specific to this task's claim.
 
 - "AC says the new route returns 200" → proof is `curl -fsS http://localhost:3000/api/foo`.
 - "AC says the script accepts `--json`" → proof is `./scripts/export.sh --json | jq .status`.
@@ -57,11 +57,11 @@ If you cannot name a proof command in one sentence, narrow the claim.
 
 ### 2. Run it FRESH in the current worktree
 
-Run it now in the current worktree, after the most recent change, not from memory of an earlier run. For multi-step claims, run each proof command, not just the last one.
+Run it in the current worktree at your latest commit, not from memory of an earlier run. For multi-step claims, run each proof command, not just the last one.
 
 ### 3. Capture exit code + tail of output
 
-Show the result to the supervisor, preferably as a task note:
+Record the result as a task note:
 
 ```bash
 task action=notes id=<task-id> note_type=progress \
@@ -73,7 +73,7 @@ Tail:
 Safety: <what could break and why it did not>"
 ```
 
-Exit code is the load-bearing line. The tail lets the supervisor check that the command exercised what you think it did (test count, file path, status code).
+Exit code is the load-bearing line. The tail lets a reviewer check that the command exercised what you think it did (test count, file path, status code).
 
 ### 4. Only then, close
 

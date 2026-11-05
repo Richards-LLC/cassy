@@ -18,24 +18,22 @@ with no demo and epics with neither their own nor any child demo skip Step 0A.
 ### Epic evidence prerequisites
 
 For an epic with child demos, use `verification_type=epic` for every verdict.
-Before Step 0A, require exactly one `Epic flow walk` note and
-`~/.cas/artifacts/<epic-id>/LEDGER.md`; reject missing evidence with
-`QA evidence required: epic has child demo_statement but no Epic flow walk note or LEDGER.md`.
-Require a completed pass on the current assembled epic tip, a 60-minute budget,
-and coverage mapping for every child demo. Reject a missing, duplicate,
-running, stale-tip, or incomplete-coverage receipt; list omitted demos as owed
-work. The note's cells/PASS/FAIL/NOT EXERCISED counts and label split must match
-the ledger. Apply the same Step 0A REJECT table and capture judgments to this
+Before Step 0A, require the release `batch_receipt` ledger at
+`<artifacts_root>/<project-key>/<epic-id>/LEDGER.md` for the reviewed tip; reject missing evidence with
+`QA evidence required: epic has child demo_statement but no batch_receipt LEDGER.md`.
+Require coverage mapping for every child demo. Reject a missing, running,
+other-tip, or incomplete-coverage receipt; list omitted demos as owed work.
+Apply the same Step 0A REJECT table and capture judgments to this
 single combined matrix, not separately per child. Check Contradictions across
 child surfaces against the captures; a cross-child contradiction is a defect,
 not a reason to accept individually passing child receipts. Do not rerun QA
-from the close verifier or substitute the children's ledgers for the epic walk.
+from the close verifier or substitute the children's ledgers for the batch round.
 
 ### Step 0A: Apply the QA evidence gate before any judgment
 
 1. Locate `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The task notes and eventual
    close reason should cite this same path; do not use a close reason as a
-   substitute for the ledger. If the file is absent, reject with this exact
+   substitute for the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
 2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
@@ -94,7 +92,7 @@ count, rate), with or without a demo:
    full-suite execution follows the ownership rule below). Reject the
    rest, naming the claim and the missing or ambiguous run.
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task. Read receipts; never rerun a passing check.
 
 ## Scratch checkout lifetime
 
@@ -141,14 +139,12 @@ rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|ex
 
 Back every finding with a command output or an exact line reference.
 
-To run the task's tests yourself, use the counted verifier lane, never plain Cargo, as `verifier-evidence-gate.md` describes under Counted verifier lane.
-
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 
 - A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
 - Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
 - Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
-- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
+- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by the landing-tree full-suite run, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`, as is a "full suite" claim that ran fewer files or tests than the suite runs.
 
 ### Step 7: Honor the task's `execution_note`
 

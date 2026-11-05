@@ -37,7 +37,7 @@ use crate::git_evidence::{
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
-    is_supervisor_from_env, worker_needs_supervisor_verification_from_env, supervisor_harness_from_env,
+    is_supervisor_from_env, supervisor_harness_from_env,
     verification_policy, worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
@@ -9515,6 +9515,7 @@ impl CasCore {
                             &resolved_parent_branch, head).err()
                     }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
                         .unwrap_or_default();
+                    let msg = gate_text::parked_reply(&msg, qa_anchor.as_deref(), measured_branch.as_deref());
                     let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
@@ -9806,7 +9807,8 @@ impl CasCore {
             && !tier_skips_verifier
             && !release_verdict_covers
         {
-            let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
+            // cas-5597: every factory worker's close parks; the merge verdict closes.
+            let is_worker_without_subagents = crate::harness_policy::is_worker_from_env();
 
             // Check for approved verification
             if let Ok(verification_store) = self.open_verification_store() {
@@ -10040,15 +10042,9 @@ impl CasCore {
                             v.summary,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate tool aliases.
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
                                 format!(
-                                    "To fix: Address the issues in this worker.\n\
-                                     Then ask supervisor to run verification \
-                                     (task-verifier or direct {sup_ver}) \
-                                     and close the task on your behalf."
+                                    "To fix: address the issues in this worker and commit; your next close parks the fix. {}",
+                                    gate_text::WORKER_CLOSE_OWNERSHIP
                                 )
                             } else {
                                 format!(
@@ -10058,21 +10054,7 @@ impl CasCore {
                             close_reason_note,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate coordination tool.
-                                let coord = format!(
-                                    "{}coordination",
-                                    crate::mcp::tools::core::guidance::caller_prefix()
-                                );
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Suggested message: {coord} action=message target=supervisor summary=\"verification requested\" \
-                                     message=\"Task {id} is ready for re-verification. \
-                                     Please verify (task-verifier or direct {sup_ver}) \
-                                     and close if approved.\"",
-                                    id = req.id
-                                )
+                                String::new()
                             } else {
                                 format!(
                                     "To verify: Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
@@ -10682,36 +10664,13 @@ impl CasCore {
                             close_reason_section.as_str(),
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate supervisor verification tool.
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Ask supervisor to run verification \
-                                         (task-verifier or direct {sup_ver}) \
-                                         and close task {} on your behalf.",
-                                    req.id
-                                )
+                                gate_text::WORKER_CLOSE_OWNERSHIP.to_string()
                             } else {
                                 String::new()
                             },
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate coordination tool.
-                                let coord = format!(
-                                    "{}coordination",
-                                    crate::mcp::tools::core::guidance::caller_prefix()
-                                );
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Suggested message: {coord} action=message \
-                                         target=supervisor summary=\"verification requested\" message=\"Please verify task {id} \
-                                         (task-verifier or direct {sup_ver}) \
-                                         and close it if approved.\"",
-                                    id = req.id
-                                )
+                                String::new()
                             } else {
                                 format!(
                                     "After verification passes, retry {caller_task} action=close id={}.",
@@ -14567,7 +14526,7 @@ fn enrich_merge_required_with_conflict_check(
              `{worker_prefix}task action=start id={task_id}` (now permitted from \
              `awaiting_merge`) to inspect from inside their worker worktree, \
              rebase the factory branch onto the current integration target tip, \
-             push, and re-park it with merge_request=true before re-closing.",
+             push, and close again to re-park it.",
             conflict_paths.join(", ")
         )
     } else if let Some(error) = check_error {
@@ -14579,8 +14538,7 @@ fn enrich_merge_required_with_conflict_check(
              park as reopen-eligible. The assigned worker can \
              `{worker_prefix}task action=start id={task_id}` to inspect from inside \
              the worker worktree, rebase the factory branch onto the current \
-             integration target tip, push, and re-park it with \
-             merge_request=true before re-closing."
+             integration target tip, push, and close again to re-park it."
         )
     } else {
         message
@@ -17415,10 +17373,8 @@ fn run_factory_branch_merge_gate_for_delivery(
              1. {drain}\n\
              {epic_push_state_step}\
              {durable_step}\
-             4. If a merge is still needed, ask your supervisor to merge \
-             {factory_branch} into {parent_branch}: {merge_request}. The supervisor \
-             merges with `{merge}` on the epic branch.\n\
-             5. Once merged, retry {retry}.\n\n\
+             4. Close again with {retry} to park it; the supervisor merges \
+             {factory_branch} into {parent_branch} with `{merge}` and the merge verdict closes the task.\n\n\
              {exits}"
         )
     } else if local_merge {
@@ -17431,8 +17387,8 @@ fn run_factory_branch_merge_gate_for_delivery(
              supervisor merges your local branch):\n\
              1. {drain}\n\
              2. Commit everything on {factory_branch}; leave it local.\n\
-             3. Ask your supervisor to merge it into {parent_branch}: {merge_request}.\n\
-             4. Once merged, retry {retry}.\n\n\
+             3. Close again with {retry} to park it, then ask your supervisor to merge it \
+             into {parent_branch}: {merge_request}. The merge verdict closes the task.\n\n\
              {exits}"
         )
     } else {

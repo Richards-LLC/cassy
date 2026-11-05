@@ -31,14 +31,11 @@ artifacts, not suite members.
 Completion requires one already-run command whose redacted output proves it is
 red-capable, deterministic (or has a stated high repro rate), fast, and
 agent-runnable (human steps use the structured template). A factory worker runs a targeted Rust loop under `cas-worker` discipline:
-commit the reproducer red, then the fix green on the same named filter. If the installed runtime denies
-this exception, use captured logs, an installed CLI or a script, or hand the
-committed reproducer to the supervisor with the exact denial. If no loop can be built, state
+commit the reproducer red, then the fix green on the same named filter.
+Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
+If no loop can be built, state
 what was tried and request the reproducing environment, a redacted capture, or
 approval for temporary instrumentation; do not hypothesize without a loop.
-When a denied Rust reproducer is the chosen loop, wait for the supervisor's
-executed command and redacted output before Phase 2; an already-executed non-Rust
-loop that proves the exact symptom can satisfy the same criterion.
 Package-scoped compile checks use the capped runner but cannot supply red/green
 execution evidence; broad Rust builds and suites remain restricted.
 
@@ -51,8 +48,7 @@ time until every remaining element is load-bearing.
 ## Phase 3 — Rank falsifiable hypotheses
 
 Produce 3–5 ranked hypotheses. Each must predict what changing one variable
-would do. Record them with `task action=notes note_type=discovery` and
-invite domain correction without blocking on it; discard a hypothesis that
+would do. Record them with `task action=notes note_type=discovery`; discard a hypothesis that
 cannot make a testable prediction.
 
 ## Phase 4 — Instrument one prediction at a time

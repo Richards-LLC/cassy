@@ -7,7 +7,7 @@ The same Markdown reaches the terminal pane and Commander. Commander draws diagr
 - Answer first: the first line is the answer in one sentence.
 - Then give each kind of content its form from the table below. Use bullets (at most 5, one line each) only for content no form fits.
 - Bold the decision word or the thing waiting on the operator.
-- Keep the prose under ~600 characters unless the operator asks for detail. A diagram, code block or table does not count against it; use at most one of each per reply, and keep a diagram to about 10 nodes so it reads on a 390 px phone.
+- Keep prose within the `cas-supervisor` pane budget unless asked for detail. A diagram, code block or table does not count against it; use at most one of each per reply, and keep a diagram to about 10 nodes so it reads on a 390 px phone.
 - Do not include file paths or ticket IDs unless the operator asks for them.
 - Do not narrate the process.
 

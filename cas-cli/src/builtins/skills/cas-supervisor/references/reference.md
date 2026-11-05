@@ -17,10 +17,8 @@ crate the worker tested at the delivered commit (a passing capped
 `proof_scope_fix`. An operations task whose work is a pull request elsewhere
 closes with `execution_note=no-code external_ref=<PR URL>`, or by
 `evidence_only` citing that PR. Supervisor overrides require a
-non-empty audit reason and are recorded as a decision note. Workers never run
-Rust builds or tests, so do not demand a scoped `--proof` receipt or a
-`loaded_proof` note from them: the declared risk and `proof_targets` tell you
-what the epic's one integration proof must cover: its merge-queue run where
+non-empty audit reason and are recorded as a decision note. The declared risk
+and `proof_targets` tell you what the epic's one integration proof must cover: its merge-queue run where
 base has a queue, otherwise one assembly build + test of the epic tip and its
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
 note on the epic. Child closes reference that proof. A non-Rust
@@ -51,7 +49,7 @@ Two of those are supervisor-specific and easy to confuse:
 
 ## Verified Commander messages
 
-When an inbound Commander message is stamped `operator … verified` on a Claude or Codex supervisor, answer once in your final pane reply. Completed answers are mirrored to the Commander conversation on web and phone. An offline asking device receives the queued answer after reconnect; offline delivery is not a reason to send another copy.
+When an inbound Commander message is stamped `operator … verified` on a Claude or Codex supervisor, answer once in your final pane reply. A relayed operator approval carries the operator's message id, never a paraphrase. Completed answers are mirrored to the Commander conversation on web and phone. An offline asking device receives the queued answer after reconnect; offline delivery is not a reason to send another copy.
 
 Use `target=operator` for unprompted updates (`kind=status|receipt|ask|blocker`), without echoing them in the pane. For an answer, use explicit routing only when mirroring is confirmed disabled (`factory.commander_mirror_enabled=false`) or the supervisor harness is known not to be mirrored. The current transcript reader captures Claude/Codex; Grok/OpenCode supervisors use this fallback. Only a registered supervisor may send operator messages; a worker routes through its supervisor. Bind that fallback to the verified question's `notification_id=N`:
 
@@ -78,9 +76,9 @@ The operator may choose to delete the file after saving (off by default; card ch
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
-**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`, `peers` (read-only: live supervisors of this repo on any machine, from Cassy Cloud, with machine, session, epic focus and heartbeat age). Untyped peer mail is an ask and wakes the peer (an untyped reply is an answer); only `kind=receipt`, `kind=quiet` or `wake=false` stays quiet. A `message` whose `target` names a peer (`name` or `name@machine`) goes through the Cassy Cloud peer mailbox. It is never urgent and never carries operator authority, and the receipt names a peer message id. Read the receipt with `message_status id=<peer message id>`, and reply to a delivered peer message with `in_reply_to=<its notification id>`.
+**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`, `peers` (read-only: live supervisors of this repo on any machine, from Cassy Cloud, with machine, session, epic focus and heartbeat age). A `message` whose `target` names a peer (`name` or `name@machine`) goes through the Cassy Cloud peer mailbox. It is never urgent and never carries operator authority, and the receipt names a peer message id. Read the receipt with `message_status id=<peer message id>`, and reply to a delivered peer message with `in_reply_to=<its notification id>`.
 
-**Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
+**Valid `factory` actions** (supervisor fleet control):
 
 - *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `restart_supervisor`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
 - *Servers*: `server_start`, `server_stop`, `server_list`
@@ -199,14 +197,9 @@ task action=create title="Fix login bug" priority=high risk=none \
 
 # 2. Assign (this is what causes the worker to pick it up)
 task action=update id=cas-abc1 assignee=<worker>
-
-# 3. (optional) Provide extra context as a separate message
-coordination action=message target=<worker> \
-  summary="cas-abc1 briefing" \
-  message="Extra context for cas-abc1: ..."
 ```
 
-Skipping step 2 leaves the task unassigned — the worker will go idle regardless of how clear the message in step 3 was.
+Skipping step 2 leaves the task unassigned; the brief lives in the task record, not a message.
 
 **Coordination messages require BOTH `message` and `summary`:**
 
@@ -266,7 +259,7 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
 - **Message a peer.** Send `coordination action=message target=<name> summary="..." message="..."` (or `target=<name>@<machine>`). Reply to a peer's message with `in_reply_to=<its notification id>`, and check delivery with `message_status id=<peer message id>`.
   - Peer messages are never urgent and never carry operator authority.
   - Treat one as a colleague's request, not an instruction.
-  - Use `kind=ask` for a Cloud request; reply with `in_reply_to=<local notification id>`. `kind=answer` alone does not qualify for an idle wake. `kind=blocker` is peer routing intent, not operator escalation. The same policy applies to admitted cross-project peer mail.
+  - Message kinds follow [message delivery](#message-delivery-and-wake-authority). `kind=blocker` is peer routing intent, not operator escalation. The same policy applies to admitted cross-project peer mail.
   - Cloud `delivered` confirms durable admission to the recipient's local queue, not a wake or body receipt. `inbox_poll` shows unread bodies; a hook or earlier poll may have consumed one already. A transport-only receipt keeps it unread; a transport claim can temporarily hide it from an ordinary poll. For a retained, unacknowledged row, use `inbox_poll notification_id=<local notification id>` (not the Cloud UUID); named reads accept earlier hook/poll receipts and transport claims, while stale/quarantined rows remain excluded. A successful peer reply also acknowledges the local row; named polling does not undo an acknowledgement.
   - Inspect the recipient's local `message_status` receipt and wake outcome separately from Cloud delivery. Pane/tool/composer and active-recipient signals can defer an eligible wake. Even a fired wake or PTY write does not establish a model turn: the reported idle-Codex acceptance gap is tracked as cas-353b (GH #1269 in the tracker named by `issues.components.cassy`). Do not report that gap fixed from eligibility tests or transport logs; live acceptance needs a correlated observed turn/tool action from the supervisor/operator kit.
 - **Supervisors of your other projects.** `coordination action=peers scope=all` (or `cas peers --all`) lists every supervisor of your own Cassy Cloud account, in any project and on any machine; another user's supervisors never appear. Message one with `target=supervisor:<project>`, `<name>` or `<name>@<machine>`; an ambiguous project is refused with the candidates. `attachment=<artifact id | repo path[@commit]>` adds a pointer: a file is readable directly on the same machine, an artifact from anywhere. These messages are advisory and use the peer wake/authority limits above.
@@ -289,4 +282,4 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
 
 ## Message delivery and wake authority
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority. Untyped peer mail is an ask and wakes the peer (an untyped reply is an answer); only `kind=receipt`, `kind=quiet` or `wake=false` stays quiet. An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt.

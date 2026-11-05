@@ -18,7 +18,7 @@ Before finalizing EPIC scope, multi-task plans, or architectural decisions, expl
 - **Six-month direction** — given what we know about where the project is heading, does this move us toward or away from that destination?
 - **Known traps** — check project memories and prior incidents for patterns this decision might repeat.
 
-Surface the trajectory assessment in-line even when the answer is "no concerns" — the fact that you thought about it is part of the value. Do not skip this gate for "small" decisions that accumulate into architecture.
+Surface a trajectory concern in-line; record nothing when there is none. Do not skip this gate for "small" decisions that accumulate into architecture.
 
 ## Spec Requirements
 
@@ -140,7 +140,7 @@ For a mechanical, codebase-wide change that cannot land green as a vertical slic
 
 When breaking an epic into subtasks, apply these patterns:
 
-**Demo statements** — Every subtask must have a `demo_statement` describing what can be demonstrated when complete. Example: `demo_statement="User types a query and results filter live"`. If a task has no demo-able output, it may be a horizontal slice — restructure it into a vertical slice that delivers observable value.
+**Demo statements** — Give a `demo_statement` only to user-facing work (`qa.user_facing_labels`). Example: `demo_statement="User types a query and results filter live"`.
 
 **Spikes** — If a task's primary output is understanding (not code), create it as a spike: `task_type=spike`. Spikes have question-based acceptance criteria (e.g., "Which auth library fits our constraints?") and produce a decision or recommendation, not implementation.
 

@@ -1125,7 +1125,6 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.target_cache_low_watermark_percent", "70", "70"),
         ("factory.target_cache_min_idle_secs", "7200", "7200"),
         ("factory.target_cache_retention_count", "2", "2"),
-        ("factory.target_cache_budget_gb", "120", "120"),
         ("factory.epic_base_branch", "staging", "staging"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),

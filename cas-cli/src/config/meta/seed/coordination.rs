@@ -55,9 +55,6 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         ("factory.target_cache_retention_count", "Warm Cargo Cache Retention",
          "Number of newest stale worker caches retained warm, also bounding parked deliveries with warm target/debug caches.",
          ConfigType::Int, "1", Constraint::Min(0)),
-        ("factory.target_cache_budget_gb", "Worker Cargo Cache Budget",
-         "Total GiB for all private worker target/debug caches; parking prunes the least recently built idle caches above it. 0 disables.",
-         ConfigType::Int, "160", Constraint::Min(0)),
     ] {
         registry.register(ConfigMeta {
             key,

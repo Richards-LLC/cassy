@@ -1118,6 +1118,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.restart_worker_between_tasks", "true", "true"),
         ("factory.context_recycle_threshold_percent", "85", "85"),
         ("factory.stall_after_secs", "900", "900"),
+        ("factory.progress_watchdog_secs", "1800", "1800"),
         ("factory.delivery_stalled_priority_secs", "120", "120"),
         ("factory.delivery_stalled_normal_secs", "240", "240"),
         ("factory.strict_cli", "true", "true"),

@@ -4641,6 +4641,19 @@ impl FactoryDaemon {
             super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
             super::relay_jobs::RelayOutput::ProbeWritten
         });
+        // cas-ddae (GH #1500): work in flight with no real progress wakes the
+        // supervisor at N and pages the operator at 2N; store and git reads,
+        // off the loop.
+        let watchdog_dir = self.app.cas_dir().to_path_buf();
+        let watchdog_session = self.session_name.clone();
+        self.relay_jobs.submit_write(&mut self.queue_jobs, "progress-watchdog", None, move || {
+            let interval = crate::config::Config::load(&watchdog_dir)
+                .unwrap_or_default()
+                .factory()
+                .progress_watchdog_secs;
+            super::progress_watchdog::sweep(&watchdog_dir, &watchdog_session, interval, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
         // cas-786a6 (H3): the two pure-store sweeps run on the store
         // worker, off the loop.
         let cas_dir = self.app.cas_dir().to_path_buf();
@@ -13338,26 +13351,42 @@ pub(super) fn fire_reminder(
             )
         };
 
+        // cas-ddae (GH #1500): a peer ask's deadline only matters while the
+        // peer is silent. Answered, the fired reminder is consumed unsent.
+        let peer_ask = reminder.trigger_filter.as_ref().and_then(|filter| {
+            filter.get(super::progress_watchdog::PEER_ASK_FILTER_KEY).and_then(|id| id.as_i64())
+        });
+        if let Some(ask) = peer_ask
+            && queue.ask_answered(ask).unwrap_or(false)
+        {
+            if let (Some(records), Some(id)) = (supervisor_queue, record_id) {
+                let _ = records.ack(id);
+            }
+            return;
+        }
         // cas-207e: a Commander ask's deadline wakes the supervisor as a
         // blocker, stamped by the daemon, so an idle pane acts on it now.
-        let enqueued = if reminder
+        let deadline = if peer_ask.is_some() {
+            Some(("peer-ask-deadline", "peer ask deadline"))
+        } else if reminder
             .trigger_filter
             .as_ref()
             .is_some_and(|filter| filter.get("operator_ask").is_some())
         {
+            Some(("operator-ask-deadline", "operator ask deadline"))
+        } else {
+            None
+        };
+        let enqueued = if let Some((source, label)) = deadline {
             queue
                 .enqueue_idempotent(
-                    &format!("operator-ask-deadline:{}", reminder.id),
+                    &format!("{source}:{}", reminder.id),
                     &target,
-                    &crate::prompt_revalidation::attach_blocker_envelope(
-                        &prompt,
-                        "operator ask deadline",
-                        None,
-                    ),
+                    &crate::prompt_revalidation::attach_blocker_envelope(&prompt, label, None),
                     Some(session_name),
-                    Some("operator ask deadline"),
+                    Some(label),
                     Some(cas_store::NotificationPriority::High),
-                    &format!("operator-ask-deadline:{}", reminder.id),
+                    &format!("{source}:{}", reminder.id),
                     Some(&cas_store::QueueOrigin::Daemon),
                 )
                 .map(|_| ())
@@ -14964,6 +14993,43 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// cas-ddae (GH #1500): a peer ask's deadline wakes the asker as a
+    /// blocker only while the peer is silent; an answered ask stays quiet.
+    #[test]
+    fn a_peer_ask_deadline_wakes_the_asker_only_while_the_peer_is_silent_gh1500() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+        reminder_store.init().unwrap();
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
+        prompt_store.init().unwrap();
+        let answered = prompt_store.enqueue_with_session("young-swan-22", "tender-finch-34", "review?", "factory").unwrap();
+        let silent = prompt_store.enqueue_with_session("young-swan-22", "tender-finch-35", "review?", "factory").unwrap();
+        prompt_store.enqueue_with_session("tender-finch-34", "young-swan-22", "approved", "peer").unwrap();
+        for (ask, peer) in [(answered, "tender-finch-34"), (silent, "tender-finch-35")] {
+            reminder_store
+                .create_with_scope("owner-id", None, &format!("Peer ask #{ask} to {peer} got no answer in 60 min."),
+                    cas_store::ReminderTriggerType::Time, Some(chrono::Utc::now() - chrono::Duration::seconds(1)), None,
+                    Some(&serde_json::json!({ "peer_ask": ask, "peer": peer })), 0, Some("factory"), None, false, None)
+                .unwrap();
+        }
+        for reminder in reminder_store.get_due_time_reminders().unwrap() {
+            super::fire_reminder(&reminder, &reminder_store, &None, &Some(Arc::clone(&prompt_store)), "factory",
+                "young-swan-22", &HashMap::from([("owner-id".into(), "young-swan-22".into())]), None, temp.path());
+        }
+        let wakes: Vec<_> = prompt_store.peek_all(10).unwrap().into_iter()
+            .filter(|row| row.source.starts_with("peer-ask-deadline:")).collect();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        // pin: the wake must name the unanswered ask and its peer, not the answered one
+        assert!(wakes[0].prompt.contains(&format!("#{silent} to tender-finch-35")), "{}", wakes[0].prompt);
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, "young-swan-22", &wakes[0].source, &wakes[0].prompt),
+            Some(super::SupervisorWakeClass::Blocker)
+        );
+        assert!(reminder_store.list_all_pending().unwrap().is_empty(), "both deadlines are consumed");
     }
 
     /// cas-207e: a Commander ask's deadline reminder fires as a

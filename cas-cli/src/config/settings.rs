@@ -1057,6 +1057,13 @@ pub struct FactoryConfig {
     #[serde(default = "default_supervisor_stall_after_secs")]
     pub stall_after_secs: u64,
 
+    /// cas-ddae (GH #1500): minutes of no factory progress (task change,
+    /// lane commit, merge or agent message; never heartbeats) with work in
+    /// flight before the supervisor is woken, in seconds. The operator is
+    /// paged at twice this. 0 disables. Default: 2700 (45 minutes).
+    #[serde(default = "default_progress_watchdog_secs")]
+    pub progress_watchdog_secs: u64,
+
     /// Seconds before an unread critical/high-priority coordination message
     /// bounces a delivery-stalled notice back to its sender.
     #[serde(default = "default_delivery_stalled_priority_secs")]
@@ -1259,6 +1266,10 @@ fn default_supervisor_stall_after_secs() -> u64 {
     cas_factory::DEFAULT_SUPERVISOR_STALL_AFTER_SECS
 }
 
+fn default_progress_watchdog_secs() -> u64 {
+    45 * 60
+}
+
 fn default_delivery_stalled_priority_secs() -> u64 {
     // cas-badb (GH #1302): an unread message escalates within five minutes.
     5 * 60
@@ -1338,6 +1349,7 @@ impl Default for FactoryConfig {
             restart_worker_between_tasks: default_restart_worker_between_tasks(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
+            progress_watchdog_secs: default_progress_watchdog_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,

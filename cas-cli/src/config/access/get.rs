@@ -183,6 +183,7 @@ impl Config {
             "factory.restart_worker_between_tasks" => Some(factory.restart_worker_between_tasks.to_string()),
             "factory.context_recycle_threshold_percent" => Some(factory.context_recycle_threshold_percent.to_string()),
             "factory.stall_after_secs" => Some(factory.stall_after_secs.to_string()),
+            "factory.progress_watchdog_secs" => Some(factory.progress_watchdog_secs.to_string()),
             "factory.delivery_stalled_priority_secs" => Some(factory.delivery_stalled_priority_secs.to_string()),
             "factory.delivery_stalled_normal_secs" => Some(factory.delivery_stalled_normal_secs.to_string()),
             "factory.strict_cli" => Some(factory.strict_cli.to_string()),

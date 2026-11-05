@@ -77,7 +77,7 @@ count, rate), with or without a demo:
    full-suite execution follows the ownership rule below). Reject the
    rest, naming the claim and the missing or ambiguous run.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 
 ## Candidate fixture isolation
 

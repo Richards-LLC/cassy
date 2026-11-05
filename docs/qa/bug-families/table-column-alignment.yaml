@@ -1,0 +1,5 @@
+title: A table column aligns once, header included, from its rule or from all its cells, and sizes to its content
+found: 2026-11-05
+tasks: [cas-72ff]
+invariants: [HUB-J4-READABLE-PROSE-TABLES]
+journeys: [HUB-J4]

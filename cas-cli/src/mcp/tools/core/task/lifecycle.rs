@@ -2145,6 +2145,14 @@ impl CasCore {
             &task.labels,
             None,
         );
+        crate::quality_ledger::bug_filed(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            task.priority.0,
+            task.created_at,
+        );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",
             id,

@@ -447,6 +447,24 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
+  it("aligns each column once, from its rule or its cells, so mixed columns and headers line up (cas-72ff)", () => {
+    // The operator's table, Nov 5 11:10 AM ET: numeric cells used to right-align one by one.
+    const table = (rule: string): string[][] => {
+      const [evi] = renderBody(document, reply(1, "answer", [
+        "| gabber supervisor | soundwave | prowl |", rule,
+        "| actually working | 17% | **13%** |",
+        "| idle with every worker idle | 53% | **61%** |",
+        "| biggest single gap | 8.3 h | **9.3 h** (9:51 PM → 7:10 AM, all 7 workers waiting) |",
+        "| worker test time | 39% | not measurable cleanly (~9% proxy). one task ordered **5 full-suite runs** for a flake |",
+      ].join("\n")));
+      const columns = [...evi!.querySelectorAll("tr")].map(row => [...row.cells].map(cell => cell.dataset.align ?? ""));
+      return columns[0]!.map((_, index) => [...new Set(columns.map(row => row[index]!))]);
+    };
+    expect(table("| --- | --- | --- |")).toEqual([["left"], ["left"], ["left"]]);
+    expect(table("| :-- | --: | :--: |")).toEqual([["left"], ["right"], ["center"]]);
+    const [numeric] = renderBody(document, reply(1, "answer", "| run | share |\n| --- | --- |\n| a | 17% |\n| b | 53% |"));
+    expect([...numeric!.querySelectorAll("tr")].map(row => row.cells[1]!.dataset.align)).toEqual(["right", "right", "right"]);
+  });
   it("renders a blank corner header as an empty cell, not a nameless column header, with copy attached below (cas-0e5e)", () => {
     const [table] = renderBody(document, reply(1, "answer", "| | time |\n|---|---:|\n| bubble says delivered | 1.05 s |"));
     const head = [...table!.querySelectorAll("thead tr > *")];

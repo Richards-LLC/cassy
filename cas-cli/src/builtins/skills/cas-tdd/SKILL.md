@@ -18,7 +18,7 @@ Elegant tests, not copious: a test exists to catch a real regression, and each e
 - Assert observable behaviour. A test restating the implementation (mirroring its branches or constants) is bloat; mark a durable exact-text contract `// pin: <reason>`. Never pin conversational reply text, SMS copy or any model output; assert the reader's decision and the outcome (charge, save, draft).
 - No exhaustive matrices, near-duplicates, copied fixtures, timing assumptions or host state; apply [Test hygiene](#test-hygiene) to every added or changed test.
 - Claim, identity and state-machine changes are the exception: cover the combination table, every identity kind × every entry kind, as rows of one table-driven test. One happy-path fixture hides the pairs that break.
-- Every bug fix adds a regression case that runs red before the fix, so the suite keeps the bug out; where the project keeps a user-flow case catalog, add the case there too.
+- Every bug fix adds a regression case that replays the real incident and runs red before the fix, so the suite keeps the bug out; where the project keeps a user-flow case catalog, add the case there too.
 - Stress loops and live probes are proof artifacts for the task note, not suite members.
 - A flaky test is a bug in the test: fix or delete it, never retry-wrap it.
 - Each test has one command and lane, selected from the dependency graph, and a failure that names whose fault it is.
@@ -46,7 +46,7 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Record the scoped command's result in the task; a zero-test success is not proof.
 - Factory workers run targeted tests under [`cas-worker` discipline](../cas-worker/references/discipline.md): commit and run red, then commit the fix and run that filter green.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

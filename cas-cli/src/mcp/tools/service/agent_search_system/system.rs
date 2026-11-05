@@ -583,6 +583,13 @@ impl CasService {
                 )));
             }
         };
+        // cas-87a2: filing on the Cassy tracker is the friction-ledger write.
+        crate::quality_ledger::issue_filed(
+            &self.inner.cas_root,
+            &outcome.url,
+            &title,
+            chrono::Utc::now(),
+        );
         let degradation = outcome
             .degradation
             .map(|message| format!("\n\n{message}"))

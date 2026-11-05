@@ -2615,13 +2615,14 @@ pub(super) const URGENT_TOOL_CALL_NOTICE: &str =
     "Cassy interrupted your in-flight tool call to deliver this; this was not the operator.\n\n";
 
 /// cas-73f7: first recheck of a declined supervisor wake. Doubles per
-/// consecutive decline, capped at [`BUSY_RECIPIENT_RECHECK_INTERVAL`].
+/// consecutive decline, capped at [`DECLINED_WAKE_RECHECK_MAX`] (cas-922d).
 pub(super) const DECLINED_WAKE_RECHECK_BASE: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const DECLINED_WAKE_RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(super) fn declined_wake_recheck(prior_declines: u32) -> std::time::Duration {
     DECLINED_WAKE_RECHECK_BASE
         .saturating_mul(1 << prior_declines.min(4))
-        .min(BUSY_RECIPIENT_RECHECK_INTERVAL)
+        .min(DECLINED_WAKE_RECHECK_MAX)
 }
 
 /// cas-d1659: whether a wake-starved row is escalated to the supervisor. A
@@ -10446,6 +10447,21 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
+                    // cas-922d: the cas-73f7 in-flight hold, per member. The
+                    // released claim lets this worker's hook surface the
+                    // broadcast when its call ends.
+                    let member_in_call = queued.urgent
+                        && self.prepared_tool_call_evidence(name) == ToolCallEvidence::InFlight;
+                    if member_in_call
+                        && chrono::Utc::now() - queued.created_at
+                            < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
+                    {
+                        self.queue_jobs.stamp(self.app.cas_dir(), queued.id, name,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
+                        tally.failed += 1;
+                        tally.notes.push(format!("{name}: {URGENT_TOOL_CALL_DETAIL}"));
+                        continue;
+                    }
                     tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
                         target_agent = %name, "Attempting prompt injection to '{}': {}", name,
                         queued.prompt.chars().take(50).collect::<String>());
@@ -10457,12 +10473,17 @@ impl FactoryDaemon {
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
                         let harness = self.app.harness_for(name);
+                        let member_prompt = if member_in_call {
+                            format!("{URGENT_TOOL_CALL_NOTICE}{prompt_with_instructions}")
+                        } else {
+                            prompt_with_instructions.clone()
+                        };
                         let payload = super::delivery::prepare_pty_machine_delivery(
                             self.app.cas_dir(),
                             name,
                             harness,
                             &inbox_source,
-                            &prompt_with_instructions,
+                            &member_prompt,
                             Some(queued.id),
                         );
                         let settle = self.urgent_settle_duration(name);

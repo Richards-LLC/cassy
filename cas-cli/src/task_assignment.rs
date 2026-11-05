@@ -6,7 +6,7 @@ use std::path::Path;
 /// The one-line form of cas-tdd's "Fewest tests" principle, carried once by
 /// every task start (cas-5a52).
 pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
-     through the real path; extend an existing test before adding one, and fix or delete a flaky test \
+     through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
      instead of retrying it (cas-tdd, Fewest tests).";
 
 /// Carried by every assignment and spawn brief. It points at the principle
@@ -14,8 +14,8 @@ pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the f
 /// carries it (cas-d9db).
 pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
     "Fewest tests: cas-tdd (task start states the principle). Assignment authorizes and requires those ",
-    "tests and the change's affected targeted tests, which you run yourself per cas-worker ",
-    "references/discipline.md; the merge queue owns the full suites. ",
+    "tests covering the lines touched, which you run yourself per cas-worker ",
+    "references/discipline.md. The merge queue runs the full suite once; never run it locally. ",
     "Docs-only and no-code tasks prove their acceptance check instead (e.g. ",
     "markdownlint, `cas codemap status`, a published artifact); don't add code tests to them. ",
     "Close your own task; never ask the supervisor to close it."

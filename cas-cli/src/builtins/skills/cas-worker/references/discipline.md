@@ -5,8 +5,7 @@ contract carries the lifecycle rules.
 
 ## Scope and test design
 
-Run affected targeted tests: the whole test module of each changed production
-function plus every integration harness that calls it. `CONTRIBUTING` names the
+Run the tests that cover the code you touched; name each file or filter you ran. `CONTRIBUTING` names the
 scoped commands. Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
 [Test hygiene](../../cas-tdd/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
 tests to add. Docs-only and no-code tasks prove their acceptance check instead
@@ -43,15 +42,20 @@ named-test filter:
 cargo nextest run -p affected-crate --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
 ```
 
-Pick `--lib` or one `--test <harness>` from the project's harness inventory
-(`scripts/cas-test-targets.py` in cas-src); the refusal names any rejected
-shape. Zero matched tests fail. Run the red test before fixing, then commit and
-run the green one. Cover each affected module and harness, for example
-`--lib -E 'test(close_ops::)'` plus
-`--test integration_factory -E 'test(worktree_surface_test::)'`, and list each
-in the close reason: named-only proofs missed same-module assertions and other
-callers' tests. Before rewording user-facing text, grep the tests for the old
-wording. Measure a size or count claim on a real tree as well as a fixture.
+Select exactly one package and a mandatory positive named-test filterset:
+`test(name)` or `test(=module::name)`, optionally joined by `|` or `&`.
+Select `--lib` or one `--test <harness>` from the project's explicit Cargo
+harness inventory (`scripts/cas-test-targets.py` in cas-src). An omitted target
+means `--lib`. Empty, `all()`, glob/regex and negated filters, repeated packages,
+broad flags, environment prefixes and compound commands are refused.
+Commit first; zero matched tests fail. Success records
+`test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
+receipts. Run the red test before fixing it, then commit and run the green test.
+
+Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
+Before rewording user-facing text, grep the tests for the old wording. Measure
+a size or count claim on a real tree as well as a fixture. List each module run
+in the close reason.
 
 Read the diff and trace callers, struct literals and match arms across
 consumers. Before the push, cut the tests you added to the
@@ -61,10 +65,11 @@ supervisor-owned; do not record a scoped `--proof`, `SCOPED_PROOF:` or
 `loaded_proof` receipt. If the installed runtime predates the targeted-test
 exception, park and name the unverified crates.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
-A supervisor's integrated run records
-`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on the
-epic; child closes reference it.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
+For a supervisor's integrated run, record
+`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
+the epic. Child closes reference the epic's integration proof; final-gate
+failures return as follow-up tasks.
 
 ## Capacity waits
 

@@ -114,6 +114,10 @@ pub fn deliver_merge_intent(
         let _ = std::fs::write(&path, text);
     }
     let (summary, body) = merge_intent_message(intent);
+    let body = match crate::cloud::peer_mailbox::attach_message_intent(&body, Some("receipt"), false) {
+        Ok(body) => body,
+        Err(error) => return MergeIntentOutcome::Failed(vec![error]),
+    };
     let mut sent = Vec::new();
     let mut errors = Vec::new();
     for peer in recipients {

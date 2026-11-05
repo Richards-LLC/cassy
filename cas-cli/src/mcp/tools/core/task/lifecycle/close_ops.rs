@@ -29195,7 +29195,7 @@ mod merge_state_gate_tests {
                 git(p, &["add", "delivery.rs", "second.rs"]);
             } else {
                 git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
-                if row == "partial-patch" { git(p, &["rm", "-q", "second.rs"]); }
+                if row == "partial-patch" { git(p, &["rm", "-q", "-f", "second.rs"]); }
             }
             git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
             let landed = head_sha(p);
@@ -29205,6 +29205,16 @@ mod merge_state_gate_tests {
             std::fs::write(p.join("later.txt"), "unrelated target progress\n").unwrap();
             git(p, &["add", "later.txt"]); git(p, &["commit", "-q", "-m", "advance target after queue publication"]);
             git(p, &["push", "-q", "origin", "main"]);
+            // Probe the same containment guard as well as full close, so a
+            // prior content gate cannot conceal a permissive partial-patch rule.
+            match verified_delivery::current(&root, &task) {
+                Ok(Some(reviewed)) => assert_eq!(
+                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                    row == "queue-landed", "containment guard: {row}",
+                ),
+                Err(_) if row == "foreign-candidate" => {},
+                other => panic!("expected task-bound review for {row}: {}", other.is_ok()),
+            }
             let mut req = base_req(&task.id); req.commit_receipt = Some(landed);
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;

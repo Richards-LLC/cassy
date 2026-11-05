@@ -415,7 +415,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         );
     }
     // pin: every shipped supervisor contract must describe the real peer wake policy above.
-    let peer_policy = "Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn.";
+    let peer_policy = "Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.";
     let root = tempfile::tempdir().unwrap();
     let queue = crate::store::open_prompt_queue_store(root.path()).unwrap();
     for (harness, cli) in [

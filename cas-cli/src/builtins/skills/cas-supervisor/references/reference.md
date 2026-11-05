@@ -1,292 +1,117 @@
 # Reference — Action Names, Field Names, Dispatch Pattern
 
-Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
+Each tool refuses an unknown action or field with the current list. The supervisor-specific ones are below.
 
-**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `rebind_branch`, `available`, `mine`.
-
-Approve an existing replacement delivery branch with `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"` after the assigned worker checks it out cleanly. Use `request_changes` first for a parked delivery. Cassy records the old tip, preserves assignment and target, and keeps normal close gates.
+Approve a replacement delivery branch with `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"` after the assigned worker checks it out cleanly; use `request_changes` first for a parked delivery. Assignment, target and close gates carry over.
 
 ## Task risk declarations
 
-Code tasks (`task`, `bug`, and `feature`) must carry `risk=blast-radius`,
-`platform`, `concurrency`, or `none` at creation. A `blast-radius` declaration
-also requires non-empty comma-separated `proof_targets`. At close, every source
-module in the attributed delivery diff must be named by a target or sit in a
-crate the worker tested at the delivered commit (a passing capped
-`cargo nextest run -p <crate>` receipt); only an untested crate needs a
-`proof_scope_fix`. An operations task whose work is a pull request elsewhere
-closes with `execution_note=no-code external_ref=<PR URL>`, or by
-`evidence_only` citing that PR. Supervisor overrides require a
-non-empty audit reason and are recorded as a decision note. Workers never run
-Rust builds or tests, so do not demand a scoped `--proof` receipt or a
-`loaded_proof` note from them: the declared risk and `proof_targets` tell you
-what the epic's one integration proof must cover: its merge-queue run where
-base has a queue, otherwise one assembly build + test of the epic tip and its
-`ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
-note on the epic. Child closes reference that proof. A non-Rust
-`risk=platform` task still carries its worker `platform_proof` receipt.
+Code tasks (`task`, `bug`, `feature`) carry `risk=blast-radius`, `platform`, `concurrency` or `none` at creation; `blast-radius` also needs comma-separated `proof_targets`. At close, every changed source module must be named by a target or sit in a crate the worker tested at the delivered commit; only an untested crate needs a `proof_scope_fix`. An operations task whose work is a pull request elsewhere closes with `execution_note=no-code external_ref=<PR URL>`. The declared risk and `proof_targets` tell you what the epic's one integration proof must cover: its merge-queue run, or one assembly build and test of the epic tip with an `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` note. Do not demand scoped Rust proof from workers. A non-Rust `risk=platform` task still carries its `platform_proof` receipt.
 
-A worker or QA reviewer requesting an exact-tip binary for a Cassy source CLI
-walk calls `factory action=candidate_request task_id=<own-task> revision=<sha>`.
-The factory daemon builds it from a checkout it keeps at the default branch tip,
-one build per machine under the build guard, and messages the requester; you get
-no turn and owe no hand-off. Run `cas qa candidate build --task <task-id> --rev
-<sha>` yourself only for your own work, such as the batch epic-tip candidate: it
-waits for that machine lock and writes `cas`, `VERSION.txt`, `SHA256SUMS` and
-`RECEIPT.json` to the task's `candidates/<revision>/`. `candidate/` points at the
-newest; a later build never replaces a cited one, and asking again for a published
-revision reuses it. These directories stay until task artifacts are cleaned. The command
-builds evidence only and does not run or replace the epic's release checks. A
-request from another machine is not routed: it builds on that machine's daemon.
+A worker or QA reviewer that needs an exact-tip Cassy binary calls `factory action=candidate_request task_id=<own-task> revision=<sha>`; the daemon builds it and messages the requester, so you owe no hand-off. Run `cas qa candidate build --task <task-id> --rev <sha>` yourself only for your own work, such as the batch epic-tip candidate. Builds go to the task's `candidates/<revision>/` and are never replaced. For proof from another machine, use the [cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs) and read the hash-verified copy before relying on it.
 
-For a proof produced on another machine, use the worker's
-[cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs):
-attach a published artifact, then fetch and read the hash-verified copy on the
-owning machine before relying on the receipt.
-
-Two of those are supervisor-specific and easy to confuse:
-
-- **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.
-- **`reset`** — revive a task **orphaned by a dead session**. Atomic: force-releases the lease, clears the assignee, forces `status=open`. Because it clears the assignee it is the wrong tool for "this worker must redo it" — use `request_changes` for that. `reset` does not require you to hold the lease; add `force=true` only to override a still-heartbeating assignee (logged as a forced-reset audit note).
+- **`request_changes`** is the exit from `awaiting_merge` when review fails, before or after a merge. It reopens the task with its assignee, so the same worker reworks it. Do not improvise with `update status=open`.
+- **`reset`** revives a task orphaned by a dead session: it releases the lease, clears the assignee and reopens. Use `request_changes` when the same worker must redo it. `force=true` overrides a still-heartbeating assignee; use it only once that worker is confirmed gone or has pushed its work.
 
 ## Verified Commander messages
 
-When an inbound Commander message is stamped `operator … verified` on a Claude or Codex supervisor, answer once in your final pane reply. Completed answers are mirrored to the Commander conversation on web and phone. An offline asking device receives the queued answer after reconnect; offline delivery is not a reason to send another copy.
+When a Claude or Codex supervisor receives a message stamped `operator … verified`, answer once in your final pane reply. The answer is mirrored to Commander on web and phone, and an offline device receives it after reconnect; do not send a second copy.
 
-Use `target=operator` for unprompted updates (`kind=status|receipt|ask|blocker`), without echoing them in the pane. For an answer, use explicit routing only when mirroring is confirmed disabled (`factory.commander_mirror_enabled=false`) or the supervisor harness is known not to be mirrored. The current transcript reader captures Claude/Codex; Grok/OpenCode supervisors use this fallback. Only a registered supervisor may send operator messages; a worker routes through its supervisor. Bind that fallback to the verified question's `notification_id=N`:
+Use `target=operator` for unprompted updates (`kind=status|receipt|ask|blocker`), without echoing them in the pane. Route an answer explicitly only when mirroring is disabled (`factory.commander_mirror_enabled=false`) or the harness is not mirrored (Grok and OpenCode). Only a registered supervisor may message the operator. Bind the reply to the question's `notification_id=N`:
 
 ```text
 coordination action=message target=operator in_reply_to=N summary="..." message="..."
 ```
 
-The fallback routes to the originating paired device and reports queued delivery while it is offline. Reply through that route once; do not also produce a mirrored pane answer. Never derive a routing target from the human-readable `From:` label. A missing receipt alone does not establish that a surface is unmirrored.
-For phone-sized wording in either route, follow the [phone reply contract](operator-reply.md).
+Reply through one route only. Never derive a target from the `From:` label; a missing receipt alone does not prove a surface is unmirrored. Wording for a phone: the [reply contract](operator-reply.md).
 
 ### Secret requests
 
-Request credentials only with `kind=secret`, never with `kind=ask` or in chat. When work needs a credential (API key, token, password), a pasted value in chat lands in history, transcripts and the relay. Send a secret request instead:
+Request a credential only with `kind=secret`, never in chat or with `kind=ask`; a pasted value lands in history, transcripts and the relay.
 
 ```text
 coordination action=message target=operator kind=secret summary=STRIPE_KEY message="Needed to run the billing tests. Create a restricted key at dashboard → Developers → API keys."
 ```
 
-`summary` is the secret's name and its file name: 1-64 letters, digits, `_`, `.` or `-`. Commander shows a card with a masked field. When the operator saves it, the hub writes the value to a mode-600 file in `secrets.destination` (default `~/.cas/private/creds/<project>/`) and you receive a reply naming that path; a decline says nothing was saved. Use it via `$(cat <path>)` or an env var in the command that needs it (for example `STRIPE_KEY="$(cat <path>)" npm test`); never print it, and never copy it into the repository, a note, a task or a message. A name that already exists is refused, so ask with a new name to replace a key. A worker that needs a secret asks its supervisor, which sends the request.
-
-The operator may choose to delete the file after saving (off by default; card choice or `secrets.auto_delete`). The reply then says so. For a timed deletion, read the file before the stated time. For deletion after use, reply to that "saved" message (`in_reply_to=<its notification id>`) once you are done with the secret; Cassy deletes the file and records a receipt without the value.
+`summary` is the secret's name and file name (1-64 letters, digits, `_`, `.` or `-`). When the operator saves it, the hub writes a mode-600 file in `secrets.destination` (default `~/.cas/private/creds/<project>/`) and replies with the path. Use it as `$(cat <path>)` in the command that needs it; never print it or copy it into the repository, a note, a task or a message. An existing name is refused, so replace a key under a new name. If the reply says the file is deleted on a timer, read it before then; for delete-after-use, reply `in_reply_to=<saved message id>` when done. Workers ask you, and you send the request.
 
 ## Supervisor override
 
-`supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
+`supervisor_override=true` is the override for supervisor-only close and transfer operations. It needs a **registered supervisor** and a **non-empty reason**, and it is recorded as a **task decision note**. Review the task state and delivery evidence first. It does not waive data-integrity or merge-state checks, and it never overrides a peer's claim or a worker's unsaved work without that owner or the operator agreeing.
 
-**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`, `peers` (read-only: live supervisors of this repo on any machine, from Cassy Cloud, with machine, session, epic focus and heartbeat age). Untyped peer mail is an ask and wakes the peer (an untyped reply is an answer); only `kind=receipt`, `kind=quiet` or `wake=false` stays quiet. A `message` whose `target` names a peer (`name` or `name@machine`) goes through the Cassy Cloud peer mailbox. It is never urgent and never carries operator authority, and the receipt names a peer message id. Read the receipt with `message_status id=<peer message id>`, and reply to a delivered peer message with `in_reply_to=<its notification id>`.
+## Factory controls
 
-**Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
+- **`hold_worker` / `release_worker`:** pause a live worker without faking a task state; the Director sends no idle nudges until you release it.
+- **`server_start` / `server_stop` / `server_list`:** register a long-lived server instead of `npm run dev &`. `shared=true` outlives worker teardown; `server_list` reports the bound ports and log.
 
-- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `restart_supervisor`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
-- *Servers*: `server_start`, `server_stop`, `server_list`
-- *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
-- *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
-- *Loops and queues*: `loop_start`, `loop_cancel`, `loop_status`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`
+  ```text
+  factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
+  ```
 
-**`hold_worker` / `release_worker` — pause a worker without faking a task state.** `action=hold_worker target=<worker>` marks a worker as deliberately paused: the Director stops accumulating idle ticks for them and emits no `WorkerIdle` nudges until you `release_worker`. Use it for "stand by while I sort out the merge base" instead of parking the task in a misleading status. Supervisor-only, requires a live worker in your factory session; the hold survives a daemon restart of that session and clears on worker removal or session shutdown.
-
-**`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
-
-```text
-factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
-factory action=server_list
-factory action=server_stop ...
-```
-
-`shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
-
-**`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never receives your `NEON_API_KEY`. Provision one:
-
-```text
-factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
-factory action=db_branch_show [task_id=<task>]
-factory action=db_branch_delete task_id=<task> [id=<branch id>]
-```
-
-Your `cas serve` creates `cas-<task-id>-<n>` with `neonctl`; use `neonctl` for ad-hoc Neon work too. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.
-
-Stock workers cannot run `neonctl` (including `env`, `npx` and `pnpm dlx`
-wrappers) or call tools matching `*neon*`, alongside the Vercel denials.
-Refusals route them to `coordination action=message target=supervisor blocker=true summary="need Neon" message="<operation and reason>"`.
-Inherited `NEON_API_KEY` and `VERCEL_TOKEN` are stripped by the existing
-protected-token policy; your credentials and `db_branch_create` stay available.
-The worker keeps its own `.env.cas-db` and `DATABASE_URL`. Operator-configured
-`factory.worker_denied_clis` / `factory.worker_denied_mcp_tools` replace the
-stock lists, and `[]` disables the corresponding check. Explicit project grants
-(such as `factory.worker_credential_env`) can authorize credentials;
-`factory.supervisor_only_env` denials still win.
+- **`db_branch_create` / `db_branch_show` / `db_branch_delete`** (supervisor only): when a worker needs a database, it asks with a blocker. `factory action=db_branch_create task_id=<task> [branch=<dev|staging|id>] [target=<worker>]` creates a Neon branch from the `neon-database` skill's parent (never production) and writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree; the connection string is never shown. Closing the task deletes the branch; each task gets at most 3, with a 72-hour TTL. Workers cannot run `neonctl` or Vercel tools and never receive `NEON_API_KEY` or `VERCEL_TOKEN`; `factory.worker_denied_clis`, `factory.worker_denied_mcp_tools` and `factory.worker_credential_env` adjust that.
 
 ### Worker controls
 
-To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`).
+Pass `lane=<light|standard|taste|heavy>` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_workers` call, never both; copy recipes from [workflow.md](workflow.md#phase-2-coordinate). Omitted controls resolve through the config cascade and the receipt warns.
 
 ```text
 factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
 ```
 
-**`spawn_workers` parameters:**
+- `isolate=true` on every spawn; shared mode is contamination-prone.
+- `task_id` pre-assigns one task (`count=1` only) and authorizes the spawn on its own.
+- `config_dir` picks the account: `CLAUDE_CONFIG_DIR` for Claude (e.g. `~/.claude-alt`), `CODEX_HOME` for Codex. Without it, the requesting supervisor's directory is captured at enqueue. An explicit Claude value strips inherited `ANTHROPIC_API_KEY`.
+- `cli=opencode` routes are receipt-gated; see [model-selection.md](model-selection.md).
 
-| Parameter | Type | Description |
-|---|---|---|
-| `count` | int | Number of workers to spawn |
-| `lane` | string | Registry lane to resolve: `light`, `standard`, `taste`, or `heavy`. The registry picks the recipe and reports any fallback in the receipt. Never combine with `cli`, `model`, or `effort`. |
-| `isolate` | bool | Each worker gets its own git worktree and branch (default false; pass `true` — shared mode is contamination-prone and every receipt warns) |
-| `worker_names` | string | Comma-separated names for the spawned workers |
-| `cli` | string | Explicit CLI backend for this spawn: `claude`, `codex`, `grok`, or `opencode` (OpenCode routes are receipt-gated; see [model-selection.md](model-selection.md#opencode-lane-route-specific-conformance)). If omitted, resolves through factory config, then stock fallback. |
-| `model` | string | Explicit model name. Accepted slugs per `cli` and the lane matrix live in [model-selection.md](model-selection.md#model-slug-table). Passed as `-m`/`--model`. If omitted, resolves through factory config, then the selected harness's stock default. |
-| `effort` | string | Explicit reasoning effort. Cassy vocabulary: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`) \| `max` (only where the registry recipe lists it: Fable, Opus 5, Astra, Sol, GPT-6 Luna — not Opus 5.5; never a default). Mapping: Claude `--effort`; Codex `--config model_reasoning_effort=<v>`; Grok `--reasoning-effort`; OpenCode generated primary-agent `variant` (QwenCloud Token Plan and Alibaba PAYG: `low`, `medium`, `xhigh`). Token Plan pins OpenAI-compatible `extra_body.enable_thinking`; PAYG uses `reasoning_effort`. If omitted, resolves through factory config, then stock fallback. For multi-step Claude workers prefer `high` as the ceiling — see [model-selection.md](model-selection.md). |
-| `task_id` | string | Pre-assign this task to the spawned worker. **Single-worker requests only** (`count=1`) — a multi-worker spawn is rejected. An open, unassigned `task_id` also *authorizes* the spawn on its own, so a post-epic follow-up needs no ceremonial single-child epic. Refused when the task is closed, already assigned, blocked/awaiting_merge, or when a spawn for that task is already queued and unconsumed. |
-| `config_dir` | string | Account directory for the spawned workers: `CLAUDE_CONFIG_DIR` for Claude (e.g. `~/.claude-alt`), `CODEX_HOME` for Codex. An explicit value wins and is preflighted before queueing; otherwise the requesting supervisor's own directory for that harness is captured **at enqueue time**. Grok has no account directory, so the acknowledgement warns. An explicit Claude value also strips inherited `ANTHROPIC_API_KEY` so the selected OAuth account is actually used. |
+On `task`, the task ID is always `id`. Factory actions that point at a task owned by another object take `task_id` (`spawn_workers`, `worktree_merge`, `worktree_create`), because their `id` names the worker or worktree. Priority is `0`-`4` or `critical|high|medium|low|backlog`.
 
-Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_workers` call, never both; these controls apply to the workers spawned by this call only. Omitted controls resolve through the config cascade and the acknowledgement warns. Copy-paste recipes: [workflow.md](workflow.md#phase-2-coordinate).
-
-**On `task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are factory actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
-
-**Priority** is `0=Critical, 1=High, 2=Medium (default), 3=Low, 4=Backlog`. Accepts numeric OR named alias: `priority=1` ≡ `priority="high"`. Other aliases: `critical`, `medium`, `low`, `backlog`, `p0`-`p4`.
-
-**Initial assignment uses `update`, NOT `transfer`:**
+**Assign with `update`; reassign with `transfer`.**
 
 ```text
-# CORRECT — initial assignment of an unclaimed task
-task action=update id=cas-abc1 assignee=<worker-name>
-
-# WRONG — transfer requires an ALREADY-CLAIMED lease, otherwise errors
-# with "No active lease found". Use transfer only to reassign between
-# workers after one has claimed.
-task action=transfer id=cas-abc1 to_agent=<worker>
+task action=update id=<task> assignee=<worker>
+task action=transfer id=<task> to_agent=<worker>
 ```
 
-The `transfer` action's target field is `to_agent` (not `assignee`). The `update` action's target field is `assignee` (not `to_agent`). Yes, they disagree. Remember: `update assignee=...` for initial assignment; `transfer to_agent=...` only when reassigning a claimed task.
+`transfer` needs a claimed lease. To take a task from a live worker, add `supervisor_override=true notes="<reason>"` to `transfer`; it releases that worker's lease silently, so message them, and do it only once they have pushed or agreed. If the atomic path fails, `reset`, then `update` and message the new worker.
 
-**Reassigning a task owned by a live worker:**
-
-When a task is claimed by a live worker and you need to reassign it without shutting the worker down, use `supervisor_override=true` on `transfer` as described in [Supervisor override](#supervisor-override):
+**Dispatch is the assignment.** Workers react to `assignee`, not to message text. A message is optional context:
 
 ```text
-# Force-transfer from a live worker to another agent (single atomic step)
-task action=transfer id=cas-abc1 to_agent=<new-worker> supervisor_override=true \
-  notes="Reassigned due to <reason>"
-```
-
-This force-releases the live worker's lease, updates the assignee, attempts to pre-claim for the target agent, and appends an audit entry to the task notes with your supervisor session ID and the prior lease holder. The old worker loses its lease silently — message them separately if they need to know.
-
-Two-step alternative (if the atomic path errors):
-
-```text
-# Step 1: Drop the live lease and reset the task to Open
-task action=reset id=cas-abc1
-
-# Step 2: Assign to the new worker
-task action=update id=cas-abc1 assignee=<new-worker>
-
-# Step 3: Notify the new worker
-coordination action=message target=<new-worker> summary="..." message="..."
-```
-
-`reset` does NOT require you to own the lease — it is safe to call on any non-closed task regardless of who holds the current lease.
-
-**Dispatching tasks is a two-step operation.** Sending a coordination message telling a worker to "claim tasks X and Y" does not actually dispatch work — workers react to `assignee` changes on the task, not to message content. Full pattern:
-
-```text
-# 1. Create
-task action=create title="Fix login bug" priority=high risk=none \
-  description="..." acceptance_criteria="..."
-
-# 2. Assign (this is what causes the worker to pick it up)
-task action=update id=cas-abc1 assignee=<worker>
-
-# 3. (optional) Provide extra context as a separate message
 coordination action=message target=<worker> \
-  summary="cas-abc1 briefing" \
-  message="Extra context for cas-abc1: ..."
+  summary="<task> briefing" \
+  message="Extra context for <task>: ..."
 ```
 
-Skipping step 2 leaves the task unassigned — the worker will go idle regardless of how clear the message in step 3 was.
+Messages need both `summary` (the preview) and `message`. Bodies cap at 1,200 characters (2,500 for blockers and merge requests) and task notes at 1,500; put longer evidence under `[factory] artifacts_root/<project-key>/<task-id>/` and send the path. Task notes use `notes=`, not `note=`.
 
-**Coordination messages require BOTH `message` and `summary`:**
-
-```text
-coordination action=message target=worker-1 \
-  summary="c29a ready for review" \
-  message="Please verify cas-c29a. Commit dfe824b on main."
-```
-
-Missing either field is a rejection. `summary` is the one-line UI preview; `message` is the full body.
-
-Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<project-key>/<task-id>/<name>.md` and send its path with a one-paragraph summary. Your own over-cap message to a worker is not refused: Cassy writes the full text to `artifacts_root/<task-id or _messages>/message-<time>-<hash>.md` and delivers its head with that path.
-
-**Urgent / interrupt delivery — course-correct a worker mid-turn (cas-c931):**
-
-Normal messages land only *between* turns: a worker that is mid-turn going down the wrong path finishes the wrong turn before it ever reads "stop, do X instead." For those cases, send an **urgent** message — it breaks the worker's in-flight turn and injects your correction as its next prompt:
+**Urgent delivery** (`urgent=true`, or `coordination action=interrupt`) breaks the worker's in-flight turn and injects your correction as its next prompt, discarding its partial reasoning. Use it only when the worker is demonstrably off course; routine nudges use a normal message.
 
 ```text
-# Urgent flag on the normal message action
 coordination action=message target=<worker> urgent=true \
   summary="..." message="Stop — you're editing the wrong file. Switch to ..."
-
-# Shorthand — forces urgent even without the flag
-coordination action=interrupt target=<worker> \
-  summary="..." message="Stop — wrong approach. Do ... instead."
 ```
-
-When urgent, the message: breaks the target's in-flight turn (Esc), waits a bounded settle window, then injects the correction as its next prompt; bypasses the Claude Code inbox even in agent-teams mode; forces Critical priority (queue jump) when none is given; skips idle-message dedup; targets the worker **by name**, independent of TUI focus.
-
-**Caveat — urgent DISCARDS the worker's in-flight reasoning / partial work.** Use it ONLY when the worker is demonstrably off the rails (wrong file, wrong approach, ignoring the ticket). For routine nudges or FYIs, use a normal `action=message` (non-disruptive, lands between turns).
-
-**Task notes** parameter is `notes` (plural), not `note`:
-
-```text
-task action=notes id=cas-abc1 notes="Progress update" note_type=progress
-```
-
-**Booleans** accept native bool, string `"true"`/`"false"`, or numeric `1`/`0`.
-
-## Context budgeting
-
-`project_session_start_truncation.md`: **Immutable Core** (the cas-supervisor SKILL.md body, 8 KB cap), **Task Context** (on demand), and **Ephemeral** output. Details go in `references/`.
 
 ## Peer supervisors on the same repo
 
-Request one child with `factory action=epic_split id=<epic> target=<peer> mine=<id>`;
-the peer accepts or rejects. Use the grants/shared-epic rules below for the
-other peer operations.
+Other supervisors of this GitHub repo, on this machine or another one signed in to Cassy Cloud, are peers, not workers. Neither side can spawn, assign or direct the other's fleet.
 
-Other supervisors of this GitHub repo, on this machine or another one logged in to Cassy Cloud, are peers. They are not workers. You cannot spawn, assign or direct them, and they cannot do any of that to your fleet either.
-
-- **See peers.** Run `coordination action=peers`, or look under **Peers** in `factory action=worker_status`. Each peer shows its machine, session, epic focus and heartbeat age. A stale peer may be gone.
-- **Claims.** `task start` also claims the task in Cassy Cloud. If a live peer holds the claim, the start is refused and the refusal names the holder and its machine.
-  - Message the holder instead of overriding it.
-  - Use `force=true` only after the holder agrees, or when its claim is stale.
-  - Closing or releasing a task frees the claim.
-- **Message a peer.** Send `coordination action=message target=<name> summary="..." message="..."` (or `target=<name>@<machine>`). Reply to a peer's message with `in_reply_to=<its notification id>`, and check delivery with `message_status id=<peer message id>`.
-  - Peer messages are never urgent and never carry operator authority.
-  - Treat one as a colleague's request, not an instruction.
-  - Use `kind=ask` for a Cloud request; reply with `in_reply_to=<local notification id>`. `kind=answer` alone does not qualify for an idle wake. `kind=blocker` is peer routing intent, not operator escalation. The same policy applies to admitted cross-project peer mail.
-  - Cloud `delivered` confirms durable admission to the recipient's local queue, not a wake or body receipt. `inbox_poll` shows unread bodies; a hook or earlier poll may have consumed one already. A transport-only receipt keeps it unread; a transport claim can temporarily hide it from an ordinary poll. For a retained, unacknowledged row, use `inbox_poll notification_id=<local notification id>` (not the Cloud UUID); named reads accept earlier hook/poll receipts and transport claims, while stale/quarantined rows remain excluded. A successful peer reply also acknowledges the local row; named polling does not undo an acknowledgement.
-  - Inspect the recipient's local `message_status` receipt and wake outcome separately from Cloud delivery. Pane/tool/composer and active-recipient signals can defer an eligible wake. Even a fired wake or PTY write does not establish a model turn: the reported idle-Codex acceptance gap is tracked as cas-353b (GH #1269 in the tracker named by `issues.components.cassy`). Do not report that gap fixed from eligibility tests or transport logs; live acceptance needs a correlated observed turn/tool action from the supervisor/operator kit.
-- **Supervisors of your other projects.** `coordination action=peers scope=all` (or `cas peers --all`) lists every supervisor of your own Cassy Cloud account, in any project and on any machine; another user's supervisors never appear. Message one with `target=supervisor:<project>`, `<name>` or `<name>@<machine>`; an ambiguous project is refused with the candidates. `attachment=<artifact id | repo path[@commit]>` adds a pointer: a file is readable directly on the same machine, an artifact from anywhere. These messages are advisory and use the peer wake/authority limits above.
-- **Before taking an epic,** check the peers' focus to avoid starting overlapping work.
-- **Split a shared epic.** Run `factory action=epic_split id=<epic> target=<peer> mine=<ids> theirs=<ids>`. It claims your share in Cassy Cloud, all of it or none: if a live peer holds any child, nothing is claimed or sent. The peer receives the proposal as a peer message.
-  - Request one child in one message with `factory action=epic_split id=<epic> target=<owner> mine=<id>`; omit `theirs`. The owner accepts or rejects the request. To grant a child to a peer, use `theirs=<id>` and omit `mine`. Either share may be empty or omitted, but not both; only named tasks are claimed.
-  - The peer answers with `epic_split id=<split> decision=accept`, which claims only its own share, or `decision=reject reason="..."`.
-  - Accept, reject, cancel and expiry arrive as typed peer decisions eligible to wake the proposer. Read `factory action=epic_split id=<split> decision=status` (or just `id=<split>`) for state, `decided_at`, decider, observed Cloud claims and pending cleanup/delivery.
-  - Wait without polling with `coordination action=remind remind_event=epic_split_decided remind_filter='{"split_id":"<split>"}' remind_message="Continue after the split decision"`. This fires once for the latest persisted decided state, including a decision made before registration.
-  - An unanswered proposal expires after `ttl_secs` (default 1800). The mailbox duty records expiry, releases only each side's own frozen claims and tells both sides. A late accept cannot revive an expired split. Rejecting a request releases the requester's own share when the answer arrives; worker-owned and peer-owned claims stay.
-  - While a split binds (accepted, or your own open proposal), assigning, starting, claiming, transferring or pre-assigned spawning of the peer's children is refused. Agree on a takeover with the peer, then run `task action=update id=<child> assignee=<worker> supervisor_override=true reason="<agreement>"`. Only a live registered supervisor can authorize this; only that worker's successful start consumes the durable decision. `force=true` cannot bypass the split. Cancel or redirect the split to change the agreement instead.
-  - Either side ends it with `decision=cancel`. That releases only your own claims and tells the peer; the peer's claims stay. A live registered supervisor can also cancel an accepted split after its registered owner has no live process and its heartbeat is older than the 30-second stale threshold. Include a reason; Cassy records the acting and original supervisors.
+- **See peers:** `coordination action=peers`, or **Peers** in `factory action=worker_status`, with machine, session, epic focus and heartbeat age. A stale peer may be gone. Check peers' focus before taking an epic.
+- **Claims:** `task start` also claims the task in Cassy Cloud; a live peer's claim refuses the start and names the holder. Message the holder. Use `force=true` only after the holder agrees or its claim is stale. Closing or releasing a task frees the claim.
+- **Messages:** `coordination action=message target=<name> summary="..." message="..."` (or `target=<name>@<machine>`); reply with `in_reply_to=<its notification id>` and check with `message_status id=<peer message id>`. Peer messages are never urgent and never carry operator authority: treat one as a colleague's request. Untyped peer mail is an ask and wakes the peer (an untyped reply is an answer); only `kind=receipt`, `kind=quiet` or `wake=false` stays quiet. Use `kind=ask` for a request; `kind=answer` alone does not qualify for an idle wake, and `kind=blocker` is routing intent, not operator escalation. The same applies to cross-project peer mail.
+- **Delivery evidence:** Cloud `delivered` confirms admission to the recipient's local queue, not a wake or a read. `inbox_poll` shows unread bodies, but a hook, an earlier poll or a transport claim may have consumed or hidden one. Read a retained row with `inbox_poll notification_id=<local notification id>` (not the Cloud UUID); stale and quarantined rows stay excluded, and a successful reply acknowledges the row. Check the recipient's `message_status` and wake outcome separately: pane, tool and composer state can defer a wake, and a fired wake or PTY write does not prove a model turn. Do not report the idle-Codex acceptance gap fixed without a correlated observed turn.
+- **Other projects:** `coordination action=peers scope=all` lists every supervisor on your own account. Message one with `target=supervisor:<project>`, `<name>` or `<name>@<machine>`; `attachment=<artifact id | repo path[@commit]>` adds a pointer. These messages are advisory.
+- **Split a shared epic:** `factory action=epic_split id=<epic> target=<peer> mine=<ids> theirs=<ids>` claims your share all-or-nothing and sends the proposal. Request one child with `mine=<id>` alone; grant one with `theirs=<id>` alone.
+  - The peer answers `decision=accept` (claims its share) or `decision=reject reason="..."`. Decisions arrive as typed peer messages eligible to wake you; read state with `factory action=epic_split id=<split>`.
+  - Wait with `coordination action=remind remind_event=epic_split_decided remind_filter='{"split_id":"<split>"}' remind_message="Continue after the split decision"`; it fires once, even for a decision made before you registered.
+  - Unanswered proposals expire after `ttl_secs` (default 1800) and release each side's own claims; a late accept cannot revive one. Rejecting a request releases the requester's share; worker-owned and peer-owned claims stay.
+  - While a split binds, staffing the peer's children is refused, and `force=true` cannot bypass it. After agreeing a takeover, run `task action=update id=<child> assignee=<worker> supervisor_override=true reason="<agreement>"`; only a live registered supervisor can authorize it, and that worker's successful start consumes the decision.
+  - Either side ends it with `decision=cancel`, releasing only its own claims. A live supervisor can cancel an accepted split whose owner has no live process and a heartbeat older than 30 seconds, with a reason; Cassy records both supervisors.
   - `epic_split` with no arguments, `coordination action=peers` and the Peers section of `worker_status` list the splits.
-  - Neither side claims or spawns for the other. A superseding supervisor releases only the original owner's claims after the owner is proven gone.
-  - Cassy Cloud shows claims only within one user account. A peer on another account cannot see your claims, but the split refusal still holds on both sides, because each database records the agreement.
-- **Check your own presence first.** If the peers section opens with `Cloud presence: failing: <cause>` or ends with `Peer mailbox: not receiving: <cause>`, peers cannot see you or cannot reach you. Fix the cause before you rely on claims, splits or messages.
-- **Another account's claims are invisible.** A peer whose details read `Claims not visible (different account)` may still be working. Agree on ownership by message and record it with an epic split.
-- **Do not resend a retried message.** A send answered `queued for automatic retry as peer-outbox:<id>` is retried under one identity for up to 15 minutes. Check it with `message_status id=peer-outbox:<id>`. Send again only after the abandonment notice arrives and its cause is fixed.
-- **On a peer refusal, message the holder.** `⛔ HELD BY A PEER` and `⛔ SPLIT TO A PEER` name the holder and include the message command to send. Do not use `force=true` to settle a disagreement.
+  - Neither side claims or spawns for the other; a superseding supervisor releases only a proven-gone owner's claims. A peer on another account cannot see your claims, but the split still binds both databases.
+- **Your own presence:** if peers shows `Cloud presence: failing: <cause>` or `Peer mailbox: not receiving: <cause>`, fix it before relying on claims, splits or messages. A peer marked `Claims not visible (different account)` may still be working: agree ownership by message and record it with a split.
+- **Retries:** a send answered `queued for automatic retry as peer-outbox:<id>` retries for up to 15 minutes; check it with `message_status id=peer-outbox:<id>` and resend only after the abandonment notice and its fix.
+- **Refusals:** `⛔ HELD BY A PEER` and `⛔ SPLIT TO A PEER` name the holder and the message to send. Never use `force=true` to settle a disagreement.
 
 ## Message delivery and wake authority
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority. `coordination action=message_status` reports a message's wake evidence.

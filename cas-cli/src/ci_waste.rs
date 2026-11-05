@@ -14,17 +14,67 @@ pub(crate) const BATCH_MERGE_THRESHOLD: usize = 3;
 pub(crate) const BATCH_WINDOW_MINUTES: u32 = 30;
 
 /// The refusal for `gh pr create` from an `epic/*` head without `--draft`.
+/// The head is `--head`/`-H`, else the checked-out branch.
 pub(crate) fn epic_pr_draft_refusal(
-    _command: &str,
-    _current_branch: impl Fn() -> Option<String>,
+    command: &str,
+    current_branch: impl Fn() -> Option<String>,
 ) -> Option<String> {
+    for statement in command.split(['\n', ';', '|', '&']) {
+        let tokens: Vec<&str> = statement
+            .split_whitespace()
+            .map(|token| token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`')))
+            .filter(|token| !token.is_empty())
+            .collect();
+        let Some(gh) = tokens.iter().position(|token| *token == "gh" || token.ends_with("/gh")) else {
+            continue;
+        };
+        if tokens.get(gh + 1) != Some(&"pr") || tokens.get(gh + 2) != Some(&"create") {
+            continue;
+        }
+        let args = &tokens[gh + 3..];
+        if args.iter().any(|arg| matches!(*arg, "--draft" | "-d")) {
+            continue;
+        }
+        let head = args
+            .iter()
+            .enumerate()
+            .find_map(|(index, arg)| {
+                arg.strip_prefix("--head=")
+                    .map(str::to_string)
+                    .or_else(|| matches!(*arg, "--head" | "-H").then(|| args.get(index + 1).map(|v| v.to_string())).flatten())
+            })
+            .or_else(&current_branch);
+        let Some(head) = head.filter(|head| head.rsplit(':').next().is_some_and(|branch| branch.starts_with("epic/")))
+        else {
+            continue;
+        };
+        return Some(format!(
+            "🚫 EPIC PR NOT DRAFT: open the {head} PR with `--draft`. Every merge into a ready epic PR reruns its full CI \
+             and cancels the last run (gabber: 43% of all CI). The release PR is the gate: mark it ready with \
+             `gh pr ready` only then. Note GitHub still runs `pull_request` workflows on drafts unless the \
+             workflow skips them (`if: github.event.pull_request.draft == false`)."
+        ));
+    }
     None
 }
 
 /// A batching notice when `target` has received [`BATCH_MERGE_THRESHOLD`]
 /// or more merges in the last [`BATCH_WINDOW_MINUTES`] minutes.
-pub(crate) fn merge_batching_notice(_repo: &Path, _target: &str) -> Option<String> {
-    None
+pub(crate) fn merge_batching_notice(repo: &Path, target: &str) -> Option<String> {
+    let since = format!("--since={BATCH_WINDOW_MINUTES} minutes ago");
+    let output = std::process::Command::new("git")
+        .args(["log", "--first-parent", "--merges", &since, "--format=%H", target, "--"])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let merges = String::from_utf8_lossy(&output.stdout).lines().filter(|line| !line.is_empty()).count();
+    (merges >= BATCH_MERGE_THRESHOLD).then(|| {
+        format!(
+            "⏱️ Batch: {merges} merges into {target} in the last {BATCH_WINDOW_MINUTES} min. Each push to a branch \
+             with an open PR reruns its CI and cancels the previous run; merge ready deliveries together."
+        )
+    })
 }
 
 #[cfg(test)]

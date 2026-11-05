@@ -885,6 +885,26 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
     }
 
+    // cas-fee3: an epic PR opens as a draft so every merge into the epic does
+    // not rerun its full CI; the release PR is the one gate.
+    if tool_name == "Bash"
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) = crate::ci_waste::epic_pr_draft_refusal(cmd, || {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&input.cwd)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        })
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
     // ========================================================================
     // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
     //

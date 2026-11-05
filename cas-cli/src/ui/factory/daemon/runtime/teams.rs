@@ -2033,6 +2033,15 @@ fast_rows=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/fast-rows-pre-p
 if [ -x \"$fast_rows\" ]; then
   printf '%s' \"$refs\" | \"$fast_rows\" \"$@\" || exit 1
 fi
+# cas-fee3: the project's declared cheap local gate (lint + touched tests),
+# so failures stop here instead of costing a CI run. Unset means none.
+local_gate=\"$(cas config get factory.worker_local_gate 2>/dev/null)\" || local_gate=\"\"
+if [ -n \"$local_gate\" ]; then
+  (cd \"$(git rev-parse --show-toplevel)\" && sh -c \"$local_gate\") || {
+    echo \"Cassy PUSH GUARD: the project's local gate failed (factory.worker_local_gate: $local_gate). Fix it before pushing.\" >&2
+    exit 1
+  }
+fi
 exit 0
 ";
 

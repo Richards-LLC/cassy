@@ -853,6 +853,12 @@ mod tests {
     }
     #[test]
     fn command_echo_is_not_execution_and_native_dialogs_do_not_claim_model_changes() {
+        let reload: Command = serde_json::from_str("\"mcp\"").expect("Commander must accept its semantic Reload Cassy command");
+        assert_eq!(reload.mapping(cas_mux::SupervisorCli::Claude), Some("/mcp reconnect cas"));
+        for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Grok, cas_mux::SupervisorCli::OpenCode] {
+            assert_eq!(reload.mapping(cli), None);
+        }
+        assert!(native_observation(reload, "❯", "❯ /mcp reconnect cas\nSuccessfully reconnected to cas\n❯", "").is_none(), "only registry process/version evidence may confirm reload");
         assert!(native_observation(Command::Usage, "❯", "Current session\nCurrent week (all models)\nResets tomorrow", "").is_some_and(|(_, open)| open));
         assert!(native_observation(Command::Compact, "❯", "❯ /compact\n❯", "").is_none());
         assert!(native_observation(Command::Compact, "›", "• Context compacted · 44s\n›", "").is_some());

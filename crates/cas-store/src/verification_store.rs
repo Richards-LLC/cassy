@@ -594,7 +594,8 @@ pub fn import_peer_premerge_verification(
     let attestation = dispatch.repository.as_ref()
         .and_then(|proof| proof.peer_premerge.as_ref()).ok_or_else(fail)?;
     let receipt = &attestation.receipt;
-    if verification.provenance != VerificationProvenance::PeerAttested
+    if receipt.status != VerificationStatus::Approved
+        || verification.provenance != VerificationProvenance::PeerAttested
         || verification.status != VerificationStatus::Approved
         || dispatch.state != VerificationDispatchState::Resolved
         || dispatch.id != receipt.dispatch_id || verification.id != receipt.verdict_id

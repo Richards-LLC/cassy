@@ -173,7 +173,15 @@ impl PeerMailboxRuntime {
                 &history,
                 &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
-                    crate::mcp::tools::core::workflow::premerge_verification::ingest_peer_receipt(&cas_dir, recipient, message)?;
+                    use crate::mcp::tools::core::workflow::premerge_verification::{PeerReceiptIngested, ingest_peer_receipt};
+                    match ingest_peer_receipt(&cas_dir, recipient, message)? {
+                        PeerReceiptIngested::Rejected(why) => {
+                            tracing::info!(message = %message.id, %why, "peer pre-merge receipt rejected");
+                            return Ok(PeerAckOutcome::Rejected);
+                        }
+                        PeerReceiptIngested::Imported => return Ok(PeerAckOutcome::Delivered),
+                        PeerReceiptIngested::NotAReceipt => {}
+                    }
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
                             tracing::info!(message = %message.id, %why, "epic split message ignored");
@@ -183,7 +191,7 @@ impl PeerMailboxRuntime {
                             tracing::info!(message = %message.id, ?recorded, "epic split recorded")
                         }
                     }
-                    Ok(())
+                    Ok(PeerAckOutcome::Delivered)
                 },
             );
             report.retry_after = mailbox.retry_after();

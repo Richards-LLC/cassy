@@ -12,7 +12,32 @@ const TAG: &str = "CAS_PEER_PREMERGE_V1 ";
 impl Approval {
     /// Publication is already confirmed when this is called. Retrying a
     /// publication reuses the durable outbox's exact logical-send identity.
-    pub(super) fn share_published(&self) -> Result<(), String> {
+    pub(super) fn share_published(&self) {
+        if let Err(error) = self.try_share_published() {
+            tracing::warn!(task = %self.candidate.task_id, %error, "peer approval sharing failed after publication");
+            let note = format!(
+                "Peer approval sharing failed after confirmed publication: {error}. Publication remains confirmed; other peers were attempted and the outbox retains retryable sends."
+            );
+            let recorded = (|| -> Result<(), String> {
+                let tasks = crate::store::open_task_store(&self.candidate.cas_root)
+                    .map_err(|error| error.to_string())?;
+                let task = tasks
+                    .get(&self.candidate.task_id)
+                    .map_err(|error| error.to_string())?;
+                if !task.notes.contains(&note) {
+                    tasks
+                        .append_note(&task.id, &note)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
+            if let Err(cause) = recorded {
+                tracing::warn!(task = %self.candidate.task_id, %cause, "could not record peer sharing failure");
+            }
+        }
+    }
+
+    fn try_share_published(&self) -> Result<(), String> {
         let root = &self.candidate.cas_root;
         if !crate::cloud::CloudConfig::load_from_cas_dir(root)
             .map_err(|error| error.to_string())?
@@ -74,17 +99,19 @@ impl Approval {
             landed_sha: record.landed_sha,
             dispatch_id: self.dispatch_id.clone(),
             verdict_id: self.verdict_id.clone(),
+            status: verdict.status,
             plan_digest: portable_plan_digest(root, &task)?,
         };
         let body = format!(
             "{TAG}{}",
             serde_json::to_string(&receipt).map_err(|error| error.to_string())?
         );
+        let mut errors = Vec::new();
         for peer in peers
             .iter()
             .filter(|peer| peer.live && peer.session.is_some())
         {
-            crate::cloud::peer_mailbox::send_premerge_receipt(
+            if let Err(error) = crate::cloud::peer_mailbox::send_premerge_receipt(
                 root,
                 PeerSend {
                     project_id: canonical_id.clone(),
@@ -98,10 +125,41 @@ impl Approval {
                     recipient_project_id: None,
                 },
                 &format!("{}@{}", peer.name, peer.machine),
-            )
-            .map_err(|error| error.to_string())?;
+            ) {
+                errors.push(format!("{}@{}: {error}", peer.name, peer.machine));
+            }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PeerReceiptIngested {
+    NotAReceipt,
+    Imported,
+    Rejected(String),
+}
+
+#[derive(Debug)]
+enum ReceiptFailure {
+    Rejected(String),
+    Retry(String),
+}
+impl ReceiptFailure {
+    fn reject(cause: impl ToString) -> Self {
+        Self::Rejected(cause.to_string())
+    }
+    fn retry(cause: impl ToString) -> Self {
+        Self::Retry(cause.to_string())
+    }
+    fn cause(self) -> String {
+        match self {
+            Self::Rejected(cause) | Self::Retry(cause) => cause,
+        }
     }
 }
 
@@ -110,8 +168,14 @@ fn validate_receipt(
     task: &Task,
     repo: &Path,
     receipt: &PeerPremergeReceipt,
-) -> Result<RepositoryProofBoundary, String> {
-    let canonical = crate::cloud::resolve_canonical_id(root).ok_or("project identity missing")?;
+) -> Result<RepositoryProofBoundary, ReceiptFailure> {
+    let canonical = crate::cloud::resolve_canonical_id(root)
+        .ok_or_else(|| ReceiptFailure::retry("project identity missing"))?;
+    if receipt.status != VerificationStatus::Approved {
+        return Err(ReceiptFailure::reject(
+            "peer receipt is not an approved verdict",
+        ));
+    }
     if !crate::cloud::project_ids_match_with_aliases(
         &receipt.project_id,
         &canonical,
@@ -120,14 +184,16 @@ fn validate_receipt(
         || task.is_terminal()
         || task.deliverables.factory_branch_anchor.as_deref() != Some(receipt.source_sha.as_str())
         || task.deliverables.parked_branch.as_deref() != Some(receipt.source_branch.as_str())
-        || portable_plan_digest(root, task)? != receipt.plan_digest
+        || portable_plan_digest(root, task).map_err(ReceiptFailure::retry)? != receipt.plan_digest
         || task
             .deliverables
             .work_target
             .as_ref()
             .is_none_or(|target| target.target_branch != receipt.target_branch)
     {
-        return Err("peer approval does not match the current task and delivery".into());
+        return Err(ReceiptFailure::reject(
+            "peer approval does not match the current task and delivery",
+        ));
     }
     for sha in [
         &receipt.source_sha,
@@ -136,21 +202,24 @@ fn validate_receipt(
         &receipt.landed_sha,
     ] {
         if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("peer approval has an invalid Git object identity".into());
+            return Err(ReceiptFailure::reject(
+                "peer approval has an invalid Git object identity",
+            ));
         }
     }
     if receipt.dispatch_id.is_empty()
         || receipt.verdict_id.is_empty()
         || receipt.supervisor_id.is_empty()
     {
-        return Err("peer approval identity missing".into());
+        return Err(ReceiptFailure::reject("peer approval identity missing"));
     }
-    // Fetch the declared target: a local-only merge is never portable authority.
+    // Fetch is the retryable boundary. Once the confirmed target is available,
+    // an invalid object, candidate or landing is a permanent proof refusal.
     let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
     let target = operations
         .fetch_merge_target(&receipt.target_branch)
-        .map_err(|error| error.to_string())?
-        .ok_or("peer publication requires a remote target")?;
+        .map_err(ReceiptFailure::retry)?
+        .ok_or_else(|| ReceiptFailure::retry("peer publication requires a remote target"))?;
     let merged = git(
         repo,
         &[
@@ -159,15 +228,19 @@ fn validate_receipt(
             &receipt.target_sha,
             &receipt.source_sha,
         ],
-    )?;
+    )
+    .map_err(ReceiptFailure::reject)?;
     if merged.lines().next() != Some(receipt.candidate_tree.as_str()) {
-        return Err("peer candidate tree does not match the source and reviewed base".into());
+        return Err(ReceiptFailure::reject(
+            "peer candidate tree does not match the source and reviewed base",
+        ));
     }
     let proof = repository_proof::capture_repository_proof_at_target(
         repo,
         &receipt.landed_sha,
         vec![receipt.source_sha.clone()],
-    )?;
+    )
+    .map_err(ReceiptFailure::reject)?;
     let candidate = Candidate {
         cas_root: root.into(),
         task_id: task.id.clone(),
@@ -181,27 +254,48 @@ fn validate_receipt(
         proof: proof.clone(),
         preparation_ms: 0,
     };
-    candidate.verify_landing(&receipt.landed_sha)?;
+    candidate
+        .verify_landing(&receipt.landed_sha)
+        .map_err(ReceiptFailure::reject)?;
     git(
         repo,
         &["merge-base", "--is-ancestor", &receipt.landed_sha, &target],
-    )?;
-    repository_proof::verify_repository_proof(&proof).map_err(|error| error.to_string())?;
+    )
+    .map_err(ReceiptFailure::reject)?;
+    repository_proof::verify_repository_proof(&proof).map_err(ReceiptFailure::reject)?;
     Ok(proof)
 }
 
-/// Called only by authenticated mailbox admission, never from prompt parsing
-/// or an MCP request. The Cloud registry independently confirms sender role.
+/// Only authenticated daemon admission can mint peer authority. Permanent
+/// refusals are explicit terminal outcomes; only availability errors retry.
 pub(crate) fn ingest_peer_receipt(
     root: &Path,
     recipient: &Agent,
     message: &ClaimedPeerMessage,
-) -> Result<(), String> {
+) -> Result<PeerReceiptIngested, String> {
     let Some(body) = message.body.strip_prefix(TAG) else {
-        return Ok(());
+        return Ok(PeerReceiptIngested::NotAReceipt);
     };
+    match import_receipt(root, recipient, message, body) {
+        Ok(()) => Ok(PeerReceiptIngested::Imported),
+        Err(ReceiptFailure::Rejected(why)) => Ok(PeerReceiptIngested::Rejected(why)),
+        Err(ReceiptFailure::Retry(error)) => Err(error),
+    }
+}
+
+fn import_receipt(
+    root: &Path,
+    recipient: &Agent,
+    message: &ClaimedPeerMessage,
+    body: &str,
+) -> Result<(), ReceiptFailure> {
     let receipt: PeerPremergeReceipt =
-        serde_json::from_str(body).map_err(|error| error.to_string())?;
+        serde_json::from_str(body).map_err(ReceiptFailure::reject)?;
+    if receipt.status != VerificationStatus::Approved {
+        return Err(ReceiptFailure::reject(
+            "peer receipt is not an approved verdict",
+        ));
+    }
     if recipient.role != AgentRole::Supervisor
         || message.scope != PeerScope::Project
         || message.sender_agent_id != receipt.supervisor_id
@@ -212,33 +306,84 @@ pub(crate) fn ingest_peer_receipt(
             .is_none_or(str::is_empty)
         || message.sender_session.as_deref().is_none_or(str::is_empty)
     {
-        return Err("unauthorized peer pre-merge envelope".into());
+        return Err(ReceiptFailure::reject(
+            "unauthorized peer pre-merge envelope",
+        ));
     }
-    let canonical = crate::cloud::resolve_canonical_id(root).ok_or("project identity missing")?;
+    let at = chrono::DateTime::parse_from_rfc3339(&message.created_at)
+        .map_err(ReceiptFailure::reject)?
+        .with_timezone(&chrono::Utc);
+    let canonical = crate::cloud::resolve_canonical_id(root)
+        .ok_or_else(|| ReceiptFailure::retry("project identity missing"))?;
     if !crate::cloud::project_ids_match_with_aliases(
         &message.project_id,
         &canonical,
         &crate::cloud::project_aliases_from_config_toml(root),
     ) {
-        return Err("peer proof came from a different project".into());
+        return Err(ReceiptFailure::reject(
+            "peer proof came from a different project",
+        ));
+    }
+    let task = crate::store::open_task_store(root)
+        .map_err(ReceiptFailure::retry)?
+        .get(&receipt.task_id)
+        .map_err(ReceiptFailure::retry)?;
+    if task.is_terminal() {
+        return Err(ReceiptFailure::reject(
+            "peer approval task is already complete",
+        ));
+    }
+    // A newer local cycle or an existing local verdict permanently owns this
+    // slot. Do not keep an old receipt leased while waiting on the network.
+    let existing = cas_store::get_latest_verification_dispatch(root, &task.id)
+        .map_err(ReceiptFailure::retry)?;
+    if let Some(existing) = existing {
+        let same = existing.state == VerificationDispatchState::Resolved
+            && existing
+                .repository
+                .as_ref()
+                .and_then(|proof| proof.peer_premerge.as_ref())
+                .is_some_and(|attestation| {
+                    attestation.receipt == receipt
+                        && attestation.message_id == message.id
+                        && Some(&attestation.sender_machine_id)
+                            == message.sender_machine_id.as_ref()
+                        && Some(&attestation.sender_session) == message.sender_session.as_ref()
+                });
+        if !same {
+            return Err(ReceiptFailure::reject(
+                "an existing local verification cycle owns this task",
+            ));
+        }
+    } else if crate::store::open_verification_store(root)
+        .map_err(ReceiptFailure::retry)?
+        .get_latest_for_task(&task.id)
+        .map_err(ReceiptFailure::retry)?
+        .is_some()
+    {
+        return Err(ReceiptFailure::reject(
+            "an existing local verdict owns this task",
+        ));
     }
     let PeerDiscovery::Found { peers, ended, .. } =
-        discover_peers(root, Some(&recipient.id)).map_err(|error| error.to_string())?
+        discover_peers(root, Some(&recipient.id)).map_err(ReceiptFailure::retry)?
     else {
-        return Err("peer supervisor identity unavailable".into());
+        return Err(ReceiptFailure::retry(
+            "peer supervisor identity unavailable",
+        ));
     };
     if !peers.iter().chain(&ended).any(|peer| {
         peer.agent_id == message.sender_agent_id
             && peer.machine_id == message.sender_machine_id
             && peer.session == message.sender_session
     }) {
-        return Err("peer proof sender is not an authenticated project supervisor".into());
+        return Err(ReceiptFailure::reject(
+            "peer proof sender is not an authenticated project supervisor",
+        ));
     }
-    let task = crate::store::open_task_store(root)
-        .map_err(|error| error.to_string())?
-        .get(&receipt.task_id)
-        .map_err(|error| error.to_string())?;
-    let repo = root.parent().ok_or("repository root missing")?;
+    let repo = root
+        .parent()
+        .ok_or_else(|| ReceiptFailure::retry("repository root missing"))?;
     let mut proof = validate_receipt(root, &task, repo, &receipt)?;
     proof.peer_premerge = Some(PeerPremergeAttestation {
         receipt: receipt.clone(),
@@ -246,9 +391,6 @@ pub(crate) fn ingest_peer_receipt(
         sender_machine_id: message.sender_machine_id.clone().unwrap(),
         sender_session: message.sender_session.clone().unwrap(),
     });
-    let at = chrono::DateTime::parse_from_rfc3339(&message.created_at)
-        .map_err(|error| error.to_string())?
-        .with_timezone(&chrono::Utc);
     let dispatch = VerificationDispatch {
         id: receipt.dispatch_id.clone(),
         task_id: task.id.clone(),
@@ -266,15 +408,22 @@ pub(crate) fn ingest_peer_receipt(
         recovery_action: Default::default(),
     };
     let mut verdict = Verification::new(receipt.verdict_id.clone(), task.id.clone());
-    verdict.id = receipt.verdict_id;
+    verdict.status = receipt.status;
     verdict.provenance = VerificationProvenance::PeerAttested;
     verdict.dispatch_id = Some(dispatch.id.clone());
     verdict.issuer_agent_id = Some(receipt.supervisor_id.clone());
     verdict.agent_id = Some(receipt.supervisor_id);
     verdict.created_at = at;
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
-    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict)
-        .map_err(|error| error.to_string())?;
+    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
+        |error| match error {
+            cas_store::StoreError::Parse(_)
+            | cas_store::StoreError::VerificationDispatchConflict { .. } => {
+                ReceiptFailure::reject(error)
+            }
+            _ => ReceiptFailure::retry(error),
+        },
+    )?;
     Ok(())
 }
 
@@ -309,7 +458,8 @@ pub(super) fn verify_peer_promotion(
     {
         return Err("peer verdict does not match its admitted proof".into());
     }
-    let current = validate_receipt(root, task, Path::new(&proof.repository_root), receipt)?;
+    let current = validate_receipt(root, task, Path::new(&proof.repository_root), receipt)
+        .map_err(ReceiptFailure::cause)?;
     if current.head_commit != proof.head_commit
         || current.state_digest != proof.state_digest
         || current.anchor_commits != proof.anchor_commits

@@ -1193,7 +1193,7 @@ pub fn deliver_claimed_with(
         consumer_id,
         &RecipientHistory::default(),
         &|_, _| Ok(None),
-        on_admitted,
+        &|recipient, message| on_admitted(recipient, message).map(|()| PeerAckOutcome::Delivered),
     )
 }
 
@@ -1208,7 +1208,7 @@ fn deliver_claimed_with_history(
     consumer_id: &str,
     history: &RecipientHistory,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
-    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
+    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
     let all = match agents.list(None) {
@@ -1408,12 +1408,19 @@ fn deliver_claimed_with_history(
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {
-                if let Err(error) = on_admitted(recipient, message) {
-                    report.errors.push(format!(
-                        "peer message {} admitted, but recording it failed: {error}",
-                        message.id
-                    ));
-                    continue;
+                match on_admitted(recipient, message) {
+                    Ok(PeerAckOutcome::Delivered) => {}
+                    Ok(PeerAckOutcome::Rejected) => {
+                        report.rejected += 1;
+                        acks.push((message.id.clone(), PeerAckOutcome::Rejected));
+                        continue;
+                    }
+                    Err(error) => {
+                        report.errors.push(format!(
+                            "peer message {} admitted, but recording it failed: {error}", message.id
+                        ));
+                        continue; // Only transient recording failures are retried.
+                    }
                 }
                 match admitted {
                     EnqueueIdempotentResult::Created(id) => {
@@ -1489,7 +1496,7 @@ pub(crate) fn send_raw(
 
 /// Internal publication path: stable delivery identity in the existing outbox.
 pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
-    outbox::enqueue_and_send(root, message, label)
+    outbox::enqueue_premerge_receipt(root, message, label)
 }
 
 /// One durable logical expiry notice, reused if reconciliation restarts after

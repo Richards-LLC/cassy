@@ -1086,9 +1086,13 @@ supervisor registry, matches the task/source/candidate/landing, and atomically
 imports a peer-attested dispatch and verdict into the receiving store. Repository
 paths are rebound locally; acknowledging or retiring a prompt never removes the
 proof. Generic verification writes cannot claim peer authority, and replay cannot
-replace an existing cycle or revive a reopened delivery. This requires the peer
-mailbox and sender registry to be available when receiving; failures retain the
-Cloud message for retry rather than inferring approval from its prose.
+replace an existing cycle or revive a reopened delivery. Publication sharing is best-effort: a failed peer never changes confirmed
+publication, other peers are still attempted, and the task records the failure.
+A later publication retry can recover its abandoned outbox send with the same
+logical identity. Receipts must explicitly say approved. Permanent refusals
+(malformed, unauthorized, stale, closed or an existing local proof cycle) are
+acknowledged as rejected; only transient store, sync, registry or transport
+availability failures remain unacknowledged for retry.
 
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.

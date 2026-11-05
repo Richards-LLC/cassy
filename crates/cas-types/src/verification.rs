@@ -499,6 +499,8 @@ impl FromStr for VerificationRecoveryAction {
 /// verifier capabilities deliberately never cross the mailbox boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPremergeReceipt {
+    /// Explicit verdict; missing and unknown status must never grant authority.
+    pub status: VerificationStatus,
     pub project_id: String,
     pub supervisor_id: String,
     pub task_id: String,

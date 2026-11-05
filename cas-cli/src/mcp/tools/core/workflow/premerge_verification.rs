@@ -44,7 +44,7 @@ struct Promotion {
 }
 
 mod peer;
-pub(crate) use peer::ingest_peer_receipt;
+pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
@@ -589,7 +589,7 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
-        self.share_published()?;
+        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -634,7 +634,7 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
-            self.share_published()?;
+            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {

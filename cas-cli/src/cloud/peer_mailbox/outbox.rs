@@ -39,8 +39,20 @@ fn connection(root: &Path) -> anyhow::Result<Connection> {
 
 pub(super) fn enqueue_and_send(
     root: &Path,
-    mut message: PeerSend,
+    message: PeerSend,
     recipient: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, false)
+}
+
+/// Publication may re-attempt an abandoned receipt after the peer recovers.
+/// Keep the original logical send key; ordinary messages retain their policy.
+pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, true)
+}
+
+fn enqueue_with_recovery(
+    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
     http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
@@ -55,16 +67,21 @@ pub(super) fn enqueue_and_send(
         let mut conn = connection(root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !message.dedupe_key.is_empty() {
-            let existing: Option<(i64, Option<String>)> = tx.query_row(
-                "SELECT id,cloud_id FROM peer_message_outbox
+            let existing: Option<(i64, Option<String>, String)> = tx.query_row(
+                "SELECT id,cloud_id,state FROM peer_message_outbox
                  WHERE sender_agent_id=?1
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
                 params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
-            if let Some(existing) = existing {
-                return Ok(existing);
+            if let Some((id, cloud_id, state)) = existing {
+                if recover_abandoned && state == "abandoned" && cloud_id.is_none() {
+                    let now = chrono::Utc::now().timestamp();
+                    tx.execute("UPDATE peer_message_outbox SET state='pending',created_at=?2,next_attempt_at=?2,last_error=NULL WHERE id=?1 AND state='abandoned'", params![id,now])?;
+                    tx.commit()?;
+                }
+                return Ok((id, cloud_id));
             }
         }
         let now = chrono::Utc::now().timestamp();

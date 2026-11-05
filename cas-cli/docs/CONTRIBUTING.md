@@ -2122,6 +2122,14 @@ merge request after correcting the cause.
 
 ## Build, assembly and CI policy
 
+Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
+managed `cas` MCP server. It preserves the conversation and confirms a new
+live server PID and its recorded version. A command echo is not success.
+The owning factory daemon must already run a build containing this action;
+an old daemon requires its normal update/relaunch before Commander can use it.
+Codex, Grok and unknown harnesses are refused by name. This action does not
+replace the factory daemon or implement automatic in-place server updates.
+
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
 that its follow-up, release publication, or installation on another host completed.

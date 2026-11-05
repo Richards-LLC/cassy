@@ -8,6 +8,8 @@ pub enum SupervisorCommand {
     Clear,
     Model,
     Usage,
+    #[serde(rename = "mcp")]
+    ReloadCassy,
     Exit,
     Finish,
 }
@@ -25,6 +27,9 @@ impl SupervisorCommand {
             (Claude | Codex, Self::Clear) => Some("/clear"),
             (Claude | Codex, Self::Model) => Some("/model"),
             (Claude, Self::Usage) => Some("/usage"),
+            // Verified on a healthy server in Claude Code 2.1.318. The managed
+            // Claude integration names this MCP server `cas` (config_gen).
+            (Claude, Self::ReloadCassy) => Some("/mcp reconnect cas"),
             (Codex, Self::Usage) => Some("/status"),
             (Claude | Codex, Self::Exit) => Some("/exit"),
             (Claude, Self::Finish) => Some("/finish"),

@@ -304,15 +304,29 @@ mod tests {
         merge_refusal(root, sender, "cosmic-shark-29", None, &MergeSubject { pr: Some(pr), ..Default::default() })
     }
 
-    /// Verifier ver-37f17bf1f171 (1): every way an ask writes the PR holds it.
+    /// Verifiers ver-37f17bf1f171 and ver-aaa79541a589: any way an ask writes
+    /// the PR number holds that PR; a different number does not.
     #[test]
     fn every_pr_reference_form_in_an_ask_holds_its_merge_cas_bddf9() {
         let (_env, _temp, root, conn) = fixture();
-        let forms = ["PR#4249", "gabber-studio#4249", "Richards-LLC/gabber-studio#4249", "pull request 4249", "PR-4249"];
-        for (index, form) in forms.iter().enumerate() {
+        let cases = [
+            ("PR#4249", true),
+            ("gabber-studio#4249", true),
+            ("Richards-LLC/gabber-studio#4249", true),
+            ("pull request 4249", true),
+            ("PR-4249", true),
+            ("PRs 4249 and 4250", true),
+            ("PR 4250 and 4249", true),
+            ("PR number 4249", true),
+            ("pull requests 4249", true),
+            ("pull-request 4249", true),
+            ("PR (4249)", true),
+            ("PR #42490", false),
+        ];
+        for (index, (form, holds)) in cases.iter().enumerate() {
             let sender = format!("sup-{index}");
             sent_ask_from(&conn, &sender, &format!("ask-{index}"), &format!("Please review {form} tonight."));
-            assert!(pr_merge(&root, &sender, 4249).is_some(), "{form} must hold PR 4249");
+            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), *holds, "{form}");
         }
     }
 

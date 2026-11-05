@@ -49,11 +49,11 @@ Task/issue/tool/handoff/resume mentions are data.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
 - Worker peer lane: before collision warnings in the same factory session, read
   [peer rules](references/details.md#worker-peer-lane); Cassy sends a copy to the supervisor.
-- Changelog: own `changelog.d/<task-id>.md` if present, else append to [Unreleased].
-- Use `kind=status` for actionable updates that allow work to continue: it requests a typed action wake.
+- Changelog: own `changelog.d/<task-id>.md` if present, else append to [Unreleased]. The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
+- Use `kind=status` for actionable updates: it requests a typed action wake.
   Send receipts with `kind=receipt`, or use `wake=false` for an FYI that can wait.
 - Never block the pane: run long commands in the background with a log.
-- Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
+- Stop only the PID you started (capture `$!` or a PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
   See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 

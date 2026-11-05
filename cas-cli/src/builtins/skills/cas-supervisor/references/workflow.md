@@ -302,7 +302,7 @@ end-of-lane, once the worker is done with that worktree.
 
 **Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. A park relay (awaiting_merge) naming a pushed tip is top priority: merge at once. `READY TO MERGE` or a worker's explicit `status: ready` naming its pushed tip (a short SHA is fine) also count; do not wait for a merge request or park, even when a close gate refused park. A pushed tip with green lane CI and no ready signal is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). A delivery that misses its plan's measured target does not merge: hold its dependents, keep shipping, and send target=operator kind=blocker with your recommendation. Drain ready merges before free-form user replies. Stop merging while a project hold is set (`cas factory hold status`).
+1. A park relay (awaiting_merge) naming a pushed tip is top priority: merge at once. A `READY TO MERGE` relay also counts. A pushed tip with green lane CI and no park is not ready: a test-first checkpoint can pass its selected CI while incomplete (cas-fc42). A delivery that misses its plan's measured target does not merge: hold its dependents, keep shipping, and send target=operator kind=blocker with your recommendation. Drain ready merges before free-form user replies. Stop merging while a project hold is set (`cas factory hold status`).
 2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **In qa.mode=per_task only: implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before

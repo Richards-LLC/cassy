@@ -80,7 +80,7 @@ enter awaiting supervisor review:
    action, commit and proof; run `task action=update id=<task-id> status=blocked`.
 2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
    using the return contract with `status: blocked` and `blocker: <cause>`.
-   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
+   Omit `kind`: `kind=status` cannot accompany `blocker=true`.
 3. Save the notification ID; wait for the review reply. Record its ID and actual
    decision/action. Clear the review hold with
    `task action=update id=<task-id> status=open`, then

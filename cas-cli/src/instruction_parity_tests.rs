@@ -27,12 +27,13 @@ const ASK_OPERATOR: &str = "Decide anything within supervisor authority yourself
 const PLAN_MISS: &str = "hold its dependents, keep shipping, and send target=operator kind=blocker with your recommendation";
 const SUP_SIGNAL: &str = "A park relay (awaiting_merge) naming a pushed tip is top priority: merge at once";
 const MERGE_PATH: &str = "action=worktree_merge";
+const RELEASE_NOTES: &str = "The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.";
 
 /// Competing answers, matched by meaning. Worker rules apply to what a worker
 /// reads; supervisor rules to what a supervisor reads.
 const WORKER_RETIRED: &[(&str, &str)] = &[
     ("someone else closes the task", r"(?i)\bclose\b[^.\n]{0,60}\b(on (my|your|their) behalf|for (me|you)\b)"),
-    ("retry close after the merge", r"(?i)\b(then|once merged,?|after (it|the merge) (lands|merges)),? retry\b[^.\n]{0,40}\bclose"),
+    ("retry close after the merge or verdict", r"(?i)\b(merge|merged|merges|verdict)\b[^.\n]{0,80}\bthen retry\b[^.\n]{0,20}\bclose|\bonce merged,? retry"),
     ("the worker runs the verifier", r"(?i)\b(run|spawn)\b[^.\n]{0,20}\btask-verifier\b"),
     ("ready is a completion claim", r"(?i)\bkind=status\|ready\b|`kind=ready`[^.\n]{0,60}\b(completion|done|merge)"),
 ];
@@ -188,6 +189,9 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
         carries(surface, text, "merge trigger", SUP_SIGNAL);
     }
     carries("Director merge relay", &relay, "merge path", MERGE_PATH);
+    for path in ["skills/cas-supervisor/SKILL.md", "skills/cas-worker/SKILL.md", "skills/cas-cut-release/SKILL.md"] {
+        carries(path, skill(path), "who writes release notes", RELEASE_NOTES);
+    }
     for (h, text) in &supervisors {
         carries(h, text, "polling", "do not poll");
     }

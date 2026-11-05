@@ -277,31 +277,27 @@ pub(crate) fn worker_dispatch_gate(gate: &WorkerDispatchGate<'_>) -> String {
     let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, coord, close_reason_hint } = gate;
     // cas-8725: when CAS queued the handoff itself, say so — a worker told to
     // "forward this" sends a second, free-text copy that cannot wake anyone.
-    let handoff_line = if *handoff_queued {
-        "Cassy has already delivered this dispatch to the supervisor \
-         (they are woken with it, not left to find it). Wait for the \
-         verdict; re-send only if the supervisor does not respond:\n\n"
+    // cas-5597: either way the verdict closes the task; nobody closes for you.
+    let handoff = if *handoff_queued {
+        format!("Cassy has already delivered this dispatch to the supervisor; its verdict closes the task, so send no {coord} message for it.")
     } else {
-        "Forward to supervisor (workers cannot spawn task-verifier \
-         directly):\n\n"
+        format!(
+            "Cassy could not deliver this dispatch; send one blocker: {coord} action=message \
+             target=supervisor task_id={id} blocker=true summary=\"Verification dispatch {dispatch_id}\" \
+             message=\"Task {id} waits on verification dispatch {dispatch_id}.{close_reason_hint}\""
+        )
     };
     format!(
         "Factory worker verification gate: task {id} close is pending \
          dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
-         {context}\
-         This close will only succeed after a legitimate verifier records a verdict.\n\n\
-         {handoff_line}\
-         {coord} action=message target=supervisor \
-         summary=\"Ready to close {id}\" \
-         message=\"Task {id} is ready to close.{close_reason_hint} \
-         Please run task-verifier for task {id} and close on my behalf if approved.\""
+         {context}{handoff}\n\n{WORKER_CLOSE_OWNERSHIP}"
     )
 }
 
 /// A worker's close that found another requester's dispatch already pending.
 pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &str, deadline: &str, conflict: &str) -> String {
     format!(
-        "Task {task_id} close is pending existing dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. {conflict} Ask the supervisor to finish this exact dispatch's verdict, then retry task close."
+        "Task {task_id} close is pending existing dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. {conflict} That dispatch's verdict closes the task. {WORKER_CLOSE_OWNERSHIP}"
     )
 }
 
@@ -309,8 +305,8 @@ pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &
 pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
     format!(
         "Cannot start a task that is awaiting merge. The worker work is \
-         already complete; wait for the supervisor to merge the factory \
-         branch, then retry task close. If review fails — the supervisor \
+         already complete; the supervisor merges the factory branch and \
+         the merge verdict closes the task. If review fails — the supervisor \
          declines the delivery, or requires an amendment after merging — \
          they must first run \
          `{tool_prefix}task action=request_changes id={task_id} reason=\"state what remains and what must be corrected or reverted\"`; \

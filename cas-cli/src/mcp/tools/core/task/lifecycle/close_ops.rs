@@ -17373,8 +17373,9 @@ fn run_factory_branch_merge_gate_for_delivery(
              1. {drain}\n\
              {epic_push_state_step}\
              {durable_step}\
-             4. Close again with {retry} to park it; the supervisor merges \
-             {factory_branch} into {parent_branch} with `{merge}` and the merge verdict closes the task.\n\n\
+             4. Close again with {retry} to park it, then ask your supervisor to merge \
+             {factory_branch} into {parent_branch}: {merge_request}. The supervisor \
+             merges with `{merge}`; the merge verdict closes the task.\n\n\
              {exits}"
         )
     } else if local_merge {

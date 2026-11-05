@@ -7666,7 +7666,8 @@ This is the body content."#;
         ] {
             let lines: Vec<_> = content.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if line.contains("factory action=spawn_workers") {
+                // cas-5597: `lane=` (preferred) resolves cli/model/effort with fallbacks.
+                if line.contains("factory action=spawn_workers") && !line.contains("lane=") {
                     for argument in ["cli=", "model=", "effort="] {
                         assert!(
                             line.contains(argument),

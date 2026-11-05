@@ -13,8 +13,7 @@ Prove the named build's demo, `qa.user_facing_paths`, `qa.api_paths` and impacte
 API globs declare non-rendered server code, including server-only TSX; rendered paths need visual evidence.
 This evidence pass does not replace fixture, unit or integration tests. Time-box every pass, batch
 round included, to `qa.pass_timeout_mins`; an honest incomplete ledger beats a late, invented result.
-For an epic with child demos, the batch round walks one combined
-[epic matrix](../cas-supervisor/references/epic-flow-walk.md). On a `qa-pass` task you review someone else's delivery: use the API path
+For an epic with child demos, the batch round walks one combined [epic matrix](../cas-supervisor/references/epic-flow-walk.md). On a `qa-pass` task you review someone else's delivery: use the API path
 below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
 Record its verdict with `verification action=qa_record`, naming the round's `LEDGER.md`.
 

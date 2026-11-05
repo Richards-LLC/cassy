@@ -514,6 +514,8 @@ pub fn rendered_contract_surface(harness: &str, role: ContractRole) -> String {
         ("grok", ContractRole::Worker) => grok_worker_instructions(),
         ("claude", ContractRole::Supervisor) => claude_supervisor_contract("worker-a, worker-b"),
         ("claude", ContractRole::Worker) => claude_worker_contract("worker-a"),
+        ("opencode", ContractRole::Supervisor) => OPENCODE_SUPERVISOR_INSTRUCTIONS.to_string(),
+        ("opencode", ContractRole::Worker) => OPENCODE_WORKER_INSTRUCTIONS.to_string(),
         other => panic!("unknown launch shape: {other:?}"),
     }
 }

@@ -4845,6 +4845,7 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     request.cleanup = Some(false);
     let response = service.factory(Parameters(request)).await.unwrap();
     let text = get_text(&response);
+    // pin: this machine-readable refusal code selects the resumable PR route.
     assert!(text.contains("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"), "{text}");
     assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(),
         "the regression must exercise the no-dispatch path");

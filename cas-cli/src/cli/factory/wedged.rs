@@ -1622,6 +1622,9 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         if ticks_per_second <= 0 {
             return BackgroundProcessState::Unavailable;
         }
+        let root_agent = std::fs::read(format!("/proc/{root_pid}/cmdline"))
+            .ok()
+            .and_then(|raw| agent_name_from_cmdline(&raw));
         let mut queue = VecDeque::from([root_pid]);
         let mut visited = HashSet::from([root_pid]);
         let mut processes = Vec::new();
@@ -1648,7 +1651,9 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                 let age_secs =
                     (uptime_secs - start_ticks as f64 / ticks_per_second as f64).max(0.0) as u64;
                 let command = process_command_name(child);
-                if !is_cas_sidecar(&command, child) {
+                let harness = std::fs::read(format!("/proc/{child}/cmdline"))
+                    .is_ok_and(|raw| is_root_harness(root_agent.as_deref(), &raw));
+                if !harness && !is_cas_sidecar(&command, child) {
                     processes.push(BackgroundProcess { command, age_secs });
                 }
             }
@@ -1661,6 +1666,8 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
             return BackgroundProcessState::Unavailable;
         };
+        let root_agent = macos_process_cmdline(root_pid)
+            .and_then(|raw| agent_name_from_cmdline(&raw));
         let mut queue = VecDeque::from([root_pid]);
         let mut visited = HashSet::from([root_pid]);
         let mut processes = Vec::new();
@@ -1694,10 +1701,10 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                             .map(str::to_owned)
                     })
                     .unwrap_or_else(|| "<command unavailable>".to_string());
-                if !raw
-                    .as_deref()
-                    .is_some_and(|raw| is_known_sidecar_commandline(&command, raw))
-                {
+                if !raw.as_deref().is_some_and(|raw| {
+                    is_root_harness(root_agent.as_deref(), raw)
+                        || is_known_sidecar_commandline(&command, raw)
+                }) {
                     processes.push(BackgroundProcess {
                         command,
                         age_secs: now.as_secs().saturating_sub(start_micros / 1_000_000),
@@ -1873,6 +1880,15 @@ fn process_command_name(pid: u32) -> String {
                 .map(|name| name.trim().to_owned())
         })
         .unwrap_or_else(|| "<command unavailable>".to_string())
+}
+
+/// cas-cff4: a sandbox wrapper such as bwrap carries the worker's argv, so it
+/// is the matched root and the harness is its descendant. That descendant is
+/// the worker itself, not a background job; counting it hid every stall.
+/// Its own children are still walked, so real jobs below it count.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_root_harness(root_agent: Option<&str>, raw: &[u8]) -> bool {
+    root_agent.is_some_and(|root| agent_name_from_cmdline(raw).as_deref() == Some(root))
 }
 
 /// Persistent MCP/harness sidecars are inherited by every worker; treating

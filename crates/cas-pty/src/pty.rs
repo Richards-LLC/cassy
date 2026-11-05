@@ -39,9 +39,10 @@ pub const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker start
 /// the later conformance work; these instructions establish only the task and
 /// coordination contract needed by the launch adapter.
 const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = concat!(
-    "You are a Cassy Factory Supervisor running in OpenCode. Coordinate work; do not implement worker tasks. ",
+    "Cassy Factory Supervisor on OpenCode. Coordinate; never implement worker tasks. ",
     simplest_complete!(),
-    " Spawn follow-ups only for a reproduced, observable defect affecting someone today. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use blocker=true for blockers and merge_request=true for merge requests. Merge READY TO MERGE and awaiting_merge deliveries first, ahead of new assignments. A delivery whose phase misses its plan's measured target does not merge: hold the work that depends on it, keep shipping everything else, and ask the operator. The merge verdict closes or reopens the task. Override a CI or QA gate only with existing authority and a reason."
+    " Spawn follow-ups only for a reproduced, observable defect affecting someone today. Use injected cas_ MCP tools: cas_coordination, cas_task. task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use blocker=true for blockers and merge_request=true for merge requests. Merge READY TO MERGE and awaiting_merge before assigning work. ",
+    "Hold deliveries below their plan target and their dependents; ship independent work. Decide and ship within scope when a written standard settles it. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles. Operator instructions expire with their step unless explicitly standing. The merge verdict closes or reopens the task. Override CI/QA only with authority and a reason."
 );
 const OPENCODE_WORKER_INSTRUCTIONS: &str = concat!(
     "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit (and push unless delivery_mode=local_merge), then close or hand off before starting another task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. ",
@@ -426,27 +427,25 @@ fn supervisor_contract(
     format!(
         "{identity} Coordinate only; never implement tasks. Skills: {checklist} at session start; \
 cas-supervisor and cas-codebase-design as needed. Tools are {prefix}<tool>{namespace_note}. \
-{ideal} A worker's task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says \
+{ideal} task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says \
 whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the \
 next turn. Workers flag blocker=true and merge_request=true. Each 'Message from <sender>: …' is \
 a triage trigger: reply with `{prefix}coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when \
 the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. Act \
-on the injected signal; do not poll; when nothing is actionable, end the turn.{no_poll} {core_head} \
+on the injected signal; do not poll; end idle turns.{no_poll} {core_head} \
 READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first with `{prefix}factory \
 action=worktree_merge id=<worker> task_id=<task-id>` for `factory/<worker>`, found via \
 `{prefix}factory action=epic_status id=<epic-id>` or `{prefix}task action=list \
 status=awaiting_merge`; act on the gate its refusal names, overriding only with authority and a \
-reason. A delivery whose phase misses its plan's measured target does not merge: hold the work \
-that depends on it, keep shipping everything else, and ask the operator. The merge verdict \
-closes or reopens the task. blocker=true → answer or reassign this turn. worker idle or died → \
+reason. Hold deliveries below their plan target and their dependents; ship independent work. \
+Decide and ship within scope when a written standard settles it. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles. Operator instructions expire with their step unless explicitly standing. \
+The merge verdict closes or reopens the task. blocker=true → answer or reassign this turn. worker idle or died → \
 `{prefix}factory action=worker_status`, then assign or recycle; a fresh task's `{prefix}task \
 action=start` clears an urgent-stop halt. cas-qa-dispatch → assign the named QA task. \
 verification dispatch → assign the verifier it names; the verifier records the verdict. \
 operator question → answer from the board.{codex_tail} Spawn follow-ups only for a reproduced, \
-observable defect affecting someone today. Write facts, not narration; answer first, readable \
-at a glance (table, diagram, > [!WARNING] callout, code block). The operator's user-level \
-instructions govern voice and style; these rules govern length. Brevity never trims evidence: findings, rejections, measurements, \
-receipts.{commentary}{workers}",
+observable defect affecting someone today. Write facts, not narration; answer first, at a glance. \
+The operator's user-level instructions govern voice and style. Brevity never trims evidence.{commentary}{workers}",
         ideal = simplest_complete!(),
     )
 }
@@ -7892,12 +7891,17 @@ echo SMOKE_DONE
         // retain decision authority and the plan boundary after compaction.
         let surfaces = ["claude", "codex", "grok", "opencode"].map(|harness| {
             let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
-            eprintln!("{harness}: {} words, {} bytes", surface.split_whitespace().count(), surface.len());
+            eprintln!(
+                "{harness}: {} words, {} bytes",
+                surface.split_whitespace().count(),
+                surface.len()
+            );
             (harness, surface)
         });
         for (harness, surface) in surfaces {
             assert!(
-                surface.contains("Decide and ship within scope when a written standard settles it."),
+                surface
+                    .contains("Decide and ship within scope when a written standard settles it."),
                 "{harness} must delegate decisions settled by standards to the supervisor"
             );
             assert!(
@@ -7905,11 +7909,13 @@ echo SMOKE_DONE
                 "{harness} must reserve operator asks for policy calls"
             );
             assert!(
-                surface.contains("Operator instructions expire with their step unless explicitly standing."),
+                surface.contains(
+                    "Operator instructions expire with their step unless explicitly standing."
+                ),
                 "{harness} must not turn a completed step into a standing gate"
             );
             assert!(
-                surface.contains("A delivery whose phase misses its plan's measured target does not merge: hold the work that depends on it, keep shipping everything else, and ask the operator."),
+                surface.contains("Hold deliveries below their plan target and their dependents; ship independent work."),
                 "{harness} must hold missed plan targets without stopping independent deliveries"
             );
         }

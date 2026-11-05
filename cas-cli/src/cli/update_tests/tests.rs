@@ -3464,7 +3464,7 @@ fn retired_cassy_ignore_lines_are_repaired_and_real_conflicts_fail_cas_3199() {
     let (result, _) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
     result.unwrap();
     cas_6718_git(&project, &["add", "-A"]);
-    cas_6718_git(&project, &["commit", "-qm", "commit Cassy's managed block"]);
+    cas_6718_git(&project, &["commit", "-qm", "commit Cassy's managed block", "--allow-empty"]);
     let retired = [
         "skills/cas-release-report/references/default-tokens.json",
         "skills/cas-release-report/scripts/check-pdf.py",

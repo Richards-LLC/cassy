@@ -1518,6 +1518,68 @@ mod tests {
         assert_eq!(turns[0].commander_id, Some(42), "only an envelope beginning a row may bind");
     }
 
+    /// cas-44f0: replay a scrubbed Grok 1.0.70 capture from a real Linux
+    /// --single session through discovery, the daemon scanner and history.
+    #[test]
+    fn grok_native_reply_reaches_commander_cas_44f0() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for from_commander in [false, true] {
+            let (temp, root, queue) = terminal_session(vec![]);
+            let store = SqliteAgentStore::open(&root).unwrap();
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.cc_session_id = Some("01a1adc1-8727-7443-8ca3-3de0d09ced72".into());
+            agent.metadata.insert("supervisor_cli".into(), "grok".into());
+            store.update(&agent).unwrap();
+            let send = from_commander.then(|| queue.enqueue_operator_message(
+                "commander:Alice@phone", "supervisor", "Mirror probe", Some("factory-1"),
+                None, None, false, None,
+                &OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+                    device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+            ).unwrap().id());
+            let mut records: Vec<Value> = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/grok-commander-updates.jsonl"))
+                .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let base = records[0]["timestamp"].as_i64().unwrap();
+            let now = Utc::now().timestamp();
+            for row in &mut records {
+                row["timestamp"] = (now + row["timestamp"].as_i64().unwrap() - base).into();
+            }
+            if let Some(id) = send {
+                records[0]["params"]["update"]["content"]["text"] =
+                    format!("[cas #{id} operator Alice@phone verified 0s first] Mirror probe").into();
+            }
+            let path = temp.path().join("account/sessions/project")
+                .join(agent.cc_session_id.as_ref().unwrap()).join("updates.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let write = |rows: &[Value]| std::fs::write(&path,
+                rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+                &root, temp.path(), "factory-1", &queue, std::slice::from_ref(&agent), state);
+            let mut state = MirrorScanState::default();
+            write(&records[..records.len() - 1]);
+            scan(&mut state);
+            assert!(operator_replies(&queue).is_empty(), "streaming text is not a completed reply");
+            write(&records);
+            scan(&mut state);
+            assert_eq!(state.transcript_reads, 2, "native transcript must resolve and be read");
+            let replies = operator_replies(&queue);
+            assert_eq!(replies.len(), 1, "completed Grok answer must reach durable history");
+            assert!(replies[0].message.contains("mirror probe complete"));
+            assert!(!replies[0].message.contains("Private reasoning"));
+            assert_eq!(replies[0].kind, crate::ui::factory::OperatorTurnKind::Answer);
+            if let Some(id) = send {
+                assert_eq!(replies[0].reply_to, Some(id));
+                assert_eq!(replies[0].device_id, "phone");
+            } else {
+                let history = queue.conversation_history("factory-1", "phone", None, 20).unwrap();
+                let input = history.iter().find(|row| row.source == "terminal").unwrap();
+                assert_eq!(replies[0].reply_to, Some(input.id));
+            }
+            scan(&mut MirrorScanState::default());
+            assert_eq!(operator_replies(&queue).len(), 1, "restart must deduplicate the native prompt id");
+        }
+    }
+
     #[test]
     fn claude_api_error_reaches_commander_in_one_scan_cas_d8e0() {
         let mut env = crate::test_env_guard::TestEnvGuard::temp_home();

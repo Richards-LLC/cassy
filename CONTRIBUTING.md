@@ -70,7 +70,8 @@ GitHub matches required checks by name string.
 longer exists is never reported, so it never passes — and every affected branch stays
 unmergeable until someone notices. GH #138 renamed these jobs once already.
 
-Currently pinned: `Fast Validation` and `macOS Check`.
+Currently required: `Fast Validation`. `macOS Check` is advisory and excluded
+from merge-group events; Release Prebuild retains pre-publish macOS proof.
 
 `Release-Profile & Build Guard (compile-only, no test suite)` is deliberately **not** a required
 check: its `if:` condition skips pull requests, so requiring it would make every PR wait forever

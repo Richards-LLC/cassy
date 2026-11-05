@@ -975,7 +975,7 @@ def prove_rows(root, rows=ROW_PROOF_ROWS):
 # cas-2970: the merge queue is the integration proof. A successful merge_group
 # run of ci.yml proves the exact tree that lands on main (preflight with the CI
 # script tiers and Commander web checks, the sharded workspace suite from an
-# archive in a plain CI checkout, doctests and macOS Check); it publishes a
+# archive in a plain CI checkout, and doctests); it publishes a
 # `merge-queue-validated-tree-<tree>` artifact only after that fan-in passes.
 # A release cut from main reuses that run for its code input instead of
 # re-running the suite locally. Any missing, failed or ambiguous evidence is a

@@ -2367,13 +2367,14 @@ else
 fi
 CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
     run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-gate.log" 2>&1 || true
-mq_expected=archive-mode,ci-script-tests,doctests,fixture-paths,hub-web-dist-drift,hub-web-tests,hub-web-visual-qa,macos-check,nextest
+mq_expected=archive-mode,ci-script-tests,doctests,fixture-paths,hub-web-dist-drift,hub-web-tests,hub-web-visual-qa,nextest
 if [[ "$(reused_rows)" == "$mq_expected" ]] \
     && grep -qF 'run=https://github.com/Richards-LLC/cassy/actions/runs/777' "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -q '^check --workspace --tests --target aarch64-apple-darwin' "$tmp/cargo.log" \
     && grep -q '^workspace-tests' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
     && grep -q '^builtin-projections' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
     && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
-    ok 'a merge-queue from-main gate reuses the queue suite rows and runs the version-delta rows fresh'
+    ok 'a merge-queue from-main gate reuses queue suite rows but executes its own macOS and version-delta proof'
 else
     bad "merge-queue gate reuse: $(reused_rows); $(cat "$tmp/mq-gate.log")"
 fi
@@ -2588,6 +2589,8 @@ elif [[ "${1:-}" == --concurrency-only ]]; then
     run_sections section_concurrency section_cancellation
 elif [[ "${1:-}" == --cancellation-only ]]; then
     run_sections section_cancellation
+elif [[ "${1:-}" == --assembly-proof-only ]]; then
+    run_sections section_assembly_proof
 elif [[ "${1:-}" == --failure-scenarios-only ]]; then
     run_sections section_failure_scenarios
 else

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Security regression test for the cas-image-generate curl credential path.
 #
-# The stub curl wrapper delegates to a local HTTP endpoint so the test observes
-# the real curl process command line while the endpoint deliberately holds the
-# request open. The API key must be present in the mode-600 header file, never
-# in curl argv, and the file must be removed when the helper exits.
+# The stub curl wrapper records the argv and header file it passes to real curl,
+# then delegates to a local HTTP endpoint. Inspect the captures after the helper
+# exits so neither process lifetime nor header cleanup can race the assertions.
+# The API key must be present in the mode-600 header file, never in curl argv,
+# and the file must be removed when the helper exits.
 
 set -euo pipefail
 
@@ -34,7 +35,6 @@ import http.server
 import os
 import pathlib
 import sys
-import time
 
 port_path = pathlib.Path(sys.argv[1])
 response_marker = pathlib.Path(sys.argv[2])
@@ -50,8 +50,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         response_marker.touch()
-        # Keep curl alive long enough for the shell test to inspect its argv.
-        time.sleep(2)
         payload = (
             '{"candidates":[{"content":{"parts":[{"inlineData":'
             '{"mimeType":"image/png","data":"c3R1Yi1pbWFnZQ=="}}]}}]}'
@@ -86,10 +84,17 @@ for ((index = 0; index < ${#args[@]}; index++)); do
     fi
 done
 [[ -n "${header_file}" ]] || { echo "stub curl did not receive a header file" >&2; exit 1; }
-printf '%s\n' "${BASHPID}" >"${CURL_STUB_PID_FILE}"
 printf '%s\n' "${header_file}" >"${CURL_STUB_HEADER_FILE}"
+cp "${header_file}" "${CURL_STUB_HEADER_CONTENTS_FILE}"
+python3 - "${header_file}" >"${CURL_STUB_HEADER_MODE_FILE}" <<'PY'
+import os
+import stat
+import sys
+print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "03o"))
+PY
 last_index=$((${#args[@]} - 1))
 args[last_index]="${CURL_STUB_URL}"
+printf '%s\n' "${args[@]}" >"${CURL_STUB_ARGV_FILE}"
 exec "${REAL_CURL}" "${args[@]}"
 SH
 chmod 755 "${stub_bin}/curl"
@@ -99,10 +104,12 @@ run_case() {
     local port_file="${tmpdir}/${label}.port"
     local response_marker="${tmpdir}/${label}.response"
     local header_capture="${tmpdir}/${label}.header"
-    local pid_capture="${tmpdir}/${label}.pid"
+    local header_contents_capture="${tmpdir}/${label}.headers"
+    local header_mode_capture="${tmpdir}/${label}.mode"
+    local argv_capture="${tmpdir}/${label}.argv"
     local output="${tmpdir}/${label}.png"
     local secret='gh-757-test-secret-should-not-be-in-argv'
-    local port header_file curl_pid curl_args mode
+    local port header_file curl_args mode
 
     EXPECTED_KEY="${secret}" python3 -u "${tmpdir}/server.py" \
         "${port_file}" "${response_marker}" &
@@ -122,42 +129,27 @@ run_case() {
     GEMINI_API_KEY="${secret}" \
         CURL_STUB_URL="http://127.0.0.1:${port}/generate" \
         CURL_STUB_HEADER_FILE="${header_capture}" \
-        CURL_STUB_PID_FILE="${pid_capture}" \
+        CURL_STUB_HEADER_CONTENTS_FILE="${header_contents_capture}" \
+        CURL_STUB_HEADER_MODE_FILE="${header_mode_capture}" \
+        CURL_STUB_ARGV_FILE="${argv_capture}" \
         REAL_CURL="$(command -v curl)" \
         PATH="${stub_bin}:${PATH}" \
         bash "${script}" --prompt "security regression" --output "${output}" &
     script_pid=$!
 
-    for _ in $(seq 1 200); do
-        [[ -s "${header_capture}" && -s "${pid_capture}" ]] && break
-        kill -0 "${script_pid}" 2>/dev/null || {
-            wait "${script_pid}" || true
-            echo "${label}: helper exited before curl exposed its header file" >&2
-            return 1
-        }
-        sleep 0.02
-    done
-    [[ -s "${header_capture}" && -s "${pid_capture}" ]] || {
-        echo "${label}: curl inspection files were not published" >&2
-        return 1
-    }
+    # Regression: even if curl and the helper finish before inspection, the
+    # credential assertions must still be inspectable without a timing window.
+    wait "${script_pid}"
+    script_pid=""
 
     header_file="$(<"${header_capture}")"
-    curl_pid="$(<"${pid_capture}")"
-    [[ -f "${header_file}" ]] || { echo "${label}: header file disappeared too early" >&2; return 1; }
-    grep -Fqx "x-goog-api-key: ${secret}" "${header_file}"
-    grep -Fqx 'Content-Type: application/json' "${header_file}"
-    mode="$(python3 - "${header_file}" <<'PY'
-import os
-import stat
-import sys
-print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "03o"))
-PY
-)"
+    grep -Fqx "x-goog-api-key: ${secret}" "${header_contents_capture}"
+    grep -Fqx 'Content-Type: application/json' "${header_contents_capture}"
+    mode="$(<"${header_mode_capture}")"
     [[ "${mode}" == 600 ]] || { echo "${label}: header mode is ${mode}, expected 600" >&2; return 1; }
 
-    curl_args="$(ps -ww -o args= -p "${curl_pid}")"
-    [[ -n "${curl_args}" ]] || { echo "${label}: curl process was not inspectable" >&2; return 1; }
+    curl_args="$(<"${argv_capture}")"
+    [[ -n "${curl_args}" ]] || { echo "${label}: curl argv was not captured" >&2; return 1; }
     if [[ "${curl_args}" == *"${secret}"* ]]; then
         echo "${label}: API key leaked into curl argv: ${curl_args}" >&2
         return 1
@@ -167,8 +159,6 @@ PY
         return 1
     }
 
-    wait "${script_pid}"
-    script_pid=""
     [[ -f "${response_marker}" ]] || { echo "${label}: stub endpoint did not receive the request" >&2; return 1; }
     [[ -f "${output}" ]] || { echo "${label}: helper did not write the response image" >&2; return 1; }
     [[ "$(<"${output}")" == stub-image ]] || { echo "${label}: unexpected image response" >&2; return 1; }

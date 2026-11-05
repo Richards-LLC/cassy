@@ -305,8 +305,9 @@ invariants:
     bug:
       task: cas-7c14
   HUB-J3-MACHINE-VERSIONS:
-    statement: Each machine names its reported runtime and a newer stable release when known; the Web footer names the client release and build independently.
-    check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
+    statement: Each machine names its reported runtime and a newer stable release when known; a hub older than its installed binary is named with the restart that loads it, never as an available update, and a reconnect after a hub restart re-reads its version. The Web footer names the client release and build independently.
+    check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist, including its cas-d786 stale-hub stage, the cas-d786 machine-version and reconnect cases in project-navigation.test.ts and connection-lifecycle.test.ts, and hub::tests::h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions. Verify old, current, stale and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
+    bug: {task: cas-d786}
   HUB-J3-SUPERVISOR-VERSIONS:
     statement: Each online supervisor shows its observed MCP version; an older version than its machine has installed is marked with an upgrade arrow and reconnect guidance, while unknown versions show nothing.
     check: 'Run the cas-8125 stage in the existing machine versions HUB-J3 journey for Linux/Claude and macOS/Codex observations, the badge-state conversations unit test and the real-store catalog projection test; capture both real candidate builds and retain platform proof.'

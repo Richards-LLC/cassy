@@ -380,6 +380,7 @@ The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud 
 - ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
 - ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
 - ❌ Never hand-edit or commit `hub-web/dist` on a factory lane. Journey tooling builds a scratch production snapshot bound to the committed source tip and records its content hash. The integration owner generates the committed release bundle from merged sources. Follow [the scratch-build workflow](../cas-cli/docs/CONTRIBUTING.md#scratch-builds-for-exact-tip-journeys).
+- ✅ The integration owner produces and commits canonical `hub-web/dist` during `scripts/release.sh` preparation, after merging sources and setting the release version. The queue builds every selected Commander tree; committed-output equality applies to version changes, dist changes and uncertain comparison inputs. A known unchanged-version, unchanged-dist source lane defers that equality to release preparation. Version-only release changes select the existing Commander check even when no web file changed.
 
 ## Behavioural constraints
 <!-- keep -->

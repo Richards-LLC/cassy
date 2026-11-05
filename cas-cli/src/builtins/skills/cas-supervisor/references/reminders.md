@@ -123,5 +123,5 @@ as a defect and remove old inbox polling workarounds.
 
 ## Peer release updates
 
-Peer FYIs default to `kind=receipt` and wait for the peer's next turn. Use
-`kind=ask` or `blocker=true` when a decision is required. Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.
+Untyped peer mail is an ask and wakes the peer; only `kind=receipt` or
+`wake=false` waits for the peer's next turn, so use those for true FYIs. Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.

@@ -1109,6 +1109,8 @@ pub(crate) fn shutdown_worktree_safety(
         return shutdown_local_worktree_safety(path, dirty, target_branches);
     }
 
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string());
     let unpushed =
         run_git(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"]).and_then(|count| {
             count
@@ -1118,7 +1120,7 @@ pub(crate) fn shutdown_worktree_safety(
     match (dirty, unpushed, remote) {
         (Ok(dirty), Ok(unpushed), Ok(_)) => (
             format!(
-                "worktree={} (dirty_files={dirty}, unpushed_commits={unpushed})",
+                "worktree={} (branch={branch}, dirty_files={dirty}, unpushed_commits={unpushed})",
                 path.display()
             ),
             dirty > 0 || unpushed > 0,
@@ -9842,7 +9844,7 @@ fn collect_worker_activity_worktree_snapshot(
         return None;
     };
     let git_status = collect_worker_git_status(&path);
-    if !git_status.dirty {
+    if git_status.dirty != Some(true) {
         return None;
     }
 
@@ -13020,9 +13022,13 @@ pub(crate) struct WorkerGitStatus {
     pub behind: usize,
     /// Branch used as the ahead/behind baseline (e.g. "origin/main")
     pub base_branch: String,
-    /// `true` if the worker scope has changes: porcelain index state normally,
-    /// or the committed contribution range while a merge is in progress.
-    pub dirty: bool,
+    /// `Some(true)` if the worker scope has changes: porcelain index state
+    /// normally, or the committed contribution range while a merge is in
+    /// progress. `None` when git could not answer (cas-2879: never "[clean]").
+    pub dirty: Option<bool>,
+    /// Entries in the repository's stash, which every worktree shares and
+    /// which is never pushed. `None` when git could not answer.
+    pub stash_count: Option<usize>,
     /// `"origin/<branch>"` when the remote-tracking ref exists, otherwise
     /// `"none"`. Existence alone is not "pushed": see `upstream`.
     pub pushed_ref: String,
@@ -13068,16 +13074,19 @@ pub(crate) struct TaskDeliveryGit {
 
 impl WorkerGitStatus {
     /// The one place that says whether HEAD is on the remote (cas-2879).
-    /// "[pushed: …]" means every HEAD commit is on that remote ref.
+    /// "[pushed: …]" means every HEAD commit is on that remote-tracking ref.
+    /// The ref is the local copy from the last fetch or push, and says so.
     pub(crate) fn push_state_label(&self) -> String {
         let remote = self.pushed_ref.as_str();
         match self.upstream {
             _ if remote == "none" => "[not pushed]".to_string(),
-            Some((0, 0)) => format!("[pushed: {remote}]"),
-            Some((0, behind)) => {
-                format!("[pushed: {remote}; it has {behind} commit(s) HEAD lacks]")
+            Some((0, 0)) => format!("[pushed: {remote} as of last fetch]"),
+            Some((0, behind)) => format!(
+                "[pushed: {remote} as of last fetch; it has {behind} commit(s) HEAD lacks]"
+            ),
+            Some((ahead, _)) => {
+                format!("[NOT PUSHED: {ahead} commit(s) not on {remote} as of last fetch]")
             }
-            Some((ahead, _)) => format!("[NOT PUSHED: {ahead} commit(s) not on {remote}]"),
             None => format!("[push unknown: {remote} exists; HEAD containment unmeasured]"),
         }
     }
@@ -13190,8 +13199,11 @@ fn collect_worker_git_status_with_gh(
     // to merge-base..HEAD there so another lane's incoming files do not render
     // as this worker's dirty/drift signal (cas-d04f / cas-7a21).
     let dirty = worker_scope_paths(worktree_path)
-        .map(|paths| !paths.is_empty())
-        .unwrap_or(false);
+        .ok()
+        .map(|paths| !paths.is_empty());
+    let stash_count = run_git(worktree_path, &["stash", "list"])
+        .ok()
+        .map(|list| list.lines().filter(|line| !line.trim().is_empty()).count());
 
     // --- pushed ref -----------------------------------------------------------
     // Check whether `refs/remotes/origin/<branch>` exists locally (i.e. has the
@@ -13248,6 +13260,7 @@ fn collect_worker_git_status_with_gh(
         behind,
         base_branch,
         dirty,
+        stash_count,
         pushed_ref,
         upstream,
         delivery: None,
@@ -13387,7 +13400,11 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         return String::new();
     }
 
-    let dirty_label = if gs.dirty { "[dirty]" } else { "[clean]" };
+    let dirty_label = match gs.dirty {
+        Some(true) => "[dirty]",
+        Some(false) => "[clean]",
+        None => "[dirty state unknown]",
+    };
     let pushed_label = gs.push_state_label();
     let pr_label = gs.pr_url.to_string(); // URL, "none", or "unknown (...)"
 
@@ -13412,6 +13429,14 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         shared_checkout_parked_warning(gs.is_shared_checkout, &gs.branch, &gs.base_branch)
             .unwrap_or_default();
 
+    let stash_label = match gs.stash_count {
+        Some(0) => String::new(),
+        Some(count) => format!(
+            "\n    stash: {count} entr{} in this repository's shared stash; stashes are never pushed",
+            if count == 1 { "y" } else { "ies" }
+        ),
+        None => "\n    stash: unknown (git stash list failed)".to_string(),
+    };
     let delivery_label = gs
         .delivery
         .as_ref()
@@ -13420,7 +13445,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 
     format!(
         "\n    git: {} @ {} {} {}\
-         \n    ahead: {} behind: {} (vs {}){}{}{}\
+         \n    ahead: {} behind: {} (vs {}){}{}{}{}\
          \n    PR: {}",
         gs.branch,
         head_sha_for_display(&gs.head_sha),
@@ -13429,6 +13454,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         gs.ahead,
         gs.behind,
         gs.base_branch,
+        stash_label,
         delivery_label,
         stale_label,
         parked_label,
@@ -15666,7 +15692,10 @@ mod tests {
         let head = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
 
         let (worktree_state, unsafe_worktree) = shutdown_worktree_safety(repo, false, &[]);
-        assert!(worktree_state.contains("unpushed_commits=1"), "{worktree_state}");
+        assert!(
+            worktree_state.contains("branch=factory/held-work, dirty_files=0, unpushed_commits=1"),
+            "{worktree_state}"
+        );
         let snapshot = ShutdownWorkerSnapshot {
             worker_name: "held-work".into(),
             worker_id: "held-id".into(),
@@ -21529,6 +21558,9 @@ effort = "high"
         run_git_ok(repo, &["commit", "-m", "after park"]);
         let head = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
 
+        std::fs::write(repo.join("work.rs"), "// stashed\n").unwrap();
+        run_git_ok(repo, &["stash"]);
+
         let mut task = cas_types::Task::new("cas-park".into(), "parked".into());
         task.deliverables.parked_branch = Some("factory/worker".into());
         task.deliverables.factory_branch_anchor = Some(anchor);
@@ -21537,14 +21569,15 @@ effort = "high"
         let rendered = format_worker_git_status(&status);
 
         assert_eq!(status.head_sha, head, "{rendered}");
-        assert!(rendered.contains("[NOT PUSHED: 1 commit(s) not on origin/factory/worker]"), "{rendered}");
+        assert!(rendered.contains("[NOT PUSHED: 1 commit(s) not on origin/factory/worker as of last fetch]"), "{rendered}");
         assert!(rendered.contains("HEAD has 1 commit(s) after the parked tip"), "{rendered}");
+        assert!(rendered.contains("stash: 1 entry"), "{rendered}");
 
         run_git_ok(repo, &["push", "origin", "factory/worker"]);
         let mut status = collect_worker_git_status(repo);
         apply_task_delivery_git_status(repo, &task, "worker", &mut status);
         assert!(
-            format_worker_git_status(&status).contains("[pushed: origin/factory/worker]"),
+            format_worker_git_status(&status).contains("[pushed: origin/factory/worker as of last fetch]"),
             "{}",
             format_worker_git_status(&status)
         );
@@ -21619,7 +21652,7 @@ effort = "high"
         let repo = setup_mid_merge_with_incoming_and_worker_contributions();
         let status = collect_worker_git_status(repo.path());
         assert!(
-            status.dirty,
+            status.dirty == Some(true),
             "worker-only.rs is a real factory/m1 contribution and must remain flagged"
         );
         assert!(
@@ -21686,7 +21719,8 @@ effort = "high"
             ahead: 3,
             behind: 0,
             base_branch: "origin/main".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "origin/factory/myworker".to_string(),
             upstream: Some((0, 0)),
             delivery: None,
@@ -21728,7 +21762,8 @@ effort = "high"
             ahead: 0,
             behind: 25,
             base_branch: "origin/main".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
             upstream: None,
             delivery: None,
@@ -21766,7 +21801,8 @@ effort = "high"
             ahead: 1,
             behind: 0,
             base_branch: "origin/main{a,b}!e".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
             upstream: None,
             delivery: None,
@@ -22090,7 +22126,8 @@ effort = "high"
             ahead: 0,
             behind: 2,
             base_branch: "origin/main".to_string(),
-            dirty: true,
+            dirty: Some(true),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
             upstream: None,
             delivery: None,
@@ -22110,6 +22147,17 @@ effort = "high"
             out.contains("not pushed") || out.contains("none"),
             "unpushed state must be visible in output: {out}"
         );
+
+        // cas-2879: an unanswered git status is unknown, never "[clean]",
+        // and an unanswered stash list says so too.
+        let unknown = WorkerGitStatus {
+            dirty: None,
+            stash_count: None,
+            ..gs
+        };
+        let out = format_worker_git_status(&unknown);
+        assert!(out.contains("[dirty state unknown]") && !out.contains("[clean]"), "{out}");
+        assert!(out.contains("stash: unknown"), "{out}");
     }
 
     // --- cas-f53c: sync_all_workers clone_path resolution -----------------

@@ -516,7 +516,11 @@ pub(crate) fn emit_worker_final_git_state(
     // per-turn Stop-hook snapshots, not terminal events. "session-stop"
     // implied the worker died; supervisors were incorrectly using it as a
     // liveness signal and resetting tasks on active workers.
-    let dirty_tag = if gs.dirty { "dirty" } else { "clean" };
+    let dirty_tag = match gs.dirty {
+        Some(true) => "dirty",
+        Some(false) => "clean",
+        None => "dirty-unknown",
+    };
     // cas-2879: "pushed" only when every HEAD commit is on the remote ref.
     let pushed_tag = gs.push_state_label();
     let summary = format!(
@@ -542,6 +546,7 @@ pub(crate) fn emit_worker_final_git_state(
         "behind": gs.behind,
         "base_branch": gs.base_branch,
         "dirty": gs.dirty,
+        "stash_count": gs.stash_count,
         "pushed_ref": gs.pushed_ref,
         "unpushed_commits": gs.upstream.map(|(ahead, _)| ahead),
         "pr_url": gs.pr_url.to_string(),
@@ -743,7 +748,8 @@ mod tests_b3 {
             ahead: 1,
             behind: 0,
             base_branch: "main".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
             upstream: None,
             delivery: None,

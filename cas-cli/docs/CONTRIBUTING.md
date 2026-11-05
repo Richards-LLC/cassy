@@ -2086,6 +2086,25 @@ zero. `verification action=show` displays the source, and the quality ledger use
 the recorded duration. Identical retries retain the original measurement.
 Migration m293 adds a nullable source; legacy rows stay unknown without backfill.
 
+### Protected default-branch delivery
+
+`worktree_merge` keeps its review, CI, repository and source checks before
+publication. When GitHub confirms the default branch has a merge queue, it
+pushes the exact source through the existing clean hook checkout, creates or
+reuses the delivery PR with a review body, and enables auto-merge pinned to
+that PR head. The tool returns the PR URL, records the task as awaiting merge,
+and retains the source checkout; the queue and existing watcher own landing
+and reconciliation. No local merge or direct default-branch push is attempted.
+
+If queue metadata is unavailable, normal delivery remains available. A
+`PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` refusal restores the exact pre-merge
+local target through the same guarded ref/checkout repair for reviewed and
+no-dispatch merges. It preserves unrelated working edits and declines to
+rewind a concurrent writer. Requested source cleanup waits for publication,
+so a refused push leaves the branch and checkout available for the PR route.
+A missing/moved PR identity or head never enables auto-merge; retry the same
+merge request after correcting the cause.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

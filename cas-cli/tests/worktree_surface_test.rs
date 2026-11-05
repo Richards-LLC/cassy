@@ -4889,6 +4889,167 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
+    for cleanup in [false, true] {
+        protected_main_fixture_cas_d6cf("unknown", cleanup).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_main_uses_pr_before_local_merge_without_dispatch_cas_d6cf() {
+    protected_main_fixture_cas_d6cf("queued", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
+    protected_main_fixture_cas_d6cf("moved", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
+    protected_main_fixture_cas_d6cf("subsequent", false).await;
+}
+
+#[cfg(unix)]
+async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
+    let queued = matches!(mode, "queued" | "moved");
+    let moved = mode == "moved";
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new().unwrap();
+    run_git(&["init", "--bare", "--initial-branch=main", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["push", "-u", "origin", "main"], &repo.root);
+    let before = git_stdout(&repo.root, &["rev-parse", "main"]);
+    let pushed_refs = remote.path().join("pushed-refs.log");
+    cas::test_paths::warm_stub(&remote.path().join("hooks/pre-receive"), &format!(r#"#!/bin/sh
+while read old new ref; do
+    printf '%s\n' "$ref" >> '{}'
+    if [ "$ref" = refs/heads/main ]; then
+        echo 'error: GH013: Repository rule violations found for refs/heads/main.' >&2
+        exit 1
+    fi
+done
+"#, pushed_refs.display()));
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("cas-d6cf".into(), "Protected default delivery".into());
+    task.assignee = Some("bob".into());
+    task.depth = TaskDepth::Light;
+    tasks.add(&task).unwrap();
+    let worker = cas_root.join("worktrees/bob");
+    repo.add_worktree(&worker, "factory/bob");
+    std::fs::write(worker.join("delivery.txt"), "task delivery\n").unwrap();
+    run_git(&["add", "delivery.txt"], &worker);
+    run_git(&["commit", "-m", "fix(cas-d6cf): delivery"], &worker);
+    let source = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let pr_url = "https://github.com/org/protected/pull/37";
+    let gh_calls = env.home().join("gh-calls.log");
+    let pr_exists = env.home().join("pr-created");
+    let armed = env.home().join("pr-armed");
+    if queued {
+        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), "https://github.com/org/protected"], &repo.root);
+        run_git(&["config", "remote.origin.url", "https://github.com/org/protected"], &repo.root);
+        // The source hook must inspect its exact clean tree, not dirty main.
+        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/pre-push"), &format!(r#"#!/bin/sh
+[ "$(git rev-parse HEAD)" = '{source}' ] || exit 1
+[ -z "$(git status --porcelain --untracked-files=no)" ] || exit 1
+"#));
+        let reported_head = if moved { "0".repeat(40) } else { source.clone() };
+        let gh = env.home().join("protected-gh");
+        cas::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{calls}'
+pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{reported_head}","headRefName":"factory/bob","baseRefName":"main"}}'
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
+'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":{{"id":"queue-main"}}}}}}}}' ;;
+'api '*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
+'pr list') if [ -f '{exists}' ]; then printf '[%s]\n' "$pr"; else printf '[]\n'; fi ;;
+'pr create') touch '{exists}'; printf '%s\n' '{url}' ;;
+'pr view') printf '%s\n' "$pr" ;;
+'pr merge') touch '{armed}'; printf 'Auto-merge armed\n' ;;
+*) exit 97 ;;
+esac
+"#, calls=gh_calls.display(), exists=pr_exists.display(), armed=armed.display(), url=pr_url));
+        env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    }
+    let peer_tip = remote.path().join("peer-tip");
+    if mode == "subsequent" {
+        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/post-merge"), &format!(r#"#!/bin/sh
+head=$(git rev-parse HEAD)
+tree=$(git rev-parse 'HEAD^{{tree}}')
+peer=$(git commit-tree "$tree" -p "$head" -m 'Subsequent target progress')
+git update-ref refs/heads/main "$peer" "$head"
+printf '%s\n' "$peer" > '{}'
+"#, peer_tip.display()));
+    }
+    let operator_edit = "unrelated operator edit\n";
+    std::fs::write(repo.root.join("README.md"), operator_edit).unwrap();
+    env.set_current_dir(&repo.root);
+    let service = make_service(cas_root.clone());
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("factory/bob".into());
+    request.task_id = Some(task.id.clone());
+    request.allow_trunk = Some(true);
+    request.cleanup = Some(cleanup);
+    let result = service.factory(Parameters(request.clone())).await;
+    if moved {
+        let refusal = result.expect_err("a changed PR head cannot acquire auto-merge authority");
+        assert!(!armed.exists(), "{refusal:?}");
+        assert!(pr_exists.exists(), "the real PR identity check must be reached");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+        return;
+    }
+    let response = result.unwrap();
+    let text = get_text(&response);
+    if mode == "subsequent" {
+        let peer = std::fs::read_to_string(peer_tip).unwrap();
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), peer.trim(),
+            "rollback must decline a later target commit: {text}");
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+        assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), operator_edit);
+        return;
+    }
+    if queued {
+        // pin: no attempted remote main update is the queue-before-merge contract.
+        assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().lines().any(|line| line == "refs/heads/main"),
+            "a known queue must route the source PR before attempting a local default-branch publication: {text}");
+        assert!(!response.is_error.unwrap_or(false) && text.contains(pr_url), "{text}");
+        assert!(armed.exists(), "the PR must have auto-merge enabled");
+        // pin: the remote delivery ref must name the exact source commit.
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/factory/bob"]), source);
+        let retry = service.factory(Parameters(request)).await.unwrap();
+        assert!(!retry.is_error.unwrap_or(false), "{}", get_text(&retry));
+        let calls = std::fs::read_to_string(&gh_calls).unwrap();
+        // pin: one external PR creation is the idempotency contract on retry.
+        assert_eq!(calls.lines().filter(|line| line.starts_with("pr create ")).count(), 1,
+            "retry must reuse the same PR: {calls}");
+        let stored = tasks.get(&task.id).unwrap();
+        assert_eq!(stored.status, TaskStatus::AwaitingMerge);
+        assert_eq!(stored.deliverables.delivery_pr_number, Some(37));
+    } else {
+        // pin: this machine-readable refusal code selects the resumable PR route.
+        assert!(text.contains("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"), "{text}");
+    }
+    assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(),
+        "the regression must exercise the no-dispatch path");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before,
+        "a refused no-dispatch merge cannot leave another lane an unpublished main merge: {text}");
+    assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+    assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+    assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), operator_edit);
+    assert!(!repo.root.join("delivery.txt").exists(), "rollback must restore the target checkout too");
+}
+
 #[tokio::test]
 async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let repo = GitRepo::new();

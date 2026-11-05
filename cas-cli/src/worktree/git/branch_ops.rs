@@ -1118,6 +1118,24 @@ impl GitOperations {
             }
         }
 
+        self.publish_pinned_source_to_origin(branch, &local_sha, timeout)
+    }
+
+    /// Publish an explicitly authorized source, including a new remote branch.
+    /// Reuse target publication's clean exact-tip hook checkout and non-force push.
+    pub(crate) fn publish_pinned_source_to_origin(
+        &self,
+        branch: &str,
+        head: &str,
+        timeout: Duration,
+    ) -> TargetPushOutcome {
+        let remote_ref = format!("origin/{branch}");
+        let Some(local_sha) = self.resolve_commit(head) else {
+            return TargetPushOutcome::NotPushed {
+                sha: None, remote_sha: self.resolve_commit(&remote_ref),
+                reason: "pinned source does not resolve".into(),
+            };
+        };
         // GH #1386: pre-push hooks read the working tree, not the refspec.
         // Validate a clean checkout of exactly the commit we will publish;
         // unrelated supervisor files/dependencies must not affect the hook.

@@ -3434,7 +3434,8 @@ pub(crate) fn render_for_scope(content: &str, cas_src: bool) -> std::borrow::Cow
     let mut out = String::with_capacity(content.len());
     let mut branch: Option<bool> = None;
     for line in content.split_inclusive('\n') {
-        match line.trim_end() {
+        // Markers may be indented to stay inside a Markdown list item.
+        match line.trim() {
             CAS_SRC_BEGIN => branch = Some(true),
             CAS_SRC_ELSE => branch = Some(false),
             CAS_SRC_END => branch = None,

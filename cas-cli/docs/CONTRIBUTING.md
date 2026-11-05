@@ -3417,7 +3417,7 @@ Every file in a managed builtin skill directory other than its `SKILL.md` (refer
 
 Builtin Markdown that only applies in this repository (Cargo and nextest
 shapes, `CONTRIBUTING`, `scripts/journey-eval.sh`, `scripts/assembly-proof.py`,
-hub-web, the merge queue) sits between whole-line `<!-- cas-src:begin -->` and
+hub-web, the merge queue) sits between whole-line (optionally indented) `<!-- cas-src:begin -->` and
 `<!-- cas-src:end -->` markers, optionally split by `<!-- cas-src:else -->`
 with a project-neutral replacement. Sync renders the cas-src branch only into
 this checkout's harness dirs; every other target, including the personal dirs

@@ -504,11 +504,11 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
-<!-- cas-src:begin -->
+   <!-- cas-src:begin -->
    Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Run targeted tests and journeys selected by the diff inside this loop. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
-<!-- cas-src:else -->
+   <!-- cas-src:else -->
    Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; merge or enqueue. Run targeted tests and journeys selected by the diff inside this loop. The final gate (step 4) is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
-<!-- cas-src:end -->
+   <!-- cas-src:end -->
 2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
 3. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 4), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
 4. Run the final assembled-tree gate. This is the epic's single build + test:
@@ -521,7 +521,7 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    epic closes once its tip is contained in base.
    With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
-<!-- cas-src:begin -->
+   <!-- cas-src:begin -->
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
    with `scripts/assembly-proof.py` that gate is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
@@ -531,10 +531,10 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    names its source worktree and HEAD. For scoped Cargo checks outside assembly,
    run `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`;
    `scripts/run-scoped-tests.sh` uses the same isolation automatically.
-<!-- cas-src:else -->
+   <!-- cas-src:else -->
    if unavailable, run the project's full suite (the commands its CLAUDE.md or
    AGENTS.md names) on that SHA and record it on the epic.
-<!-- cas-src:end -->
+   <!-- cas-src:end -->
    A matching code tree reuses its durable two-context PASS; integration recovery and the
    release gate cite that receipt instead of running the suite again.
    On exit 0, record a progress note on the epic:

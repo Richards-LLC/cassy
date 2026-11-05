@@ -187,7 +187,7 @@ def scoped_renders(body):
             line = part + (b"\n" if index < len(parts) - 1 else b"")
             if not line:
                 continue
-            marker = line.rstrip()
+            marker = line.strip()
             if marker == b"<!-- cas-src:begin -->":
                 branch = True
             elif marker == b"<!-- cas-src:else -->":

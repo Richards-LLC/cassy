@@ -15023,6 +15023,7 @@ mod tests {
         let wakes: Vec<_> = prompt_store.peek_all(10).unwrap().into_iter()
             .filter(|row| row.source.starts_with("peer-ask-deadline:")).collect();
         assert_eq!(wakes.len(), 1, "{wakes:?}");
+        // pin: the wake must name the unanswered ask and its peer, not the answered one
         assert!(wakes[0].prompt.contains(&format!("#{silent} to tender-finch-35")), "{}", wakes[0].prompt);
         assert_eq!(
             FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, "young-swan-22", &wakes[0].source, &wakes[0].prompt),

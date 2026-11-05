@@ -942,7 +942,7 @@ mod large_artifact_staging_tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.toml"),
-            "[hooks]\ncontext_limit = 3\n",
+            "[hooks]\ncontext_limit = 3\nsession_start_memories = true\n",
         )
         .unwrap();
 

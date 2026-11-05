@@ -61,6 +61,11 @@ fn record_memory_access(entry: &mut Entry, promote_on_access: bool) {
 /// the harness critical path, so a telemetry database error must never hide a
 /// successfully built context prompt.
 fn record_context_session_start_query(cas_root: &Path, input: &HookInput, memory_ids: &[String]) {
+    // A pull-only SessionStart lists no memories; an empty query row would
+    // still read as a session_context sample in the friction ledger (cas-71b2).
+    if memory_ids.is_empty() {
+        return;
+    }
     let query_id = format!(
         "qry-context-session-start-{}",
         uuid::Uuid::new_v4().simple()
@@ -139,8 +144,14 @@ pub fn build_context_with_token_budget(
     }
 
     // Try to initialize hybrid context scorer for semantic relevance
-    // Falls back to basic scoring if search infrastructure isn't available
-    let hybrid_scorer = HybridContextScorer::open_with_graph(cas_root).ok();
+    // Falls back to basic scoring if search infrastructure isn't available.
+    // A pull-only SessionStart ranks no memories, so it skips opening the
+    // search index and entity graph (cas-71b2).
+    let lists_memories = input.hook_event_name != "SessionStart"
+        || cas_core::hooks::HooksConfig::session_start_memories(&config);
+    let hybrid_scorer = lists_memories
+        .then(|| HybridContextScorer::open_with_graph(cas_root).ok())
+        .flatten();
     let scorer_ref: Option<&dyn ContextScorer> =
         hybrid_scorer.as_ref().map(|s| s as &dyn ContextScorer);
 

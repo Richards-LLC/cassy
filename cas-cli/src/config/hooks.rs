@@ -588,6 +588,11 @@ pub struct HookConfig {
     #[serde(default)]
     pub minimal_start: bool,
 
+    /// List ranked memories at SessionStart. Off: SessionStart carries a
+    /// one-line pull pointer and `search action=context` lists them (cas-71b2).
+    #[serde(default)]
+    pub session_start_memories: bool,
+
     // === Per-hook configurations ===
     /// SessionStart hook configuration
     #[serde(default)]
@@ -706,6 +711,7 @@ impl Default for HookConfig {
             ai_fallback: default_ai_fallback(),
             plan_mode: PlanModeConfig::default(),
             minimal_start: false,
+            session_start_memories: false,
             // Per-hook configurations
             session_start: SessionStartHookConfig::default(),
             post_tool_use: PostToolUseHookConfig::default(),

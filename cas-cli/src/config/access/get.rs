@@ -110,6 +110,7 @@ impl Config {
             "hooks.ai_model" => Some(hooks.ai_model.clone()),
             "hooks.ai_fallback" => Some(hooks.ai_fallback.to_string()),
             "hooks.minimal_start" => Some(hooks.minimal_start.to_string()),
+            "hooks.session_start_memories" => Some(hooks.session_start_memories.to_string()),
             "hooks.stop.duplicate_detection_enabled" => {
                 Some(hooks.stop.duplicate_detection_enabled.to_string())
             }

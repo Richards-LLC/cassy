@@ -558,6 +558,17 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     let (temp, core) = setup_cas(&mut test_env);
 
     let cas_dir = temp.path().join(".cas");
+    // The ranked SessionStart listing is opt-in (cas-71b2).
+    cas::config::Config::load(&cas_dir)
+        .map(|mut config| {
+            config
+                .hooks
+                .get_or_insert_with(Default::default)
+                .session_start_memories = true;
+            config.save(&cas_dir)
+        })
+        .expect("load fixture config")
+        .expect("save fixture config");
     let entry_store = SqliteStore::open(&cas_dir).unwrap();
     for id in ["metrics-session-memory-a", "metrics-session-memory-b"] {
         entry_store

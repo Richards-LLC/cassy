@@ -316,7 +316,12 @@ mod tests {
         }
 
         let scorer = HybridContextScorer::open_with_graph(cas_dir).expect("open scorer");
-        let config = crate::config::Config::default();
+        // The ranked listing is opt-in at SessionStart (cas-71b2).
+        let mut config = crate::config::Config::default();
+        config
+            .hooks
+            .get_or_insert_with(Default::default)
+            .session_start_memories = true;
 
         let rank = |carried_prompt: &str| -> Vec<String> {
             let surfaced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

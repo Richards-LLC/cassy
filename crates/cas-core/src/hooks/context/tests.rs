@@ -506,16 +506,30 @@ fn session_start_surfaces_a_draft_operator_hard_rule_labelled_draft_cas_5372() {
 }
 
 fn build_with_knowledge(ks: &dyn KnowledgeStore, store: Option<&dyn Store>) -> String {
+    build_with_config(ks, store, &DefaultHooksConfig::new(), &session_start_input())
+}
+
+/// SessionStart with the opt-in ranked memory listing (cas-71b2).
+fn build_listing_memories(ks: &dyn KnowledgeStore, store: Option<&dyn Store>) -> String {
+    let config = DefaultHooksConfig::new().with_session_start_memories();
+    build_with_config(ks, store, &config, &session_start_input())
+}
+
+fn build_with_config(
+    ks: &dyn KnowledgeStore,
+    store: Option<&dyn Store>,
+    config: &DefaultHooksConfig,
+    input: &HookInput,
+) -> String {
     let stores = ContextStores {
         project_store: store,
         knowledge_store: Some(ks),
         ..ContextStores::empty()
     };
-    let config = DefaultHooksConfig::new();
     let (context, _) = build_context_with_stores(
-        &session_start_input(),
+        input,
         &stores,
-        &config,
+        config,
         10,
         None,
         "mcp__cas__",
@@ -667,7 +681,7 @@ fn no_raw_memory_bodies_are_injected_alongside_the_knowledge_index() {
     store.init().expect("init entry store");
     store.add(&entry).expect("add entry");
 
-    let context = build_with_knowledge(&ks, Some(&store));
+    let context = build_listing_memories(&ks, Some(&store));
 
     // Guard against a vacuous pass: the memory must actually be surfaced —
     // as a pointer — for "no body" to mean anything.
@@ -704,7 +718,7 @@ fn cas_4caa_expired_memories_are_excluded_from_session_start_surfacing() {
     store.add(&expired).expect("add expired memory");
     store.add(&active).expect("add active memory");
 
-    let context = build_with_knowledge(&ks, Some(&store));
+    let context = build_listing_memories(&ks, Some(&store));
     assert!(
         context.contains("active-memory"),
         "active memory missing: {context}"
@@ -713,6 +727,44 @@ fn cas_4caa_expired_memories_are_excluded_from_session_start_surfacing() {
         !context.contains("expired-memory"),
         "expired memory leaked into SessionStart: {context}"
     );
+}
+
+/// Token ceiling for what SessionStart spends on memories by default.
+const SESSION_START_MEMORY_TOKEN_BUDGET: usize = 40;
+
+/// cas-71b2: the ranked memory listing was injected every session and measured
+/// unopened, so SessionStart carries only a pull pointer under a stated budget,
+/// and the on-demand path (`search action=context`) still lists the memories.
+#[test]
+fn session_start_memory_injection_is_a_pull_pointer_under_budget_cas_71b2() {
+    let (_temp, ks) = knowledge_fixture(&[]);
+    let store = SqliteStore::open(_temp.path()).expect("open entry store");
+    store.init().expect("init entry store");
+    store
+        .add(&Entry {
+            id: "listed-memory".to_string(),
+            content: "A learning the ranked listing would surface".to_string(),
+            entry_type: EntryType::Learning,
+            created: chrono::Utc::now(),
+            ..Default::default()
+        })
+        .expect("add memory");
+
+    let session_start = build_with_knowledge(&ks, Some(&store));
+    assert!(session_start.contains(super::MEMORY_PULL_POINTER), "{session_start}");
+    assert!(!session_start.contains("listed-memory"), "{session_start}");
+    let pointer_tokens = estimate_tokens(super::MEMORY_PULL_POINTER);
+    assert!(
+        pointer_tokens <= SESSION_START_MEMORY_TOKEN_BUDGET,
+        "memory pointer costs {pointer_tokens} tokens, budget {SESSION_START_MEMORY_TOKEN_BUDGET}"
+    );
+
+    let pull = HookInput {
+        hook_event_name: "McpContext".to_string(),
+        ..session_start_input()
+    };
+    let pulled = build_with_config(&ks, Some(&store), &DefaultHooksConfig::new(), &pull);
+    assert!(pulled.contains("listed-memory"), "{pulled}");
 }
 
 /// GH #992 (cas-0339): session start injects only the newest handoff for the
@@ -775,7 +827,7 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
         build_context_with_stores(
             &input,
             &stores,
-            &DefaultHooksConfig::new(),
+            &DefaultHooksConfig::new().with_session_start_memories(),
             10,
             None,
             "mcp__cas__",

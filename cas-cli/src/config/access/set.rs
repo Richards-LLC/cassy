@@ -673,6 +673,12 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "hooks.session_start_memories" => {
+                let hooks = self.hooks.get_or_insert_with(HookConfig::default);
+                hooks.session_start_memories = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             "hooks.stop.duplicate_detection_enabled"
             | "hooks.stop.learning_review_enabled"
             | "hooks.stop.rule_review_enabled" => {

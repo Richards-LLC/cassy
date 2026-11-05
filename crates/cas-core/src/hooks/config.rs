@@ -68,6 +68,12 @@ pub trait HooksConfig {
     /// Whether to start with minimal context (context engineering pattern)
     fn minimal_start(&self) -> bool;
 
+    /// Whether SessionStart lists ranked memories (Helpful Memories and
+    /// Related to Current Work). Off by default: the listing was measured
+    /// unopened (cas-71b2), so SessionStart carries a one-line pull pointer
+    /// and the ranked list is fetched on demand through `search action=context`.
+    fn session_start_memories(&self) -> bool;
+
     /// Whether MCP mode is enabled
     fn mcp_enabled(&self) -> bool;
 
@@ -160,6 +166,7 @@ Report blockers immediately:
 pub struct DefaultHooksConfig {
     pub token_budget: usize,
     pub minimal_start: bool,
+    pub session_start_memories: bool,
     pub mcp_enabled: bool,
     pub ai_context: bool,
     pub ai_model: String,
@@ -173,6 +180,7 @@ impl DefaultHooksConfig {
         Self {
             token_budget: default_token_budget(),
             minimal_start: false,
+            session_start_memories: false,
             mcp_enabled: false,
             ai_context: false,
             ai_model: default_ai_model(),
@@ -193,6 +201,12 @@ impl DefaultHooksConfig {
         self.token_budget = budget;
         self
     }
+
+    /// Create config that lists ranked memories at SessionStart.
+    pub fn with_session_start_memories(mut self) -> Self {
+        self.session_start_memories = true;
+        self
+    }
 }
 
 impl HooksConfig for DefaultHooksConfig {
@@ -202,6 +216,10 @@ impl HooksConfig for DefaultHooksConfig {
 
     fn minimal_start(&self) -> bool {
         self.minimal_start
+    }
+
+    fn session_start_memories(&self) -> bool {
+        self.session_start_memories
     }
 
     fn mcp_enabled(&self) -> bool {

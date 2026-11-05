@@ -87,8 +87,8 @@ pub use pty::{
     missing_contract_elements, rendered_contract_surface,
 };
 pub use pty::{
-    Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV,
-    WORKER_ROLE_SKILLS,
+    CODEX_WORKER_STARTUP_PREFIX, Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig,
+    WORKER_CREDENTIAL_WARNING_ENV, WORKER_ROLE_SKILLS, WORKER_STARTUP_BRIEF_PREFIX,
 };
 
 #[cfg(test)]

@@ -12,6 +12,10 @@ mod message_attention_tests;
 /// cas-cd3f: the source CAS stamps on the startup brief it queues for a
 /// freshly launched supervisor. Read only on a Daemon-stamped row.
 pub(crate) const SUPERVISOR_STARTUP_SOURCE: &str = "cas-startup";
+/// cas-d511: the delivery watchdog's pane nudge has no queue row of its own;
+/// the turn ledger matches this exact text to attribute the turn to the daemon.
+pub(crate) const DELIVERY_WATCHDOG_NUDGE: &str =
+    "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.";
 
 /// The daemon's own reminder to its owner is not an inter-agent relay.
 /// Caller-written reminder text cannot use this exception.
@@ -5187,7 +5191,7 @@ impl FactoryDaemon {
                         &pane,
                         self.app.harness_for(&pane),
                         source,
-                        "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
+                        DELIVERY_WATCHDOG_NUDGE,
                         Some(row_id),
                     );
                     let nudge = self.app.mux.inject(&pane, &payload).await;

@@ -479,6 +479,14 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let unknown = client.repair(&root, &scope).unwrap();
     assert!(matches!(unknown.outcome, RepairOutcome::Blocked));
     assert!(unknown.error.unwrap().contains("build"));
+    // cas-51b3: only a commit id may carry "-dirty"; an unknown build still cannot.
+    metadata.daemon_build_hash = Some("unknown-dirty".into());
+    crate::ui::factory::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
+    let unknown_dirty = client.repair(&root, &scope).unwrap();
+    assert!(matches!(unknown_dirty.outcome, RepairOutcome::Blocked));
+    assert!(unknown_dirty.error.unwrap().contains("unknown or stale runtime identity"));
     metadata.daemon_build_hash = Some(FIXTURE_BUILD.into());
     metadata.daemon_pid_starttime = metadata.daemon_pid_starttime.map(|value| value + 1);
     crate::ui::factory::SessionManager::new()

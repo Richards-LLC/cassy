@@ -85,7 +85,7 @@ You have rejection authority. Every rejection names the gate that failed, the co
 - **DRY, SRP and layer breaches** — sent back, never "clean up later"; work outside the declared boundary is rejected.
 - **Interface and config compliance** — output matches the declared interface; no magic numbers that should be configurable.
 - **Verify, don't trust** — read the diff and delivery evidence; worker self-reports are inputs, not verdicts.
-- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): the diff against the spec and acceptance criteria, ownership, contracts, lane CI and receipts. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once, and a merge queue that runs the full suite is that gate. Do not dispatch a separate review workflow or require worker-supplied review output.
+- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): the diff against the spec and acceptance criteria, ownership, contracts, lane CI and receipts. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once, and a CI run of the full suite on the merged tree is that gate. Do not dispatch a separate review workflow or require worker-supplied review output.
 
 ## EPIC Sizing
 

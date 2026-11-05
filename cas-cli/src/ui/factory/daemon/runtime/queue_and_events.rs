@@ -2611,6 +2611,17 @@ pub(super) const BUSY_RECIPIENT_RECHECK_INTERVAL: std::time::Duration =
 pub(super) const URGENT_TOOL_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
 pub(super) const URGENT_TOOL_CALL_DETAIL: &str =
     "urgent held: recipient has a tool call in flight; surfaces when the call ends";
+pub(super) const URGENT_TOOL_CALL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What an urgent row does about its recipient's in-flight tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UrgentToolCallHold {
+    /// Inside [`URGENT_TOOL_CALL_HOLD`]: no Esc; wait for the call's end.
+    Wait,
+    /// Past the hold: interrupt, opening with [`URGENT_TOOL_CALL_NOTICE`].
+    Interrupt,
+}
+
 pub(super) const URGENT_TOOL_CALL_NOTICE: &str =
     "Cassy interrupted your in-flight tool call to deliver this; this was not the operator.\n\n";
 
@@ -7707,6 +7718,24 @@ impl FactoryDaemon {
             && rows[input + 1].trim_start().starts_with("───")
     }
 
+    /// cas-73f7 / cas-922d: the one in-flight hold check for urgent rows,
+    /// single-target and broadcast alike. `None`: no call in flight.
+    fn urgent_tool_call_hold(
+        &self,
+        queued: &cas_store::QueuedPrompt,
+        pane: &str,
+    ) -> Option<UrgentToolCallHold> {
+        (queued.urgent && self.prepared_tool_call_evidence(pane) == ToolCallEvidence::InFlight).then(|| {
+            if chrono::Utc::now() - queued.created_at
+                < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
+            {
+                UrgentToolCallHold::Wait
+            } else {
+                UrgentToolCallHold::Interrupt
+            }
+        })
+    }
+
     /// Combine off-loop transcript inputs with the pane's current vetoes.
     fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
         PaneWakeState {
@@ -8656,6 +8685,22 @@ impl FactoryDaemon {
         } else {
             Some(tally.notes.join("; "))
         };
+        // cas-99b5: a member held for its in-flight tool call still needs
+        // this row, for its hook or its bounded interrupt. Keep the row open
+        // and come back; members already handed it count as handed off.
+        if tally.held > 0 {
+            self.queue_jobs.stamp(
+                self.app.cas_dir(),
+                tally.queued.id,
+                &tally.queued.target,
+                super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                    detail: detail.unwrap_or_else(|| URGENT_TOOL_CALL_DETAIL.to_string()),
+                    recheck_at: chrono::Utc::now()
+                        + chrono::Duration::from_std(URGENT_TOOL_CALL_RECHECK).unwrap(),
+                },
+            );
+            return;
+        }
         self.queue_jobs.stamp(
             self.app.cas_dir(),
             tally.queued.id,
@@ -10449,16 +10494,13 @@ impl FactoryDaemon {
                     };
                     // cas-922d: the cas-73f7 in-flight hold, per member. The
                     // released claim lets this worker's hook surface the
-                    // broadcast when its call ends.
-                    let member_in_call = queued.urgent
-                        && self.prepared_tool_call_evidence(name) == ToolCallEvidence::InFlight;
-                    if member_in_call
-                        && chrono::Utc::now() - queued.created_at
-                            < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
-                    {
+                    // broadcast when its call ends; cas-99b5: the row stays
+                    // open for it (see `finish_broadcast`).
+                    let hold = self.urgent_tool_call_hold(&queued, name);
+                    if hold == Some(UrgentToolCallHold::Wait) {
                         self.queue_jobs.stamp(self.app.cas_dir(), queued.id, name,
                             super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
-                        tally.failed += 1;
+                        tally.held += 1;
                         tally.notes.push(format!("{name}: {URGENT_TOOL_CALL_DETAIL}"));
                         continue;
                     }
@@ -10473,7 +10515,7 @@ impl FactoryDaemon {
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
                         let harness = self.app.harness_for(name);
-                        let member_prompt = if member_in_call {
+                        let member_prompt = if hold == Some(UrgentToolCallHold::Interrupt) {
                             format!("{URGENT_TOOL_CALL_NOTICE}{prompt_with_instructions}")
                         } else {
                             prompt_with_instructions.clone()
@@ -10754,14 +10796,10 @@ impl FactoryDaemon {
                 // reads to Claude as the operator rejecting it. Hold the row,
                 // claim released, so the recipient's hook surfaces it when
                 // the call ends; past the bound, interrupt and say who did.
-                let urgent_into_tool_call = queued.urgent
-                    && self.prepared_tool_call_evidence(&pane_target) == ToolCallEvidence::InFlight;
-                if urgent_into_tool_call
-                    && chrono::Utc::now() - queued.created_at
-                        < chrono::Duration::from_std(URGENT_TOOL_CALL_HOLD).unwrap()
-                {
+                let hold = self.urgent_tool_call_hold(&queued, &pane_target);
+                if hold == Some(UrgentToolCallHold::Wait) {
                     let recheck_at = chrono::Utc::now()
-                        + chrono::Duration::from_std(DECLINED_WAKE_RECHECK_BASE / 2).unwrap();
+                        + chrono::Duration::from_std(URGENT_TOOL_CALL_RECHECK).unwrap();
                     for (member, token) in batch_claims.iter().map(|(member, token)| (member.clone(), *token))
                         .chain(std::iter::once((queued.clone(), claim_token)))
                     {
@@ -10775,7 +10813,7 @@ impl FactoryDaemon {
                     }
                     continue;
                 }
-                if urgent_into_tool_call {
+                if hold == Some(UrgentToolCallHold::Interrupt) {
                     prompt_with_instructions.insert_str(0, URGENT_TOOL_CALL_NOTICE);
                 }
                 let inject_generation = match self.queue_jobs.admit_claimed(

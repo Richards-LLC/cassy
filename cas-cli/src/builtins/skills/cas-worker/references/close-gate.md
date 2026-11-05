@@ -11,8 +11,14 @@ every failed gate and what it parsed. Fix them all, then retry once.
 ## Commit and push
 
 Commit scoped work; push once before parking and once per review round, unless
-`delivery_mode=local_merge`. The pre-push hook runs `scripts/fast-rows-pre-push.sh`
-when present. Park reads exact-tip test receipts and never runs checks.
+`delivery_mode=local_merge`.
+<!-- cas-src:begin -->
+The pre-push hook runs `scripts/fast-rows-pre-push.sh`
+when present.
+<!-- cas-src:else -->
+A configured pre-push hook gives early feedback; CI owns that proof.
+<!-- cas-src:end -->
+Park reads exact-tip test receipts and never runs checks.
 
 ## Rule-driven sites
 
@@ -79,8 +85,13 @@ hand-write the `UPKEEP ESCAPE` or `UPKEEP OBSERVE` notes.
 
 ## Changelog at park
 
+<!-- cas-src:begin -->
 A delivery that changes shipped Rust, `hub-web/src`, user-run scripts or builtin
-skills adds a titled Unreleased entry under a category and product area (for
+skills
+<!-- cas-src:else -->
+A delivery that changes shipped product code or user-run scripts
+<!-- cas-src:end -->
+adds a titled Unreleased entry under a category and product area (for
 example `### Fixed — Commander` with `- **Title** — description`), as its own
 `changelog.d/<task-id>.md` where that directory exists, leaving `CHANGELOG.md`
 alone. Test-only, docs-only or internal QA deliveries record a decision note

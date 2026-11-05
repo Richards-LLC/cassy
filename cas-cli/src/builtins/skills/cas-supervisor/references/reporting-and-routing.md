@@ -8,7 +8,11 @@
 
 ## Release train
 
+<!-- cas-src:begin -->
 Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block and host verification. Slack goes through skills/violet/SKILL.md on every harness; route a worker to it rather than taking its draft back by hand.
+<!-- cas-src:else -->
+Slack goes through skills/violet/SKILL.md on every harness; route a worker to it rather than taking its draft back by hand.
+<!-- cas-src:end -->
 
 Before/after screenshots come from each visual delivery's QA bundle under `[factory] artifacts_root/<project-key>/<task-id>/qa/pairs/` ([layout](../../cas-qa-craft/references/evidence-bundle.md#beforeafter-pairs)). When routing release notes or a report, name the task ids whose `bundle.json` records `pairs_status: complete` or `partial`.
 

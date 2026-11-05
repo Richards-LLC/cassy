@@ -31,6 +31,8 @@ mod slack_transport;
 mod communication;
 mod git_hooks;
 mod journeys;
+#[cfg(feature = "mcp-proxy")]
+mod retired_tools;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -263,6 +265,7 @@ impl CheckGroup {
             | "mcp config"
             | "mcp stdio upstreams"
             | "mcp upstream reachability"
+            | "retired mcp references"
             | "sync target"
             | "models"
             | "git hooks path"
@@ -2802,6 +2805,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_stdio_commands_check(&cas_root));
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(retired_tools::check(&cas_root));
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_upstream_reachability_check(&cas_root));
 

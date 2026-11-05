@@ -611,6 +611,10 @@
         {
           "text": "../../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "never run evals or full suites",
+          "reason": "cas-97c4 (GH #1513): a worker's proof is its changed files' tests plus its new red-green test; CI runs evals and full suites."
         }
       ],
       "absent": [
@@ -661,6 +665,10 @@
         {
           "text": "--lib <module>",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "every integration harness that calls it",
+          "reason": "cas-97c4: this phrase ordered integration suites and eval fixtures for one-file changes."
         }
       ],
       "any_of": []
@@ -3292,6 +3300,10 @@
         {
           "text": "Phase outcome met (plan metric receipt)",
           "reason": "Audit finding 6: completion requires a plan metric receipt."
+        },
+        {
+          "text": "never add a local full run",
+          "reason": "cas-97c4 (GH #1513): PR CI's full run on the exact SHA is the gate; a supervisor-ordered local gate duplicated it."
         }
       ],
       "absent": [

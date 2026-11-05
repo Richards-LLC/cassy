@@ -4810,6 +4810,52 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new().unwrap();
+    run_git(&["init", "--bare", "--initial-branch=main", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["push", "-u", "origin", "main"], &repo.root);
+    let before = git_stdout(&repo.root, &["rev-parse", "main"]);
+    cas::test_paths::warm_stub(&remote.path().join("hooks/pre-receive"),
+        "#!/bin/sh\necho 'error: GH013: Repository rule violations found for refs/heads/main.' >&2\nexit 1\n");
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("cas-d6cf".into(), "Protected default delivery".into());
+    task.assignee = Some("bob".into());
+    task.depth = TaskDepth::Light;
+    tasks.add(&task).unwrap();
+    let worker = cas_root.join("worktrees/bob");
+    repo.add_worktree(&worker, "factory/bob");
+    std::fs::write(worker.join("delivery.txt"), "task delivery\n").unwrap();
+    run_git(&["add", "delivery.txt"], &worker);
+    run_git(&["commit", "-m", "fix(cas-d6cf): delivery"], &worker);
+    let source = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.root.join("README.md"), "unrelated operator edit\n").unwrap();
+    env.set_current_dir(&repo.root);
+    let service = make_service(cas_root.clone());
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("factory/bob".into());
+    request.task_id = Some(task.id.clone());
+    request.allow_trunk = Some(true);
+    request.cleanup = Some(false);
+    let response = service.factory(Parameters(request)).await.unwrap();
+    let text = get_text(&response);
+    assert!(text.contains("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"), "{text}");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(),
+        "the regression must exercise the no-dispatch path");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before,
+        "a refused no-dispatch merge cannot leave another lane an unpublished main merge: {text}");
+    assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+    assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+    assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), "unrelated operator edit\n");
+    assert!(!repo.root.join("delivery.txt").exists(), "rollback must restore the target checkout too");
+}
+
 #[tokio::test]
 async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let repo = GitRepo::new();

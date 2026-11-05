@@ -2,6 +2,10 @@ use super::*;
 use crate::coordination::binding_intake::ChannelDisposition;
 use std::io::{Read, Write};
 const PROJECT: &str = "github.com/example/project";
+/// cas-51b3: the fake runtime's build is a fixture, never the test binary's
+/// own CAS_GIT_HASH. This is the identity of the release/v4.0.3 run that
+/// failed and hung: a build from a tree with uncommitted edits.
+const FIXTURE_BUILD: &str = "8b253ab-dirty";
 
 fn project(root: &Path, team: &str) {
     std::fs::create_dir_all(root).unwrap();
@@ -41,12 +45,29 @@ fn runtime_rounds(root: &Path, capability: bool, rounds: usize) -> std::thread::
         None,
     );
     metadata.project_dir = Some(root.parent().unwrap().to_str().unwrap().into());
+    metadata.daemon_build_hash = Some(FIXTURE_BUILD.into());
     SessionManager::new().save_metadata(&metadata).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(gui_socket_path(name)).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let root = root.to_path_buf();
     std::thread::spawn(move || {
-        for _ in 0..rounds {
-            let (mut stream, _) = listener.accept().unwrap();
+        for round in 0..rounds {
+            // A client that refuses before connecting fails the test, never hangs it.
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "repair never connected to the runtime for round {round}"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("runtime accept: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -95,7 +116,14 @@ fn runtime_rounds(root: &Path, capability: bool, rounds: usize) -> std::thread::
                 acknowledgement: Some(DrainAcknowledgement {
                     nonce: request.nonce,
                     pause,
-                    runtime: RuntimeIdentity::current(&root, name).unwrap(),
+                    runtime: RuntimeIdentity {
+                        canonical_cas_dir: root.canonicalize().unwrap(),
+                        factory_session: name.into(),
+                        pid: std::process::id(),
+                        pid_starttime: crate::mcp::daemon::read_pid_starttime(std::process::id())
+                            .unwrap(),
+                        build: FIXTURE_BUILD.into(),
+                    },
                 }),
                 error: None,
             };
@@ -451,7 +479,7 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let unknown = client.repair(&root, &scope).unwrap();
     assert!(matches!(unknown.outcome, RepairOutcome::Blocked));
     assert!(unknown.error.unwrap().contains("build"));
-    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap_or("unknown").into());
+    metadata.daemon_build_hash = Some(FIXTURE_BUILD.into());
     metadata.daemon_pid_starttime = metadata.daemon_pid_starttime.map(|value| value + 1);
     crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)

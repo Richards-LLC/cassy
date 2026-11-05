@@ -637,6 +637,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn second_machine_init_pull_then_session_keeps_rules_active_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        // No wrapped rule operation occurs between init and Cloud/hub pull.
+        let local = crate::store::open_rule_store_local(&root).unwrap();
+        let mut incoming = make_rule("rule-second-machine", Scope::Project);
+        incoming.created = chrono::Utc::now() - chrono::Duration::days(30);
+        incoming.status = RuleStatus::Proven;
+        incoming.helpful_count = 1;
+        local.add(&incoming).unwrap();
+        let session = crate::store::open_rule_store(&root).unwrap();
+        assert_eq!(session.get(&incoming.id).unwrap().status, RuleStatus::Proven);
+        assert!(temp.path().join(".claude/rules/cas/rule-second-machine.md").is_file());
+    }
+
+    #[test]
+    fn unreadable_start_marker_is_an_empty_cut_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let marker = root.join("rule-projections/started.json");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        for (index, bytes) in [b"not JSON".to_vec(), Vec::new(), vec![0xff]].into_iter().enumerate() {
+            std::fs::write(&marker, bytes).unwrap();
+            let local = crate::store::open_rule_store_local(&root).unwrap();
+            let mut rule = make_rule(&format!("rule-corrupt-start-{index}"), Scope::Project);
+            rule.status = RuleStatus::Proven;
+            rule.helpful_count = 1;
+            local.add(&rule).unwrap();
+            let session = crate::store::open_rule_store(&root).unwrap();
+            assert!(session.list_proven().unwrap().iter().any(|row| row.id == rule.id));
+            assert!(temp.path().join(format!(".claude/rules/cas/{}.md", rule.id)).is_file());
+        }
+        // An actual read I/O error has the same harmless empty-cut meaning.
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        let session = crate::store::open_rule_store(&root).unwrap();
+        assert_eq!(session.list_proven().unwrap().len(), 3);
+    }
+
     /// cas-caae (skills audit M27): a proven rule naming another registered
     /// project is never written to this project's rule files, and an
     /// existing file for it is removed on its next write.

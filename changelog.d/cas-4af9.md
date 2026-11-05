@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **One pre-merge review per delivery** — A delivery's approval now stays valid when only the target branch moved and the merge result is unchanged. That covers a fast-forwarded local target and a merge-queue landing of the same tree, so the work is no longer reviewed twice and a worker's close no longer fails after a queue landing. The review is built on origin's tip when the local target lags. A target that diverged from origin is refused before any review starts. When candidate preparation fails, the error now names the full git command and its exit status instead of an empty message.

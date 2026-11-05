@@ -27,18 +27,16 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    the supervisor, wait blocked with the one-line note in
    [Verification-required close](references/recovery.md#verification-required-close),
    and retry close after the verdict.
-4. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
-   the current factory-branch tip SHA, and send one `merge_request=true` message;
-   its body is the request, so do not send a separate prose summary or ACK before
-   or after it. Don't poll: the merge's verdict closes the task (you hear
-   once) or reopens it with findings. Don't re-close or block on it.
+4. For MERGE REQUIRED, drain `inbox_poll`, act on unread supervisor messages,
+   capture the current factory-branch tip SHA, and send one `merge_request=true` message.
+   Request body; no extra prose/ACK. Wait for the verdict;
+   it closes or reopens the task. Never re-close or block on it.
 
-One event gets one message. A close is the lifecycle report; never send a post-close
-summary or echo the close relay. After a merge request, wait for the supervisor's
-response; send no follow-up update.
+One event gets one message. Close is the lifecycle report; never echo it or
+send post-close updates. After a merge request, wait.
 
-Stay available after handoff. Never self-dispatch: every time you go idle,
-use assigned work; `ready` and `available` are backlog
+Stay available. Never self-dispatch: every time you go idle, use assigned work;
+`ready` and `available` are backlog
   visibility, not authorization.
 
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close.
@@ -65,7 +63,7 @@ use assigned work; `ready` and `available` are backlog
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Evidence, sync or resume | [details.md](references/details.md) |
-| Bug filing | [Routing](references/details.md#credentials-and-routing): `issues.repo` and `issues.components.cassy`, `issues.components.violet`, `issues.components.cloud` |
+| Bug filing | [Routing](references/details.md#credentials-and-routing): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately. |
 
 Tool loading is two steps, not one: lookup does **not** execute the tool;
 call the resolved tool next, not another ToolSearch.

@@ -11,7 +11,7 @@ pub(crate) const CAS_SECTION_END: &str = "<!-- CAS:END -->";
 /// (audit D1).
 const AGENTS_DIRECTIVE_CONTENT: &str = r#"## Cassy: tasks, memory and context
 
-Track work and knowledge in Cassy rather than in harness-local todo lists; Cassy tasks and memories persist across sessions.
+Track work and knowledge in Cassy; tasks and memories persist across sessions.
 Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode. Call them directly.
 
 - `task`: action=create, start, close, ready.
@@ -20,7 +20,7 @@ Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's p
 
 Slack transport: use the `violet` skill and the Violet proxy for every Slack read (`violet.violet_read`) and post (`violet.violet_post`). Never use the Claude Slack connector or Codex Slack app. Pre-tool hooks deny non-Violet Slack writes by default; only an explicit operator setting `slack.transport=any` disables that guard.
 
-Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
+Bug routing (`issues.repo` for project bugs; `issues.components.{cassy,violet,cloud}` for components): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.
 Deliverables: use `cas-sow-delivery-report` for SOW deliveries, `cas-feature-report` for feature reports, `cas-release-notes` + `cas-release-report` for internal releases, and `cas-customer-release-notes` for client updates; follow DESIGN.md and use real before/after pairs.
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 

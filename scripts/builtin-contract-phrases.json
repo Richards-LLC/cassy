@@ -117,6 +117,14 @@
         {
           "text": "Phase outcome met (plan metric receipt)",
           "reason": "Audit finding 6: the exit ladder requires measured outcome evidence."
+        },
+        {
+          "text": "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
         }
       ],
       "absent": [
@@ -303,6 +311,14 @@
         {
           "text": "cite the plan section and its metric receipt at close",
           "reason": "Audit finding 13: workers report the governing outcome alongside task completion."
+        },
+        {
+          "text": "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+          "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
         }
       ],
       "absent": [

@@ -285,7 +285,9 @@ mod tests {
         assert!(local.pushed.is_err(), "{:?}", local.pushed);
         assert_eq!(git(dir, &["rev-parse", &local.refname]), local.sha);
         assert!(
-            local.describe().contains("local only: push to origin failed"),
+            local
+                .describe()
+                .contains("local only: push to origin failed"),
             "{}",
             local.describe()
         );

@@ -519,6 +519,8 @@ async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
         ("late-timedout-approved", "success", Some("approved"), true),
         ("late-moved-target", "success", Some("approved"), true),
         ("late-child", "success", Some("approved"), true),
+        ("late-child-moved-target", "success", Some("approved"), true),
+        ("late-child-target-changed", "success", Some("approved"), false),
         ("late-child-superseded", "success", Some("approved"), false),
         ("late-child-changed", "success", Some("approved"), false),
     ]).await;
@@ -620,7 +622,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
                 "action": "start", "id": task.id,
             })))).await.expect("record the original delivery branch through real start");
         }
-        if row == "late-moved-target" {
+        if row.ends_with("moved-target") {
             std::fs::write(worker_path.join("sibling.txt"), "already reviewed sibling\n").unwrap();
             run_git(&["add", "sibling.txt"], &worker_path);
             run_git(&["commit", "-m", "sibling already carried by source"], &worker_path);
@@ -771,7 +773,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
             env.set("CAS_AGENT_ROLE", "supervisor");
         }
-        if row == "late-moved-target" {
+        if row.ends_with("moved-target") {
             let source = git_stdout(&repo.root, &["rev-parse", &delivery_branch]);
             let tree = git_stdout(&repo.root, &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)]);
             let sibling = git_stdout(&repo.root, &["rev-parse", &format!("{delivery_branch}^1")]);
@@ -823,6 +825,11 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             ).unwrap();
             assert_ne!(next.id, dispatch.id);
         }
+        if row == "late-child-target-changed" {
+            std::fs::write(repo.root.join("README.md"), "unrelated target change during review\n").unwrap();
+            run_git(&["commit", "-am", "unrelated target tree changed during review"], &repo.root);
+            run_git(&["push", "origin", "main"], &repo.root);
+        }
         if row == "late-child-changed" {
             std::fs::write(worker_path.join(delivered_path), "changed after review\n").unwrap();
             run_git(&["commit", "-am", "changed candidate after verifier started"], &worker_path);
@@ -836,7 +843,7 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         let result = if let Some(child_id) = late_child {
             delivery_service(&cas_root, &child_id).verification(Parameters(request)).await
         } else { supervisor.verification(Parameters(request)).await };
-        if row == "late-child-superseded" || row == "late-child-changed" {
+        if matches!(row, "late-child-superseded" | "late-child-changed" | "late-child-target-changed") {
             let refused = result.expect_err("late authority cannot cross a changed or superseded candidate");
             assert!(refused.message.contains("superseded") || refused.message.contains("changed"), "{row}: {refused}");
             assert!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().is_none());

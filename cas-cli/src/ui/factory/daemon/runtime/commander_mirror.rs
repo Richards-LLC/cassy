@@ -1262,7 +1262,7 @@ mod tests {
         }
     }
 
-    /// cas-d511: 29 v4.0.1 turns had no role. Every wake now names one.
+    /// cas-d511: 29 turns in one release had no role. Every wake now names one.
     #[test]
     fn turns_without_a_session_queue_row_still_name_who_woke_them_cas_d511() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -1296,7 +1296,7 @@ mod tests {
         }
     }
 
-    /// cas-d511: 15 of 27 v4.0.1 daemon "no-op" turns merged, spawned, ran a
+    /// cas-d511: 15 of 27 daemon "no-op" turns in one release merged, spawned, ran a
     /// verifier or launched a check through Codex code mode.
     #[test]
     fn merges_subagents_and_code_mode_checks_are_turn_actions_cas_d511() {

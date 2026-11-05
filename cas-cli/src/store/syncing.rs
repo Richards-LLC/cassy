@@ -5,7 +5,7 @@
 //! and the rule passes the T1 filter policy, the write is dual-enqueued
 //! to both the personal queue and the team queue.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
@@ -14,7 +14,7 @@ use crate::store::share_policy::{
     eligible_for_team_rule, origin_is_foreign_or_unknown, resolve_team_id,
 };
 use crate::store::{Result, RuleStore};
-use crate::types::Rule;
+use crate::types::{Rule, RuleStatus};
 use cas_core::Syncer;
 use cas_store::RuleVersion;
 
@@ -114,17 +114,112 @@ impl SyncingRuleStore {
             .is_some()
     }
 
-    fn try_sync(&self, rule: &Rule) {
+    // Keep receipts outside the generated directory: removing that entire
+    // directory must still withdraw its previously projected policy.
+    fn receipt_path(project_root: &Path, id: &str) -> PathBuf {
+        let filename: String = id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        project_root.join(".cas/rule-projections").join(filename)
+    }
+
+    fn receipt(&self, id: &str) -> Result<Option<String>> {
+        let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) else {
+            return Ok(None);
+        };
+        match std::fs::read_to_string(Self::receipt_path(root, id)) {
+            Ok(state) => Ok(Some(state)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn record_projection(&self, id: &str, state: &str) -> Result<()> {
+        if let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) {
+            let path = Self::receipt_path(root, id);
+            std::fs::create_dir_all(path.parent().expect("receipt parent"))?;
+            std::fs::write(path, state)?;
+        }
+        Ok(())
+    }
+
+    /// A held source remains visible in rule listing, but is not active policy.
+    pub(crate) fn is_held(project_root: &Path, id: &str) -> bool {
+        std::fs::read_to_string(Self::receipt_path(project_root, id))
+            .is_ok_and(|state| state == "held")
+    }
+
+    fn live(rule: &Rule) -> bool {
+        rule.status == RuleStatus::Proven || rule.is_active_operator_hard_rule()
+    }
+
+    fn reconcile(&self, mut rule: Rule) -> Result<Rule> {
+        if self.project_root.as_deref().is_none_or(|p| p.as_os_str().is_empty())
+            || !Self::live(&rule) || self.names_foreign_project(&rule)
+        {
+            return Ok(rule);
+        }
+        let receipt = self.receipt(&rule.id)?;
+        let file = self.syncer.target_dir().join(format!("{}.md", rule.id));
+        if file.is_file() && receipt.as_deref() != Some("held") {
+            // Adopt an existing pre-receipt projection without re-writing it.
+            self.record_projection(&rule.id, "projected")?;
+            return Ok(rule);
+        }
+        let deleted = receipt.as_deref() == Some("projected");
+        let reason = if deleted {
+            "retired: previously projected rule file was removed"
+        } else {
+            self.record_projection(&rule.id, "held")?;
+            "held: file absent; use rule action=restore to keep, or delete to retire"
+        };
+        rule.status = if deleted { RuleStatus::Retired } else { RuleStatus::Stale };
+        self.inner.update_with_metadata(&rule, Some("rule projection reconciliation"), Some(reason))?;
+        // A legacy hold is local uncertainty, never a speculative Cloud change.
+        if deleted { self.queue_upsert(&rule); }
+        Ok(rule)
+    }
+
+    fn try_sync(&self, rule: &Rule) -> Result<()> {
         if self.names_foreign_project(rule) {
             self.try_remove(&rule.id);
-            return;
+            return Ok(());
         }
-        // Ignore sync errors - syncing is best-effort
-        let _ = self.syncer.sync_rule(rule);
+        // A held rule cannot be revived by helpful/update or a remote replay.
+        if self.receipt(&rule.id)?.as_deref() == Some("held") {
+            return Ok(());
+        }
+        // File sync remains best-effort; never claim a projection on failure.
+        if self.syncer.sync_rule(rule).unwrap_or(false) {
+            self.record_projection(&rule.id, "projected")?;
+        } else if !Self::live(rule) {
+            self.forget_projection(&rule.id);
+        }
+        Ok(())
+    }
+
+    fn forget_projection(&self, id: &str) {
+        if let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::remove_file(Self::receipt_path(root, id));
+        }
     }
 
     fn try_remove(&self, rule_id: &str) {
         let _ = self.syncer.remove_rule(rule_id);
+        self.forget_projection(rule_id);
+    }
+
+    fn prepare_update(&self, id: &str) -> Result<bool> {
+        let before = self.get(id)?;
+        // A draft promoted through the explicit write path is new policy;
+        // an already active/held rule must respect its missing projection.
+        Ok(!Self::live(&before) && self.receipt(id)?.is_none())
+    }
+
+    fn after_write(&self, id: &str, new_projection: bool) -> Result<()> {
+        let stored = self.inner.get(id)?;
+        let stored = if new_projection { stored } else { self.reconcile(stored)? };
+        self.try_sync(&stored)?;
+        if self.receipt(id)?.as_deref() != Some("held") { self.queue_upsert(&stored); }
+        Ok(())
     }
 
     fn queue_upsert(&self, rule: &Rule) {
@@ -197,22 +292,17 @@ impl RuleStore for SyncingRuleStore {
 
     fn add(&self, rule: &Rule) -> Result<()> {
         self.inner.add(rule)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, true)
     }
 
     fn get(&self, id: &str) -> Result<Rule> {
-        self.inner.get(id)
+        self.reconcile(self.inner.get(id)?)
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
+        let new_projection = self.prepare_update(&rule.id)?;
         self.inner.update(rule)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, new_projection)
     }
 
     fn update_with_metadata(
@@ -221,12 +311,9 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner
-            .update_with_metadata(rule, changed_by, change_note)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        let new_projection = self.prepare_update(&rule.id)?;
+        self.inner.update_with_metadata(rule, changed_by, change_note)?;
+        self.after_write(&rule.id, new_projection)
     }
 
     fn update_clearing_stakeholder(
@@ -235,11 +322,9 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
+        let new_projection = self.prepare_update(&rule.id)?;
         self.inner.update_clearing_stakeholder(rule, changed_by, change_note)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, new_projection)
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {
@@ -309,24 +394,25 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner
-            .restore_version(id, version, changed_by, change_note)?;
-        let restored = self.inner.get(id)?;
-        self.try_sync(&restored);
-        self.queue_upsert(&restored);
-        Ok(())
+        // Reconcile first so a legacy row's original state is in history.
+        self.get(id)?;
+        self.inner.restore_version(id, version, changed_by, change_note)?;
+        self.forget_projection(id);
+        self.after_write(id, true)
     }
 
     fn list(&self) -> Result<Vec<Rule>> {
-        self.inner.list()
+        self.inner.list()?.into_iter().map(|rule| self.reconcile(rule)).collect()
     }
 
     fn list_proven(&self) -> Result<Vec<Rule>> {
-        self.inner.list_proven()
+        Ok(self.list()?.into_iter().filter(|rule| rule.status == RuleStatus::Proven).collect())
     }
 
     fn list_critical(&self) -> Result<Vec<Rule>> {
-        self.inner.list_critical()
+        Ok(self.inner.list_critical()?.into_iter()
+            .map(|rule| self.reconcile(rule)).collect::<Result<Vec<_>>>()?
+            .into_iter().filter(|rule| Self::live(rule)).collect())
     }
 
     fn close(&self) -> Result<()> {

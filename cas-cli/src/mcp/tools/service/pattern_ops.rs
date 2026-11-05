@@ -1,6 +1,31 @@
 use crate::mcp::tools::service::imports::*;
 
 impl CasService {
+    /// A personal rule is an existing Cloud pattern, not a project Draft.
+    /// Authentication binds its owner; the quote itself is the stored source.
+    pub(super) async fn create_personal_rule(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let author = self.inner.operator_hard_rule_author()
+            .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, reason))?;
+        let quote = req.stakeholder_quote.filter(|quote| !quote.trim().is_empty())
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Personal rules require stakeholder_quote with the operator's verbatim words"))?;
+        if req.stakeholder.as_deref().is_none_or(|name| name.trim().is_empty()) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "Personal rules require stakeholder naming the operator"));
+        }
+        if req.paths.is_some() || req.auto_approve_tools.is_some() || req.auto_approve_paths.is_some() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "Personal patterns do not grant path or tool approvals; create a project rule for those fields"));
+        }
+        let pattern_req = serde_json::from_value(serde_json::json!({
+            "action": "create", "content": quote, "category": "general",
+            "propagation": "all_projects",
+        })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        // Reuse the single-write/uncertain-outcome contract; never retry a POST.
+        let mut result = self.pattern_create(pattern_req).await?;
+        result.content.push(Content::text(format!(
+            "Source: personal pattern; operator's verbatim words; authorised by {author}."
+        )));
+        Ok(result)
+    }
+
     pub(super) async fn pattern_create(
         &self,
         req: PatternRequest,
@@ -1035,6 +1060,12 @@ mod tests {
                 store.register(&agent).unwrap();
                 service.inner.set_agent_id_for_testing(agent.id);
             }
+            let missing_quote = service.rule(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "create", "scope": "global", "content": "Only an agent paraphrase",
+                "stakeholder": "Operator",
+            })).unwrap())).await;
+            assert!(missing_quote.is_err(), "operator words are required even from a trusted author");
+            assert!(server.try_recv().unwrap().is_none(), "no write without verbatim provenance");
             let http = server.clone();
             let reply = allowed.then(|| std::thread::spawn(move || {
                 let mut request = http.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
@@ -1047,22 +1078,35 @@ mod tests {
                 request.respond(tiny_http::Response::from_string(
                     r#"{"id":"pat-personal","content":"  Keep my exact words.\nAcross every project.  ","status":"active","propagation":"all_projects"}"#
                 ).with_status_code(201)).unwrap();
+                let request = http.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+                    .expect("rule list reads personal sources");
+                assert_eq!(request.method().as_str(), "GET");
+                assert_eq!(request.url(), "/api/patterns?status=active");
+                request.respond(tiny_http::Response::from_string(
+                    r#"{"patterns":[{"id":"pat-personal","content":"  Keep my exact words.\nAcross every project.  ","status":"active","propagation":"all_projects"}]}"#
+                )).unwrap();
             }));
             let result = service.rule(Parameters(serde_json::from_value(serde_json::json!({
                 "action": "create", "scope": "global", "content": "An agent paraphrase",
                 "stakeholder": "Operator", "stakeholder_quote": "  Keep my exact words.\nAcross every project.  ",
                 "stakeholder_scope": "every project",
             })).unwrap())).await;
-            if let Some(reply) = reply { reply.join().unwrap(); }
             if allowed {
                 let result = result.expect("authenticated operator personal rule");
                 let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
                 assert!(text.contains("pat-personal"), "{text}");
                 assert!(text.contains("active"), "{text}");
                 assert!(text.contains("personal-author"), "caller attribution: {text}");
+                let listed = service.rule(Parameters(serde_json::from_value(serde_json::json!({
+                    "action": "list",
+                })).unwrap())).await.unwrap();
+                let listed = listed.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+                assert!(listed.contains("Source: personal pattern"), "{listed}");
+                assert!(listed.contains("pat-personal"), "{listed}");
             } else {
                 assert!(result.is_err(), "untrusted callers cannot assert operator provenance");
             }
+            if let Some(reply) = reply { reply.join().unwrap(); }
             assert!(server.try_recv().unwrap().is_none(), "no retry or untrusted Cloud write");
             assert!(service.inner.open_rule_store().unwrap().list().unwrap().is_empty(), "no project Draft or duplicate policy");
         }

@@ -121,7 +121,7 @@ Was: release prep lacked one check. → Now: release prep runs it before the PR.
 • *Release check* — The release cut validates the draft before publishing.
 ```
 EOF2
-    sed -i "s/DRAFT_NAME/$name/" "$path"
+    sed "s/DRAFT_NAME/$name/" "$path" > "$path.tmp" && mv "$path.tmp" "$path"
 }
 
 git init --quiet --bare -b main "$tmp/origin.git"

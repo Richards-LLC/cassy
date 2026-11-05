@@ -3,6 +3,25 @@ import { describe, expect, it, vi } from "vitest";
 import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
 
 describe("supervisor slash commands", () => {
+  it("routes /mcp to Reload Cassy only for Claude and names unsupported harnesses", async () => {
+    for (const harness of ["claude", "codex", "grok", "other", undefined]) {
+      document.body.innerHTML = '<section><textarea></textarea></section>';
+      const input = document.querySelector("textarea")!;
+      const run = vi.fn().mockResolvedValue(undefined);
+      const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
+      input.value = "/mcp";
+      expect(commands.submit()).toBe(true);
+      if (harness === "claude") {
+        await Promise.resolve();
+        expect(run).toHaveBeenCalledWith("mcp", false);
+      } else {
+        expect(run).not.toHaveBeenCalled();
+        expect(document.querySelector('[role="status"]')?.textContent).toContain(harness ?? "unknown");
+        expect(document.querySelector('[role="status"]')?.textContent).toContain("Reload Cassy");
+      }
+      commands.dispose();
+    }
+  });
   it("filters command suggestions but submits only an exact supported command", async () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;

@@ -2572,6 +2572,7 @@ journeys:
     trigger: Open a paired Claude or Codex conversation at desktop or 390 px.
   steps:
   - Type a slash, filter the curated palette, and run Usage by keyboard.
+  - In Claude, run /mcp as Reload Cassy and read the replacement server PID and version; other harnesses refuse it by name.
   - Read submission separately from an observed native outcome without repeating a mutation.
   - Finish waits for the active turn, then its reply reaches the conversation
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.

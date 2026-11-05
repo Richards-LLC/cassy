@@ -139,8 +139,14 @@ pub fn build_context_with_token_budget(
     }
 
     // Try to initialize hybrid context scorer for semantic relevance
-    // Falls back to basic scoring if search infrastructure isn't available
-    let hybrid_scorer = HybridContextScorer::open_with_graph(cas_root).ok();
+    // Falls back to basic scoring if search infrastructure isn't available.
+    // A pull-only SessionStart ranks no memories, so it skips opening the
+    // search index and entity graph (cas-71b2).
+    let lists_memories = input.hook_event_name != "SessionStart"
+        || cas_core::hooks::HooksConfig::session_start_memories(&config);
+    let hybrid_scorer = lists_memories
+        .then(|| HybridContextScorer::open_with_graph(cas_root).ok())
+        .flatten();
     let scorer_ref: Option<&dyn ContextScorer> =
         hybrid_scorer.as_ref().map(|s| s as &dyn ContextScorer);
 

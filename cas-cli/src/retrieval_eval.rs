@@ -585,11 +585,17 @@ pub const SELECTOR_HELPFUL_MEMORIES_PRODUCTION: &str = "helpful_memories_product
 
 const EVAL_PROJECT_ID: &str = "cas-retrieval-eval-fixture";
 
+/// The ranked memory list now reaches agents through the pull path
+/// (`search action=context`, event `McpContext`); SessionStart carries only a
+/// pointer unless `hooks.session_start_memories` is set (cas-71b2). The
+/// ranking code is shared, so the eval scores the surface that still lists.
+const EVAL_HOOK_EVENT: &str = "McpContext";
+
 fn hook_input(case: &EvalCase) -> cas_core::hooks::types::HookInput {
     cas_core::hooks::types::HookInput {
         session_id: format!("retrieval-eval-{}", case.case_id),
         cwd: case.cwd.clone(),
-        hook_event_name: "SessionStart".to_string(),
+        hook_event_name: EVAL_HOOK_EVENT.to_string(),
         user_prompt: Some(case.user_prompt.clone()),
         ..Default::default()
     }
@@ -846,7 +852,7 @@ fn production_hook_input(case: &EvalCase) -> cas_core::hooks::types::HookInput {
     cas_core::hooks::types::HookInput {
         session_id: format!("retrieval-eval-{}", case.case_id),
         cwd: case.cwd.clone(),
-        hook_event_name: "SessionStart".to_string(),
+        hook_event_name: EVAL_HOOK_EVENT.to_string(),
         user_prompt: None,
         ..Default::default()
     }

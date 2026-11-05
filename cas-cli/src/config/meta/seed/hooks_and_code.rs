@@ -396,6 +396,23 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             ],
         });
 
+    registry.register(ConfigMeta {
+            key: "hooks.session_start_memories",
+            section: "hooks",
+            name: "SessionStart Memories",
+            description: "List ranked memories (Helpful Memories, Related to Current Work) at session start. Off by default: session start carries a one-line pointer and `search action=context` returns the ranked list on demand.",
+            value_type: ConfigType::Bool,
+            default: "false",
+            constraint: Constraint::None,
+            advanced: true,
+            requires_feature: None,
+            keywords: &["memories", "session", "startup", "context", "pull"],
+            use_cases: &[
+                "Enable to preload the ranked memory list in every session",
+                "Leave off to keep session start lean and fetch memories on demand",
+            ],
+        });
+
     // ============================================================
     // STAGING SECTION
     // ============================================================

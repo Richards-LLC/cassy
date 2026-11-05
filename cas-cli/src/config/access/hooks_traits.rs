@@ -12,6 +12,12 @@ impl cas_core::hooks::HooksConfig for Config {
             .unwrap_or(false)
     }
 
+    fn session_start_memories(&self) -> bool {
+        self.hooks
+            .as_ref()
+            .is_some_and(|h| h.session_start_memories)
+    }
+
     fn mcp_enabled(&self) -> bool {
         true // MCP is always enabled
     }
@@ -66,6 +72,10 @@ impl cas_core::hooks::HooksConfig for HookConfig {
 
     fn minimal_start(&self) -> bool {
         self.minimal_start
+    }
+
+    fn session_start_memories(&self) -> bool {
+        self.session_start_memories
     }
 
     fn mcp_enabled(&self) -> bool {

@@ -83,6 +83,12 @@ fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
     let cas_root = temp.path().join(".cas");
     fs::create_dir_all(&cas_root).unwrap();
 
+    // The ranked listing is opt-in at SessionStart (cas-71b2).
+    fs::write(
+        cas_root.join("config.toml"),
+        "[hooks]\nsession_start_memories = true\n",
+    )
+    .unwrap();
     let entry_store = SqliteStore::open(&cas_root).unwrap();
     entry_store.init().unwrap();
     let ids = ["session-memory-a", "session-memory-b", "session-memory-c"];
@@ -185,7 +191,7 @@ fn helpful_memory_surface_callback_uses_literal_lowercase_memory_tag() {
     build_context_with_stores(
         &session_start_input(),
         &stores,
-        &DefaultHooksConfig::new(),
+        &DefaultHooksConfig::new().with_session_start_memories(),
         5,
         Some(&callback),
         "mcp__cas__",
@@ -236,7 +242,7 @@ fn high_importance_preference_injects_its_full_first_line() {
     store.init().unwrap();
     store.add(&entry).unwrap();
 
-    let config = DefaultHooksConfig::new();
+    let config = DefaultHooksConfig::new().with_session_start_memories();
     let stores = ContextStores {
         project_store: Some(&store),
         ..ContextStores::empty()
@@ -292,7 +298,9 @@ fn helpful_memories_only_surface_active_feedback_eligible_entries() {
         store.add(&entry).unwrap();
     }
 
-    let config = DefaultHooksConfig::new().with_token_budget(2_000);
+    let config = DefaultHooksConfig::new()
+        .with_token_budget(2_000)
+        .with_session_start_memories();
     let stores = ContextStores {
         project_store: Some(&store),
         ..ContextStores::empty()
@@ -366,7 +374,9 @@ fn high_importance_preferences_are_kept_when_the_memory_budget_omits_other_entri
     // test exists to exercise never happens. 180 restores the same shape:
     // 126 tokens left, the preference item (~58) fits under the 76-token
     // threshold, and adding the ordinary item (~45) does not.
-    let config = DefaultHooksConfig::new().with_token_budget(180);
+    let config = DefaultHooksConfig::new()
+        .with_token_budget(180)
+        .with_session_start_memories();
     let stores = ContextStores {
         project_store: Some(&store),
         ..ContextStores::empty()

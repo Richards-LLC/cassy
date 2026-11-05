@@ -167,6 +167,11 @@ pub(super) fn demote_body_headings(body: &str) -> String {
 /// reached from here. `cas-cli`'s `knowledge_tools` suite reads this constant
 /// and drives the named action end-to-end, so a rename on either side fails a
 /// test instead of silently shipping an index whose pull half 404s.
+/// What SessionStart carries instead of the ranked memory listing (cas-71b2).
+/// It is its own `## ` section so the SessionStart byte budget keeps it whole.
+/// `mcp__cas__` is remapped to the reader's prefix like every other mention.
+pub const MEMORY_PULL_POINTER: &str = "## Memories (pull-only)\n`mcp__cas__search` (action: context) ranks memories for your task; `mcp__cas__memory` (action: get, id) reads one.";
+
 pub const KNOWLEDGE_PULL_INSTRUCTION: &str = "These are titles only. Read a page body with `mcp__cas__knowledge` (action: read, id) before answering questions about how this project works — do not guess from the title.";
 
 /// Build context string for session start injection
@@ -423,8 +428,10 @@ pub fn build_context_with_stores(
             "_Newest handoff for this role. Older handoffs are superseded and kept as history._"
                 .to_string()
         });
+        // The handoff is its own feature, not a ranked memory: reporting it
+        // as "memory" counted it as session_context injection (cas-71b2).
         if let Some(callback) = on_surfaced {
-            callback(&current.id, "memory", Some(&current.preview(60)));
+            callback(&current.id, "handoff", Some(&current.preview(60)));
         }
     }
 
@@ -770,6 +777,18 @@ pub fn build_context_with_stores(
         (available_skills, available_skills_tokens)
     };
 
+    // Ranked memories are pull-only at SessionStart (cas-71b2): the listing
+    // was measured unopened, so a one-line pointer replaces it and the scorer
+    // never runs. Every other caller (`search action=context`) still lists.
+    let list_memories = input.hook_event_name != "SessionStart" || config.session_start_memories();
+    if !list_memories && !minimal_start {
+        if !context_parts.is_empty() {
+            context_parts.push(String::new());
+        }
+        context_parts.push(MEMORY_PULL_POINTER.to_string());
+        total_tokens += estimate_tokens(MEMORY_PULL_POINTER);
+    }
+
     // Add valuable entries using scorer (hybrid or basic)
     // Skip display in minimal mode but track availability
     if budget_remaining(total_tokens) > 100 {
@@ -811,6 +830,7 @@ pub fn build_context_with_stores(
         // can compete with curated memories for SessionStart space.
         let filtered_entries: Vec<Entry> = merged_entries
             .iter()
+            .filter(|_| list_memories)
             .filter(|e| e.entry_type != EntryType::Observation || e.feedback_score() > 0)
             .filter(|e| e.entry_type != EntryType::Context || e.feedback_score() > 0)
             // Handoffs never rank here: the current one has its own section and
@@ -826,7 +846,11 @@ pub fn build_context_with_stores(
         let scorer: &dyn ContextScorer = stores.entry_scorer.unwrap_or(&basic_scorer);
 
         // Score entries using the scorer
-        let mut scored_entries = scorer.score_entries(&filtered_entries, &context_query);
+        let mut scored_entries = if list_memories {
+            scorer.score_entries(&filtered_entries, &context_query)
+        } else {
+            Vec::new()
+        };
         // Standing preferences at the high-importance threshold are operative
         // constraints. Keep them ahead of compact learnings when the memory
         // section has to omit entries for the hook budget.

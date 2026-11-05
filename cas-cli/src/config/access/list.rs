@@ -126,6 +126,10 @@ impl Config {
                 "hooks.minimal_start".to_string(),
                 hooks.minimal_start.to_string(),
             ),
+            (
+                "hooks.session_start_memories".to_string(),
+                hooks.session_start_memories.to_string(),
+            ),
             // Hooks.plan_mode section
             (
                 "hooks.plan_mode.enabled".to_string(),

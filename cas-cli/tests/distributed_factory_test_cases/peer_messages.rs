@@ -531,7 +531,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
 
     let sent = coordinate(
         &service_a,
-        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?", "kind": "ask"}),
+        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?"}),
     )
     .await
     .unwrap();
@@ -550,8 +550,8 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap();
     assert_eq!(rows.len(), 1);
 
-    // pin: the receiver's peer envelope carries the typed ask attribute for the wake gate.
-    assert!(rows[0].prompt.lines().next().unwrap().contains("kind=\"ask\""), "peer kind must survive the actual Cloud route: {}", rows[0].prompt);
+    // pin: cas-7dd1d, an untyped peer message must arrive as an ask for the wake gate.
+    assert!(rows[0].prompt.lines().next().unwrap().contains("kind=\"ask\""), "untyped peer mail must arrive as an ask: {}", rows[0].prompt);
 
     let replied = coordinate(
         &service_b,
@@ -594,14 +594,16 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     let invalid = coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"invalid", "message":"unknown kind", "kind":"answr", "in_reply_to":rows[0].id})).await.unwrap_err();
     // pin: an unsupported kind must return an actionable validation error.
     assert!(invalid.contains("unknown peer message kind"), "{invalid}");
-    // New untyped FYIs remain quiet; replies to an ask and explicit actions wake.
-    for (kind, blocker, wakes) in [
-        (None, false, false),
-        (Some("blocker"), false, true), (None, true, true), (Some("status"), false, true),
-        (Some("receipt"), false, false), (Some("quiet"), false, false),
+    // cas-7dd1d: an untyped peer message wakes like an ask; only an explicit
+    // receipt/quiet or wake=false stays quiet, even beside an explicit ask.
+    for (kind, blocker, wake, wakes) in [
+        (None, false, None, true), (None, false, Some(false), false),
+        (Some("ask"), false, Some(false), false),
+        (Some("blocker"), false, None, true), (None, true, None, true), (Some("status"), false, None, true),
+        (Some("receipt"), false, None, false), (Some("quiet"), false, None, false),
     ] {
-        let body = format!("peer intent {kind:?} blocker={blocker}");
-        coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker})).await.unwrap();
+        let body = format!("peer intent {kind:?} blocker={blocker} wake={wake:?}");
+        coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker, "wake":wake})).await.unwrap();
         let bb = b.clone();
         let rows = tokio::task::spawn_blocking(move || { tick(&bb, "b"); inbox(&bb) }).await.unwrap();
         let row = rows.iter().find(|row| row.prompt.ends_with(&body)).unwrap();

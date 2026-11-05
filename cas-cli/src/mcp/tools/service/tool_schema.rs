@@ -89,7 +89,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("blocker", "Blocker escalation; wakes idle supervisor."),
     ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
-    ("kind", "answer|status|receipt|ask|blocker|secret (summary=NAME); peer FYIs default receipt (quiet)."),
+    ("kind", "answer|status|receipt|ask|blocker|secret (summary=NAME); untyped wakes; receipt is quiet."),
     ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
     ("options", "Operator ask choices; tap returns the label with in_reply_to."),
     ("attachment", "Published artifact id for Commander."),

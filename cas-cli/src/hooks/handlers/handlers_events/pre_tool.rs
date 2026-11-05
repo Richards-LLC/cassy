@@ -894,20 +894,14 @@ fn handle_pre_tool_use_inner(
             .tool_input
             .as_ref()
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-        && let Some(refusal) = crate::qa_pass::github_gate::github_merges_in(cmd)
-            .iter()
-            .find_map(|merge| match merge.selector {
-                crate::qa_pass::github_gate::MergeSelector::Number(pr) => {
-                    crate::peer_ask_gate::merge_refusal(
-                        root,
-                        &crate::hooks::handlers::handlers_state::current_agent_id(input),
-                        &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
-                        std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
-                        &crate::peer_ask_gate::MergeSubject { task_id: None, pr: Some(pr) },
-                    )
-                }
-                _ => None,
-            })
+        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal(
+            root,
+            std::path::Path::new(&input.cwd),
+            cmd,
+            &crate::hooks::handlers::handlers_state::current_agent_id(input),
+            &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        )
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
     }

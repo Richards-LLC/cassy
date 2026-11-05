@@ -25,6 +25,9 @@ pub(crate) const OVERRIDE_MARKER: &str = "PEER ASK OVERRIDE";
 pub(crate) struct MergeSubject {
     pub(crate) task_id: Option<String>,
     pub(crate) pr: Option<u64>,
+    /// A PR merge whose number could not be resolved: any ask that names a
+    /// PR holds it (fail closed).
+    pub(crate) any_pr: bool,
 }
 
 fn names_word(body: &str, word: &str) -> bool {
@@ -36,13 +39,61 @@ fn names_word(body: &str, word: &str) -> bool {
     })
 }
 
+/// Every PR number `body` names: `#N` (also `PR#N`, `repo#N`,
+/// `owner/repo#N`), `pull/N`, `pull request N` and `PR N` / `PR-N` / `PR:N`.
+fn pr_numbers(body: &str) -> Vec<u64> {
+    let lower = body.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let digits_at = |mut at: usize, separators: &[u8]| -> Option<u64> {
+        while at < bytes.len() && separators.contains(&bytes[at]) {
+            at += 1;
+        }
+        let end = (at..bytes.len()).find(|&i| !bytes[i].is_ascii_digit()).unwrap_or(bytes.len());
+        if end == at || (end < bytes.len() && bytes[end].is_ascii_alphanumeric()) {
+            return None;
+        }
+        lower[at..end].parse().ok()
+    };
+    let mut numbers = Vec::new();
+    for (at, _) in lower.match_indices('#') {
+        numbers.extend(digits_at(at + 1, &[]));
+    }
+    for (at, _) in lower.match_indices("pull/") {
+        numbers.extend(digits_at(at + 5, &[]));
+    }
+    for (at, _) in lower.match_indices("pull request") {
+        numbers.extend(digits_at(at + 12, b" #:"));
+    }
+    for (at, _) in lower.match_indices("pr") {
+        let standalone = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        if standalone {
+            numbers.extend(digits_at(at + 2, b" -:#"));
+        }
+    }
+    numbers
+}
+
 fn names_subject(body: &str, subject: &MergeSubject) -> bool {
     subject.task_id.as_deref().is_some_and(|id| names_word(body, id))
-        || subject.pr.is_some_and(|pr| {
-            ["#", "pull/", "PR ", "pr "]
-                .iter()
-                .any(|prefix| names_word(body, &format!("{prefix}{pr}")))
+        || subject.pr.is_some_and(|pr| pr_numbers(body).contains(&pr))
+        || (subject.any_pr && !pr_numbers(body).is_empty())
+}
+
+/// The task an ask names, for the override note; else the merged task.
+fn task_for_override(cas_root: &Path, ask: &OpenPeerAsk, subject: &MergeSubject) -> String {
+    if let Some(task_id) = &subject.task_id {
+        return task_id.clone();
+    }
+    crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .and_then(|tasks| {
+            tasks
+                .into_iter()
+                .map(|task| task.id)
+                .find(|id| names_word(&ask.body, id))
         })
+        .unwrap_or_else(|| "<any task id>".to_string())
 }
 
 /// The ask id a reply or an override names.
@@ -81,7 +132,7 @@ pub(crate) fn merge_refusal(
     operator_session: Option<&str>,
     subject: &MergeSubject,
 ) -> Option<String> {
-    if subject.task_id.is_none() && subject.pr.is_none() {
+    if subject.task_id.is_none() && subject.pr.is_none() && !subject.any_pr {
         return None;
     }
     let asks = crate::cloud::peer_mailbox::open_asks(cas_root, supervisor_agent_id, ASK_WINDOW_SECS);
@@ -90,7 +141,7 @@ pub(crate) fn merge_refusal(
             announce_override(cas_root, supervisor_name, operator_session, ask, &task_id, &reason);
             continue;
         }
-        let note_task = subject.task_id.as_deref().unwrap_or("<task>");
+        let note_task = task_for_override(cas_root, ask, subject);
         return Some(format!(
             "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and no reply has arrived. \
              Wait for the answer, or override visibly: \
@@ -105,6 +156,34 @@ pub(crate) fn merge_refusal(
     None
 }
 
+/// A supervisor's raw `gh pr merge`: every merge in `command` resolves to
+/// its PR the way the QA merge guard does; an unresolvable merge is held by
+/// any open ask that names a PR.
+pub(crate) fn github_merge_refusal(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor_agent_id: &str,
+    supervisor_name: &str,
+    operator_session: Option<&str>,
+) -> Option<String> {
+    let merges = crate::qa_pass::github_gate::github_merges_in(command);
+    if merges.is_empty()
+        || crate::cloud::peer_mailbox::open_asks(cas_root, supervisor_agent_id, ASK_WINDOW_SECS).is_empty()
+    {
+        return None;
+    }
+    merges
+        .iter()
+        .find_map(|merge| {
+            let subject = match crate::qa_pass::github_gate::merge_pr_number(cwd, merge) {
+                Ok(pr) => MergeSubject { task_id: None, pr: Some(pr), any_pr: false },
+                Err(_) => MergeSubject { task_id: None, pr: None, any_pr: true },
+            };
+            merge_refusal(cas_root, supervisor_agent_id, supervisor_name, operator_session, &subject)
+        })
+}
+
 fn announce_override(
     cas_root: &Path,
     supervisor_name: &str,
@@ -115,7 +194,7 @@ fn announce_override(
 ) {
     let id = ask_id(ask);
     let line = format!(
-        "⚠️ {supervisor_name} merged past an unanswered ask to {} on {task_id} (ask {id}): {reason}",
+        "⚠️ {supervisor_name} overrode an unanswered ask to {} on {task_id} (ask {id}) to merge: {reason}",
         ask.recipient
     );
     crate::quality_ledger::intervention(
@@ -175,14 +254,14 @@ mod tests {
         sent_ask(&conn, "ask-4251", "Can you review PR #4251?");
         let merge = |pr| {
             merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", Some("gabber-factory"),
-                &MergeSubject { task_id: None, pr: Some(pr) })
+                &MergeSubject { task_id: None, pr: Some(pr), any_pr: false })
         };
 
         let refused = merge(4249).expect("open ask holds its PR");
         assert!(refused.contains("UNANSWERED PEER ASK") && refused.contains("ask-4249"), "{refused}");
         assert!(merge(4250).is_none(), "an ask about another PR holds nothing");
         assert!(
-            merge_refusal(&root, "sup-other", "other", None, &MergeSubject { task_id: None, pr: Some(4249) }).is_none(),
+            merge_refusal(&root, "sup-other", "other", None, &MergeSubject { task_id: None, pr: Some(4249), any_pr: false }).is_none(),
             "only the merging supervisor's own asks hold its merge"
         );
 
@@ -204,7 +283,7 @@ mod tests {
             .list_pending("operator")
             .unwrap();
         assert!(
-            notices.iter().any(|notice| notice.payload.contains("merged past an unanswered ask")
+            notices.iter().any(|notice| notice.payload.contains("overrode an unanswered ask")
                 && notice.payload.contains("prowl silent 7h")),
             "{notices:?}"
         );
@@ -249,5 +328,21 @@ mod tests {
         )
         .unwrap();
         assert!(pr_merge(&root, "sup-soundwave", 4249).is_some(), "an \"ok\" receipt leaves the ask open");
+    }
+
+    /// Verifier ver-37f17bf1f171 (2): `gh pr merge` with a branch or with no
+    /// argument resolves its PR like the QA merge guard and is held too.
+    #[test]
+    fn a_branch_or_bare_pr_merge_is_held_by_its_ask_cas_bddf9() {
+        let (mut env, temp, root, conn) = fixture();
+        sent_ask(&conn, "ask-branch", "Please review PR #4249 before staging.");
+        let gh = temp.path().join("fake-gh");
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '%s' '{\"number\":4249}'\n");
+        env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
+        for command in ["gh pr merge release/rebuild-batch-22 --merge", "gh pr merge --squash"] {
+            let refused = github_merge_refusal(&root, temp.path(), command, "sup-soundwave", "cosmic-shark-29", None)
+                .unwrap_or_else(|| panic!("{command} must be held"));
+            assert!(refused.contains("ask-branch"), "{refused}");
+        }
     }
 }

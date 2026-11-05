@@ -4414,7 +4414,7 @@ impl CasCore {
                         &caller,
                         agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
                         agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
-                        &crate::peer_ask_gate::MergeSubject { task_id: Some(task_id.to_string()), pr: None },
+                        &crate::peer_ask_gate::MergeSubject { task_id: Some(task_id.to_string()), pr: None, any_pr: false },
                     )
                 }
             {

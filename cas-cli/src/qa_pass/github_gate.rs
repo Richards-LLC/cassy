@@ -398,6 +398,32 @@ struct PrHead {
 }
 
 /// Look the PR up with `gh pr view`; the error says why it could not be.
+/// The PR number a raw merge targets, resolved the way the QA merge guard
+/// resolves its head: the explicit number, else `gh pr view` of the branch or
+/// of the checked-out branch (cas-bddf9).
+pub fn merge_pr_number(cwd: &Path, merge: &GithubMerge) -> Result<u64, String> {
+    let selector = match &merge.selector {
+        MergeSelector::Number(number) => return Ok(*number),
+        MergeSelector::Unresolvable(why) => return Err((*why).to_string()),
+        MergeSelector::CurrentBranch => None,
+        MergeSelector::Branch(branch) => Some(branch.as_str()),
+    };
+    let mut command = Command::new(gh_bin());
+    command.args(["pr", "view"]);
+    if let Some(selector) = selector {
+        command.arg(selector);
+    }
+    if let Some(repo) = merge.repo.as_deref() {
+        command.args(["--repo", repo]);
+    }
+    command.args(["--json", "number"]).current_dir(cwd);
+    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    serde_json::from_slice::<serde_json::Value>(&stdout)
+        .ok()
+        .and_then(|value| value.get("number").and_then(serde_json::Value::as_u64))
+        .ok_or_else(|| "`gh pr view` returned no PR number".to_string())
+}
+
 fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Result<PrHead, String> {
     let mut command = Command::new(gh_bin());
     command.args(["pr", "view"]);

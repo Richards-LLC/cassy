@@ -10362,12 +10362,14 @@ impl CasCore {
                                     // cas-defb: a no-code delivery is its external
                                     // proof; pin the reviewed commit so a sibling
                                     // merge or the lane's next task cannot stale it.
-                                    // cas-f43d: so is a close measured as delivering
-                                    // nothing from a clean checkout, declared or not:
-                                    // the reviewed tree is exactly that commit.
+                                    // cas-f43d: so is a factory task whose recorded
+                                    // lane is measured as delivering nothing, from a
+                                    // clean checkout, declared or not: the reviewed
+                                    // tree is exactly that commit. A legacy task with
+                                    // no lane start keeps the strict boundary.
                                     if epic_proof_ref.is_none()
                                         && (task.execution_note.as_deref() == Some("no-code")
-                                            || (measure_no_delivery(
+                                            || (task.deliverables.factory_branch_start.is_some() && measure_no_delivery(
                                                 worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                                                 no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,
                                                 delivery_receipt, commit_receipt_window.as_ref(),
@@ -43020,6 +43022,15 @@ mod zero_change_close_tests {
         sweep.task_type = TaskType::Spike;
         sweep.risk = vec![TaskRisk::None];
         sweep.deliverables.work_target = task.deliverables.work_target.clone();
+        // Like gabber's tasks, the worker started on a recorded lane at the
+        // epic tip and committed nothing to it.
+        git(p, &["branch", "factory/cas-defb-worker", "epic/live"]);
+        git(p, &["push", "-q", "origin", "factory/cas-defb-worker"]);
+        let lane = |target: &Option<WorkTarget>| Some(cas_types::FactoryBranchStart {
+            work_target: target.clone().unwrap(), assignee: worker.into(),
+            branch: "factory/cas-defb-worker".into(), base_sha: head_sha(p),
+        });
+        sweep.deliverables.factory_branch_start = lane(&sweep.deliverables.work_target);
         store.add(&sweep).unwrap();
         let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": sweep.id, "no_delivery": true,
@@ -43045,10 +43056,10 @@ mod zero_change_close_tests {
         (plain.status, plain.assignee, plain.task_type, plain.risk) =
             (TaskStatus::InProgress, Some(worker.into()), TaskType::Spike, vec![TaskRisk::None]);
         plain.deliverables.work_target = task.deliverables.work_target.clone();
+        git(p, &["branch", "-f", "factory/cas-defb-worker", "epic/live"]);
+        git(p, &["push", "-q", "-f", "origin", "factory/cas-defb-worker"]);
+        plain.deliverables.factory_branch_start = lane(&plain.deliverables.work_target);
         store.add(&plain).unwrap();
-        // The worker's lane exists at the epic tip with no commit of its own.
-        git(p, &["branch", "factory/cas-defb-worker", "epic/live"]);
-        git(p, &["push", "-q", "origin", "factory/cas-defb-worker"]);
         let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": plain.id, "reason": "investigation written up in the artifact",
         })).unwrap();

@@ -4835,7 +4835,8 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     run_git(&["add", "delivery.txt"], &worker);
     run_git(&["commit", "-m", "fix(cas-d6cf): delivery"], &worker);
     let source = git_stdout(&worker, &["rev-parse", "HEAD"]);
-    std::fs::write(repo.root.join("README.md"), "unrelated operator edit\n").unwrap();
+    let operator_edit = "unrelated operator edit\n";
+    std::fs::write(repo.root.join("README.md"), operator_edit).unwrap();
     env.set_current_dir(&repo.root);
     let service = make_service(cas_root.clone());
     let mut request = coord_req("worktree_merge");
@@ -4853,7 +4854,7 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
         "a refused no-dispatch merge cannot leave another lane an unpublished main merge: {text}");
     assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
     assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
-    assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), "unrelated operator edit\n");
+    assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), operator_edit);
     assert!(!repo.root.join("delivery.txt").exists(), "rollback must restore the target checkout too");
 }
 

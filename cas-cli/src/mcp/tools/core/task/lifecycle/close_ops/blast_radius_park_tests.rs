@@ -928,6 +928,8 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
 
     let reviewer = tempfile::tempdir().unwrap();
     git(reviewer.path(), &["clone", "-q", f._origin.path().to_str().unwrap(), "."]);
+    git(reviewer.path(), &["config", "user.name", "CAS Test"]);
+    git(reviewer.path(), &["config", "user.email", "cas@example.test"]);
     git(reviewer.path(), &["checkout", "-q", "-b", LANE, &format!("origin/{LANE}")]);
     git(reviewer.path(), &["checkout", "-q", "main"]);
     let remote_root = crate::store::init_cas_dir(reviewer.path()).unwrap();

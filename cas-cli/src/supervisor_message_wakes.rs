@@ -720,9 +720,12 @@ mod tests {
                 "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
                 Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
             ).unwrap().id();
-            let blocker = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_blocker_envelope(
-                "A decision is required", &peer.name, None,
-            ));
+            // cas-922d: a blocker skips the debounce, so it would make the
+            // batch due and leave nothing to park in the park-failure case.
+            let blocker = (failure != "park").then(|| enqueue(&cas, &peer,
+                &crate::prompt_revalidation::attach_blocker_envelope(
+                    "A decision is required", &peer.name, None,
+                )));
             let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
                 "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
                     task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
@@ -764,7 +767,7 @@ mod tests {
                 warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later + Duration::from_secs(1));
                 selected
             });
-            for id in [ordinary, lifecycle, blocker, merge] {
+            for id in [Some(ordinary), Some(lifecycle), blocker, Some(merge)].into_iter().flatten() {
                 assert!(selected.rows.iter().any(|row| row.id == id),
                     "{failure}: batching failure must not lose selected row #{id}");
                 assert!(selected.facts[&id].message_batch.is_empty());

@@ -34,7 +34,6 @@ import http.server
 import os
 import pathlib
 import sys
-import time
 
 port_path = pathlib.Path(sys.argv[1])
 response_marker = pathlib.Path(sys.argv[2])
@@ -50,8 +49,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         response_marker.touch()
-        # Keep curl alive long enough for the shell test to inspect its argv.
-        time.sleep(2)
         payload = (
             '{"candidates":[{"content":{"parts":[{"inlineData":'
             '{"mimeType":"image/png","data":"c3R1Yi1pbWFnZQ=="}}]}}]}'
@@ -142,8 +139,15 @@ run_case() {
         return 1
     }
 
+    # Regression: even if curl and the helper finish before inspection, the
+    # credential assertions must still be inspectable without a timing window.
+    wait "${script_pid}"
+    script_pid=""
+
     header_file="$(<"${header_capture}")"
     curl_pid="$(<"${pid_capture}")"
+    curl_args="$(ps -ww -o args= -p "${curl_pid}" || true)"
+    [[ -n "${curl_args}" ]] || { echo "${label}: curl process was not inspectable after helper exit" >&2; return 1; }
     [[ -f "${header_file}" ]] || { echo "${label}: header file disappeared too early" >&2; return 1; }
     grep -Fqx "x-goog-api-key: ${secret}" "${header_file}"
     grep -Fqx 'Content-Type: application/json' "${header_file}"
@@ -156,8 +160,6 @@ PY
 )"
     [[ "${mode}" == 600 ]] || { echo "${label}: header mode is ${mode}, expected 600" >&2; return 1; }
 
-    curl_args="$(ps -ww -o args= -p "${curl_pid}")"
-    [[ -n "${curl_args}" ]] || { echo "${label}: curl process was not inspectable" >&2; return 1; }
     if [[ "${curl_args}" == *"${secret}"* ]]; then
         echo "${label}: API key leaked into curl argv: ${curl_args}" >&2
         return 1
@@ -167,8 +169,6 @@ PY
         return 1
     }
 
-    wait "${script_pid}"
-    script_pid=""
     [[ -f "${response_marker}" ]] || { echo "${label}: stub endpoint did not receive the request" >&2; return 1; }
     [[ -f "${output}" ]] || { echo "${label}: helper did not write the response image" >&2; return 1; }
     [[ "$(<"${output}")" == stub-image ]] || { echo "${label}: unexpected image response" >&2; return 1; }

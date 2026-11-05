@@ -688,6 +688,72 @@ const AMBIGUITY_PROBE_LIMIT: usize = 5;
 /// is stated in [`CommitProvenance::reason`].
 const MAX_LINKS_PER_COMMIT: usize = 20;
 
+/// The abbreviation a close note is searched for. Close receipts quote both
+/// forms, and the short one is a substring of the long one.
+const NOTE_PROBE_LEN: usize = 8;
+
+/// A `tasks` row as a provenance edge reports it.
+#[derive(Clone)]
+struct TaskEdgeRow {
+    id: String,
+    title: Option<String>,
+    updated_at: Option<String>,
+    assignee: Option<String>,
+}
+
+/// The `tasks` edges of one `resolve_provenance` call, from one scan.
+#[derive(Default)]
+struct TaskEdges {
+    /// Exact `factory_branch_anchor` value -> tasks carrying it.
+    anchors: HashMap<String, Vec<TaskEdgeRow>>,
+    /// [`note_probe_key`] -> the first `MAX_LINKS_PER_COMMIT` tasks whose
+    /// notes mention it.
+    mentions: HashMap<Vec<u8>, Vec<TaskEdgeRow>>,
+}
+
+/// An all-hex probe, ASCII-lowercased: `LIKE` compares ASCII case-insensitively.
+fn hex_probe_key(probe: &[u8]) -> Option<[u8; NOTE_PROBE_LEN]> {
+    let mut key: [u8; NOTE_PROBE_LEN] = probe.try_into().ok()?;
+    key.iter().all(u8::is_ascii_hexdigit).then(|| {
+        key.make_ascii_lowercase();
+        key
+    })
+}
+
+/// The [`TaskEdges::mentions`] key of a note probe.
+fn note_probe_key(probe: &str) -> Vec<u8> {
+    hex_probe_key(probe.as_bytes()).map_or_else(|| probe.as_bytes().to_vec(), |key| key.to_vec())
+}
+
+/// Push each probe `text` contains onto `out`, once. An all-hex probe can
+/// only occur inside a maximal run of hex digits, so only those runs are
+/// windowed.
+fn hex_mentions(
+    text: &[u8],
+    probes: &std::collections::HashSet<[u8; NOTE_PROBE_LEN]>,
+    out: &mut Vec<[u8; NOTE_PROBE_LEN]>,
+) {
+    let mut i = 0;
+    while i < text.len() {
+        if !text[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < text.len() && text[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        for window in text[start..i].windows(NOTE_PROBE_LEN) {
+            if let Some(key) = hex_probe_key(window)
+                && probes.contains(&key)
+                && !out.contains(&key)
+            {
+                out.push(key);
+            }
+        }
+    }
+}
+
 /// A usable `worker_git_commit` row, already classified.
 struct WorkerCommitEvent {
     head_sha: String,
@@ -1321,6 +1387,101 @@ impl SqliteHistoryStore {
             |row| row.get(0),
         )?
         .collect()
+    }
+
+    /// The `tasks` edges for `shas` — factory anchors, and close-note mentions
+    /// of each SHA's 8-char abbreviation — in ONE scan of `tasks` (cas-5590).
+    ///
+    /// The per-commit form ran two full scans per SHA: an unindexed
+    /// `json_extract` equality and a `notes LIKE '%probe%'` over every note. On
+    /// the live store (6.7 K tasks, 61.5 MB of notes) the 500-commit repair
+    /// batch spent ~40 s in them while holding this process's shared
+    /// connection, so every MCP call in each `cas serve` stalled behind the
+    /// embedded daemon's five-minute history tick, up to the 55 s deadline.
+    ///
+    /// Matching is the old SQL's: an anchor is a byte-exact TEXT equality; a
+    /// mention is an ASCII case-insensitive substring, at most
+    /// `MAX_LINKS_PER_COMMIT` rows per probe in table order. An all-hex probe
+    /// (every real SHA) is found through the note's hex runs; any other probe
+    /// keeps its original `LIKE` query.
+    fn task_edges(conn: &Connection, shas: &[String]) -> rusqlite::Result<TaskEdges> {
+        let wanted: std::collections::HashSet<&str> = shas.iter().map(String::as_str).collect();
+        let mut hex_probes = std::collections::HashSet::new();
+        let mut other_probes: Vec<&str> = Vec::new();
+        for sha in shas.iter().filter(|sha| sha.len() >= FULL_SHA_LEN) {
+            let probe = &sha[..NOTE_PROBE_LEN];
+            match hex_probe_key(probe.as_bytes()) {
+                Some(key) => {
+                    hex_probes.insert(key);
+                }
+                None if !other_probes.contains(&probe) => other_probes.push(probe),
+                None => {}
+            }
+        }
+
+        let mut edges = TaskEdges::default();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, updated_at, assignee,
+                    json_extract(deliverables, '$.factory_branch_anchor'), notes
+               FROM tasks",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut mentioned: Vec<[u8; NOTE_PROBE_LEN]> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let anchor = match row.get_ref(4)? {
+                rusqlite::types::ValueRef::Text(text) => std::str::from_utf8(text)
+                    .ok()
+                    .filter(|anchor| wanted.contains(anchor)),
+                _ => None,
+            };
+            mentioned.clear();
+            if !hex_probes.is_empty()
+                && let rusqlite::types::ValueRef::Text(notes) | rusqlite::types::ValueRef::Blob(notes) =
+                    row.get_ref(5)?
+            {
+                hex_mentions(notes, &hex_probes, &mut mentioned);
+            }
+            mentioned.retain(|key| {
+                edges
+                    .mentions
+                    .get(&key[..])
+                    .is_none_or(|rows| rows.len() < MAX_LINKS_PER_COMMIT)
+            });
+            if anchor.is_none() && mentioned.is_empty() {
+                continue;
+            }
+            let task = TaskEdgeRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                updated_at: row.get(2)?,
+                assignee: row.get(3)?,
+            };
+            if let Some(anchor) = anchor {
+                edges.anchors.entry(anchor.to_string()).or_default().push(task.clone());
+            }
+            for key in &mentioned {
+                edges.mentions.entry(key.to_vec()).or_default().push(task.clone());
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, title, updated_at, assignee FROM tasks
+              WHERE notes LIKE '%' || ?1 || '%' LIMIT ?2",
+        )?;
+        for probe in other_probes {
+            let rows = stmt
+                .query_map(params![probe, MAX_LINKS_PER_COMMIT as i64], |row| {
+                    Ok(TaskEdgeRow {
+                        id: row.get("id")?,
+                        title: row.get("title")?,
+                        updated_at: row.get("updated_at")?,
+                        assignee: row.get("assignee")?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            edges.mentions.insert(probe.as_bytes().to_vec(), rows);
+        }
+        Ok(edges)
     }
 
     /// Full 40-char object names mentioned in a blob of free text.
@@ -2117,37 +2278,29 @@ impl HistoryStore for SqliteHistoryStore {
             }
         }
 
+        // Both `tasks` edges come from one scan, never one per commit (cas-5590).
+        let task_edges = if has_tasks {
+            Self::task_edges(&conn, shas)?
+        } else {
+            TaskEdges::default()
+        };
+
         // --- Edge: the exact factory anchor (high confidence, no guard needed).
-        if has_tasks {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, updated_at, assignee FROM tasks
-                  WHERE json_extract(deliverables, '$.factory_branch_anchor') = ?1",
-            )?;
-            for sha in shas {
-                let rows = stmt.query_map(params![sha], |row| {
-                    Ok((
-                        row.get::<_, String>("id")?,
-                        row.get::<_, Option<String>>("title")?,
-                        row.get::<_, Option<String>>("updated_at")?,
-                        row.get::<_, Option<String>>("assignee")?,
-                    ))
-                })?;
-                for row in rows {
-                    let (id, title, updated_at, assignee) = row?;
-                    if let Some(entry) = out.get_mut(sha) {
-                        entry.links.push(ProvenanceLink {
-                            link_method: LINK_METHOD_FACTORY_ANCHOR.to_string(),
-                            confidence: LinkConfidence::High,
-                            task_id: Some(id),
-                            task_title: title,
-                            session_id: None,
-                            agent_id: assignee,
-                            observed_at: updated_at,
-                            matched_prefix: None,
-                            ambiguous: false,
-                            ambiguous_candidates: Vec::new(),
-                        });
-                    }
+        for sha in shas {
+            for task in task_edges.anchors.get(sha).into_iter().flatten() {
+                if let Some(entry) = out.get_mut(sha) {
+                    entry.links.push(ProvenanceLink {
+                        link_method: LINK_METHOD_FACTORY_ANCHOR.to_string(),
+                        confidence: LinkConfidence::High,
+                        task_id: Some(task.id.clone()),
+                        task_title: task.title.clone(),
+                        session_id: None,
+                        agent_id: task.assignee.clone(),
+                        observed_at: task.updated_at.clone(),
+                        matched_prefix: None,
+                        ambiguous: false,
+                        ambiguous_candidates: Vec::new(),
+                    });
                 }
             }
         }
@@ -2162,12 +2315,32 @@ impl HistoryStore for SqliteHistoryStore {
             let mut seen: std::collections::HashSet<(String, String, String)> =
                 std::collections::HashSet::new();
 
-            for event in &events {
-                let exact = classify_candidate(&event.head_sha) == CandidateClass::Exact;
-                for sha in shas {
-                    if !candidate_matches(&event.head_sha, sha) {
-                        continue;
-                    }
+            // cas-5590: index the heads once, so each commit looks up its own
+            // prefixes instead of testing every head (~12 K live) per commit.
+            let mut by_head: HashMap<String, Vec<usize>> = HashMap::new();
+            for (position, event) in events.iter().enumerate() {
+                by_head
+                    .entry(event.head_sha.to_ascii_lowercase())
+                    .or_default()
+                    .push(position);
+            }
+            let mut widths: Vec<usize> = by_head.keys().map(String::len).collect();
+            widths.sort_unstable();
+            widths.dedup();
+
+            for sha in shas {
+                let lower = sha.to_ascii_lowercase();
+                // In event order, as the per-event loop visited them.
+                let mut matched: Vec<usize> = widths
+                    .iter()
+                    .filter_map(|&width| lower.get(..width).and_then(|prefix| by_head.get(prefix)))
+                    .flatten()
+                    .copied()
+                    .filter(|&position| candidate_matches(&events[position].head_sha, sha))
+                    .collect();
+                matched.sort_unstable();
+                for event in matched.into_iter().map(|position| &events[position]) {
+                    let exact = classify_candidate(&event.head_sha) == CandidateClass::Exact;
                     let key = (
                         sha.clone(),
                         event.head_sha.to_lowercase(),
@@ -2224,53 +2397,38 @@ impl HistoryStore for SqliteHistoryStore {
         }
 
         // --- Edge: the free-text close receipt in tasks.notes (medium).
-        if has_tasks {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, updated_at, assignee FROM tasks
-                  WHERE notes LIKE '%' || ?1 || '%' LIMIT ?2",
-            )?;
-            for sha in shas {
-                if sha.len() < FULL_SHA_LEN {
+        for sha in shas {
+            if sha.len() < FULL_SHA_LEN {
+                continue;
+            }
+            // The abbreviation, not the full SHA: close receipts quote both
+            // forms, and the short one is a superstring test that catches
+            // the long one too.
+            let probe = &sha[..NOTE_PROBE_LEN];
+            let already: std::collections::HashSet<String> = out
+                .get(sha)
+                .map(|p| p.links.iter().filter_map(|l| l.task_id.clone()).collect())
+                .unwrap_or_default();
+            for task in task_edges.mentions.get(&note_probe_key(probe)).into_iter().flatten() {
+                // The anchor edge already named this task exactly; a
+                // substring hit on the same task adds no information and
+                // would pad the answer with fake corroboration.
+                if already.contains(&task.id) {
                     continue;
                 }
-                // The abbreviation, not the full SHA: close receipts quote both
-                // forms, and the short one is a superstring test that catches
-                // the long one too.
-                let probe = &sha[..8];
-                let already: std::collections::HashSet<String> = out
-                    .get(sha)
-                    .map(|p| p.links.iter().filter_map(|l| l.task_id.clone()).collect())
-                    .unwrap_or_default();
-                let rows = stmt.query_map(params![probe, MAX_LINKS_PER_COMMIT as i64], |row| {
-                    Ok((
-                        row.get::<_, String>("id")?,
-                        row.get::<_, Option<String>>("title")?,
-                        row.get::<_, Option<String>>("updated_at")?,
-                        row.get::<_, Option<String>>("assignee")?,
-                    ))
-                })?;
-                for row in rows {
-                    let (id, title, updated_at, assignee) = row?;
-                    // The anchor edge already named this task exactly; a
-                    // substring hit on the same task adds no information and
-                    // would pad the answer with fake corroboration.
-                    if already.contains(&id) {
-                        continue;
-                    }
-                    if let Some(entry) = out.get_mut(sha) {
-                        entry.links.push(ProvenanceLink {
-                            link_method: LINK_METHOD_TASK_NOTE.to_string(),
-                            confidence: LinkConfidence::Medium,
-                            task_id: Some(id),
-                            task_title: title,
-                            session_id: None,
-                            agent_id: assignee,
-                            observed_at: updated_at,
-                            matched_prefix: Some(probe.to_string()),
-                            ambiguous: false,
-                            ambiguous_candidates: Vec::new(),
-                        });
-                    }
+                if let Some(entry) = out.get_mut(sha) {
+                    entry.links.push(ProvenanceLink {
+                        link_method: LINK_METHOD_TASK_NOTE.to_string(),
+                        confidence: LinkConfidence::Medium,
+                        task_id: Some(task.id.clone()),
+                        task_title: task.title.clone(),
+                        session_id: None,
+                        agent_id: task.assignee.clone(),
+                        observed_at: task.updated_at.clone(),
+                        matched_prefix: Some(probe.to_string()),
+                        ambiguous: false,
+                        ambiguous_candidates: Vec::new(),
+                    });
                 }
             }
         }
@@ -5082,6 +5240,65 @@ mod tests {
         assert_eq!(m.links.len(), 1, "{m:?}");
         assert_eq!(m.links[0].link_method, LINK_METHOD_TASK_NOTE);
         assert_eq!(m.links[0].confidence, LinkConfidence::Medium);
+    }
+
+    /// cas-5590: the daemon's 500-commit repair batch must not scan `tasks`
+    /// or the worker commit events once per commit. It holds the process's
+    /// shared connection, and per-SHA scans over the live store froze every
+    /// MCP call for ~40 s.
+    #[test]
+    fn a_repair_batch_reads_each_edge_once_not_once_per_commit_cas_5590() {
+        let (_t, store) = store();
+        let shas: Vec<String> = (0..500).map(|i| format!("{i:08x}{}", "c".repeat(32))).collect();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, title TEXT, notes TEXT, updated_at TEXT,
+                     assignee TEXT, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            // Receipts are dense in hex and digits, as live close notes are.
+            let receipts = "PASS 0000a1b2 at 2026-11-05T00:00:00Z; merged 00c0ffee0, 0 failed. "
+                .repeat(110);
+            let mut insert = conn
+                .prepare("INSERT INTO tasks (id, title, notes) VALUES (?1, 't', ?2)")
+                .unwrap();
+            for i in 0..3_000 {
+                insert.execute(params![format!("cas-{i}"), receipts]).unwrap();
+            }
+            // LIKE is ASCII case-insensitive, and a probe inside a longer hex run matches.
+            let mention = format!("{receipts} receipt {}", shas[7].to_uppercase());
+            insert.execute(params!["cas-mention", mention]).unwrap();
+        }
+        // The live store holds ~12 K usable worker_git_commit heads.
+        create_events_table(&store);
+        store
+            .lock()
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 11999)
+                 INSERT INTO events (event_type, entity_type, entity_id, summary, metadata, created_at)
+                 SELECT 'worker_git_commit', 'worker', 'w', 's',
+                        json_object('head_sha', 'f' || printf('%07x', i)), '2026-08-08T01:00:00Z'
+                   FROM n;",
+            )
+            .unwrap();
+        emit_worker_git_commit(&store, &shas[9][..8], "session-9");
+
+        let started = std::time::Instant::now();
+        let resolved = store.resolve_provenance("/repo", &shas).unwrap();
+        let elapsed = started.elapsed();
+
+        let links = &resolved[&shas[7]].links;
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].task_id.as_deref(), Some("cas-mention"));
+        let links = &resolved[&shas[9]].links;
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].session_id.as_deref(), Some("session-9"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "500 commits over 25 MB of notes and 12 K commit events took {elapsed:?} holding the shared connection"
+        );
     }
 
     /// The `shas` filter must narrow in SQL. `Some(empty)` means "this filter

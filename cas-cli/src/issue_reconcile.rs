@@ -273,7 +273,7 @@ pub struct ShippedIssueReport {
 }
 
 /// The delivery commits recorded on `task`, most specific first.
-fn delivery_commits(task: &Task) -> Vec<&str> {
+pub(crate) fn delivery_commits(task: &Task) -> Vec<&str> {
     let deliverables = &task.deliverables;
     [
         deliverables.delivery_pr_merge_commit.as_deref(),

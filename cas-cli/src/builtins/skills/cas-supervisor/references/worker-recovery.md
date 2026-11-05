@@ -1,234 +1,108 @@
 # Worker Recovery — Triage and Failure Modes
 
-Contents: [Authoritative liveness](#authoritative-liveness) · [Is the worker actually dead?](#is-the-worker-actually-dead) · [Verify lifecycle notifications](#verify-lifecycle-notifications-before-acting) · [Retry policy](#retry-policy-by-failure-mode) · [Failure modes](#worker-failure-recovery): silent worker, injected but unwoken, stalled spawn queue, context pressure, garbage output, resource contention.
+Contents: [Authoritative liveness](#authoritative-liveness) · [Is the worker actually dead?](#is-the-worker-actually-dead) · [Verify lifecycle notifications](#verify-lifecycle-notifications-before-acting) · [Retry policy](#retry-policy-by-failure-mode) · [Failure modes](#worker-failure-recovery)
 
 ## Authoritative liveness
 
-`worker_status`, `agent_list`, and the FACTORY pane share one dual-signal classifier:
+`worker_status`, `agent_list` and the FACTORY pane share one classifier and print its evidence. A live OS harness process outranks a stale heartbeat: do not shut down, unregister or respawn that worker. Never act on `Workers: None active` or `Filtered stale` alone; a false-empty roster can hide a live worker mid-turn. Purge dead registry rows with `gc_cleanup`.
 
-> **Live = (Active/Idle + heartbeat &lt; 30s) OR live OS harness process for that agent.**
-
-**Authoritative for shutdown / re-spawn decisions:**
-
-1. **OS process** (highest) — if Grok/Claude/Codex is still running, the worker is alive even when heartbeat lagged (`[alive — heartbeat stale]` / `active,alive-heartbeat-stale`). Do **not** shut down, unregister, or re-spawn.
-2. **Heartbeat freshness** — within ~30s → live. Past that with no process → not live.
-3. **Supporting:** last activity / transcript age, worktree dirty, active leases, `is-wedged`.
-4. **Never** act on `Workers: None active` or `Filtered stale` alone — a false-empty roster can hide a live worker mid-turn; confirm `ps`/worktree/`is-wedged` first. Use `gc_cleanup` to purge dead registry rows.
-
-Prompt-queue poison remediation requires an explicit age cutoff and supervisor sign-off:
-`factory action=gc_cleanup force=true older_than_secs=86400` terminally
-abandons only pending prompts older than one day and preserves the rows for forensics.
-Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
-destructive whole-queue clear and should not be used for targeted recovery.
+For a poisoned prompt queue, run `gc_report` first, then `factory action=gc_cleanup force=true older_than_secs=86400`, which abandons only pending prompts older than a day. Never pass `force=true` without `older_than_secs`: that clears the whole queue.
 
 ## Supervisor restart
 
-When your pane exits on its own (`/exit`, a crash, a kill), the factory shuts down
-and every worker pane stops with it. Only a requested restart spares them. Tell
-the operator this plainly before recommending a restart.
+When your pane exits on its own (`/exit`, a crash, a kill), the factory shuts down and every worker pane stops with it. Only a requested restart spares them. Tell the operator this plainly before recommending a restart.
 
-- **New `cas serve` binary:** ask the operator to use the harness's MCP
-  reconnect control (Claude Code: `/mcp`). It replaces only your MCP server;
-  your pane and the workers keep running. Use `recycle_worker` for stale
-  workers.
-- **A new harness version or a fresh context:**
-  1. Record your handoff with `memory action=remember entry_type=handoff`.
-  2. Run `factory action=restart_supervisor`. Within about a second the daemon
-     ends your session and starts a new one with the factory's boot harness,
-     model and effort. Workers keep their tasks, panes and leases. A `/model`
-     change does not carry over.
-  3. If your session is still running after 10 seconds, the restart did not
-     happen: a refusal arrives as a message, and silence means the running
-     daemon predates this action. Use the factory restart below.
-- **A crash, or a daemon that predates `restart_supervisor`:** treat it as a
-  factory restart.
-  1. Have each worker commit and push or park, and write `HANDOFF.md`.
-  2. Record your handoff with `memory action=remember entry_type=handoff`.
-  3. After the restart and preflight, respawn the workers by name on their
-     tasks. A respawn by name reuses the kept worktree.
+- **New `cas serve` binary:** ask the operator to use the harness's MCP reconnect control (Claude Code: `/mcp`). Your pane and the workers keep running; use `recycle_worker` for stale workers.
+- **A new harness version or a fresh context:** record a handoff with `memory action=remember entry_type=handoff`, then run `factory action=restart_supervisor`. The daemon starts a new session with the factory's boot harness, model and effort; workers keep their tasks, panes and leases, and a `/model` change does not carry over. If your session still runs after 10 seconds, the restart did not happen: a refusal arrives as a message, and silence means the daemon predates the action.
+- **A crash, or a daemon without `restart_supervisor`:** treat it as a factory restart. Have each worker commit and push or park and write `HANDOFF.md`, record your handoff, then after the restart and preflight respawn the workers by name on their tasks; a respawn by name reuses the kept worktree.
 
 ## Disposable verification and walk checkouts
 
-Create review scratch with `cas factory scratch-checkout --cas-root <root>
---task-id <task-id> --head <full SHA>`; add `--dispatch-id` for a dispatch.
-Use the printed path instead of creating an ad-hoc clone on the scratch drive.
-Run named Rust tests with `cas factory verifier-test` using the same owner
-arguments so Zig, the private target and capped admission stay consistent.
-Publish durable evidence to task artifacts. `gc_report` shows managed review
-state and large unmanaged leftovers; `gc_cleanup force=true dry_run=false`
-removes two-hour-old idle checkouts after task termination or dispatch resolution,
-including their Git worktree registrations. Live leases and process users retain
-the checkout. Unmanaged leftovers remain operator review items.
+Create review scratch with `cas factory scratch-checkout --cas-root <root> --task-id <task-id> --head <full SHA>` (add `--dispatch-id` for a dispatch) and use the printed path, not an ad-hoc clone. Run named Rust tests with `cas factory verifier-test` and the same owner arguments. `gc_cleanup force=true dry_run=false` removes idle checkouts two hours after their task or dispatch ends; live leases and process users keep theirs.
 
 ## Is the worker actually dead?
 
-Before you shut down a pane that *looks* broken, spend 60 seconds on triage. The supervisor TUI is not ground truth for worker liveness — the most common false positive is a worker mid-way through a long tool call or showing Claude Code's Bun/React-Ink crash screen (process alive, UI unresponsive). Destructive recovery on a live worker rips its worktree out from under itself and turns a recoverable hang into a real crash.
+The supervisor TUI is not ground truth. The usual false positive is a worker mid-way through a long tool call, or showing Claude Code's Bun/React-Ink crash screen while its process lives. Destructive recovery on a live worker rips its worktree out from under it.
 
-**Step 1: classify.** `cas factory is-wedged <worker>` returns one of six states plus evidence and exits with a differentiated code:
+1. **Classify:** `cas factory is-wedged <worker>` prints a state and its evidence.
 
-| Exit | State | What it means | Recovery |
-|---|---|---|---|
-| 0 | `alive` | PID up, transcript fresh, no crash signature — worker is running. | Wait. |
-| 1 | `wedged` | PID up, transcript fresh, Bun/React-Ink crash signature matched. | `cas factory kill` + respawn. |
-| 2 | `starved` | PID up, transcript cold (>60s since last write). Likely scheduler-starved or hung on a tool call. | Re-classify on the next `worker_idle` or task event. |
-| 3 | `dead` | PID gone, AND a second signal corroborates it (transcript stale AND worktree not recently edited). | Cleanup only — no kill needed. |
-| 4 | `unverified` | PID probe says gone, but the transcript is still fresh or the worktree was recently edited — a contradiction. | **Do not treat as dead.** Run `cas factory debug <worker>` and check the worktree before doing anything destructive; this is what a stale or wrong tracked pid looks like while the real worker is alive. |
-| 5 | `approval-hang` | A permission request is parked for a team lead and no child process is running. | Answer it: `cas factory approve <worker>` or `cas factory deny <worker> --reason "<why>"` (`--request <perm-id>` names one request). |
+   | State | Recovery |
+   |---|---|
+   | `alive` | Wait. |
+   | `wedged` (crash signature, process up) | `cas factory kill <worker>`, then respawn. |
+   | `starved` (process up, transcript cold) | Wait on an event reminder, never a timed poll. Classify again on the next `worker_idle` or task event. |
+   | `dead` (process gone, corroborated) | No kill needed; `task action=reset id=<task-id>` or `cas factory kill`. |
+   | `unverified` (signals contradict) | **Do not treat as dead.** Run `cas factory debug <worker>` and inspect the worktree; do not kill or reset the lease. |
+   | `approval-hang` | `cas factory approve <worker>` or `cas factory deny <worker> --reason "<why>"`. |
 
-The crash signature is the pane filling with minified paths like `/$bunfs/root/src/entrypoints/cli.js`, React-Ink `createElement("ink-box", ...)` enumerations and a JS stack trace; the PID and heartbeat stay alive, so only the transcript grep tells it apart from a live worker mid-call.
+2. **Read the transcript tail:** `cas factory debug <worker> --tail 20`. It reads the worker's own config dir, so a worker spawned with `config_dir=~/.claude-alt` writes under that directory. Use it to decide whether in-flight work is salvageable before killing.
+3. **Recover** only on `wedged` or `dead`. `cas factory kill` resets the leased tasks only once death is confirmed; investigate before passing `--force`.
 
-**Step 2: read the transcript tail.** `cas factory debug <worker> --tail 20` prints the last N JSONL entries from `~/.claude/projects/*/<session>.jsonl` without touching the TUI. That path follows the **worker's** config dir, not yours: a worker spawned with `config_dir=~/.claude-alt` writes its transcript under `~/.claude-alt/projects/*/` instead. If the transcript looks missing, check which config dir the worker was spawned into before concluding it never started. This is the canonical "what did the worker just do" signal — use it to decide whether the wedged state has salvageable in-flight work before killing.
-
-**Step 3: recovery.** Only after `is-wedged` reports `wedged` or `dead` — never off `unverified`:
-
-- **Wedged:** `cas factory kill <worker>`, then respawn. It SIGKILLs the worker's process group and resets its leased tasks (same semantics as `task action=reset`) only once death is confirmed; `cas factory kill --help` documents process resolution and the PID-recycling guard. Investigate before passing `--force`.
-- **Starved:** do not kill. Wait on an event reminder, never a timed poll. Re-check on the next `worker_idle` or task event; if it re-classifies as `wedged`, proceed to the kill path.
-- **Dead:** no kill needed. The `kill` verb is still safe to run (`skipping SIGKILL` + task reset runs); or manually `task action=reset id=<task-id>`.
-- **Unverified:** do not kill and do not reset the lease. Run `cas factory debug <worker>` and inspect the worktree manually; re-run `is-wedged` once you've confirmed which process is actually the worker.
-
-**Anti-pattern:** "pane looks broken → `shutdown_workers`". That pathway has destroyed in-progress work; the `is-wedged` / `debug` / `kill` triad replaces it.
+Never answer "pane looks broken" with `shutdown_workers`; that has destroyed in-progress work.
 
 ## Verify Lifecycle Notifications Before Acting
 
-Director and task-lifecycle notifications are hints, not ground truth. Before closing, reassigning, respawning, or merging because of a notification:
-
-- Run `task action=show id=<task-id>` and trust the task status over the notification text.
-- Check the worker branch tip or worktree commits before assuming work exists: `git -C .cas/worktrees/<worker> log --oneline -5`.
-- Check liveness with `factory action=worker_status` before declaring a worker idle or dead.
+Director and lifecycle notifications are hints. Before closing, reassigning, respawning or merging on one, read `task action=show id=<task-id>`, check the worker's commits (`git -C .cas/worktrees/<worker> log --oneline -5`) and check liveness with `factory action=worker_status`.
 
 ## Retry policy by failure mode
 
-Classify the failure before you retry or respawn. The same brief on the same
-cause fails the same way, so the failure mode decides what changes.
+Classify the failure before you retry. The same brief on the same cause fails the same way, so the failure mode decides what changes.
 
 | Failure mode | Signature | Retry |
 |---|---|---|
-| Harness crash or transient error | `is-wedged` says `wedged` or `dead`; garbage output; a transient API or network error | Respawn with the same brief. Point the new worker at the commits that already landed. |
-| Capacity | Rate limit, usage cap, model unavailable | Retry as is after the reset, or respawn on the lane's fallback recipe ([model-selection.md](model-selection.md)). |
-| Scope too large | Context ran out before the task finished; out-of-memory | Split the task and give a fresh worker the smaller brief. |
-| Model tool errors | The worker keeps mis-calling a tool or loops on one call | Respawn the same brief on a different model. |
-| Wrong approach | The delivery solves the wrong problem, review rejects the design, or the worker misread the brief | Rewrite the brief to name what was wrong, then use a fresh worker. Never re-send the brief that produced it. |
-| Environment or tooling | Missing binary, denied path, broken worktree, stale Cassy binary, CI infrastructure | Fix the environment first. Do not retry: no retry fixes an environment. |
-| Same failure twice | A retry fails with the same symptom | Stop. An identical second failure was never flake. Write down the premise you were retrying on and escalate to the operator, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
+| Harness crash or transient error | `wedged` or `dead`; garbage output; a transient API or network error | Respawn with the same brief and point the new worker at what landed. |
+| Capacity | Rate limit, usage cap, model unavailable | Retry after the reset, or use the lane's fallback recipe ([model-selection.md](model-selection.md)). |
+| Scope too large | Context ran out; out-of-memory | Split the task and give a fresh worker the smaller brief. |
+| Model tool errors | The worker keeps mis-calling or looping on a tool | Respawn the same brief on a different model. |
+| Wrong approach | Wrong problem solved, design rejected, brief misread | Rewrite the brief to name what was wrong; use a fresh worker. |
+| Environment or tooling | Missing binary, denied path, broken worktree, stale Cassy binary, CI infrastructure | Fix the environment first; no retry fixes it. |
+| Same failure twice | A retry fails the same way | Stop. Write down the premise you retried on and escalate, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
 
-Cap it at two retries per task across all modes, then stop and escalate.
-
-**A dead worker still leaves a report.** Before you reassign its task, write
-the report it never sent, so review sees a failure instead of a silent gap:
+Cap it at two retries per task, then escalate. Before reassigning a dead worker's task, write the report it never sent:
 `task action=notes id=<task-id> note_type=blocker notes="BLOCKED <tip sha or none>: worker died (<failure mode>); landed: <commits or nothing>"`.
 
 ## Worker Failure Recovery
 
-Recurring failure modes and their recovery procedures.
-
 ### Silent Worker
 
-**Signature:** Worker stops responding to messages. No progress notes, no commits, no heartbeat updates. Task stays `in_progress` indefinitely.
-
-Run `factory action=worker_status`, then the `is-wedged` / `debug` / `kill` triad above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup.
+No messages, notes, commits or heartbeat; the task stays `in_progress`. Run `factory action=worker_status`, then the triage above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup.
 
 ### Injected but Unwoken Worker
 
-**Signature:** Heartbeat is fresh, worktree is clean, and there is zero activity for 10+ minutes after a supervisor message. Delivery and acceptance are separate: inspect transport receipts, task state, and execution evidence before concluding the worker is stuck.
+Fresh heartbeat, clean worktree, no activity for 10+ minutes after a message. Delivery and acceptance are separate:
 
-**Diagnosis:**
+1. Read `task action=show id=<task-id>`: a successful `task action=start` is acceptance. A clean worktree alone does not prove inactivity.
+2. Read `coordination action=message_status notification_id=<id>`. It reports transport handoff, wake observations and confirmation separately; its queue columns are `processed_at, acked_at`, and neither proves acceptance or execution. `queue_ack` acknowledges durable supervisor notifications and `message_ack` prompt-message receipts; neither replaces `task action=start`. A missing prose ACK is not a recovery trigger.
 
-1. Confirm a fresh heartbeat with `factory action=worker_status`
-2. Read `task action=show id=<task-id>`: a successful start is authoritative assignment acceptance. A clean `git -C .cas/worktrees/<worker> status --short` alone does not prove inactivity.
-3. Check prompt delivery state with `coordination action=message_status notification_id=<id>` (the id the `message` call returned). It reports transport handoff, wake observations and confirmation separately; the queue columns behind it are `processed_at, acked_at`. A set `processed_at` records transport processing; `acked_at` records queue acknowledgement. Neither is assignment acceptance or execution proof. Use `queue_ack` for durable supervisor notifications and `message_ack` for prompt-message receipts; lifecycle relay acknowledgements reconcile linked rows. Neither replaces `task action=start`. Missing prose ACK alone is not a recovery trigger.
+Recovery: make sure the work is an assigned task with full acceptance criteria, then send a short urgent wake that points at it:
 
-**Recovery:**
+```text
+coordination action=message target=<worker> urgent=true summary="Task <id> assigned" message="Task <id> is assigned. Run task action=show id=<id>."
+```
 
-1. Ensure the work exists as an assigned task with full spec and acceptance criteria.
-2. Send a short urgent wake that points only at the task:
-
-   ```text
-   coordination action=message target=<worker> urgent=true summary="Task <id> assigned" message="Task <id> is assigned. Run task action=show id=<id>."
-   ```
-
-3. Do not kill or respawn. There is no evidence of a dead process or dirty worktree; the fix is a durable task plus a short wake.
+Do not kill or respawn: there is no evidence of a dead process or dirty worktree.
 
 ### Stalled Spawn Queue
 
-If `worker_status` shows `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED`,
-or `SPAWN IN FLIGHT FOR`, the factory daemon has stopped processing spawn and
-shutdown requests. Run `factory action=restart_spawn_queue`. It
-keeps the session and every pane. The daemon abandons its in-flight spawn,
-drops dequeued actions that have not run, and messages you what to re-issue.
-If the loop itself is wedged, its watchdog first kills hung git, gh or ssh
-helper processes. Check `worker_status` again. If the loop is still wedged,
-file a CAS bug quoting the phase and wait channel that `worker_status` names.
+On `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED` or `SPAWN IN FLIGHT FOR`, run `factory action=restart_spawn_queue`. It keeps the session and every pane and messages you what to re-issue. If `worker_status` still shows the loop wedged, file a CAS bug quoting the phase and wait channel it names.
 
-### Context pressure (worker_status `context:` line)
+### Context pressure
 
-`factory action=worker_status` prints a `context:` line per worker, banded by the share of the model's context window in use:
+`worker_status` prints a `context:` band per worker once it has answered at least once. At `approaching`, remind the worker to commit WIP. At `near-limit`, act now:
 
-```text
-  • bright-leopard-9 (heartbeat: 8s ago)
-    context: approaching (~112k / 200k tk; ~44% headroom)
-```
-
-| Band | Window used | Action |
-|---|---|---|
-| `ok` | < 50% | Normal — no action. |
-| `approaching` | 50–79% | Note it. Remind the worker to commit any WIP. |
-| `near-limit` | ≥ 80% | Act immediately — see recovery steps below. |
-
-An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED` line naming the command.
-
-**Pre-compaction recovery (context: near-limit):**
-
-1. Send: `coordination action=message target=<worker> summary="Context near limit — commit now" message="Your context is near the limit. Commit any in-progress work immediately (git add / git commit), then report what you committed."`
-2. Wait for the commit confirmation on a `task_*` or `worker_idle` event reminder.
-3. If the worker is mid-task and not responding: check the worktree manually: `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`
-4. Once work is committed, its `HANDOFF.md` written and the worker is idle: `factory action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
-
-**Why the indicator may be absent:** The context line is read from the tail of the worker's session transcript. A newly spawned worker that hasn't produced an assistant message yet will show no `context:` line — this is expected. The line appears after the worker's first response.
+1. `coordination action=message target=<worker> summary="Context near limit — commit now" message="Commit any in-progress work now, then report what you committed."`
+2. Wait for the commit on a `task_*` or `worker_idle` event reminder, or check `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`.
+3. Once work is committed, `HANDOFF.md` written and the worker idle, run `factory action=recycle_worker target=<worker>`; it keeps the name, recipe and worktree. `RECYCLE RECOMMENDED` names the same command for an idle Codex worker.
 
 ### Garbage Output (Context Exhaustion)
 
-**Signature:** Worker output degrades into garbled multi-language text (Russian/Chinese characters mixed with English, repeating pseudo-words like "updofficial/action/official", BPE fragment nonsense). May be followed by a generic "violates Usage Policy" API error. This is token sampling collapse from an exhausted context window, not a real policy violation.
+Output degrading into mixed-language or pseudo-word text, sometimes followed by a "violates Usage Policy" error, is sampling collapse from an exhausted context, not a policy violation. Acting on `near-limit` usually prevents it.
 
-**Triggering conditions:** Long iterative fix-test-rerun loops, heavy stack trace volume in tool results, extended sessions with rapid context churn (20+ file edits in a short window). The `context: near-limit` indicator in `worker_status` fires before this stage — if you act on `near-limit`, you typically avoid reaching the garbled-output stage.
+1. Send no revision instructions; more messages make it worse.
+2. Shut the worker down: `factory action=shutdown_workers worker_names=<worker>`.
+3. List its commits (`git -C .cas/worktrees/<worker> log --oneline <epic-branch>..HEAD`) and inspect them closely: degraded output can look plausible and be wrong. Record the good commits in a task note.
+4. `task action=reset id=<task-id>`, spawn a fresh worker with `task_id=<task-id>`, point it at the good commits, and ask it to commit working state periodically.
 
-**Recovery:**
+### Resource-Contention Worker Crashes
 
-1. Do not send revision instructions. The worker's context is poisoned — any further messages make it worse, not better.
-2. Shut down the affected worker immediately: `factory action=shutdown_workers worker_names=<worker>`. Do not attempt to salvage the session.
-3. Check the worker's worktree for any commits made before degradation: `git -C .cas/worktrees/<worker> log --oneline <epic-branch>..HEAD`
-4. Inspect those diffs carefully — degraded output may be syntactically plausible but semantically wrong. Record which commits are good in a task note.
-5. Free the task with `task action=reset id=<task-id>`, then spawn a fresh worker on it (`task_id=<task-id>`); point it at the good commits in the assignment.
-6. If the task involves iterative test-fix loops, add guidance to the assignment: "periodically commit working state" so partial progress survives if degradation recurs.
-
-### Resource-Contention Worker Crashes (cas-0bf4)
-
-**Signature:** Multiple workers wedge around the same time in the Claude Code JS crash-screen state (Bun/React Ink render exception). Host shows `uptime` load avg well above CPU count (5-min avg > 1.0 × num_cpus on a 16-thread box = saturated). Memory is NOT under pressure — this is CPU scheduler starvation, not OOM.
-
-**Root cause:** Each worker's `cargo` builds a per-worktree `target/` with rustc fanning out to `num_cpus` parallel jobs. 4 workers × 16 rustc threads × an autofix pass = scheduler storm → Claude Code event loop starves → Ink render exception → worker wedged in crash-screen state. See task `cas-0bf4` and discovery in `cas-4513`.
-
-**Built-in mitigation (on by default):** Factory mode exports `CARGO_BUILD_JOBS` into each worker's env at spawn and wraps the worker command with `nice -n 10` so cargo runs at a lower priority than the supervisor. Controlled by two config knobs in `.cas/config.toml`:
-
-```toml
-[factory]
-# Cap on CARGO_BUILD_JOBS exported into workers.
-# "auto" (default) = max(2, num_cpus / 4).
-# Any numeric string like "4" is exported verbatim.
-worker_build_jobs = "auto"
-
-# When true, prefix each worker spawn with `nice -n 10`.
-# Default true. Flip false for single-worker or benchmarking.
-nice_cargo = true
-```
-
-Shell-level overrides (win over config): `CAS_FACTORY_CARGO_BUILD_JOBS=<N>`, `CAS_FACTORY_NICE_WORKER=1`, `CAS_FACTORY_NICE_LEVEL=<N>`.
-
-**When the defaults are wrong:**
-
-- Running more than 4 workers on a 16-thread host → set `worker_build_jobs = "2"` (÷4 assumption no longer holds).
-- Host has 4–8 cores → the auto-cap floors at 2, which is still `workers × 2` rustc threads; on a 4-worker factory with 4 cores consider `worker_build_jobs = "1"` manually.
-- Host has 32+ threads → `"auto"` is fine; can push higher if wall-time matters.
-- CPU-bound but not crashing → flip `nice_cargo = false` to let workers and supervisor compete on equal terms.
-
-**Repro runbook (for verifying the cap works on a given host):** spawn 4 workers on this repo, trigger simultaneous cargo builds in all of them (`cargo test` in each worktree), watch `uptime` over 60 s. 5-min load avg should stay below CPU count. If it still saturates, drop `worker_build_jobs` one step (e.g. `"auto"` → `"2"`) and re-check.
-
-**If workers still wedge under these caps:** the scheduler storm is not the bottleneck. Likely candidates, in order of follow-up cost: (1) subagent concurrency cap (cas-0bf4 Phase 3), (2) operational — spawn fewer workers.
+Several workers wedging together in the crash-screen state while the host's 5-minute load exceeds its CPU count is scheduler starvation from parallel `cargo` builds, not memory pressure. Factory mode caps each worker's `CARGO_BUILD_JOBS` and runs it under `nice`; the spawn receipt shows both. Tune `[factory] worker_build_jobs` (default `auto`) and `nice_cargo` in `.cas/config.toml`: lower the job cap when running more workers than the host has cores for. If workers still wedge under the caps, spawn fewer workers.

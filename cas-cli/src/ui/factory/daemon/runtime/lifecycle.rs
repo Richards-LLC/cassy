@@ -81,15 +81,37 @@ fn page_operator_for_idle_supervisor(
         "Supervisor {supervisor} has taken no action for over {hours} hours and has not answered its idle pages, while work waits:\n{}\nType in its pane to wake it, or take the work over.",
         next_step.next_step_text()
     );
+    record_operator_page(
+        cas_dir,
+        "supervisor-idle-watchdog",
+        &summary,
+        message,
+        &format!("supervisor-idle-page:{session}:{}", episode.to_rfc3339()),
+    );
+}
+
+/// One durable, deduped blocker turn to the operator (Commander and the
+/// operator route), stamped by the daemon. Shared by the supervisor-idle page
+/// (cas-7456) and the progress watchdog (cas-ddae); `dedupe_key` names the
+/// episode, so a repeat for the same episode records nothing. Returns whether
+/// the turn is recorded (a duplicate counts).
+pub(super) fn record_operator_page(
+    cas_dir: &std::path::Path,
+    source: &str,
+    summary: &str,
+    message: String,
+    dedupe_key: &str,
+) -> bool {
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
-        tracing::warn!("cas-7456: prompt queue unavailable; supervisor-idle operator page skipped");
-        return;
+        tracing::warn!(source, "prompt queue unavailable; operator page skipped");
+        return false;
     };
     let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
         schema_version: 2,
         reply_to: None,
         message,
-        summary: summary.clone(),
+        summary: summary.to_string(),
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
@@ -99,26 +121,28 @@ fn page_operator_for_idle_supervisor(
     }) {
         Ok(payload) => payload,
         Err(error) => {
-            tracing::warn!(%error, "cas-7456: failed to encode the supervisor-idle operator page");
-            return;
+            tracing::warn!(%error, source, "failed to encode the operator page");
+            return false;
         }
     };
     if let Err(error) = queue.record_operator_turn(&cas_store::OperatorTurn {
-        source: "supervisor-idle-watchdog",
+        source,
         target: "operator",
         prompt: &payload,
         factory_session: (!session.is_empty()).then_some(session.as_str()),
         metadata: cas_store::OperatorTurnMetadata {
-            summary: Some(summary.as_str()),
+            summary: Some(summary),
             priority: Some(cas_store::NotificationPriority::High),
             origin: Some(&cas_store::QueueOrigin::Daemon),
             kind: Some("blocker"),
-            dedupe_key: Some(&format!("supervisor-idle-page:{session}:{}", episode.to_rfc3339())),
+            dedupe_key: Some(dedupe_key),
             ..Default::default()
         },
     }) {
-        tracing::warn!(%error, "cas-7456: failed to record the supervisor-idle operator page");
+        tracing::warn!(%error, source, "failed to record the operator page");
+        return false;
     }
+    true
 }
 
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
@@ -1298,7 +1322,7 @@ fn enqueue_worker_attention_relay_detail(
     )
 }
 
-fn enqueue_worker_attention_relay_detail_with_key(
+pub(super) fn enqueue_worker_attention_relay_detail_with_key(
     cas_dir: &std::path::Path,
     kind: &str,
     worker: &str,
@@ -1471,6 +1495,9 @@ fn enqueue_worker_attention_relay_inner(
     // supervisor are a blocker, not routine: idle workers burn wall clock.
     if kind == "supervisor_stalled" {
         body = crate::prompt_revalidation::attach_blocker_envelope(&body, "ready work", task_id);
+    } else if kind == "progress_stalled" {
+        // cas-ddae: nothing has moved with work in flight; a blocker, not routine.
+        body = crate::prompt_revalidation::attach_blocker_envelope(&body, "no factory progress", task_id);
     } else if kind == "pty_write_stalled" {
         body = crate::prompt_revalidation::attach_blocker_envelope(&body, "PTY write blocked", task_id);
     }
@@ -3659,6 +3686,8 @@ impl FactoryDaemon {
         // lose both its auto-merge arm and queue entry without a merge-group
         // run, which still needs one supervisor wake.
         let mut last_auto_merge_membership = std::collections::BTreeSet::new();
+        // cas-73fa: run-less queue exits awaiting their confirming poll.
+        let mut last_held_queue_exits = std::collections::BTreeSet::new();
         // cas-e753 (GH #1145): Violet push-wake. Claims run on the blocking
         // pool every 15 s; channel sweeps run as their own task so a slow
         // Violet read never holds up the next claim.
@@ -3905,6 +3934,7 @@ impl FactoryDaemon {
                     let watch_cas_dir = self.app.cas_dir().to_path_buf();
                     let previously_queued = last_merge_queue_membership.clone();
                     let previously_armed = last_auto_merge_membership.clone();
+                    let previously_held = last_held_queue_exits.clone();
                     let mut watched_branches =
                         std::collections::BTreeSet::from(["main".to_string()]);
                     if let Some(manager) = self.app.worktree_manager() {
@@ -3956,6 +3986,7 @@ impl FactoryDaemon {
                             &supervisor_prs,
                             &previously_queued,
                             &previously_armed,
+                            &previously_held,
                         )?;
                         // Reuse this existing bounded background read. Presence
                         // publishes the local snapshot; the control loop does
@@ -4001,6 +4032,7 @@ impl FactoryDaemon {
                             self.pending_ci_wakes.extend(ci_wakes);
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
+                            last_held_queue_exits = queue_poll.held_exits;
                             // GH #1165: persisting the results is store work;
                             // it runs on the store worker, in order.
                             let cas_dir = self.app.cas_dir().to_path_buf();

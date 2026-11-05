@@ -921,6 +921,8 @@ struct ShutdownWorkerSnapshot {
     worktree_state: String,
     worktree_cleanup_verdict: String,
     unsafe_worktree: bool,
+    /// The worker's checkout, when it is on disk (cas-2879 rescue).
+    clone_path: Option<std::path::PathBuf>,
 }
 
 /// The task rows the shutdown safety check judges, or why they are unreadable.
@@ -950,6 +952,48 @@ impl ShutdownWorkerSnapshot {
 
     fn render(&self) -> String {
         format!("{}; {}", self.render_state(), self.worktree_cleanup_verdict)
+    }
+
+    /// cas-2879: the exact next step for a refused shutdown of this worker.
+    fn remedy(&self) -> String {
+        let worker = &self.worker_name;
+        if self.unsafe_worktree {
+            format!(
+                "remedy: message {worker} to commit, push its branch and park its task, wait \
+                 for its park, then retry. force=true instead saves the work to \
+                 refs/cas/rescue/{worker}/<time> and pushes that ref before teardown; the work \
+                 is then on that ref, not in the delivery"
+            )
+        } else {
+            format!(
+                "remedy: have {worker} park or hand off its in-progress task, then retry; \
+                 force=true releases the task unfinished"
+            )
+        }
+    }
+
+    /// cas-2879: before a forced teardown, keep unpushed or uncommitted work
+    /// on a pushed rescue ref, and say exactly what happened.
+    fn rescue_for_forced_shutdown(&self) -> Option<String> {
+        if !self.unsafe_worktree {
+            return None;
+        }
+        let worker = &self.worker_name;
+        let Some(path) = self.clone_path.as_deref() else {
+            return Some(format!("{worker}: no worktree on disk; nothing to preserve"));
+        };
+        let git = crate::worktree::GitOperations::new(path.to_path_buf());
+        Some(match git.rescue_unpushed_work(worker, None, "HEAD", Some(path)) {
+            Ok(Some(work)) => format!("{worker}: {}", work.describe()),
+            Ok(None) => format!(
+                "{worker}: every commit is on a remote and the tree is clean; nothing to preserve"
+            ),
+            Err(error) => format!(
+                "{worker}: RESCUE FAILED ({error}); its worktree and branch are kept on disk at \
+                 {}, and are the only copy of that work",
+                path.display()
+            ),
+        })
     }
 
     /// Tasks and worktree state without the shutdown cleanup verdict, which
@@ -1003,18 +1047,19 @@ fn shutdown_worker_snapshot(
         .map(str::to_string)
         .collect::<Vec<_>>();
 
-    let (worktree_state, worktree_cleanup_verdict, unsafe_worktree) =
+    let (worktree_state, worktree_cleanup_verdict, unsafe_worktree, clone_path) =
         match resolve_worker_clone_path(cas_root, worker) {
             WorkerClonePathResolve::Ready(path) => {
                 let (state, unsafe_worktree) =
                     shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
                 let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
-                (state, verdict, unsafe_worktree)
+                (state, verdict, unsafe_worktree, Some(path))
             }
             WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
                 format!("worktree={} (not present)", candidate.display()),
                 "worktree absent (nothing to remove)".to_string(),
                 false,
+                None,
             ),
         };
 
@@ -1026,6 +1071,7 @@ fn shutdown_worker_snapshot(
         worktree_state,
         worktree_cleanup_verdict,
         unsafe_worktree,
+        clone_path,
     }
 }
 
@@ -1063,6 +1109,8 @@ pub(crate) fn shutdown_worktree_safety(
         return shutdown_local_worktree_safety(path, dirty, target_branches);
     }
 
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string());
     let unpushed =
         run_git(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"]).and_then(|count| {
             count
@@ -1072,7 +1120,7 @@ pub(crate) fn shutdown_worktree_safety(
     match (dirty, unpushed, remote) {
         (Ok(dirty), Ok(unpushed), Ok(_)) => (
             format!(
-                "worktree={} (dirty_files={dirty}, unpushed_commits={unpushed})",
+                "worktree={} (branch={branch}, dirty_files={dirty}, unpushed_commits={unpushed})",
                 path.display()
             ),
             dirty > 0 || unpushed > 0,
@@ -3849,12 +3897,23 @@ impl CasService {
                     "shutdown_workers refused: selected worker state requires force=true. Nothing was queued.\n{}",
                     unsafe_snapshots
                         .iter()
-                        .map(|snapshot| format!("- {}", snapshot.render()))
+                        .map(|snapshot| format!("- {}\n  {}", snapshot.render(), snapshot.remedy()))
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),
             ));
         }
+
+        // cas-2879: force never discards work silently. Unpushed commits and
+        // uncommitted files go to a pushed rescue ref before anything stops.
+        let rescue_lines: Vec<String> = if force {
+            unsafe_snapshots
+                .iter()
+                .filter_map(|snapshot| snapshot.rescue_for_forced_shutdown())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Force was needed and given: that is the intervention, whichever stop
         // path follows. The respawn it causes is paired at the next spawn.
@@ -3984,9 +4043,23 @@ impl CasService {
             .chain(selected_launched_names.iter().cloned())
             .collect();
 
+        let rescue_report = if rescue_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWork preserved before forced teardown (this is not a delivery; report it as \
+                 rescued, not confirmed):\n{}",
+                rescue_lines
+                    .iter()
+                    .map(|line| format!("- {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+
         if worker_names.is_empty() {
             return Ok(Self::success(format!(
-                "Shut down adopted workers: {}. Worktrees preserved.",
+                "Shut down adopted workers: {}. Worktrees preserved.{rescue_report}",
                 selected
                     .iter()
                     .map(|worker| worker.name.as_str())
@@ -4048,7 +4121,7 @@ impl CasService {
             format!("worker(s): {}", worker_names.join(", "))
         };
         let msg = format!(
-            "Queued shutdown request for {request_scope} (request ID: {request_id})\nExact affected workers and request-time state:\n{}",
+            "Queued shutdown request for {request_scope} (request ID: {request_id})\nExact affected workers and request-time state:\n{}{rescue_report}",
             snapshots
                 .iter()
                 .map(|snapshot| format!("- {}", snapshot.render()))
@@ -9714,33 +9787,48 @@ fn apply_task_delivery_git_status_with_gh(
             repo, task, worker,
         )
     });
-    let head_ref = task.deliverables.factory_branch_anchor.as_deref().unwrap_or(&branch);
-    let Ok(head) = run_git(repo, &["rev-parse", "--verify", &format!("{head_ref}^{{commit}}")]) else {
+    let tip_ref = task.deliverables.factory_branch_anchor.as_deref().unwrap_or(&branch);
+    let Ok(tip) = run_git(repo, &["rev-parse", "--verify", &format!("{tip_ref}^{{commit}}")]) else {
         return;
     };
     let base = task.deliverables.work_target.as_ref()
         .map(|target| target.target_branch.as_str())
         .filter(|branch| !branch.is_empty())
-        .unwrap_or(&status.base_branch);
-    let Ok(counts) = run_git(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")]) else {
+        .unwrap_or(&status.base_branch)
+        .to_owned();
+    let Some((behind, ahead)) = left_right_counts(repo, &base, &tip) else {
         return;
     };
-    let mut parts = counts.split_whitespace();
-    let (Some(behind), Some(ahead)) = (parts.next().and_then(|n| n.parse().ok()), parts.next().and_then(|n| n.parse().ok())) else {
-        return;
-    };
-    status.branch = branch;
-    status.head_sha = head;
-    status.base_branch = base.to_owned();
-    status.behind = behind;
-    status.ahead = ahead;
-    let pushed_ref = format!("origin/{}", status.branch);
-    status.pushed_ref = if run_git(repo, &["rev-parse", "--verify", &format!("refs/remotes/{pushed_ref}")]).is_ok() {
-        pushed_ref
+    // cas-2879: the real HEAD, dirty state and push state stay on the git:
+    // line. On the delivery branch, ahead/behind follow HEAD against the
+    // task target; the anchor is reported beside it, never instead of it.
+    if branch == status.branch {
+        if let Some((behind, ahead)) = left_right_counts(repo, &base, "HEAD") {
+            status.base_branch = base.clone();
+            status.behind = behind;
+            status.ahead = ahead;
+        }
     } else {
-        "none".to_string()
-    };
-    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, gh_program);
+        let pushed_ref = format!("origin/{branch}");
+        let pushed_ref = if run_git(repo, &["rev-parse", "--verify", &format!("refs/remotes/{pushed_ref}")]).is_ok() {
+            pushed_ref
+        } else {
+            "none".to_string()
+        };
+        status.pr_url = collect_worker_pr_url(repo, &branch, &pushed_ref, gh_program);
+    }
+    let head_past_tip = run_git(repo, &["merge-base", "--is-ancestor", &tip, "HEAD"])
+        .is_ok()
+        .then(|| left_right_counts(repo, &tip, "HEAD").map(|(_, past)| past))
+        .flatten();
+    status.delivery = Some(TaskDeliveryGit {
+        branch,
+        tip,
+        ahead,
+        behind,
+        base_branch: base,
+        head_past_tip,
+    });
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -9756,7 +9844,7 @@ fn collect_worker_activity_worktree_snapshot(
         return None;
     };
     let git_status = collect_worker_git_status(&path);
-    if !git_status.dirty {
+    if git_status.dirty != Some(true) {
         return None;
     }
 
@@ -12934,11 +13022,23 @@ pub(crate) struct WorkerGitStatus {
     pub behind: usize,
     /// Branch used as the ahead/behind baseline (e.g. "origin/main")
     pub base_branch: String,
-    /// `true` if the worker scope has changes: porcelain index state normally,
-    /// or the committed contribution range while a merge is in progress.
-    pub dirty: bool,
-    /// `"origin/<branch>"` when the branch has been pushed, otherwise `"none"`
+    /// `Some(true)` if the worker scope has changes: porcelain index state
+    /// normally, or the committed contribution range while a merge is in
+    /// progress. `None` when git could not answer (cas-2879: never "[clean]").
+    pub dirty: Option<bool>,
+    /// Entries in the repository's stash, which every worktree shares and
+    /// which is never pushed. `None` when git could not answer.
+    pub stash_count: Option<usize>,
+    /// `"origin/<branch>"` when the remote-tracking ref exists, otherwise
+    /// `"none"`. Existence alone is not "pushed": see `upstream`.
     pub pushed_ref: String,
+    /// HEAD against `pushed_ref` as `(ahead, behind)`: commits only in HEAD
+    /// and commits only on the remote ref. `None` when there is no remote ref
+    /// or the count failed. cas-2879: "[pushed]" requires `ahead == 0`.
+    pub upstream: Option<(usize, usize)>,
+    /// The task delivery bound to this worker, when it is not simply the
+    /// worktree's HEAD (cas-2879). The `git:` line always shows the real HEAD.
+    pub delivery: Option<TaskDeliveryGit>,
     /// Result of the open pull-request lookup.
     pub pr_url: WorkerPrUrl,
     /// `true` when this path is the SHARED primary checkout (the main
@@ -12950,6 +13050,46 @@ pub(crate) struct WorkerGitStatus {
     /// `false` (treated as a linked worktree) whenever git can't answer —
     /// a false alarm on every non-git dir would train the reader to ignore it.
     pub is_shared_checkout: bool,
+}
+
+/// The bound task delivery measured beside a worker's real HEAD (cas-2879).
+///
+/// QA cas-881f: worker_status printed the parked anchor as the worktree's
+/// HEAD, so a commit made after parking read as "[clean] [pushed]" and a
+/// supervisor told the operator the work was safe. The anchor now renders on
+/// its own line and never replaces HEAD.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskDeliveryGit {
+    /// Delivery branch bound to the task.
+    pub branch: String,
+    /// Parked anchor, else the delivery branch tip (full SHA).
+    pub tip: String,
+    /// Delivery tip against `base_branch`.
+    pub ahead: usize,
+    pub behind: usize,
+    pub base_branch: String,
+    /// Commits on the worktree HEAD after `tip`, when HEAD descends from it.
+    pub head_past_tip: Option<usize>,
+}
+
+impl WorkerGitStatus {
+    /// The one place that says whether HEAD is on the remote (cas-2879).
+    /// "[pushed: …]" means every HEAD commit is on that remote-tracking ref.
+    /// The ref is the local copy from the last fetch or push, and says so.
+    pub(crate) fn push_state_label(&self) -> String {
+        let remote = self.pushed_ref.as_str();
+        match self.upstream {
+            _ if remote == "none" => "[not pushed]".to_string(),
+            Some((0, 0)) => format!("[pushed: {remote} as of last fetch]"),
+            Some((0, behind)) => format!(
+                "[pushed: {remote} as of last fetch; it has {behind} commit(s) HEAD lacks]"
+            ),
+            Some((ahead, _)) => {
+                format!("[NOT PUSHED: {ahead} commit(s) not on {remote} as of last fetch]")
+            }
+            None => format!("[push unknown: {remote} exists; HEAD containment unmeasured]"),
+        }
+    }
 }
 
 /// Outcome of the best-effort open pull-request lookup used by
@@ -13059,8 +13199,11 @@ fn collect_worker_git_status_with_gh(
     // to merge-base..HEAD there so another lane's incoming files do not render
     // as this worker's dirty/drift signal (cas-d04f / cas-7a21).
     let dirty = worker_scope_paths(worktree_path)
-        .map(|paths| !paths.is_empty())
-        .unwrap_or(false);
+        .ok()
+        .map(|paths| !paths.is_empty());
+    let stash_count = run_git(worktree_path, &["stash", "list"])
+        .ok()
+        .map(|list| list.lines().filter(|line| !line.trim().is_empty()).count());
 
     // --- pushed ref -----------------------------------------------------------
     // Check whether `refs/remotes/origin/<branch>` exists locally (i.e. has the
@@ -13084,6 +13227,12 @@ fn collect_worker_git_status_with_gh(
             "none".to_string()
         }
     };
+
+    // cas-2879: a remote ref that exists is not proof HEAD is on it.
+    let upstream = (pushed_ref != "none")
+        .then(|| left_right_counts(worktree_path, &pushed_ref, "HEAD"))
+        .flatten()
+        .map(|(remote_only, head_only)| (head_only, remote_only));
 
     // --- open PR URL (gh, graceful degrade) -----------------------------------
     // Keep the pushed-ref short-circuit to avoid an unnecessary ~200ms query,
@@ -13111,10 +13260,28 @@ fn collect_worker_git_status_with_gh(
         behind,
         base_branch,
         dirty,
+        stash_count,
         pushed_ref,
+        upstream,
+        delivery: None,
         pr_url,
         is_shared_checkout,
     }
+}
+
+/// `git rev-list --left-right --count left...right` as `(left_only, right_only)`.
+fn left_right_counts(
+    repo: &std::path::Path,
+    left: &str,
+    right: &str,
+) -> Option<(usize, usize)> {
+    let counts = run_git(
+        repo,
+        &["rev-list", "--left-right", "--count", &format!("{left}...{right}")],
+    )
+    .ok()?;
+    let mut parts = counts.split_whitespace();
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
 /// Resolve an open PR for a branch without exposing subprocess details.
@@ -13233,12 +13400,12 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         return String::new();
     }
 
-    let dirty_label = if gs.dirty { "[dirty]" } else { "[clean]" };
-    let pushed_label = if gs.pushed_ref == "none" {
-        "[not pushed]".to_string()
-    } else {
-        format!("[pushed: {}]", gs.pushed_ref)
+    let dirty_label = match gs.dirty {
+        Some(true) => "[dirty]",
+        Some(false) => "[clean]",
+        None => "[dirty state unknown]",
     };
+    let pushed_label = gs.push_state_label();
     let pr_label = gs.pr_url.to_string(); // URL, "none", or "unknown (...)"
 
     // cas-ecf7 (GH #118): a worktree that is behind its base was the failure
@@ -13262,9 +13429,23 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         shared_checkout_parked_warning(gs.is_shared_checkout, &gs.branch, &gs.base_branch)
             .unwrap_or_default();
 
+    let stash_label = match gs.stash_count {
+        Some(0) => String::new(),
+        Some(count) => format!(
+            "\n    stash: {count} entr{} in this repository's shared stash; stashes are never pushed",
+            if count == 1 { "y" } else { "ies" }
+        ),
+        None => "\n    stash: unknown (git stash list failed)".to_string(),
+    };
+    let delivery_label = gs
+        .delivery
+        .as_ref()
+        .map(|delivery| format_task_delivery_git(gs, delivery))
+        .unwrap_or_default();
+
     format!(
         "\n    git: {} @ {} {} {}\
-         \n    ahead: {} behind: {} (vs {}){}{}\
+         \n    ahead: {} behind: {} (vs {}){}{}{}{}\
          \n    PR: {}",
         gs.branch,
         head_sha_for_display(&gs.head_sha),
@@ -13273,10 +13454,39 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         gs.ahead,
         gs.behind,
         gs.base_branch,
+        stash_label,
+        delivery_label,
         stale_label,
         parked_label,
         pr_label,
     )
+}
+
+/// The task-delivery line beside the real HEAD (cas-2879). Silent when the
+/// delivery is exactly the worktree's HEAD.
+fn format_task_delivery_git(gs: &WorkerGitStatus, delivery: &TaskDeliveryGit) -> String {
+    let tip = head_sha_for_display(&delivery.tip);
+    if delivery.branch != gs.branch {
+        return format!(
+            "\n    task delivery: {} @ {tip} ahead: {} behind: {} (vs {}); this worktree has \
+             {} checked out, so the git: line above is not the delivery",
+            delivery.branch, delivery.ahead, delivery.behind, delivery.base_branch, gs.branch,
+        );
+    }
+    if delivery.tip == gs.head_sha {
+        return String::new();
+    }
+    let head = head_sha_for_display(&gs.head_sha);
+    match delivery.head_past_tip {
+        Some(count) => format!(
+            "\n    ⚠️ PARKED TIP {tip} IS NOT HEAD {head}: HEAD has {count} commit(s) after \
+             the parked tip that are not in the delivery"
+        ),
+        None => format!(
+            "\n    ⚠️ PARKED TIP {tip} IS NOT HEAD {head}: HEAD does not descend from the \
+             parked tip"
+        ),
+    }
 }
 
 // =============================================================================
@@ -14563,6 +14773,7 @@ mod tests {
             worktree_state: "worktree=/repo/.cas/worktrees/calm-hawk-84 (dirty_files=0)".to_string(),
             worktree_cleanup_verdict: shutdown_worktree_cleanup_verdict(repo.path(), false),
             unsafe_worktree: false,
+            clone_path: None,
         };
         assert!(snapshot.render().contains("will be removed at shutdown"));
         std::fs::write(repo.path().join("unfinished.txt"), "work").expect("write dirty file");
@@ -15454,6 +15665,7 @@ mod tests {
             worktree_state: "worktree=/tmp/w".into(),
             worktree_cleanup_verdict: "worktree /tmp/w will be removed at shutdown".into(),
             unsafe_worktree: false,
+            clone_path: None,
         };
         assert!(!snapshot.requires_force());
         snapshot.mark_task_state_unknown(&error);
@@ -15461,6 +15673,47 @@ mod tests {
         let rendered = snapshot.render();
         assert!(rendered.contains("unknown (") && rendered.contains(&error), "{rendered}");
         assert!(rendered.contains("task state unknown"), "{rendered}");
+    }
+
+    /// cas-2879 (QA cas-881f): a worker holding an unpushed commit is
+    /// measured from its real worktree, refused with an exact remedy, and a
+    /// forced shutdown keeps the commit on a pushed rescue ref and says so.
+    #[test]
+    fn forced_shutdown_rescues_unpushed_commit_and_refusal_names_remedy_cas_2879() {
+        let origin = tempfile::tempdir().unwrap();
+        run_git_ok(origin.path(), &["init", "--bare", "-b", "main"]);
+        let (tmp, _) = setup_git_repo_with_factory_branch("held-work");
+        let repo = tmp.path();
+        run_git_ok(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        run_git_ok(repo, &["push", "origin", "main", "factory/held-work"]);
+        std::fs::write(repo.join("late.rs"), "// after push\n").unwrap();
+        run_git_ok(repo, &["add", "late.rs"]);
+        run_git_ok(repo, &["commit", "-m", "unpushed"]);
+        let head = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        let (worktree_state, unsafe_worktree) = shutdown_worktree_safety(repo, false, &[]);
+        assert!(
+            worktree_state.contains("branch=factory/held-work, dirty_files=0, unpushed_commits=1"),
+            "{worktree_state}"
+        );
+        let snapshot = ShutdownWorkerSnapshot {
+            worker_name: "held-work".into(),
+            worker_id: "held-id".into(),
+            task_states: Vec::new(),
+            has_in_progress_task: false,
+            worktree_state,
+            worktree_cleanup_verdict: String::new(),
+            unsafe_worktree,
+            clone_path: Some(repo.to_path_buf()),
+        };
+        assert!(snapshot.requires_force());
+        assert!(snapshot.remedy().contains("message held-work to commit, push"), "{}", snapshot.remedy());
+
+        let line = snapshot.rescue_for_forced_shutdown().expect("unsafe work is rescued");
+        assert!(line.contains("preserved 1 unpushed commit(s)"), "{line}");
+        assert!(line.contains("pushed to origin"), "{line}");
+        let refname = line.split(" at ").nth(1).unwrap().split(' ').next().unwrap();
+        assert_eq!(run_git(origin.path(), &["rev-parse", refname]).unwrap(), head, "{line}");
     }
 
     #[tokio::test]
@@ -21276,10 +21529,58 @@ effort = "high"
         task.deliverables.factory_branch_anchor = Some(tip.clone());
         let mut status = collect_worker_git_status(repo);
         apply_task_delivery_git_status(repo, &task, "worker", &mut status);
-        assert_eq!(status.branch, "factory/worker-cas-next");
-        assert_eq!(status.head_sha, tip);
-        assert_eq!(status.ahead, 1);
-        assert_eq!(status.behind, 0);
+        assert_eq!(status.branch, "factory/worker", "git: stays the real checkout (cas-2879)");
+        let delivery = status.delivery.as_ref().expect("bound delivery measured");
+        assert_eq!(delivery.branch, "factory/worker-cas-next");
+        assert_eq!(delivery.tip, tip);
+        assert_eq!((delivery.ahead, delivery.behind), (1, 0));
+        assert!(
+            format_worker_git_status(&status).contains("task delivery: factory/worker-cas-next"),
+            "{}",
+            format_worker_git_status(&status)
+        );
+    }
+
+    /// cas-2879 (QA cas-881f): a commit made after parking must not render as
+    /// the parked anchor "[clean] [pushed]". HEAD, its unpushed count and the
+    /// stale anchor are all on the worker_status lines.
+    #[test]
+    fn worker_status_reports_real_head_and_unpushed_commit_past_parked_tip() {
+        let (tmp, _) = setup_git_repo_with_factory_branch("worker");
+        let repo = tmp.path();
+        let origin = tempfile::TempDir::new().unwrap();
+        run_git_ok(origin.path(), &["init", "--bare", "-b", "main"]);
+        run_git_ok(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        run_git_ok(repo, &["push", "origin", "main", "factory/worker"]);
+        let anchor = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(repo.join("late.py"), "print('late')\n").unwrap();
+        run_git_ok(repo, &["add", "late.py"]);
+        run_git_ok(repo, &["commit", "-m", "after park"]);
+        let head = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        std::fs::write(repo.join("work.rs"), "// stashed\n").unwrap();
+        run_git_ok(repo, &["stash"]);
+
+        let mut task = cas_types::Task::new("cas-park".into(), "parked".into());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let mut status = collect_worker_git_status(repo);
+        apply_task_delivery_git_status(repo, &task, "worker", &mut status);
+        let rendered = format_worker_git_status(&status);
+
+        assert_eq!(status.head_sha, head, "{rendered}");
+        assert!(rendered.contains("[NOT PUSHED: 1 commit(s) not on origin/factory/worker as of last fetch]"), "{rendered}");
+        assert!(rendered.contains("HEAD has 1 commit(s) after the parked tip"), "{rendered}");
+        assert!(rendered.contains("stash: 1 entry"), "{rendered}");
+
+        run_git_ok(repo, &["push", "origin", "factory/worker"]);
+        let mut status = collect_worker_git_status(repo);
+        apply_task_delivery_git_status(repo, &task, "worker", &mut status);
+        assert!(
+            format_worker_git_status(&status).contains("[pushed: origin/factory/worker as of last fetch]"),
+            "{}",
+            format_worker_git_status(&status)
+        );
     }
 
     fn setup_mid_merge_with_incoming_and_worker_contributions() -> tempfile::TempDir {
@@ -21351,7 +21652,7 @@ effort = "high"
         let repo = setup_mid_merge_with_incoming_and_worker_contributions();
         let status = collect_worker_git_status(repo.path());
         assert!(
-            status.dirty,
+            status.dirty == Some(true),
             "worker-only.rs is a real factory/m1 contribution and must remain flagged"
         );
         assert!(
@@ -21418,8 +21719,11 @@ effort = "high"
             ahead: 3,
             behind: 0,
             base_branch: "origin/main".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "origin/factory/myworker".to_string(),
+            upstream: Some((0, 0)),
+            delivery: None,
             pr_url: WorkerPrUrl::Url("https://github.com/org/repo/pull/42".to_string()),
             is_shared_checkout: false,
         };
@@ -21458,8 +21762,11 @@ effort = "high"
             ahead: 0,
             behind: 25,
             base_branch: "origin/main".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
+            upstream: None,
+            delivery: None,
             pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
@@ -21494,8 +21801,11 @@ effort = "high"
             ahead: 1,
             behind: 0,
             base_branch: "origin/main{a,b}!e".to_string(),
-            dirty: false,
+            dirty: Some(false),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
+            upstream: None,
+            delivery: None,
             pr_url: WorkerPrUrl::None,
             is_shared_checkout: true,
         };
@@ -21816,8 +22126,11 @@ effort = "high"
             ahead: 0,
             behind: 2,
             base_branch: "origin/main".to_string(),
-            dirty: true,
+            dirty: Some(true),
+            stash_count: Some(0),
             pushed_ref: "none".to_string(),
+            upstream: None,
+            delivery: None,
             pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
@@ -21834,6 +22147,17 @@ effort = "high"
             out.contains("not pushed") || out.contains("none"),
             "unpushed state must be visible in output: {out}"
         );
+
+        // cas-2879: an unanswered git status is unknown, never "[clean]",
+        // and an unanswered stash list says so too.
+        let unknown = WorkerGitStatus {
+            dirty: None,
+            stash_count: None,
+            ..gs
+        };
+        let out = format_worker_git_status(&unknown);
+        assert!(out.contains("[dirty state unknown]") && !out.contains("[clean]"), "{out}");
+        assert!(out.contains("stash: unknown"), "{out}");
     }
 
     // --- cas-f53c: sync_all_workers clone_path resolution -----------------

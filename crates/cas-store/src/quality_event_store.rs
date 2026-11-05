@@ -26,7 +26,8 @@ pub const QUALITY_EVENT_SCHEMA_STATEMENTS: &[&str] = &[
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN
-            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn')),
+            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn',
+             'friction')),
         occurred_at TEXT NOT NULL,
         task_id TEXT,
         release_version TEXT,
@@ -61,6 +62,28 @@ pub const QUALITY_EVENT_TURN_UPGRADE_STATEMENTS: &[&str] = &[
     "INSERT INTO quality_events_turn_upgrade SELECT * FROM quality_events",
     "DROP TABLE quality_events",
     "ALTER TABLE quality_events_turn_upgrade RENAME TO quality_events",
+    QUALITY_EVENT_SCHEMA_STATEMENTS[1],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[2],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[3],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[4],
+];
+
+/// Admit Friction rows (cas-87a2) by the same in-place rebuild as the Turn
+/// upgrade: every row, seq and trigger survives. Caller owns the transaction.
+pub const QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS: &[&str] = &[
+    "CREATE TABLE quality_events_friction_upgrade (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN
+            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn',
+             'friction')),
+        occurred_at TEXT NOT NULL, task_id TEXT, release_version TEXT, actor TEXT,
+        title TEXT, link TEXT, payload TEXT NOT NULL, local_note TEXT,
+        origin TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'cloud')),
+        project_id TEXT NOT NULL DEFAULT '', UNIQUE (project_id, id)
+    )",
+    "INSERT INTO quality_events_friction_upgrade SELECT * FROM quality_events",
+    "DROP TABLE quality_events",
+    "ALTER TABLE quality_events_friction_upgrade RENAME TO quality_events",
     QUALITY_EVENT_SCHEMA_STATEMENTS[1],
     QUALITY_EVENT_SCHEMA_STATEMENTS[2],
     QUALITY_EVENT_SCHEMA_STATEMENTS[3],
@@ -172,6 +195,16 @@ impl FeedbackVerdict {
     }
 }
 
+/// Where an identified Cassy problem was filed (cas-87a2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrictionSource {
+    /// A bug task in the Cassy source repository.
+    Task,
+    /// An issue on the Cassy tracker, filed from any project.
+    Issue,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackSource {
@@ -231,6 +264,17 @@ pub enum QualityPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         used: Option<u64>,
     },
+    /// A Cassy problem was identified and filed. Filing is the ledger write:
+    /// the summary is the row's sanitized `title`, an issue URL its `link`.
+    Friction {
+        source: FrictionSource,
+        /// Task id, or `owner/repo/issues/N`.
+        reference: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        severity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
 }
 
 impl QualityPayload {
@@ -242,6 +286,7 @@ impl QualityPayload {
             Self::Escape { .. } => "escape",
             Self::Release { .. } => "release",
             Self::FeatureFeedback { .. } => "feature_feedback",
+            Self::Friction { .. } => "friction",
         }
     }
 
@@ -269,6 +314,15 @@ impl QualityPayload {
             }
             Self::FeatureFeedback { feature, .. } if !is_slug(feature) => {
                 return Err(format!("feature is not a slug: {feature}"));
+            }
+            Self::Friction { reference, severity, project, .. } => {
+                if let Some(bad) = std::iter::once(reference)
+                    .chain(severity)
+                    .chain(project)
+                    .find(|value| !is_slug(value))
+                {
+                    return Err(format!("friction field is not a slug: {bad}"));
+                }
             }
             _ => {}
         }
@@ -458,10 +512,10 @@ pub fn ensure_quality_event_schema(conn: &Connection) -> Result<()> {
     let historical = conn.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='quality_events'",
         [], |row| row.get::<_, String>(0),
-    ).ok().is_some_and(|sql| !sql.contains("'turn'"));
+    ).ok().is_some_and(|sql| !sql.contains("'friction'"));
     conn.execute_batch("SAVEPOINT quality_event_schema")?;
     let result = (|| -> Result<()> {
-        let statements = if historical { QUALITY_EVENT_TURN_UPGRADE_STATEMENTS }
+        let statements = if historical { QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS }
             else { QUALITY_EVENT_SCHEMA_STATEMENTS };
         for statement in statements { conn.execute(statement, [])?; }
         Ok(())
@@ -752,7 +806,9 @@ mod tests {
         let guard = crate::shared_db::lock_connection(&conn).unwrap();
         // Simulate a database shipped before Turn existed, preserving its rows.
         guard.execute_batch("DROP TRIGGER quality_events_no_update; DROP TRIGGER quality_events_no_delete; ALTER TABLE quality_events RENAME TO old_quality_events;").unwrap();
-        let old_ddl = QUALITY_EVENT_SCHEMA_STATEMENTS[0].replace(", 'turn'", "");
+        let old_ddl = QUALITY_EVENT_SCHEMA_STATEMENTS[0]
+            .replace(", 'turn',\n             'friction'", "");
+        assert!(!old_ddl.contains("'turn'") && !old_ddl.contains("'friction'"));
         guard.execute(&old_ddl, []).unwrap();
         guard.execute("INSERT INTO quality_events SELECT * FROM old_quality_events", []).unwrap();
         guard.execute("DROP TABLE old_quality_events", []).unwrap();
@@ -776,6 +832,22 @@ mod tests {
         assert!(rows[1].seq > before[0].seq);
         if let QualityPayload::Turn { no_op, .. } = &mut turn.payload { *no_op = false; }
         assert!(record_quality_event(dir.path(), &turn).is_err());
+
+        // cas-87a2: the same upgrade admits Friction; free text stays out of
+        // the payload, which only takes slugs.
+        let friction = |reference: &str| NewQualityEvent::new(
+            format!("friction|task|{reference}"),
+            QualityPayload::Friction {
+                source: FrictionSource::Task,
+                reference: reference.into(),
+                severity: Some("p0".into()),
+                project: Some("cas-src".into()),
+            },
+        );
+        assert!(record_quality_event(dir.path(), &friction("cas-87a2")).unwrap());
+        assert!(!record_quality_event(dir.path(), &friction("cas-87a2")).unwrap());
+        assert!(record_quality_event(dir.path(), &friction("has spaces")).is_err());
+        assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap().len(), 3);
     }
 
     /// Scope A: code, command lines, paths, secrets and notes never reach the wire.

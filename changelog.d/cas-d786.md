@@ -1,3 +1,0 @@
-### Fixed — Commander and factory
-
-- **Show the old process, not a false update** — Commander re-reads a machine's hub version when its event stream reconnects, so a hub that `cas update` restarted no longer keeps showing the replaced version. `/v1/machine` now reports `installed_version`, the binary a hub restart would run. A hub older than that binary reads "Hub 4.0.0 · installed 4.0.2 · Run cas hub restart" instead of "Update available → 4.0.2", and a published release is offered only beyond what is installed. The factory status bar names an installed binary the running daemon has not loaded ("installed v4.0.2 · restart factory to load") and stops advertising a release that is already installed.

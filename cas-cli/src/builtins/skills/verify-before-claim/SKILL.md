@@ -92,7 +92,11 @@ If a proof failed or a claim is INCONCLUSIVE, do not close. Go back to the worke
 | "Tests pass" (factory worker, Rust) | Tests written or updated and committed, plus the worker proof above; targeted runs have nonzero receipts, and the full suite follows the ownership rule above (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
 | "Tests pass" (non-Rust) | Affected targeted tests with a nonzero passed count; the full suite follows the ownership rule above |
 | "Tests pass" (supervisor / non-factory, Rust) | `cargo test [--lib --test --workspace]` against the relevant scope |
+<!-- cas-src:begin -->
 | "Build is clean" (supervisor / non-factory) | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
+<!-- cas-src:else -->
+| "Build is clean" (supervisor / non-factory) | The project's build command for the touched packages; `cargo build` (`--workspace` for `pub` type changes) in a Rust project |
+<!-- cas-src:end -->
 | "Script runs end-to-end" | The actual script invocation, with the expected input |
 | "New CLI subcommand works" | `<binary> <subcommand> [args]` against a freshly built binary (supervisor / non-factory for Rust binaries) |
 | "Endpoint returns 200" | `curl -fsS` against a running server, OR an integration test |

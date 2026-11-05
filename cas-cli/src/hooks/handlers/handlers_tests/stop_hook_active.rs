@@ -110,7 +110,8 @@ fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
 
 /// cas-7456 (GH #1302 F): a supervisor ended its turn with no reminder set and
 /// slept for 11 h. A factory supervisor's Stop with no pending reminder warns
-/// that it has no wake source (and never blocks); a pending reminder quiets it.
+/// that it has no wake source (and never blocks) while work is open; a pending
+/// reminder quiets it.
 #[test]
 fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
     let mut env = TestEnvGuard::temp_home();
@@ -142,6 +143,14 @@ fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
     // cas-b080: a reminder left pending by an earlier session cannot wake
     // this one, so it is not a wake source.
     remind("an-earlier-session");
+
+    // cas-d9db: a greeting turn with no tasks and no workers has nothing open
+    // to wake for, so it stays quiet; a parked delivery is open work.
+    let idle = serde_json::to_string(&stop()).unwrap();
+    assert!(!idle.contains("No wake source"), "no open work, no warning: {idle}");
+    let mut parked = cas_types::Task::new("cas-d9db".into(), "parked delivery".into());
+    parked.status = cas_types::TaskStatus::AwaitingMerge;
+    crate::store::open_task_store(&cas_root).unwrap().add(&parked).unwrap();
 
     let warned = stop();
     assert_eq!(decision_of(&warned), None, "the warning never blocks the stop");

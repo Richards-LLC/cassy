@@ -23,9 +23,9 @@ const BATCH_CLOSE: &str = "In qa.mode=batch, Cassy closes merged deliveries when
 const SUP_BATCH_CLOSE: &str = "In qa.mode=batch the release batch_receipt closes merged deliveries";
 const QA_TIMING: &str = "In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.";
 const FULL_SUITE: &str = "The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
-const ASK_OPERATOR: &str = "Decide anything within supervisor authority yourself; ask the operator only for a policy call.";
-const PLAN_MISS: &str = "hold its dependents, keep shipping, and send target=operator kind=blocker with your recommendation";
-const SUP_SIGNAL: &str = "A park relay (awaiting_merge) naming a pushed tip is top priority: merge at once";
+const ASK_OPERATOR: &str = "Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs.";
+const PLAN_MISS: &str = "Hold deliveries below their plan target and their dependents; ship independent work.";
+const SUP_SIGNAL: &str = "awaiting_merge";
 const MERGE_PATH: &str = "action=worktree_merge";
 const RELEASE_NOTES: &str = "The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.";
 

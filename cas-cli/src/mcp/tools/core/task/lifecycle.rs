@@ -169,7 +169,7 @@ fn publish_parked_delivery_branch(
         "kept locally (no origin)".to_string()
     } else {
         match git.push_branch(branch) {
-            Ok(()) => "pushed to origin, so its lane CI runs there".to_string(),
+            Ok(()) => "pushed to origin (Git acknowledged the push; CI not checked)".to_string(),
             Err(error) => format!("pushing it to origin failed: {error}"),
         }
     };
@@ -2144,6 +2144,14 @@ impl CasCore {
             task.task_type,
             &task.labels,
             None,
+        );
+        crate::quality_ledger::bug_filed(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            task.priority.0,
+            task.created_at,
         );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",

@@ -1677,7 +1677,7 @@ pub fn generate_prompt_at(
                  Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  {test_policy}\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.",
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.",
                 test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
             );
 
@@ -1880,8 +1880,9 @@ pub fn generate_prompt_at(
                         "Worker {worker} is idle while task {} ({}) is still {}{}.\n\
                          This is a worker-lifecycle idle signal, not a task completion.\n\
                          Check live state: `{supervisor_prefix}task action=show id={}`\n\
-                         If close was rejected, resolve the rejection before acting on the task as closed.",
-                        task.task_id, task.task_title, task.task_status, rejection, task.task_id
+                         If close was rejected, resolve the rejection before acting on the task as closed.\n\
+                         Next action: message {worker} with its next step, or reassign {}.",
+                        task.task_id, task.task_title, task.task_status, rejection, task.task_id, task.task_id
                     )
                 };
 
@@ -3669,6 +3670,10 @@ mod tests {
         assert!(prompt.text.contains("MERGE REQUIRED"));
         // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("not a task completion"));
+        // cas-73fa: an idle relay names what the supervisor must do.
+        // pin: the named next action is the relay's contract with the supervisor.
+        assert!(prompt.text.contains("Next action: message swift-fox with its next step, or reassign cas-1234"),
+            "{}", prompt.text);
         assert!(
             !lower.contains("done") && !lower.contains("finished"),
             "idle close-rejection prompt must not use completion-flavored wording: {}",

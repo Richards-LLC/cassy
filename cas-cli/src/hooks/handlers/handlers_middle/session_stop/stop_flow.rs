@@ -808,7 +808,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) -> Option<String> {
     let is_supervisor = std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor");
     let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
-    if !is_supervisor || session.is_empty() {
+    if !is_supervisor || session.is_empty() || !factory_session_has_open_work(cas_root, &session) {
         return None;
     }
     let reminders = crate::store::open_reminder_store(cas_root).ok()?;
@@ -832,6 +832,30 @@ fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) 
         "No wake source: this supervisor turn ended with no pending reminder, so only a relay Cassy delivers can start your next turn. If work is open (idle workers, parked deliveries, a running CI or merge queue), set one now with coordination action=remind (an event such as ci_completed or task_completed, or a time watchdog with cross_session=true)."
             .to_string()
     })
+}
+
+/// cas-d9db: the wake-source warning matters only when work is open. A greeting
+/// turn in a factory with no tasks and no workers has nothing to wake for.
+/// Open work is a parked delivery (any `awaiting_merge` task; tasks carry no
+/// factory session) or a live worker registered to this factory session, which
+/// also covers every open or in-progress task assigned to one. A store that
+/// cannot be read counts as open work, so the warning errs towards firing.
+fn factory_session_has_open_work(cas_root: &Path, session: &str) -> bool {
+    let parked = crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|tasks| tasks.list(Some(TaskStatus::AwaitingMerge)).ok())
+        .is_none_or(|parked| !parked.is_empty());
+    parked
+        || open_agent_store(cas_root)
+            .ok()
+            .and_then(|agents| agents.list(None).ok())
+            .is_none_or(|agents| {
+                agents.iter().any(|agent| {
+                    agent.role == AgentRole::Worker
+                        && agent.factory_session.as_deref() == Some(session)
+                        && agent.is_alive()
+                })
+            })
 }
 
 /// cas-2961: a supervisor messaged a mid-task worker this turn and stopped

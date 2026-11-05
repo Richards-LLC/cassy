@@ -1,55 +1,31 @@
 # Reminder Discipline — Push First, One Bounded Checkpoint
 
-Reminders are a safety net for work that may otherwise go quiet. They are not
-polling, acknowledgement, liveness, merge authority, or task status. Start from
-push lifecycle events and worker messages; on a reminder turn, read the
-authoritative task/worker state once before acting.
+Reminders are a safety net for work that may go quiet, not polling, acknowledgement, liveness, merge authority or task status. Start from lifecycle events and worker messages; on a reminder turn, read the authoritative task or worker state once, then act.
 
 ## Decision table
 
-| Situation | First action | Reminder? | Advance/cleanup |
-|---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. A verifier delivery's `worktree_merge` prepares a candidate and opens a pre-merge dispatch: run the verifier; PASS publishes and closes. Then cancel any phase reminder |
-| Parked merge refused only for pending CI | Let the exact-SHA retry Cassy armed finish | No — green retries automatically; red or a moved lane sends one notice | Act only on that notice |
-| Other GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
-| Long release, publication, or other detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice | Check the authoritative job/task state once |
-| Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
-| Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
-| Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One task-filtered event reminder, lasting until task terminal | Cancel it if the phase completes through another path |
+| Situation | First action | Reminder? |
+|---|---|---|
+| Worker reports `MERGE REQUIRED` | Merge now; run the verifier on any pre-merge dispatch Cassy opens (PASS publishes and closes). In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. | No; cancel any phase reminder after |
+| Parked merge refused only for pending CI | Let Cassy's armed exact-SHA retry finish | No; act only on its notice |
+| Other CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
+| Long release, publication or detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice |
+| Context-pressure handoff | Commit, push, task note, explicit handoff | One time checkpoint only if no next owner can acknowledge in time |
+| Blocked worker recovery | Read state and send one recovery instruction | Only when an external dependency could otherwise go quiet |
 
-Never create a reminder instead of checking authoritative task acceptance,
-reading inbox updates, or processing an authenticated typed lifecycle event. Do not sleep,
-watch CI, or repeatedly poll. One active reminder per task/phase is the limit.
+One active reminder per task or phase. Cancel it when the phase completes or state changes; a closed or merged task leaves no stale reminder. Never arm a timer to catch operator messages or inbox updates: Commander already wakes you, and a missing wake is a defect to file.
 
 ## API contract
 
-Every reminder has exactly **one** trigger: `remind_delay_secs` *or*
-`remind_event`, never both. For time checkpoints, pass `remind_ttl_secs`
-covering the phase. For `task_completed` or `task_blocked` with a task filter,
-omit TTL to wait until the task is terminal; use an explicit positive TTL only
-for a real deadline. A deadline reached while the task is still live sends one
-visible owner notice. Keep the returned reminder ID, list only to reconcile a
-known phase, and cancel or supersede it when state changes. Closing/merging a
-task must leave no stale phase reminder.
-
-### Time checkpoint: a real deadline
-
-Use a delay only for work that becomes due at that time, such as an expiring
-context handoff, a build-admission retry or a post-release invariant run. A timer that checks inbox, CI, task,
-merge or detached-job status is refused with the matching event forms.
+Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Time checkpoints pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal. Keep the returned ID; the tool refuses polling-shaped timers and names the event form to use. A task-filtered deadline reached while the task is still live sends one owner notice. A delay suits a real deadline, an admission retry, a post-release invariant run or a plain time backstop; the daemon's progress watchdog wakes you after 45 minutes with no movement.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
   remind_message="Context handoff deadline: escalate to the next owner"
-```
-
-Keep the returned ID and cancel it when the owner acknowledges:
-
-```text
 coordination action=remind_cancel remind_id=<reminder-id>
 ```
 
-### Event checkpoint: only for a concrete lifecycle event
+Use a delay only for work that becomes due at that time, such as an expiring handoff or a build-admission retry.
 
 ```text
 coordination action=remind remind_event=task_completed cross_session=true \
@@ -57,21 +33,11 @@ coordination action=remind remind_event=task_completed cross_session=true \
   remind_message="After this task completes, inspect its close/merge state once"
 ```
 
-A task-filtered wait reconciles persisted task status, including a close synced
-from another machine. Use `cross_session=true` to retain it across session end.
-Without `remind_filter` the reminder fires on any task's completion. `task_completed` is a real event; vague hopes such as "when CI is ready" are
-not. For a parked delivery whose completion is an externally observable git
-condition, use the durable external triggers below instead of a finite timer.
+Without `remind_filter` it fires on any task's completion. `cross_session=true` keeps a reminder across session end.
 
-### Durable external checkpoint: branch or tag
+### Durable external checkpoints
 
-External conditions survive daemon/session restart. When `remind_ttl_secs` is
-omitted they expire after seven days (`0` means no expiry), and they also
-expire once both their owner and target have had no heartbeat or live process
-for 24 hours. They require `cross_session=true` and a JSON filter.
-`target_branch` is the bare origin branch; `origin/main` is stored as `main`.
-`branch_contained_in` also accepts `sha` for `commit`; other filter keys are
-refused, and one refusal lists every missing requirement:
+Git conditions survive daemon and session restarts and need `cross_session=true` and a JSON filter. They expire after seven days without `remind_ttl_secs` (`0` means never), or once owner and target have been gone for 24 hours. `target_branch` is the bare origin branch; tags must be published to origin.
 
 ```text
 coordination action=remind remind_event=branch_contained_in \
@@ -81,45 +47,19 @@ coordination action=remind remind_event=branch_contained_in \
 coordination action=remind remind_event=tag_exists \
   remind_filter='{"tag":"v<release>"}' \
   cross_session=true remind_message="Release tag exists; inspect the authoritative receipt"
-```
 
-For CI, wait on the runs themselves instead of a delay reminder:
-
-```text
 coordination action=remind remind_event=ci_completed \
   remind_filter='{"sha":"<full-40-char-sha>","workflow":"CI"}' \
   cross_session=true remind_message="CI finished on <sha>; merge or route the red job"
 ```
 
-It fires within a minute once every run for that SHA (or only the named
-workflow) has completed, carrying each run's conclusion and URL and an
-overall `outcome`. Without `workflow`, scheduled runs are ignored. For a
-merge-queue landing, use `branch_contained_in` with `"target_branch":"main"`.
-
-The daemon checks origin on a bounded one-minute cadence, off its input loop,
-fetching each target branch once per check. A local-only tag cannot satisfy
-`tag_exists`; the tag must be published to origin. A failed remote check
-leaves the reminder pending and backs that ref off, up to 30 minutes between
-checks. The fired description includes the
-remote ref and SHA, and the reminder fires once when the condition becomes
-true, delivering the existing supervisor notification and prompt-queue wake.
+`ci_completed` fires once every run for that SHA (or the named workflow) completes, with each conclusion and URL; without `workflow`, scheduled runs are ignored. The daemon checks origin about once a minute and backs off failing refs up to 30 minutes.
 
 ## Role patterns
 
-- **Supervisors:** after dispatch, end the turn. An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt. Wait for CI with `ci_completed`,
-  for landing with `branch_contained_in`, and for a task with its filtered event.
-  Detached commands use the harness background-task completion notice. On the
-  signal, inspect the official receipt once and advance the work.
-- **Workers:** persist a detached command's log/receipt and next action in a
-  progress note. Use its background-task completion notice; use an event reminder
-  for a concrete external condition. A capped build-admission refusal may use
-  one timer to retry the refused work at its admission time. Context handoff is
-  commit + push + task note + supervisor message.
-
-Cancel any pending reminder when its phase completes. Never arm a timer to find
-operator messages: Commander already wakes the supervisor. Report a missing wake
-as a defect and remove old inbox polling workarounds.
+- **Supervisors:** after dispatch, end the turn. An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt. On the signal, inspect the official receipt once and advance the work.
+- **Workers:** record a detached command's log and next action in a progress note and use its background-task notice. A capped build-admission refusal may use one timer to retry at its admission time. A context handoff is commit, push, task note and supervisor message.
 
 ## Peer release updates
 
-Peer message kinds: [reference](reference.md#message-delivery-and-wake-authority). Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.
+Peer message kinds: [reference](reference.md#message-delivery-and-wake-authority). Send a peer merge or close update that unblocks their release as `kind=status`, never `kind=receipt`. Use `kind=ask` or `blocker=true` when you need a decision. Treat `EPIC READY: all children closed` as an action: inspect the epic and advance its release.

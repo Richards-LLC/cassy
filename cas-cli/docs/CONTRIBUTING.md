@@ -1080,6 +1080,21 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A confirmed publication shares a portable approval through the existing project
+peer mailbox. The daemon checks the Cloud-stamped sender against the project
+supervisor registry, matches the task/source/candidate/landing, and atomically
+imports a peer-attested dispatch and verdict into the receiving store. Repository
+paths are rebound locally; acknowledging or retiring a prompt never removes the
+proof. Generic verification writes cannot claim peer authority, and replay cannot
+replace an existing cycle or revive a reopened delivery. Publication sharing is best-effort: a failed peer never changes confirmed
+publication, other peers are still attempted, and the task records the failure.
+A later publication retry can recover its abandoned outbox send with the same
+logical identity. Receipts must explicitly say approved. Permanent refusals
+(malformed, unauthorized, stale, closed or an existing local proof cycle) are
+acknowledged as rejected; only transient store, sync, registry or transport
+availability failures remain unacknowledged for retry.
+
+
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
@@ -2106,6 +2121,10 @@ A missing/moved PR identity or head never enables auto-merge; retry the same
 merge request after correcting the cause.
 
 ## Build, assembly and CI policy
+
+Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
+Name cached or recorded state as such; a successful mutation does not establish
+that its follow-up, release publication, or installation on another host completed.
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
 
@@ -3393,8 +3412,10 @@ command away.
 
 `finish` is a shared builtin skill; Claude Code exposes it as `/finish`, and the
 other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
-Update also refreshes finish in named Claude/Codex accounts and their shared
-bases. The exact old cas-f4ea command seed is removed in favor of the skill.
+Update also refreshes finish in named Claude/Codex accounts. The shared bases
+(`~/.cas/claude-base`, `~/.cas/codex-base`), which every account's `skills`
+links to, receive the full builtin set. The exact old cas-f4ea command seed is
+removed in favor of the skill.
 A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
 entrypoints untouched and skips installing its finish skill for that profile.
 An existing customized finish `SKILL.md` is preserved, even when it retains
@@ -3412,6 +3433,15 @@ account-discovery failures appear in `account_discovery_warnings` and do not
 abort default-profile or shared-base refresh.
 
 Every file in a managed builtin skill directory other than its `SKILL.md` (references, scripts, examples, templates) is owned by that skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`. The ledger keeps deleted files too: sync prunes an installed file Cassy no longer ships only when its content proves it is Cassy's (a shipped hash, the recorded baseline, or `managed_by: cas`). Retired managed agents are pruned the same way, and `cas doctor` reports installed-vs-catalog drift as `host install parity`.
+
+Builtin Markdown that only applies in this repository (Cargo and nextest
+shapes, `CONTRIBUTING`, `scripts/journey-eval.sh`, `scripts/assembly-proof.py`,
+hub-web, the merge queue) sits between whole-line (optionally indented) `<!-- cas-src:begin -->` and
+`<!-- cas-src:end -->` markers, optionally split by `<!-- cas-src:else -->`
+with a project-neutral replacement. Sync renders the cas-src branch only into
+this checkout's harness dirs; every other target, including the personal dirs
+that outrank project skills, gets the neutral branch. Markers never reach an
+installed file, and the history ledger records both renders.
 
 **After changing, adding or deleting any builtin skill file — and before cutting a release — run:**
 

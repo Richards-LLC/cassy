@@ -39,8 +39,20 @@ fn connection(root: &Path) -> anyhow::Result<Connection> {
 
 pub(super) fn enqueue_and_send(
     root: &Path,
-    mut message: PeerSend,
+    message: PeerSend,
     recipient: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, false)
+}
+
+/// Publication may re-attempt an abandoned receipt after the peer recovers.
+/// Keep the original logical send key; ordinary messages retain their policy.
+pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, true)
+}
+
+fn enqueue_with_recovery(
+    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
     http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
@@ -55,16 +67,21 @@ pub(super) fn enqueue_and_send(
         let mut conn = connection(root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !message.dedupe_key.is_empty() {
-            let existing: Option<(i64, Option<String>)> = tx.query_row(
-                "SELECT id,cloud_id FROM peer_message_outbox
+            let existing: Option<(i64, Option<String>, String)> = tx.query_row(
+                "SELECT id,cloud_id,state FROM peer_message_outbox
                  WHERE sender_agent_id=?1
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
                 params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
-            if let Some(existing) = existing {
-                return Ok(existing);
+            if let Some((id, cloud_id, state)) = existing {
+                if recover_abandoned && state == "abandoned" && cloud_id.is_none() {
+                    let now = chrono::Utc::now().timestamp();
+                    tx.execute("UPDATE peer_message_outbox SET state='pending',created_at=?2,next_attempt_at=?2,last_error=NULL WHERE id=?1 AND state='abandoned'", params![id,now])?;
+                    tx.commit()?;
+                }
+                return Ok((id, cloud_id));
             }
         }
         let now = chrono::Utc::now().timestamp();
@@ -249,4 +266,54 @@ fn notify_abandoned(
 ) -> anyhow::Result<()> {
     queue.notify_peer_send_abandoned(sender, name, session, id, recipient, cause)?;
     Ok(())
+}
+
+/// One ask this supervisor sent a peer that no peer reply answers yet
+/// (cas-bddf9).
+#[derive(Debug, Clone)]
+pub struct OpenPeerAsk {
+    /// Cloud peer message id; absent while the ask is still queued.
+    pub cloud_id: Option<String>,
+    pub recipient: String,
+    pub body: String,
+}
+
+/// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
+/// `sender_agent_id` in the last `window_secs` that no delivered peer reply
+/// answers: a reply naming it with `in_reply_to` whose kind is not a
+/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
+/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
+/// the peer.
+pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
+    let Ok(conn) = connection(root) else {
+        return Vec::new();
+    };
+    let since = chrono::Utc::now().timestamp() - window_secs;
+    let Ok(mut statement) = conn.prepare(
+        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body')
+         FROM peer_message_outbox o
+         WHERE o.sender_agent_id = ?1 AND o.created_at >= ?2 AND o.state != 'abandoned'
+           AND (json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
+                OR json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"blocker\"/>%')
+           AND (o.cloud_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM prompt_queue q
+                WHERE q.source LIKE 'peer:%'
+                  AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
+         ORDER BY o.id",
+    ) else {
+        return Vec::new();
+    };
+    statement
+        .query_map(params![sender_agent_id, since], |row| {
+            Ok(OpenPeerAsk {
+                cloud_id: row.get(0)?,
+                recipient: row.get(1)?,
+                body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
 }

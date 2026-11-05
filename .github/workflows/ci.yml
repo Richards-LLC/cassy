@@ -1868,8 +1868,7 @@ jobs:
       always() && needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'pull_request'
       || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
-      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
+      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)

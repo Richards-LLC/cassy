@@ -1046,7 +1046,12 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
     drop(service);
     drop(reviewer);
     let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
-    for row in queue.peek_all(100).unwrap() { queue.ack(row.id).unwrap(); }
+    for row in queue.peek_all(100).unwrap() {
+        if let Some(envelope) = crate::cloud::peer_mailbox::parse_envelope(&row.prompt) {
+            assert!(!envelope.wakes_idle(), "machine receipts must not wake a supervisor model");
+        }
+        queue.ack(row.id).unwrap();
+    }
     git(f.dir.path(), &["merge", "-q", "--ff-only", "origin/main"]);
     env.set("CAS_AGENT_ROLE", "worker");
     let closed = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;

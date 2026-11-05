@@ -4647,9 +4647,6 @@ mod related_recall_response_tests {
         assert!(rows[0]
             .prompt
             .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY));
-        // pin: cas-97c4 (GH #1513): every assignment scopes proof to the changed files' tests; CI owns full suites.
-        assert!(rows[0].prompt.contains("the tests for the files you changed") && rows[0].prompt.contains("never evals or full suites"),
-            "{}", rows[0].prompt);
         assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
         // A later director tick shares the producer; it cannot duplicate this dispatch.
         crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();

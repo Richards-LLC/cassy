@@ -613,8 +613,8 @@
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         },
         {
-          "text": "never run evals or full suites",
-          "reason": "cas-97c4 (GH #1513): a worker's proof is its changed files' tests plus its new red-green test; CI runs evals and full suites."
+          "text": "Run the tests that cover the code you touched",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): a worker's proof is the tests covering the code it touched."
         }
       ],
       "absent": [
@@ -668,7 +668,7 @@
         },
         {
           "text": "every integration harness that calls it",
-          "reason": "cas-97c4: this phrase ordered integration suites and eval fixtures for one-file changes."
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): this phrase ordered integration suites and eval fixtures for one-file changes."
         }
       ],
       "any_of": []
@@ -796,6 +796,10 @@
         {
           "text": "## Fewest tests",
           "reason": "Keep the canonical Fewest tests principle at the anchor its citations link to."
+        },
+        {
+          "text": "replays the real incident",
+          "reason": "cas-97c4: a bug fix's red test replays the real incident; four deliveries passed their own fixtures and failed the real replay."
         }
       ],
       "absent": [],
@@ -3290,8 +3294,8 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
         },
         {
-          "text": "one full assembly gate run",
-          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+          "text": "single full-suite run",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): the epic's one full-suite run is on the tree that lands, skipped when the queue or CI already ran it."
         },
         {
           "text": "system action=preflight",
@@ -3302,8 +3306,8 @@
           "reason": "Audit finding 6: completion requires a plan metric receipt."
         },
         {
-          "text": "never add a local full run",
-          "reason": "cas-97c4 (GH #1513): PR CI's full run on the exact SHA is the gate; a supervisor-ordered local gate duplicated it."
+          "text": "never name suites or evals",
+          "reason": "cas-97c4 (GH #1513, operator-approved audit rewrite): 84% of wasted worker test minutes came from supervisor acceptance naming suites or evals."
         }
       ],
       "absent": [

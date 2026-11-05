@@ -72,7 +72,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     }
     registry.register(ConfigMeta {
         key: "factory.auto_route_builds", section: "factory", name: "Route Build Overflow to Peers",
-        description: "When local build admission is saturated, ask a fresh same-repo peer with free builder slots to staff a new task. Never moves running work or routes a task twice.",
+        description: "When spawn admission is saturated, ask a fresh same-account, same-repo peer with free slots to staff a new task. Disable to release existing routes to local admission.",
         value_type: ConfigType::Bool, default: "true", constraint: Constraint::None,
         advanced: false, requires_feature: None,
         keywords: &["factory", "build", "capacity", "peer", "routing"],

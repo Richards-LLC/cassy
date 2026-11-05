@@ -1,3 +1,3 @@
 ### Added — Factory
 
-- **Place build overflow on a peer machine** — Supervisors publish builder slots, load and pressure in peer presence. When local admission is saturated, a new task can go to a fresh same-repository supervisor with capacity, with its full brief and a receipt naming free slots and load per CPU. Routes survive retries without duplicate asks or bouncing between machines. Set `factory.auto_route_builds=false` to disable automatic placement.
+- **Place build overflow on your other machine** — Supervisors publish builder slots, load and pressure in peer presence. When spawn admission is saturated, a new task can go to a fresh supervisor of the same account and repository, with its full brief and capacity receipt. Each peer gets at most one new route per 90 seconds. Routes expire after 15 minutes or when the peer goes stale; disabling `factory.auto_route_builds` also releases them to local admission. Existing worker assignments stay local.

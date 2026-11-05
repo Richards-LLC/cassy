@@ -2249,12 +2249,15 @@ metadata: free builder slots, one-minute load, CPU count and available CPU/memor
 PSI. A passive guard sample reports zero free slots if pressure, disk headroom or
 the builder cap would refuse the next build; heartbeat sampling never runs GC.
 `factory.auto_route_builds` defaults to `true`. If local admission would wait,
-a single-task `spawn_workers task_id=...` request or a supervisor's fresh task
-assignment can instead ask a live same-repository supervisor on another machine
-to staff it. Both the heartbeat and capacity sample must be at most 90 seconds
-old, with no future timestamps. Unknown or unavailable capacity retains local
+a single-task `spawn_workers task_id=...` request can instead ask a live
+supervisor of the same account and repository on another machine to staff it.
+Teammates and peers whose account cannot be confirmed are never selected.
+Task creation and assignment retain their existing local behavior. Both the
+heartbeat and capacity sample must be at most 90 seconds old, with no future timestamps. Unknown or unavailable capacity retains local
 behaviour. Selection prefers the most free slots, then the lowest load per CPU;
-the result names both measurements.
+the result names both measurements. The existing peer outbox limits each peer
+to one new route per 90 seconds, including concurrent requests; a replay of
+the same logical ask does not consume another slot.
 
 Only open, unleased and previously unassigned build tasks are eligible. Existing
 workers keep their work, ordered task queues remain local, and `force=true` on
@@ -2262,10 +2265,14 @@ spawn retains the explicit local override. Routing stores a `BUILD_ROUTE` note
 with the stable `build-route:<repo>:<task>` identity, leaves the local assignee
 empty and sends one `kind=ask` through the existing durable peer outbox with the
 full task and supervisor brief. Retries reuse its selected recipient and send
-key. A peer receiving a task with a route note staffs it locally or waits; it
-never routes it onward. A failed send retains the route for recovery and
+key only while the peer is live, its heartbeat and sample remain fresh, and the
+route is less than 15 minutes old. Otherwise an expired note restores local
+admission; history still prevents routing onward. Unsent retry entries are
+cancelled when a route expires. A peer receiving a task with a route note staffs
+it locally or waits; it never routes it onward. A failed send retains the route for recovery and
 withholds local dispatch. `cas config set factory.auto_route_builds false`
-disables new automatic routes; already selected routes retain their identity.
+disables new automatic routes and releases existing routes to local admission.
+A forced local spawn also releases its prior automatic route.
 The peer supervisor still owns staffing and local admission; an ask grants no
 remote process-control authority.
 

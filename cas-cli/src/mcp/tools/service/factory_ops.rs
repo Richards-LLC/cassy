@@ -3075,7 +3075,7 @@ impl CasService {
         // Route only a single task, never silently split an ordered worker queue.
         // Run even after admission recovers: an earlier routed request must
         // replay its existing ask rather than queue a second local worker.
-        if !force_build_guard && req.task_ids.is_none()
+        if req.task_ids.is_none()
             && let Some(task_id) = req.task_id.as_deref()
         {
             let sender = self.inner.resolve_live_supervisor_authority().ok().or_else(|| {
@@ -3091,6 +3091,9 @@ impl CasService {
                     factory_config.clone(), build_guard.clone(),
                 );
                 let routed = tokio::task::spawn_blocking(move || {
+                    let mut config = config;
+                    // A forced local spawn releases a prior automatic route.
+                    config.auto_route_builds &= !force_build_guard;
                     crate::factory_build_routing::route(&root, &sender, &id, brief.as_deref(), &config, &guard)
                 }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                     .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;

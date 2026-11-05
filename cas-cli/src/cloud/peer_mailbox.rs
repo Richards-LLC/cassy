@@ -1504,6 +1504,8 @@ pub(crate) fn send_build_route(root: &Path, message: PeerSend, label: &str) -> R
     outbox::enqueue_and_send(root, message, label)
 }
 
+pub(crate) use outbox::{build_route_recent_peers, cancel_build_route};
+
 /// One durable logical expiry notice, reused if reconciliation restarts after
 /// Cloud acceptance but before its split work flag is settled.
 pub(crate) fn send_split_expiry(

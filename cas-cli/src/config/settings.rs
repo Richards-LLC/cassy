@@ -966,8 +966,8 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
-    /// Route new build tasks to a fresh same-repository peer when local
-    /// build admission is saturated. Existing work never migrates.
+    /// Route spawned build tasks to a fresh same-account, same-repository
+    /// peer when local admission is saturated. Disable to release routes.
     #[serde(default = "default_true")]
     pub auto_route_builds: bool,
 

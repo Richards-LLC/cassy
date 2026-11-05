@@ -7,6 +7,8 @@ use std::path::Path;
 pub(crate) const CAPACITY_META: &str = "build_capacity_v1";
 const ROUTE_MARKER: &str = "BUILD_ROUTE: ";
 const FRESH_SECS: i64 = 90;
+const ROUTE_LIFETIME_SECS: i64 = 15 * 60;
+const EXPIRED_MARKER: &str = "BUILD_ROUTE_EXPIRED: ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BuildCapacity {
@@ -35,7 +37,7 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RoutePlan {
+struct RoutePlan {
     key: String,
     source_machine_id: String,
     sender_agent_id: String,
@@ -43,6 +45,8 @@ pub(crate) struct RoutePlan {
     recipient: String,
     free_slots: usize,
     load_per_cpu: Option<f64>,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
 }
 
 impl RoutePlan {
@@ -58,16 +62,21 @@ impl RoutePlan {
     }
 
     /// The existing outbox makes retries/crash recovery the same logical ask.
-    pub(crate) fn send(&self, root: &Path, task: &cas_types::Task) -> Result<String, String> {
+    fn send(
+        &self,
+        root: &Path,
+        task: &cas_types::Task,
+    ) -> Result<String, crate::cloud::peer_mailbox::PeerSendError> {
         let project_id = crate::cloud::resolve_canonical_id(root)
-            .ok_or_else(|| "build routing needs a canonical repository identity".to_string())?;
+            .ok_or_else(|| send_error("build routing needs a canonical repository identity"))?;
         let brief = format!(
             "Build capacity overflow: please staff task {} locally, or wait for local admission. \
              Retain its BUILD_ROUTE note; never auto-route it again. Full task and supervisor brief:\n{}",
             task.id,
-            serde_json::to_string_pretty(task).map_err(|error| error.to_string())?
+            serde_json::to_string_pretty(task).map_err(send_error)?
         );
-        let body = crate::cloud::peer_mailbox::attach_message_intent(&brief, Some("ask"), false)?;
+        let body = crate::cloud::peer_mailbox::attach_message_intent(&brief, Some("ask"), false)
+            .map_err(send_error)?;
         let message = crate::cloud::peer_mailbox::PeerSend {
             project_id,
             sender_agent_id: self.sender_agent_id.clone(),
@@ -81,12 +90,6 @@ impl RoutePlan {
         };
         crate::cloud::peer_mailbox::send_build_route(root, message, &self.recipient)
             .map(|_| self.receipt())
-            .map_err(|error| {
-                format!(
-                    "Build route to {} retained; local dispatch withheld: {error}",
-                    self.recipient
-                )
-            })
     }
 }
 
@@ -98,9 +101,61 @@ fn machine_id(sender: &cas_types::Agent) -> String {
 }
 
 fn has_route(task: &cas_types::Task) -> bool {
-    task.notes
+    task.notes.lines().any(|line| {
+        line.starts_with(ROUTE_MARKER)
+            || line.starts_with(EXPIRED_MARKER)
+            || line.starts_with("build-route:")
+    })
+}
+
+fn send_error(error: impl ToString) -> crate::cloud::peer_mailbox::PeerSendError {
+    crate::cloud::peer_mailbox::PeerSendError::Failed {
+        cause: error.to_string(),
+        retry: String::new(),
+    }
+}
+
+fn live_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option<BuildCapacity> {
+    let fresh = |at: DateTime<Utc>| at <= now && now - at <= chrono::Duration::seconds(FRESH_SECS);
+    if peer.own != Some(true)
+        || !peer.live
+        || !fresh(peer.last_heartbeat)
+        || peer
+            .session
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+    {
+        return None;
+    }
+    let capacity: BuildCapacity = serde_json::from_value(peer.build_capacity.clone()?).ok()?;
+    (fresh(capacity.observed_at) && capacity.cpu_count > 0).then_some(capacity)
+}
+
+fn expire(
+    root: &Path,
+    task: &mut cas_types::Task,
+    plan: &RoutePlan,
+    cause: &str,
+) -> Result<(), String> {
+    crate::cloud::peer_mailbox::cancel_build_route(root, &plan.sender_agent_id, &plan.key)?;
+    task.notes = task
+        .notes
         .lines()
-        .any(|line| line.starts_with(ROUTE_MARKER) || line.starts_with("build-route:"))
+        .map(|line| {
+            if line.starts_with(ROUTE_MARKER) {
+                format!(
+                    "{EXPIRED_MARKER}{} peer={} expired_at={} cause={cause}",
+                    plan.key,
+                    plan.recipient,
+                    Utc::now().to_rfc3339()
+                )
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(())
 }
 
 fn prepare(
@@ -129,13 +184,48 @@ fn prepare(
     {
         return Ok(None);
     }
-    // Any prior route prevents ping-pong. Only the original sender may replay
-    // its exact persisted selection, including after a crash before HTTP send.
+    // A routed task never moves onward. Its source may replay only while
+    // the selected peer and sample are fresh and the route is under 15 min.
     if has_route(task) {
-        return Ok(task.notes.lines().find_map(|line| {
-            let plan: RoutePlan = serde_json::from_str(line.strip_prefix(ROUTE_MARKER)?).ok()?;
-            (plan.source_machine_id == machine_id(sender)).then_some(plan)
-        }));
+        let plan = task.notes.lines().find_map(|line| {
+            serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+        });
+        let Some(plan) = plan.filter(|plan| plan.source_machine_id == machine_id(sender)) else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let in_window = plan.created_at.is_some_and(|created| {
+            created <= now && now - created < chrono::Duration::seconds(ROUTE_LIFETIME_SECS)
+        });
+        let peer_ready = config.auto_route_builds
+            && in_window
+            && discover_peers(root, Some(&sender.id))
+                .ok()
+                .is_some_and(|discovery| {
+                    let PeerDiscovery::Found { peers, .. } = discovery else {
+                        return false;
+                    };
+                    peers.iter().any(|peer| {
+                        peer.agent_id == plan.recipient_agent_id
+                            && live_capacity(peer, now).is_some()
+                    })
+                });
+        if peer_ready {
+            return Ok(Some(plan));
+        }
+        expire(
+            root,
+            task,
+            &plan,
+            if !config.auto_route_builds {
+                "automatic routing disabled"
+            } else if !in_window {
+                "route reached its 15-minute lifetime"
+            } else {
+                "peer or capacity is no longer fresh"
+            },
+        )?;
+        return Ok(None);
     }
     if !config.auto_route_builds || guard.requested_builders == 0 || guard.violations().is_empty() {
         return Ok(None);
@@ -150,27 +240,22 @@ fn prepare(
         return Ok(None);
     };
     let now = Utc::now();
-    let fresh = |at: DateTime<Utc>| at <= now && now - at <= chrono::Duration::seconds(FRESH_SECS);
+    let recent =
+        crate::cloud::peer_mailbox::build_route_recent_peers(root, now.timestamp() - FRESH_SECS)?;
     let local_machine = machine_id(sender);
     let mut candidates = peers
         .into_iter()
         .filter_map(|peer| {
-            if !peer.live
-                || !fresh(peer.last_heartbeat)
-                || peer
-                    .session
-                    .as_deref()
-                    .is_none_or(|session| session.trim().is_empty())
-                || peer
-                    .machine_id
-                    .as_deref()
-                    .is_none_or(|id| id == local_machine)
+            if peer
+                .machine_id
+                .as_deref()
+                .is_none_or(|id| id == local_machine)
+                || recent.contains(&peer.agent_id)
             {
                 return None;
             }
-            let capacity: BuildCapacity =
-                serde_json::from_value(peer.build_capacity.clone()?).ok()?;
-            if !fresh(capacity.observed_at) || capacity.free_slots == 0 || capacity.cpu_count == 0 {
+            let capacity = live_capacity(&peer, now)?;
+            if capacity.free_slots == 0 {
                 return None;
             }
             let ratio = capacity
@@ -200,6 +285,7 @@ fn prepare(
         recipient: format!("{}@{}", peer.name, peer.machine),
         free_slots: capacity.free_slots,
         load_per_cpu: ratio,
+        created_at: Some(now),
     };
     if let Some(brief) = brief {
         task.notes.push_str(&format!("\n📌 SPAWN BRIEF {brief}\n"));
@@ -209,38 +295,6 @@ fn prepare(
         serde_json::to_string(&plan).map_err(|error| error.to_string())?
     ));
     Ok(Some(plan))
-}
-
-/// Assignment callers stage the route in the same task mutation as the other
-/// validated fields, before any local assignment prompt can be enqueued.
-pub(crate) fn prepare_assignment(
-    root: &Path,
-    sender: &cas_types::Agent,
-    task: &mut cas_types::Task,
-) -> Result<Option<RoutePlan>, String> {
-    let config = crate::config::Config::load(root)
-        .unwrap_or_default()
-        .factory();
-    if !config.auto_route_builds && !has_route(task) {
-        return Ok(None);
-    }
-    let guard = crate::factory_build_guard::inspect_for_task(root, &config, 1, Some(task));
-    let assignee = task.assignee.take();
-    let plan = prepare(root, sender, task, None, &config, &guard)?;
-    if plan.is_none() {
-        task.assignee = assignee;
-    }
-    Ok(plan)
-}
-
-pub(crate) async fn deliver(
-    plan: RoutePlan,
-    root: std::path::PathBuf,
-    task: cas_types::Task,
-) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || plan.send(&root, &task))
-        .await
-        .map_err(|error| error.to_string())?
 }
 
 pub(crate) fn route(
@@ -254,15 +308,28 @@ pub(crate) fn route(
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let expected = tasks.get(task_id).map_err(|error| error.to_string())?;
     let mut task = expected.clone();
-    let Some(plan) = prepare(root, sender, &mut task, brief, config, guard)? else {
-        return Ok(None);
-    };
+    let plan = prepare(root, sender, &mut task, brief, config, guard)?;
     if task.notes != expected.notes {
         task.updated_at = tasks
             .update_if_current(&task, &expected)
             .map_err(|error| error.to_string())?;
     }
-    plan.send(root, &task).map(Some)
+    let Some(plan) = plan else { return Ok(None) };
+    match plan.send(root, &task) {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(crate::cloud::peer_mailbox::PeerSendError::BuildRouteCooldown(_)) => {
+            let expected = task.clone();
+            expire(root, &mut task, &plan, "peer routing cooldown")?;
+            tasks
+                .update_if_current(&task, &expected)
+                .map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+        Err(error) => Err(format!(
+            "Build route to {} retained; local dispatch withheld: {error}",
+            plan.recipient
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -646,7 +713,13 @@ mod tests {
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
-        for case in ["absent", "stale-sample", "old-route", "disabled"] {
+        for case in [
+            "absent",
+            "stale-sample",
+            "old-route",
+            "disabled",
+            "pending-disabled",
+        ] {
             server.reset().await;
             let project = env.home().join(case);
             std::fs::create_dir_all(&project).unwrap();
@@ -677,7 +750,7 @@ mod tests {
             Mock::given(method("POST"))
                 .and(path("/api/peer-messages"))
                 .respond_with(
-                    ResponseTemplate::new(200)
+                    ResponseTemplate::new(if case == "pending-disabled" { 503 } else { 200 })
                         .set_body_json(serde_json::json!({"id": "sent", "status": "queued"})),
                 )
                 .mount(&server)
@@ -705,13 +778,12 @@ mod tests {
                     )
                 })
             };
-            assert!(
-                invoke(root.clone(), sender.clone(), false)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .is_some()
-            );
+            let initial = invoke(root.clone(), sender.clone(), false).await.unwrap();
+            if case == "pending-disabled" {
+                assert!(initial.is_err());
+            } else {
+                assert!(initial.unwrap().is_some());
+            }
             if case == "old-route" {
                 let mut task = tasks.get("cas-release").unwrap();
                 task.notes = task
@@ -744,7 +816,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_json(directory(peers)))
                 .mount(&server)
                 .await;
-            let result = invoke(root.clone(), sender, case == "disabled")
+            let result = invoke(root.clone(), sender, case.ends_with("disabled"))
                 .await
                 .unwrap()
                 .unwrap();
@@ -759,6 +831,15 @@ mod tests {
                 updated.notes
             );
             assert!(updated.assignee.is_none());
+            if case == "pending-disabled" {
+                let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1")
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    status.contains("abandoned") && status.contains("expired"),
+                    "{status}"
+                );
+            }
         }
     }
 
@@ -832,5 +913,30 @@ mod tests {
                 None => assert!(result.is_none(), "{id}: {result:?}"),
             }
         }
+        // A caller that passed selection before another spawn committed must
+        // still lose at the durable outbox's atomic cooldown check.
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.method == "POST" && request.url.path() == "/api/peer-messages")
+            .unwrap();
+        let mut raced: crate::cloud::peer_mailbox::PeerSend =
+            serde_json::from_slice(&sent.body).unwrap();
+        raced.dedupe_key = format!("build-route:{REPO}:cas-raced");
+        let error = tokio::task::spawn_blocking(move || {
+            crate::cloud::peer_mailbox::send_build_route(&root, raced, "best@best")
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::cloud::peer_mailbox::PeerSendError::BuildRouteCooldown(_)
+            ),
+            "{error}"
+        );
     }
 }

@@ -510,7 +510,8 @@ pub struct PeerPremergeReceipt {
     pub landed_sha: String,
     pub dispatch_id: String,
     pub verdict_id: String,
-    pub task_context: serde_json::Value,
+    /// Task, ancestor epic and linked-spec plan; excludes host-local paths/evidence.
+    pub plan_digest: String,
 }
 
 /// Transport provenance supplied only by the authenticated daemon admission.

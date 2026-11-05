@@ -998,6 +998,7 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
     // Identity/candidate combinations share the same real mailbox boundary;
     // none may create a dispatch or verdict in the worker's store.
     for (field, value, in_body) in [
+        ("plan_digest", serde_json::json!("changed-plan"), true),
         ("task_id", serde_json::json!("cas-wrong-task"), true),
         ("source_sha", serde_json::json!(receipt["target_sha"]), true),
         ("candidate_tree", serde_json::json!(tip), true),

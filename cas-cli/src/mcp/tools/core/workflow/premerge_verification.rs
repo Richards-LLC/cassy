@@ -195,9 +195,7 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
-fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
     hash.update(serde_json::to_vec(&task_context(task)).map_err(|error| error.to_string())?);
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let specs = crate::store::open_spec_store(root).map_err(|error| error.to_string())?;
@@ -222,6 +220,20 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
         linked.sort_by(|a, b| a.id.cmp(&b.id));
         hash.update(serde_json::to_vec(&linked).map_err(|error| error.to_string())?);
     }
+    Ok(())
+}
+
+fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-peer-premerge-plan-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-premerge-candidate-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",

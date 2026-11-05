@@ -107,9 +107,9 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_message", "Reminder text; ask: default at deadline."),
     ("remind_delay_secs", "Seconds: time reminder. ask: deadline."),
     ("remind_event", "task_completed|task_blocked|worker_idle|epic_completed|epic_split_decided|ci_completed|branch_contained_in|tag_exists; external: cross_session=true."),
-    ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"}; task {\"task_id\":\"cas-12\"}."),
+    ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); task {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
-    ("remind_ttl_secs", "TTL: 3600; task-filtered 0; external 604800; 0=never."),
+    ("remind_ttl_secs", "TTL default 3600 (task-bound 0); external default 604800; 0=never."),
     ("cross_session", "remind: survive session end and task close."),
     ("scope", "peers: all=account-wide."),
 ];

@@ -1669,6 +1669,23 @@ fn protected_default_branch_pr_error(
     ))
 }
 
+/// The no-dispatch path owns only the newly attempted merge, never an
+/// existing or concurrently advanced target. Preserve the exact pre-merge ref.
+fn restore_unreviewed_protected_merge(
+    operations: &crate::worktree::GitOperations,
+    target: &str,
+    base: Option<&str>,
+    outcome: &crate::worktree::git::TargetPushOutcome,
+) -> String {
+    let (Some(base), crate::worktree::git::TargetPushOutcome::ProtectedDefaultBranch { sha, .. }) = (base, outcome) else {
+        return "No new local merge was owned by this attempt; no history was rewound.".into();
+    };
+    match super::premerge_verification::restore_unpublished_merge(operations, target, base, sha) {
+        Ok(()) => format!("Unconfirmed merge restored locally to {base}. Source retained for the PR route."),
+        Err(error) => format!("Local rollback declined: {error}. Concurrent history and working edits were preserved; inspect the target before retrying."),
+    }
+}
+
 fn delivery_observation_failure_message(
     worktree_id: &str,
     task_id: &str,
@@ -5039,7 +5056,11 @@ impl CasCore {
         // workers default to preserving the worktree mid-session.
         let mut do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
-        let defer_reviewed_cleanup = premerge_approval.is_some() && transactional_delivery.is_none();
+        // A default-branch publication may require a PR even without a task
+        // verifier. Keep its source until publication, including cleanup=true.
+        let defer_reviewed_cleanup = transactional_delivery.is_none()
+            && (premerge_approval.is_some() || (manager.git().has_origin_remote()
+                && worktree.parent_branch == manager.git().detect_default_branch()));
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
@@ -5242,6 +5263,7 @@ impl CasCore {
         // receipt; empty when nothing needed reconciling.
         let mut reconcile_note = String::new();
         let mut pushed_source_note = String::new();
+        let mut unpublished_merge_base = None;
         let mut merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -5436,6 +5458,7 @@ impl CasCore {
             let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
                 .or(dirty_pushed_anchor);
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
+            unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if let Some(anchor) = pushed_anchor {
                 let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
                 if result.is_ok() {
@@ -5736,7 +5759,10 @@ impl CasCore {
                 return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
             }
             if let Some(error) = protected_error {
-                return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
+                let restored = restore_unreviewed_protected_merge(
+                    manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), &push_outcome,
+                );
+                return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
             }
             post_merge_test_delay().await;
             target_push = Some((receipt.target_branch.clone(), push_outcome));
@@ -5916,10 +5942,13 @@ impl CasCore {
                 let push = protected_error.unwrap_or_else(|| describe_target_push_state(&push_branch, &push_outcome));
                 return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
             }
-            if defer_reviewed_cleanup && do_cleanup && source_worktree_live {
+        }
+        if defer_reviewed_cleanup && do_cleanup && source_worktree_live && push_outcome.is_published() {
                 let source = crate::worktree::GitOperations::new(worktree.path.clone());
+                let expected = premerge_approval.as_ref().map(|approval| approval.candidate.source_sha.as_str())
+                    .or(observed_source_tip.as_deref());
                 let unchanged = source.current_branch().ok().as_deref() == Some(worktree.branch.as_str())
-                    && source.resolve_commit("HEAD").as_deref() == Some(approval.candidate.source_sha.as_str())
+                    && source.resolve_commit("HEAD").as_deref() == expected
                     && source.classify_dirty_status(&worktree.path).is_ok_and(|dirty| !dirty.is_blocked());
                 if unchanged {
                     manager.cleanup_merged_worktree(&mut worktree)
@@ -5930,10 +5959,16 @@ impl CasCore {
                     do_cleanup = false;
                     reconcile_note.push_str("\nCleanup deferred: source checkout changed or has uncommitted work; worktree and branch retained.");
                 }
-            }
         }
         if let Some(error) = protected_error {
-            return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
+            let restored = restore_unreviewed_protected_merge(
+                manager.git(), &push_branch, unpublished_merge_base.as_deref(), &push_outcome,
+            );
+            return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
+        }
+        if defer_reviewed_cleanup && !push_outcome.is_published() {
+            do_cleanup = false;
+            reconcile_note.push_str("\nCleanup deferred until publication; source worktree and branch retained.");
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
         post_merge_test_delay().await;

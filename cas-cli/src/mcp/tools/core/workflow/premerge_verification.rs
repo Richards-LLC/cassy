@@ -528,25 +528,9 @@ impl Approval {
         }
         self.verify_landing(attempted)?;
         let attempted_base = self.candidate.landing_base(attempted)?;
-        // Restore only our ref and merge paths. reset --hard would discard
-        // unrelated operator edits which the merge deliberately preserved.
-        let restored = operations
-            .compare_and_swap_ref(&self.candidate.target_branch, &attempted_base, attempted)
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                let checkouts = operations
-                    .list_worktrees()
-                    .map_err(|error| error.to_string())?;
-                for checkout in checkouts.iter().filter(|checkout| {
-                    checkout.branch.as_deref() == Some(self.candidate.target_branch.as_str())
-                }) {
-                    git(
-                        &checkout.path,
-                        &["read-tree", "-u", "-m", attempted, &attempted_base],
-                    )?;
-                }
-                Ok(())
-            });
+        let restored = restore_unpublished_merge(
+            operations, &self.candidate.target_branch, &attempted_base, attempted,
+        );
         Ok(Some(match restored {
             Ok(()) => format!(
                 "Unconfirmed reviewed merge restored locally to {}. Candidate, source and approval retained; fix the push cause and retry.",
@@ -557,6 +541,24 @@ impl Approval {
             ),
         }))
     }
+}
+
+/// Restore only the merge this publication attempted, retaining unrelated
+/// working edits and any concurrent writer. Reviewed and no-dispatch merges
+/// use the same compare-and-swap plus merge-path checkout repair.
+pub(crate) fn restore_unpublished_merge(
+    operations: &crate::worktree::GitOperations,
+    target: &str,
+    base: &str,
+    attempted: &str,
+) -> Result<(), String> {
+    operations.compare_and_swap_ref(target, base, attempted)
+        .map_err(|error| error.to_string())?;
+    let checkouts = operations.list_worktrees().map_err(|error| error.to_string())?;
+    for checkout in checkouts.iter().filter(|checkout| checkout.branch.as_deref() == Some(target)) {
+        git(&checkout.path, &["read-tree", "-u", "-m", attempted, base])?;
+    }
+    Ok(())
 }
 
 impl CasCore {

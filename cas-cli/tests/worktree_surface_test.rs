@@ -4813,6 +4813,17 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
 #[cfg(unix)]
 #[tokio::test]
 async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
+    protected_main_fixture_cas_d6cf(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_main_uses_pr_before_local_merge_without_dispatch_cas_d6cf() {
+    protected_main_fixture_cas_d6cf(true).await;
+}
+
+#[cfg(unix)]
+async fn protected_main_fixture_cas_d6cf(queued: bool) {
     let mut env = test_env();
     let repo = GitRepo::new();
     let remote = TempDir::new().unwrap();
@@ -4820,8 +4831,16 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
     run_git(&["push", "-u", "origin", "main"], &repo.root);
     let before = git_stdout(&repo.root, &["rev-parse", "main"]);
-    cas::test_paths::warm_stub(&remote.path().join("hooks/pre-receive"),
-        "#!/bin/sh\necho 'error: GH013: Repository rule violations found for refs/heads/main.' >&2\nexit 1\n");
+    let pushed_refs = remote.path().join("pushed-refs.log");
+    cas::test_paths::warm_stub(&remote.path().join("hooks/pre-receive"), &format!(r#"#!/bin/sh
+while read old new ref; do
+    printf '%s\n' "$ref" >> '{}'
+    if [ "$ref" = refs/heads/main ]; then
+        echo 'error: GH013: Repository rule violations found for refs/heads/main.' >&2
+        exit 1
+    fi
+done
+"#, pushed_refs.display()));
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
     disable_system_a(&cas_root);
     let tasks = open_task_store(&cas_root).unwrap();
@@ -4835,6 +4854,30 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     run_git(&["add", "delivery.txt"], &worker);
     run_git(&["commit", "-m", "fix(cas-d6cf): delivery"], &worker);
     let source = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let pr_url = "https://github.com/org/protected/pull/37";
+    let gh_calls = env.home().join("gh-calls.log");
+    let pr_exists = env.home().join("pr-created");
+    let armed = env.home().join("pr-armed");
+    if queued {
+        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), "https://github.com/org/protected"], &repo.root);
+        run_git(&["config", "remote.origin.url", "https://github.com/org/protected"], &repo.root);
+        let gh = env.home().join("protected-gh");
+        cas::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{calls}'
+pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{source}","headRefName":"factory/bob","baseRefName":"main"}}'
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
+'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":{{"id":"queue-main"}}}}}}}}' ;;
+'api repos/org/protected/commits/'*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
+'pr list') if [ -f '{exists}' ]; then printf '[%s]\n' "$pr"; else printf '[]\n'; fi ;;
+'pr create') touch '{exists}'; printf '%s\n' '{url}' ;;
+'pr view') printf '%s\n' "$pr" ;;
+'pr merge') touch '{armed}'; printf 'Auto-merge armed\n' ;;
+*) exit 97 ;;
+esac
+"#, calls=gh_calls.display(), exists=pr_exists.display(), armed=armed.display(), url=pr_url));
+        env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    }
     let operator_edit = "unrelated operator edit\n";
     std::fs::write(repo.root.join("README.md"), operator_edit).unwrap();
     env.set_current_dir(&repo.root);
@@ -4844,10 +4887,26 @@ async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     request.task_id = Some(task.id.clone());
     request.allow_trunk = Some(true);
     request.cleanup = Some(false);
-    let response = service.factory(Parameters(request)).await.unwrap();
+    let response = service.factory(Parameters(request.clone())).await.unwrap();
     let text = get_text(&response);
-    // pin: this machine-readable refusal code selects the resumable PR route.
-    assert!(text.contains("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"), "{text}");
+    if queued {
+        assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().lines().any(|line| line == "refs/heads/main"),
+            "a known queue must route the source PR before attempting a local default-branch publication: {text}");
+        assert!(!response.is_error.unwrap_or(false) && text.contains(pr_url), "{text}");
+        assert!(armed.exists(), "the PR must have auto-merge enabled");
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/factory/bob"]), source);
+        let retry = service.factory(Parameters(request)).await.unwrap();
+        assert!(!retry.is_error.unwrap_or(false), "{}", get_text(&retry));
+        let calls = std::fs::read_to_string(&gh_calls).unwrap();
+        assert_eq!(calls.lines().filter(|line| line.starts_with("pr create ")).count(), 1,
+            "retry must reuse the same PR: {calls}");
+        let stored = tasks.get(&task.id).unwrap();
+        assert_eq!(stored.status, TaskStatus::AwaitingMerge);
+        assert_eq!(stored.deliverables.delivery_pr_number, Some(37));
+    } else {
+        // pin: this machine-readable refusal code selects the resumable PR route.
+        assert!(text.contains("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"), "{text}");
+    }
     assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(),
         "the regression must exercise the no-dispatch path");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before,

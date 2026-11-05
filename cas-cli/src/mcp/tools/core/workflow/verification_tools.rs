@@ -436,8 +436,14 @@ impl CasCore {
                     return Err(Self::error(ErrorCode::INVALID_PARAMS, "Verifier handoff rejected: late dispatch was superseded or invalidated."));
                 }
                 let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &dispatch)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
-                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Verifier handoff rejected: expired handoff is not a pre-merge candidate."))?;
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                let Some(candidate) = candidate else {
+                    if dispatch.state == cas_types::VerificationDispatchState::Claimed {
+                        cas_store::timeout_verification_dispatch(&self.cas_root, &req.task_id, chrono::Utc::now())
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                    }
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "Verifier handoff rejected: expired non-premerge handoff is timed_out; registered-supervisor recovery is required."));
+                };
                 candidate.validate_late_verdict(&self.cas_root, &task)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Verifier handoff rejected: candidate changed: {error}")))?;
                 late_premerge_dispatch = Some(dispatch);

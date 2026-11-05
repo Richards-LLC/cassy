@@ -490,12 +490,14 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             cas::types::VerificationDispatchState::Pending
                 | cas::types::VerificationDispatchState::Claimed
         ));
+        let measurement_events = cas_store::quality_events_between(&fixture.root, None, None).unwrap();
         assert!(
-            cas_store::quality_events_between(&fixture.root, None, None)
-                .unwrap()
-                .iter()
-                .all(|event| event.task_id.as_deref() != Some(task_id.as_str())),
-            "a question ran no check"
+            measurement_events.iter()
+                .any(|event| event.task_id.as_deref() == Some(task_id.as_str())
+                    && matches!(&event.payload, cas_store::QualityPayload::CheckRun {
+                        minutes: Some(minutes), ..
+                    } if *minutes == verdict.duration_ms.unwrap() as f64 / 60_000.0)),
+            "automatic duration must reach the verifier measurement ledger: mode={mode}, duration_ms={:?}, events={measurement_events:?}", verdict.duration_ms
         );
 
         // A worker cannot turn the question into an approval.

@@ -84,7 +84,7 @@ affects with the command its CLAUDE.md or AGENTS.md names. Independent QA first
 consumes matching worker receipts under [independent-pass.md](independent-pass.md).
 Factory workers and QA cannot use `--full` or an unfiltered Playwright run.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 
 Each journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.

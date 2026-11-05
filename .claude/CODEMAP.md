@@ -123,7 +123,7 @@
 - `cas-cli/src/fast_lane_walk.rs` - durable failed-walk Commander choice, authenticated reply binding, fifteen-minute revert default and project runner.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides. Batch persistence marks its MCP response committed before continued delivery closes; `server_handler.rs` and `lifecycle/merge_close.rs` retain bounded outcome summaries on each task, with complete long remedies in immutable receipt details. `qa_evidence.rs` excludes batch, post-commit and late-close system outcomes from producer citations, and formats restored/synced citations as separate timestamped notes.
 - `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - incremental Claude/Codex/Grok turn accounting before optional Commander mirroring; typed actions and authenticated wake provenance.
-- `cas-cli/src/migration/migrations/m292_quality_turns.rs` - append-only quality ledger CHECK upgrade, shared with store-open repair.
+- `cas-cli/src/migration/migrations/m292_quality_turns.rs`, `cas-cli/src/migration/migrations/m295_quality_friction.rs` - append-only quality ledger CHECK upgrades (Turn, Friction), shared with store-open repair.
 - `cas-cli/src/quality_ledger.rs`, `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/cli/ledger.rs` - append-only quality events, live/history queue identities and friction-ledger commands.
 - `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub service lifecycle and Serve target ownership.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE routes and MCP action schemas.

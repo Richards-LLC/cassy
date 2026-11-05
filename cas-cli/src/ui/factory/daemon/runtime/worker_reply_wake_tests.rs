@@ -96,3 +96,38 @@ async fn a_stranded_worker_message_raises_one_alarm_wake_and_notice_cas_2961() {
     assert_eq!(wake_attempt(&mut daemon, id).await, cas_store::WakeAttempt::Fired,
         "the alarm wakes the idle supervisor once with the stranded message");
 }
+
+/// cas-922d: a worker's ask is the conversation. Its seventh in an hour must
+/// not wait for the sender-pair cap, and it skips the 20 s burst debounce, so
+/// an idle supervisor wakes on the first pass.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capped_worker_ask_wakes_the_idle_supervisor_at_once_cas_922d() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = super::peer_mailbox_wake_tests::peer_fixture().await;
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let mut worker =
+        cas_types::Agent::new_with_role("worker-id".into(), WORKER.into(), cas_types::AgentRole::Worker);
+    worker.factory_session = Some(daemon.session_name.clone());
+    crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+    let spent = chrono::Utc::now() - chrono::Duration::minutes(10);
+    for lead in 0..6 {
+        crate::supervisor_message_wakes::record(&cas_dir, 900_000 + lead, daemon.app.supervisor_name(),
+            &["worker-id".to_string()], spent, spent).unwrap();
+    }
+    let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("worker-id".into());
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::tools::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::tools::CasService::new(core);
+    let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "kind": "ask",
+        "summary": "Which base?", "message": "Should cas-922d start from origin/main or the parked branch?",
+    }))
+    .unwrap();
+    service.coordination(Parameters(request)).await.unwrap();
+    let id: i64 = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap()
+        .query_row("SELECT MAX(id) FROM prompt_queue WHERE instr(prompt, 'origin/main or the parked') > 0", [], |row| row.get(0))
+        .expect("the ask is queued");
+    assert_eq!(wake_attempt(&mut daemon, id).await, cas_store::WakeAttempt::Fired);
+}

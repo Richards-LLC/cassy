@@ -6,8 +6,7 @@ covers capped check/test evidence and non-Rust suites without restating those ru
 
 ## Scope and test design
 
-Run affected targeted tests: the whole test module of each changed production
-function plus every integration harness that calls it.
+Run the tests that cover the code you touched; name each file or filter you ran.
 <!-- cas-src:begin -->
 `CONTRIBUTING` names the scoped commands.
 <!-- cas-src:else -->
@@ -74,13 +73,10 @@ Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
 receipts. Run the red test before fixing it, then commit and run the green test.
 
-For affected module and harness selection, for example
-`--lib -E 'test(close_ops::)'` plus
-`--test integration_factory -E 'test(worktree_surface_test::)'`.
+Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run
-in the close reason. Named-only proofs missed same-module assertions
-and other callers' tests, so five deliveries failed at merge or review.
+in the close reason.
 
 <!-- cas-src:else -->
 In a Rust project, Cassy's capped runner admits only
@@ -98,7 +94,7 @@ a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 For a supervisor's integrated run, record
 `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
 the epic. Child closes reference the epic's integration proof; final-gate

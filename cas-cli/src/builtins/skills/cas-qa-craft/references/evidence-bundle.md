@@ -207,7 +207,7 @@ For browser deliveries, run the project's unit, type and source-impact-selected
 journey checks while iterating. Close and QA do not require a journey receipt.
 <!-- cas-src:end -->
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 Workers produce affected-journey evidence; independent QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing

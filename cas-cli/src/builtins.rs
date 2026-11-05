@@ -5424,7 +5424,7 @@ This is the body content."#;
     #[test]
     fn full_suite_owner_rule_syncs_for_every_harness_cas_7e91e() {
         // pin: GH #1243 requires this one identical ownership sentence across installed skill surfaces.
-        const RULE: &str = "With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only.";
+        const RULE: &str = "Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
         for harness in [
             SupervisorCli::Claude,
             SupervisorCli::Codex,

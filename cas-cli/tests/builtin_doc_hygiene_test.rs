@@ -657,6 +657,16 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "skills/cas-tdd/SKILL.md",
+        "journey",
+        "cas-97c4: the operator-approved proof-ownership sentence names the registry-backed QA journeys walked once per release batch.",
+    ),
+    (
+        "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        "journey",
+        "cas-97c4: the operator-approved proof-ownership sentence names the registry-backed QA journeys walked once per release batch.",
+    ),
+    (
         "skills/cas-qa-craft/references/evidence-ledger.md",
         "journey",
         "Names the registry-backed journey IDs prefilled by cas qa ledger init.",

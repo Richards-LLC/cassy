@@ -82,7 +82,7 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Goal: what is true when the task is done | `description` |
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
-| Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+| Proof expected: the touched tests; never name suites or evals | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
 For rule-driven work, cite each rule id and its verbatim stakeholder scope in
 the brief. Declare known causal anchors with `Rule-driven sites:` (JSON objects
@@ -505,21 +505,19 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
    <!-- cas-src:begin -->
-   Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Run targeted tests and journeys selected by the diff inside this loop. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
+   Then run the closeout in this order, once: freeze scope; start one full review; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
    <!-- cas-src:else -->
-   Then run the closeout in this order, once: freeze scope; start one full review and the [interim queue precheck](#interim-queue-precheck) together; put every finding into one batch fix; re-review only the fix diff; run one QA round; merge or enqueue. Run targeted tests and journeys selected by the diff inside this loop. The final gate (step 4) is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
+   Then run the closeout in this order, once: freeze scope; start one full review; put every finding into one batch fix; re-review only the fix diff; run one QA round; merge or enqueue. Fix tasks run only their touched tests. The final gate (step 4) is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
    <!-- cas-src:end -->
 2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
 3. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 4), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
-4. Run the final assembled-tree gate. This is the epic's single build + test:
-   targeted worker tests complement one full assembly gate run
-   on the epic tip proves every child and checks cross-task integration.
+4. Run the final assembled-tree gate. This is the epic's single full-suite run, on the tree that lands; skip it when the queue or CI already ran it.
    **When the base branch lands through a merge queue that runs the full suite
    on the merged tree, that queue run is this gate.** Do not run a local full
    suite before the PR: lane CI admits lanes, the epic PR
    enters the queue, and the queue proves the exact tree that becomes base. The
    epic closes once its tip is contained in base.
-   With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+   Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
    <!-- cas-src:begin -->
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
@@ -546,7 +544,7 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    the finding, required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
 6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. After the fix
-   lands, rerun the final assembled-tree gate on the new tip: re-enqueue the PR, or for a local gate capture the real exit code and record
+   lands, rerun only the failed checks, then re-enqueue the PR, or for a local gate capture the real exit code and record
    a fresh `ASSEMBLY_PROOF` for it:
 
    ```bash

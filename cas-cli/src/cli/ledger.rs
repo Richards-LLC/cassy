@@ -101,13 +101,17 @@ fn pull_before_report(cas_root: &Path) {
     }
 }
 
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
+/// Trimmed stdout of a successful git command, empty output included.
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git").current_dir(repo).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    git_output(repo, args).filter(|text| !text.is_empty())
 }
 
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
@@ -161,6 +165,254 @@ fn commit_to_main_minutes(repo: &Path, tag: &str) -> Option<f64> {
         );
     }
     median(minutes)
+}
+
+/// A measured value, or the reason it could not be measured. Missing data is
+/// never reported as zero.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum Measure<T> {
+    Known(T),
+    Unknown { unknown: String },
+}
+
+fn unknown<T>(reason: impl Into<String>) -> Measure<T> {
+    Measure::Unknown { unknown: reason.into() }
+}
+
+impl<T> Measure<T> {
+    fn render(&self, known: impl FnOnce(&T) -> String) -> String {
+        match self {
+            Measure::Known(value) => known(value),
+            Measure::Unknown { unknown } => format!("unknown ({unknown})"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LandingSpread {
+    median_minutes: f64,
+    p90_minutes: f64,
+    deliveries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LineChurn {
+    added: u64,
+    removed: u64,
+}
+
+/// New checks: net `#[test]` attributes in Rust sources plus CI workflow jobs
+/// that did not exist at the start of the range.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct NewChecks {
+    total: i64,
+    tests: i64,
+    ci_jobs: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SpeedRow {
+    commit_to_main: Measure<LandingSpread>,
+    main_to_published_minutes: Measure<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComplexityRow {
+    lines: Measure<LineChurn>,
+    config_keys: Measure<i64>,
+    checks: Measure<NewChecks>,
+}
+
+/// Where `cas config set` keys are declared (`ConfigMeta { key: .. }`).
+const CONFIG_REGISTRY_PATH: &str = "cas-cli/src/config/meta";
+const WORKFLOWS_PATH: &str = ".github/workflows";
+
+/// Git revisions bounding a release: its previous tag to its tag, or the
+/// newest tag to HEAD for work in progress.
+fn release_range(repo: &Path, release: &str, published: bool) -> Result<(String, String), String> {
+    if !published {
+        let newest = git(repo, &["describe", "--tags", "--abbrev=0"])
+            .ok_or("no release tag bounds the work in progress")?;
+        return Ok((newest, "HEAD".to_string()));
+    }
+    git(repo, &["rev-parse", "--verify", "--quiet", &format!("{release}^{{commit}}")])
+        .ok_or_else(|| format!("tag {release} is not in this repository"))?;
+    let previous = previous_tag(repo, release).ok_or_else(|| format!("no earlier tag bounds {release}"))?;
+    Ok((previous, release.to_string()))
+}
+
+fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = ((percentile * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
+}
+
+/// Per delivery (each first-parent landing on main), minutes from its earliest
+/// authored commit to the landing.
+fn delivery_landing_spread(repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
+    let Some(landings) =
+        git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")])
+    else {
+        return unknown(format!("git log {from}..{to} failed"));
+    };
+    let mut minutes: Vec<f64> = landings
+        .lines()
+        .filter_map(|landing| {
+            let (sha, landed_at) = landing.split_once(' ')?;
+            let landed_at = parse_time(landed_at)?;
+            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{sha}^1..{sha}")])?;
+            let first = authored.lines().filter_map(parse_time).min()?;
+            Some(minutes_between(first, landed_at))
+        })
+        .collect();
+    if minutes.is_empty() {
+        return unknown(format!("no deliveries landed in {from}..{to}"));
+    }
+    minutes.sort_by(f64::total_cmp);
+    Measure::Known(LandingSpread {
+        median_minutes: median(minutes.clone()).unwrap_or_default(),
+        p90_minutes: nearest_rank(&minutes, 0.9),
+        deliveries: minutes.len(),
+    })
+}
+
+/// Minutes from the release commit to publication: the release record's own
+/// measure, else its publish time, else the annotated tag's date.
+fn main_to_published(
+    repo: &Path,
+    release: &str,
+    published: bool,
+    recorded: Option<f64>,
+    published_at: Option<DateTime<Utc>>,
+) -> Measure<f64> {
+    if !published {
+        return unknown("not published yet");
+    }
+    if let Some(minutes) = recorded {
+        return Measure::Known(minutes);
+    }
+    let Some(released) = tag_time(repo, release) else {
+        return unknown(format!("tag {release} is not in this repository"));
+    };
+    let tagged = || {
+        git(repo, &["for-each-ref", "--format=%(taggerdate:iso-strict)", &format!("refs/tags/{release}")])
+            .and_then(|date| parse_time(&date))
+    };
+    match published_at.or_else(tagged) {
+        Some(at) => Measure::Known(minutes_between(released, at)),
+        None => unknown(format!("no release record, and {release} is a lightweight tag")),
+    }
+}
+
+fn line_churn(repo: &Path, from: &str, to: &str) -> Measure<LineChurn> {
+    let Some(stat) = git_output(repo, &["diff", "--shortstat", from, to]) else {
+        return unknown(format!("git diff {from} {to} failed"));
+    };
+    let count = |suffix: &str| -> u64 {
+        stat.split(',')
+            .find(|part| part.contains(suffix))
+            .and_then(|part| part.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0)
+    };
+    Measure::Known(LineChurn { added: count("insertion"), removed: count("deletion") })
+}
+
+fn config_keys_at(repo: &Path, rev: &str) -> Option<std::collections::BTreeSet<String>> {
+    git_output(repo, &["cat-file", "-e", &format!("{rev}:{CONFIG_REGISTRY_PATH}")])?;
+    // `git grep` exits 1 when nothing matches: a registry with no keys yet.
+    let found = git_output(repo, &["grep", "-h", "-o", "-E", r#"key: *"[^"]+""#, rev, "--", CONFIG_REGISTRY_PATH])
+        .unwrap_or_default();
+    Some(found.lines().filter_map(|line| line.split('"').nth(1).map(str::to_string)).collect())
+}
+
+fn new_config_keys(repo: &Path, from: &str, to: &str) -> Measure<i64> {
+    let Some(after) = config_keys_at(repo, to) else {
+        return unknown(format!("no config registry at {CONFIG_REGISTRY_PATH}"));
+    };
+    let before = config_keys_at(repo, from).unwrap_or_default();
+    Measure::Known(after.difference(&before).count() as i64)
+}
+
+/// Job ids under a workflow's top-level `jobs:` map.
+fn workflow_jobs(text: &str) -> Vec<String> {
+    let mut jobs = Vec::new();
+    let mut indent: Option<usize> = None;
+    let mut in_jobs = false;
+    for line in text.lines() {
+        let body = line.trim_start();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        let depth = line.len() - body.len();
+        if depth == 0 {
+            in_jobs = line.trim_end() == "jobs:";
+            continue;
+        }
+        if in_jobs && *indent.get_or_insert(depth) == depth
+            && let Some((name, _)) = body.split_once(':')
+        {
+            jobs.push(name.trim().trim_matches(['"', '\'']).to_string());
+        }
+    }
+    jobs
+}
+
+fn ci_jobs_at(repo: &Path, rev: &str) -> std::collections::BTreeSet<String> {
+    let files = git_output(repo, &["ls-tree", "-r", "--name-only", rev, "--", WORKFLOWS_PATH]).unwrap_or_default();
+    files
+        .lines()
+        .filter(|file| file.ends_with(".yml") || file.ends_with(".yaml"))
+        .flat_map(|file| {
+            let text = git_output(repo, &["show", &format!("{rev}:{file}")]).unwrap_or_default();
+            workflow_jobs(&text).into_iter().map(move |job| format!("{file}#{job}"))
+        })
+        .collect()
+}
+
+fn new_checks(repo: &Path, from: &str, to: &str) -> Measure<NewChecks> {
+    let Some(diff) = git_output(repo, &["diff", "-U0", from, to, "--", "*.rs"]) else {
+        return unknown(format!("git diff {from} {to} failed"));
+    };
+    let is_test = |line: &str| {
+        let line = line.trim_start();
+        line.starts_with("#[test]") || line.starts_with("#[tokio::test")
+    };
+    let tests = diff
+        .lines()
+        .map(|line| match line.split_at_checked(1) {
+            Some(("+", body)) if !line.starts_with("+++") && is_test(body) => 1,
+            Some(("-", body)) if !line.starts_with("---") && is_test(body) => -1,
+            _ => 0,
+        })
+        .sum::<i64>();
+    let before = ci_jobs_at(repo, from);
+    let ci_jobs = ci_jobs_at(repo, to).difference(&before).count() as i64;
+    Measure::Known(NewChecks { total: tests + ci_jobs, tests, ci_jobs })
+}
+
+fn release_shape(
+    repo: &Path,
+    release: &str,
+    published: bool,
+    recorded_publish_minutes: Option<f64>,
+    published_at: Option<DateTime<Utc>>,
+) -> (SpeedRow, ComplexityRow) {
+    let main_to_published_minutes =
+        main_to_published(repo, release, published, recorded_publish_minutes, published_at);
+    match release_range(repo, release, published) {
+        Ok((from, to)) => (
+            SpeedRow { commit_to_main: delivery_landing_spread(repo, &from, &to), main_to_published_minutes },
+            ComplexityRow {
+                lines: line_churn(repo, &from, &to),
+                config_keys: new_config_keys(repo, &from, &to),
+                checks: new_checks(repo, &from, &to),
+            },
+        ),
+        Err(reason) => (
+            SpeedRow { commit_to_main: unknown(reason.clone()), main_to_published_minutes },
+            ComplexityRow { lines: unknown(reason.clone()), config_keys: unknown(reason.clone()), checks: unknown(reason) },
+        ),
+    }
 }
 
 fn record_release(cas_root: &Path, repo: &Path, receipt: &Path) -> Result<String> {
@@ -272,6 +524,9 @@ struct LedgerReport {
     commit_to_main_minutes: Option<f64>,
     main_to_published_minutes: Option<f64>,
     ejections: u32,
+    /// Git-derived speed over the release range; `unknown` carries the reason.
+    speed: SpeedRow,
+    complexity: ComplexityRow,
     escapes: Vec<EscapeRow>,
     checks: BTreeMap<String, CheckRow>,
     features: BTreeMap<String, FeatureRow>,
@@ -333,7 +588,24 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 }),
         );
     }
-    Ok(aggregate(name, published, from, to, &events))
+    let mut report = aggregate(name, published, from, to, &events);
+    let published_at = published
+        .then(|| cas_store::quality_release_events(cas_root))
+        .transpose()?
+        .and_then(|releases| {
+            releases
+                .into_iter()
+                .find(|event| event.release_version.as_deref() == Some(report.release.as_str()))
+                .map(|event| event.occurred_at)
+        });
+    (report.speed, report.complexity) = release_shape(
+        repo,
+        &report.release,
+        published,
+        report.main_to_published_minutes,
+        published_at,
+    );
+    Ok(report)
 }
 
 fn project_name(event: &QualityEvent) -> String {
@@ -365,6 +637,15 @@ fn aggregate(
         commit_to_main_minutes: None,
         main_to_published_minutes: None,
         ejections: 0,
+        speed: SpeedRow {
+            commit_to_main: unknown("no repository read"),
+            main_to_published_minutes: unknown("no repository read"),
+        },
+        complexity: ComplexityRow {
+            lines: unknown("no repository read"),
+            config_keys: unknown("no repository read"),
+            checks: unknown("no repository read"),
+        },
         escapes: Vec::new(),
         checks: BTreeMap::new(),
         features: BTreeMap::new(),
@@ -505,14 +786,22 @@ fn render(report: &LedgerReport) -> String {
         let _ = writeln!(out, "  {kind:<16}{count:>4}");
     }
 
+    let minutes = |minutes: &f64| duration(Some(*minutes));
     let _ = writeln!(out, "\nSpeed");
+    let _ = writeln!(out, "  commit to main  {}", report.speed.commit_to_main.render(|spread| format!(
+        "median {}, p90 {} over {} deliveries",
+        minutes(&spread.median_minutes), minutes(&spread.p90_minutes), spread.deliveries)));
+    let _ = writeln!(out, "  main to publish {}", report.speed.main_to_published_minutes.render(minutes));
     if report.published {
-        let _ = writeln!(out, "  commit to main  {}", duration(report.commit_to_main_minutes));
-        let _ = writeln!(out, "  main to publish {}", duration(report.main_to_published_minutes));
         let _ = writeln!(out, "  queue ejections {}", report.ejections);
-    } else {
-        let _ = writeln!(out, "  not published yet");
     }
+
+    let _ = writeln!(out, "\nComplexity added");
+    let _ = writeln!(out, "  lines           {}", report.complexity.lines.render(|churn| format!(
+        "+{} / -{}", churn.added, churn.removed)));
+    let _ = writeln!(out, "  config keys     {}", report.complexity.config_keys.render(|keys| format!("{keys} new")));
+    let _ = writeln!(out, "  new checks      {}", report.complexity.checks.render(|checks| format!(
+        "{} ({} tests, {} CI jobs)", checks.total, checks.tests, checks.ci_jobs)));
 
     let _ = writeln!(out, "\nEscapes: {}", report.escapes.len());
     for escape in &report.escapes {
@@ -585,6 +874,128 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// Runs git with fixed identity and the given author/committer dates.
+    fn git_dated(repo: &Path, args: &[&str], authored: &str, committed: &str) {
+        let status = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.test")
+            .env("GIT_AUTHOR_DATE", authored)
+            .env("GIT_COMMITTER_DATE", committed)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    const REGISTRY: &str = "cas-cli/src/config/meta/seed/keys.rs";
+    const WORKFLOW: &str = ".github/workflows/ci.yml";
+
+    /// v1.0.0 (lightweight) then three deliveries to v1.1.0 (annotated, tagged
+    /// 15 min after its release commit): a merged branch whose first commit
+    /// landed 120 min later, and two direct commits that landed after 30 and
+    /// 10 min. Across the range: one new config key, two new `#[test]`s and
+    /// one removed, one new CI job.
+    fn release_fixture(repo: &Path) -> std::path::PathBuf {
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let at = |time: &str| format!("2026-10-01T{time}:00Z");
+        let commit = |message: &str, authored: &str, committed: &str| {
+            git_in(repo, &["add", "-A"]);
+            git_dated(repo, &["commit", "-q", "-m", message], &at(authored), &at(committed));
+        };
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        write(REGISTRY, "    key: \"a.one\", section: \"a\",\n");
+        write(WORKFLOW, "name: ci\njobs:\n  test:\n    runs-on: ubuntu\n");
+        write("src/lib.rs", "#[test]\nfn old() {}\n");
+        commit("base", "09:00", "09:00");
+        git_in(repo, &["tag", "v1.0.0"]);
+
+        git_in(repo, &["checkout", "-q", "-b", "feature"]);
+        write("src/feature.rs", "#[test]\nfn one() {}\n");
+        commit("feature one", "11:00", "11:00");
+        write("src/feature.rs", "#[test]\nfn one() {}\n#[test]\nfn two() {}\n");
+        commit("feature two", "11:30", "11:30");
+        git_in(repo, &["checkout", "-q", "main"]);
+        git_dated(repo, &["merge", "-q", "--no-ff", "-m", "land feature", "feature"], &at("13:00"), &at("13:00"));
+        write(REGISTRY, "    key: \"a.one\", section: \"a\",\n    key: \"a.two\", section: \"a\",\n");
+        commit("config key", "13:30", "14:00");
+        write(WORKFLOW, "name: ci\njobs:\n  test:\n    runs-on: ubuntu\n  lint:\n    runs-on: ubuntu\n");
+        write("src/lib.rs", "fn old() {}\n");
+        commit("lint job", "14:00", "14:10");
+        git_dated(repo, &["tag", "-a", "v1.1.0", "-m", "v1.1.0"], &at("14:25"), &at("14:25"));
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        cas_root
+    }
+
+    /// Commit to main is per delivery, from its first commit to its landing.
+    #[test]
+    fn report_shows_commit_to_main_median_and_p90_per_delivery() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(
+            report.speed.commit_to_main,
+            Measure::Known(LandingSpread { median_minutes: 30.0, p90_minutes: 120.0, deliveries: 3 })
+        );
+        let text = render(&report);
+        assert!(text.contains("commit to main  median 30 min, p90 120 min over 3 deliveries"), "{text}");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["speed"]["commit_to_main"]["p90_minutes"], 120.0);
+        // The first release has no earlier tag to bound it.
+        let first = render(&build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap());
+        assert!(first.contains("commit to main  unknown (no earlier tag bounds v1.0.0)"), "{first}");
+    }
+
+    /// Without a release record, an annotated tag dates the publication; a
+    /// lightweight tag leaves it unknown rather than zero.
+    #[test]
+    fn report_shows_main_to_published_from_the_tag_or_why_not() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(report.speed.main_to_published_minutes, Measure::Known(15.0));
+        assert!(render(&report).contains("main to publish 15 min"));
+        let first = build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap();
+        let json = serde_json::to_value(&first).unwrap();
+        assert_eq!(
+            json["speed"]["main_to_published_minutes"]["unknown"],
+            "no release record, and v1.0.0 is a lightweight tag"
+        );
+    }
+
+    /// Complexity added: line churn, new config registry keys, and new checks.
+    #[test]
+    fn report_shows_complexity_added_over_the_release() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["complexity"]["lines"], serde_json::json!({"added": 7, "removed": 1}));
+        assert_eq!(json["complexity"]["config_keys"], 1);
+        assert_eq!(json["complexity"]["checks"], serde_json::json!({"total": 2, "tests": 1, "ci_jobs": 1}));
+        let text = render(&report);
+        for expected in [
+            "Complexity added",
+            "lines           +7 / -1",
+            "config keys     1 new",
+            "new checks      2 (1 tests, 1 CI jobs)",
+        ] {
+            assert!(text.contains(expected), "missing {expected}:\n{text}");
+        }
     }
 
     /// The train's receipt becomes a release event, and the report for that

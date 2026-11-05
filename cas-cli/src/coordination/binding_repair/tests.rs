@@ -3,7 +3,7 @@ use crate::coordination::binding_intake::ChannelDisposition;
 use std::io::{Read, Write};
 const PROJECT: &str = "github.com/example/project";
 /// cas-51b3: the fake runtime's build is a fixture, never the test binary's
-/// own CAS_GIT_HASH. This is the identity of the release/v4.0.3 run that
+/// own CAS_GIT_HASH. This is the identity of the Nov 5 release-branch run that
 /// failed and hung: a build from a tree with uncommitted edits.
 const FIXTURE_BUILD: &str = "8b253ab-dirty";
 

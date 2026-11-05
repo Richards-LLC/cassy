@@ -4883,25 +4883,35 @@ mod tests {
         let cas = bin.join("cas");
         std::fs::write(
             &cas,
-            "#!/bin/sh\n[ \"$*\" = 'config get factory.worker_local_gate' ] && echo 'echo LOCAL-GATE-RAN >&2; exit 1'\n",
+            "#!/bin/sh\n[ \"$*\" = 'config get factory.worker_local_gate' ] && echo \"$LOCAL_GATE_CMD\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-        let push = std::process::Command::new("git")
-            .args(["push", "origin", "factory/w"])
-            .env("PATH", path)
-            .env("CAS_AGENT_NAME", "w")
-            .env("CAS_ROOT", hook_cas_root.path())
-            .env_remove("CAS_SESSION_ID")
-            .env_remove("CAS_FACTORY_SESSION")
-            .current_dir(&wt)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        assert!(!push.status.success(), "a failing local gate stops the push: {stderr}");
+        let push = |gate: &str| {
+            std::process::Command::new("git")
+                .args(["push", "origin", "factory/w"])
+                .env("PATH", &path)
+                .env("LOCAL_GATE_CMD", gate)
+                .env("CAS_LOCAL_GATE_TIMEOUT_SECS", "1")
+                .env("CAS_AGENT_NAME", "w")
+                .env("CAS_ROOT", hook_cas_root.path())
+                .env_remove("CAS_SESSION_ID")
+                .env_remove("CAS_FACTORY_SESSION")
+                .current_dir(&wt)
+                .output()
+                .unwrap()
+        };
+        let failed = push("echo LOCAL-GATE-RAN >&2; exit 1");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(!failed.status.success(), "a failing local gate stops the push: {stderr}");
         assert!(stderr.contains("LOCAL-GATE-RAN"), "{stderr}");
+        // verifier ver-6b51133654a4 (c): a hung gate is cut off, not waited on.
+        let hung = push("sleep 30");
+        let stderr = String::from_utf8_lossy(&hung.stderr);
+        assert!(!hung.status.success(), "a hung local gate stops the push: {stderr}");
+        assert!(stderr.contains("timed out after 1s"), "{stderr}");
         assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }

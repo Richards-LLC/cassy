@@ -1347,6 +1347,8 @@ mod tests {
             ("qa.mode", "per_task"),
             ("release.claude_account_allowlist", "agent@example.com"),
             ("peers.same_repo_scope", "own"),
+            // cas-fee3: the worker push runs this command.
+            ("factory.worker_local_gate", "pnpm ci:local"),
         ] {
             assert!(is_operator_only_config_key(key), "{key}");
             let mut changed = before.clone();

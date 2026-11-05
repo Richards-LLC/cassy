@@ -19076,6 +19076,46 @@ mod tests {
         );
     }
 
+    /// cas-73fa: a supervisor notice that asks nothing of its recipient is not
+    /// sent. A verified spawn, a clean shutdown with nothing to reassign and an
+    /// informational spawn base stay in the spawn audit; failures and
+    /// unpublished, unverified, local-only or diverged bases still reach the
+    /// supervisor.
+    #[test]
+    fn notices_that_ask_nothing_are_not_sent_cas_73fa() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = || queue.peek_all(20).unwrap().into_iter().map(|row| row.summary.unwrap_or_default()).collect::<Vec<_>>();
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(1), "tender-owl-85",
+            "register", true, "Worker is active in the Cassy agent registry for this factory session.").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(2),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-claude".into(), Vec::new())], failed: Vec::new(),
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(3), "ready-jay-11", &[
+            "SPAWN BASE: 'main' — task cas-d8e0's WorkTarget; declared delivery branch wins over ambient trunk and pinned focus.".into(),
+            "SPAWN BASE REFRESHED: local 'main' (aaa) is 2 commit(s) behind 'origin/main' (bbb); local branch FAST-FORWARDED to the published tip.".into(),
+            "EPIC BRANCH READY: 'epic/x' already published on origin.".into(),
+        ]);
+        assert!(rows().is_empty(), "nothing here asks the supervisor to act: {:?}", rows());
+
+        enqueue_spawn_outcome_notice(&cas_dir, "keen-crane", "factory-session", Some(4), "happy-shark-29",
+            "provision", false, "worktree add failed").unwrap();
+        super::record_shutdown_outcome(&cas_dir, "factory-session", "keen-crane", Some(5),
+            &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport {
+                stopped: vec![("idle-codex".into(), vec!["cas-held1".into()])], failed: vec![("stuck".into(), "pid alive".into())],
+            });
+        super::report_spawn_warnings(&cas_dir, "keen-crane", "factory-session", Some(6), "ready-jay-12", &[
+            "EPIC BRANCH UNPUBLISHED: 'epic/x' (ccc) could not be published to origin.".into(),
+        ]);
+        let sent = rows();
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn failed at provision")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker shutdown: 1 stopped, 1 failed")), "{sent:?}");
+        assert!(sent.iter().any(|s| s.starts_with("Worker spawn base warning")), "{sent:?}");
+    }
+
     // -----------------------------------------------------------------------
     // cas-2702 (GH #58 / #59): the spawn-queue consumer must never wedge, and
     // every queued request must end in a launch or a supervisor-visible FAILED.

@@ -402,6 +402,9 @@ pub(crate) struct MergeQueuePoll {
     pub ejections: Vec<MergeQueueEjection>,
     pub auto_merge_prs: BTreeSet<u64>,
     pub pr_lane_failures: Vec<PrLaneFailure>,
+    /// cas-73fa: queue exits with no failed run, held for one confirming
+    /// poll. A PR GitHub is merging can look dequeued for one poll.
+    pub held_exits: BTreeSet<u64>,
 }
 
 /// A durable condition encoded in an event reminder's JSON filter. The
@@ -1173,6 +1176,7 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
         &[],
         previously_queued,
         previously_armed,
+        &BTreeSet::new(),
     )
 }
 
@@ -1185,6 +1189,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     supervisor_prs: &[SupervisorPr],
     previously_queued: &BTreeSet<u64>,
     previously_armed: &BTreeSet<u64>,
+    _previously_held: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
     let pulls = transport.merge_queue_pull_requests()?;
     let runs = transport.completed_runs()?;
@@ -1579,7 +1584,7 @@ mod tests {
             job: "unused".into(), log: None, calls: Cell::new(0),
         };
         let poll = collect_tracked_merge_queue_ejections(
-            &transport, &[], &[], &BTreeSet::new(), &BTreeSet::new(),
+            &transport, &[], &[], &BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new(),
         ).unwrap();
         assert_eq!(poll.observed_prs.len(), 1);
         assert_eq!(poll.observed_prs[0].head_sha, "deadbeef");
@@ -2450,6 +2455,38 @@ mod tests {
             .is_empty(),
             "a normally merged PR must not relay"
         );
+    }
+
+    /// cas-73fa: one queue exit is one notice. A dequeue seen before its
+    /// failed run is listed waits one poll and then reports once, with the
+    /// run. A PR that merges between the two polls is never reported.
+    #[test]
+    fn a_queue_exit_without_a_failed_run_waits_one_confirming_poll_cas_73fa() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-db9d".to_string(), worker: "happy-shark-29".to_string(),
+            branch: "factory/happy-shark-29".to_string(), branch_tip: None, pr_number: None,
+        };
+        let transport = |runs: Vec<CiRun>, pulls: Vec<MergeQueuePullRequest>| FakeTransport {
+            runs, pulls, delivery_pulls: Vec::new(), job: String::new(), log: None, calls: Cell::new(0),
+        };
+        let poll = |t: &FakeTransport, queued: &BTreeSet<u64>, held: &BTreeSet<u64>| collect_tracked_merge_queue_ejections(
+            t, std::slice::from_ref(&delivery), &[], queued, &BTreeSet::new(), held,
+        ).unwrap();
+        let dequeued = vec![pull(1479, &delivery.branch, false, "2026-11-04T20:12:50Z")];
+        let first = poll(&transport(Vec::new(), dequeued.clone()), &BTreeSet::from([1479]), &BTreeSet::new());
+        assert!(first.ejections.is_empty(), "a run-less exit waits for a confirming poll");
+        assert_eq!(first.held_exits, BTreeSet::from([1479]));
+
+        let merged = poll(&transport(Vec::new(), Vec::new()), &first.queued_prs, &first.held_exits);
+        assert!(merged.ejections.is_empty(), "a PR that merged in between is not an ejection");
+
+        let confirmed = poll(&transport(Vec::new(), dequeued.clone()), &first.queued_prs, &first.held_exits);
+        assert_eq!(confirmed.ejections.len(), 1, "still dequeued on the confirming poll");
+        let mut failed = run_with("gh-readonly-queue/main/pr-1479-base", "queue-sha", 41904635260, Some("failure"));
+        failed.event = "merge_group".to_string();
+        let later = poll(&transport(vec![failed], dequeued), &confirmed.queued_prs, &confirmed.held_exits);
+        assert!(later.ejections.iter().all(|e| e.occurrence == confirmed.ejections[0].occurrence),
+            "a failed run listed after the exit is the same episode, not a second notice: {:?}", later.ejections);
     }
 
     #[test]

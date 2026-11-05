@@ -3666,6 +3666,10 @@ mod tests {
         assert!(prompt.text.contains("MERGE REQUIRED"));
         // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("not a task completion"));
+        // cas-73fa: an idle relay names what the supervisor must do.
+        // pin: the named next action is the relay's contract with the supervisor.
+        assert!(prompt.text.contains("Next action: message swift-fox with its next step, or reassign cas-1234"),
+            "{}", prompt.text);
         assert!(
             !lower.contains("done") && !lower.contains("finished"),
             "idle close-rejection prompt must not use completion-flavored wording: {}",

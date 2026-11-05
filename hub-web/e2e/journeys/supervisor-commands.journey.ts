@@ -22,9 +22,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         expect(hub.sends).toHaveLength(0);
         const receipt = page.locator(".supervisor-command-receipt");
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 4.0.5 (previous PID 1101).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await expect(receipt).toContainText("PID 2202, version 4.0.5");
+        await expect(receipt).toContainText("PID 2202, version 9.99.2");
         expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(1);
       });
     });

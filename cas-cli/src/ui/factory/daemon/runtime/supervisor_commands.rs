@@ -646,7 +646,7 @@ mod tests {
                 continue;
             }
             let old = process();
-            record(&daemon, old.0.id(), Some("4.0.4"));
+            record(&daemon, old.0.id(), Some("9.99.1"));
             let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
             let mut agent = store.get("single-sup").unwrap();
             agent.cc_session_id = Some("reload-version".into());
@@ -677,13 +677,13 @@ mod tests {
             let replacement = process();
             record(&daemon, replacement.0.id(), None);
             assert!(reload_observation(daemon.app.cas_dir(), &daemon.session_name, &name, old.0.id()).is_none());
-            record(&daemon, replacement.0.id(), Some("4.0.5"));
+            record(&daemon, replacement.0.id(), Some("9.99.2"));
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let response = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
                     if let DaemonMessage::SupervisorCommandReceipt { receipt } = response {
                         if receipt.phase == Phase::Observed {
-                            assert!(receipt.detail.contains(&format!("PID {}, version 4.0.5", replacement.0.id())), "{}", receipt.detail);
+                            assert!(receipt.detail.contains(&format!("PID {}, version 9.99.2", replacement.0.id())), "{}", receipt.detail);
                             break;
                         }
                     }

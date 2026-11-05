@@ -443,6 +443,7 @@ impl Reconcile {
                                     !line.is_empty()
                                         && !line.starts_with('#')
                                         && !paths.iter().any(|p| p == line)
+                                        && !builtins::previously_shipped_gitignore_entry(line)
                                 })
                             {
                                 conflicts.push(path.clone());

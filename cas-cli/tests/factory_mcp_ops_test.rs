@@ -11814,6 +11814,15 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
             .await
             .expect_err("a mid-task worker must still be refused");
         assert!(busy.contains("commits behind"), "{busy}");
+        // cas-8aa1: a queued task the worker has not started holds no
+        // worktree, and task start cuts each task from its own target.
+        active.status = TaskStatus::Open;
+        env.task_store().update(&active).unwrap();
+        let queued = assign(&env, &task_b, assignee)
+            .await
+            .expect("a queued, unstarted task must not make an idle worker stale");
+        assert!(!queued.contains("commits behind"), "{queued}");
+        store.update(&targeted).unwrap();
         active.status = TaskStatus::Closed;
         env.task_store().update(&active).unwrap();
 

@@ -517,6 +517,8 @@ async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
     premerge_record_then_merge(&[
         ("late-approved", "success", Some("approved"), true),
         ("late-timedout-approved", "success", Some("approved"), true),
+        ("late-moved-target", "success", Some("approved"), true),
+        ("late-child", "success", Some("approved"), false),
     ]).await;
 }
 
@@ -615,6 +617,11 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
                 "action": "start", "id": task.id,
             })))).await.expect("record the original delivery branch through real start");
+        }
+        if row == "late-moved-target" {
+            std::fs::write(worker_path.join("sibling.txt"), "already reviewed sibling\n").unwrap();
+            run_git(&["add", "sibling.txt"], &worker_path);
+            run_git(&["commit", "-m", "sibling already carried by source"], &worker_path);
         }
         std::fs::create_dir_all(worker_path.join("docs")).unwrap();
         std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
@@ -762,6 +769,29 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
             env.set("CAS_AGENT_ROLE", "supervisor");
         }
+        if row == "late-moved-target" {
+            let source = git_stdout(&repo.root, &["rev-parse", &delivery_branch]);
+            let tree = git_stdout(&repo.root, &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)]);
+            let sibling = git_stdout(&repo.root, &["rev-parse", &format!("{delivery_branch}^1")]);
+            run_git(&["merge", "--no-ff", &sibling, "-m", "queued sibling landing while review runs"], &repo.root);
+            run_git(&["push", "origin", "main"], &repo.root);
+            assert_ne!(git_stdout(&repo.root, &["rev-parse", "origin/main"]), target_before);
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", &delivery_branch]), source);
+            let recomputed = git_stdout(&repo.root, &["merge-tree", "--write-tree", "origin/main", &delivery_branch]);
+            assert_eq!(recomputed.lines().next(), Some(tree.as_str()), "moved target keeps the reviewed candidate tree");
+        }
+        let late_child = if row == "late-child" {
+            let child_id = format!("{slug}-verifier-session");
+            let mut child = Agent::new(child_id.clone(), "task-verifier".into());
+            child.agent_type = AgentType::SubAgent;
+            child.role = AgentRole::Standard;
+            child.parent_id = Some(supervisor_id.clone());
+            child.factory_session = Some(session.clone());
+            child.heartbeat();
+            cas_store::issue_server_verifier_handoff(&cas_root, &task.id, &dispatch.id, &supervisor_id, "late-verifier-tool").unwrap();
+            cas_store::bind_server_verifier_handoff_and_register_child(&cas_root, &supervisor_id, &child).unwrap();
+            Some(child_id)
+        } else { None };
         if row.starts_with("late-") {
             // Advance the dispatch's clock, never sleep through a deadline.
             let now = chrono::Utc::now();
@@ -775,6 +805,21 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
                 let expired = cas_store::timeout_verification_dispatch(&cas_root, &task.id, now).unwrap().unwrap();
                 assert_eq!(expired.id, dispatch.id);
             }
+        }
+        if let Some(child_id) = late_child {
+            let refused = delivery_service(&cas_root, &child_id).verification(Parameters(verification_req(serde_json::json!({
+                "action":"add", "task_id":task.id, "dispatch_id":dispatch.id,
+                "status":"approved", "summary":"child review after deadline", "confidence":1.0,
+            })))).await.expect_err("expired child authority must refuse loudly, never accept then discard");
+            assert!(refused.message.contains("expired"), "{refused}");
+            let timed_out = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
+            assert_eq!(timed_out.id, dispatch.id);
+            assert_eq!(timed_out.state, cas::types::VerificationDispatchState::TimedOut);
+            assert!(cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().is_none());
+            let held = supervisor.factory(Parameters(merge)).await.expect_err("a missing child verdict must hold the same dispatch");
+            assert!(held.message.contains(&dispatch.id), "{held}");
+            assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap().id, dispatch.id);
+            continue;
         }
         let verdict = verdict.expect("every publication needs a candidate verdict");
         let recorded = get_text(&supervisor.verification(Parameters(verification_req(serde_json::json!({

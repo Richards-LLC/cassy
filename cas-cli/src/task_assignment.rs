@@ -8,7 +8,7 @@ use std::path::Path;
 macro_rules! test_principle {
     () => {
         "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
-         through the real path; extend an existing test before adding one, and fix or delete a flaky test \
+         through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
          instead of retrying it (cas-tdd, Fewest tests)."
     };
 }

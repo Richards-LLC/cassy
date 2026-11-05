@@ -286,7 +286,7 @@ fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &
 /// Read the running session, not `claude --version`: an install can replace
 /// that executable while an older supervisor is still alive.
 fn verify_claude_reload_version(root: &std::path::Path, session: &str, supervisor: &str) -> anyhow::Result<()> {
-    const MINIMUM: [u64; 3] = [2, 1, 318];
+    const MINIMUM: [u64; 3] = [2, 1, 311];
     let observed = supervisor_transcript(root, session, supervisor, cas_mux::SupervisorCli::Claude)
         .and_then(|path| crate::mcp::tools::service::worker_liveness::read_jsonl_tail(&path, 256 * 1024))
         .and_then(|(_, tail)| tail.split_inclusive('\n').filter(|line| line.ends_with('\n')).rev()
@@ -298,7 +298,7 @@ fn verify_claude_reload_version(root: &std::path::Path, session: &str, superviso
         parts.next().is_none().then_some(triple)
     });
     anyhow::ensure!(parsed.is_some_and(|version| version >= MINIMUM),
-        "Reload Cassy was not sent: Claude Code has an unverified version ({}). This action requires observed Claude Code 2.1.318 or newer.", observed.as_deref().unwrap_or("unknown"));
+        "Reload Cassy was not sent: Claude Code has an unverified version ({}). This action requires observed Claude Code 2.1.311 or newer.", observed.as_deref().unwrap_or("unknown"));
     Ok(())
 }
 
@@ -458,7 +458,9 @@ impl FactoryDaemon {
             for record in self.supervisor_commands.records.values_mut() {
                 if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                     record.receipt.phase = Phase::Unconfirmed;
-                    record.receipt.detail = "The harness outcome was not observed. Check Raw output before sending another command.".into();
+                    record.receipt.detail = if record.receipt.command == Command::ReloadCassy {
+                        "Cassy reload is unconfirmed: no replacement live MCP PID and version were recorded. Check Claude's /mcp panel before retrying."
+                    } else { "The harness outcome was not observed. Check Raw output before sending another command." }.into();
                 }
             }
             if let Some(record) = self.supervisor_commands.records.get(&owner) {

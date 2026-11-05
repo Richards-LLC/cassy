@@ -2126,8 +2126,9 @@ Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
 managed `cas` MCP server. It preserves the conversation and confirms a new
 live server PID and its recorded version. A command echo is not success.
 The exact native `/mcp reconnect cas` interaction was verified against a
-healthy, isolated stdio server on Claude Code **2.1.318**. Earlier or unknown
-running Claude versions are refused as unverified; the current session's
+healthy, isolated stdio server on Claude Code **2.1.311, 2.1.316 and 2.1.318**.
+The minimum supported version is **2.1.311**. Older or unknown running Claude
+versions are refused as unverified; the current session's
 transcript supplies the version, rather than a potentially newer installation.
 The owning factory daemon must already run a build containing this action;
 an old daemon requires its normal update/relaunch before Commander can use it.

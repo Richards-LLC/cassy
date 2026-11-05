@@ -27,7 +27,8 @@ impl SupervisorCommand {
             (Claude | Codex, Self::Clear) => Some("/clear"),
             (Claude | Codex, Self::Model) => Some("/model"),
             (Claude, Self::Usage) => Some("/usage"),
-            // Verified on a healthy server in Claude Code 2.1.318. The managed
+            // Healthy-server reconnect verified in Claude Code 2.1.311, 2.1.316
+            // and 2.1.318. The managed
             // Claude integration names this MCP server `cas` (config_gen).
             (Claude, Self::ReloadCassy) => Some("/mcp reconnect cas"),
             (Codex, Self::Usage) => Some("/status"),

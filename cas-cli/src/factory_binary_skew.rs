@@ -226,18 +226,40 @@ pub(crate) fn snapshot_with_installed(
 }
 
 pub(crate) fn installed_version() -> Option<String> {
-    static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<String>)>>> = OnceLock::new();
-    let path = std::env::var("PATH").unwrap_or_default();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((cached_path, checked_at, version)) = guard.as_ref() {
-            if cached_path == &path && checked_at.elapsed() < Duration::from_secs(10) {
-                return version.clone();
-            }
-        }
+    installed_version_of(std::ffi::OsStr::new("cas"))
+}
+
+/// The version a restart of this long-lived process (hub or factory daemon)
+/// would run. A service launches it by an absolute (pinned) path, which an
+/// install replaces; a process started as plain `cas` resolves it on PATH.
+pub(crate) fn relaunch_version() -> Option<String> {
+    match std::env::args_os()
+        .next()
+        .filter(|program| Path::new(program).is_absolute())
+    {
+        Some(program) => installed_version_of(&program),
+        None => installed_version(),
+    }
+}
+
+/// The version `program --version` reports, cached for ten seconds per
+/// program and PATH (cas-d786).
+pub(crate) fn installed_version_of(program: &std::ffi::OsStr) -> Option<String> {
+    type Cache = BTreeMap<(std::ffi::OsString, String), (Instant, Option<String>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let key = (
+        program.to_owned(),
+        std::env::var("PATH").unwrap_or_default(),
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some((checked_at, version)) = guard.get(&key)
+        && checked_at.elapsed() < Duration::from_secs(10)
+    {
+        return version.clone();
     }
     let version = crate::bounded_process::run_command(
-        Command::new("cas").arg("--version"),
+        Command::new(program).arg("--version"),
         crate::bounded_process::Deadline::after(Duration::from_millis(500)),
         Duration::from_millis(500),
     )
@@ -250,7 +272,7 @@ pub(crate) fn installed_version() -> Option<String> {
             .map(|word| word.trim_start_matches('v').to_string())
     });
     if let Ok(mut guard) = cache.lock() {
-        *guard = Some((path, Instant::now(), version.clone()));
+        guard.insert(key, (Instant::now(), version.clone()));
     }
     version
 }

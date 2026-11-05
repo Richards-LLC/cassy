@@ -1,0 +1,4 @@
+title: A machine card shows the running hub against its installed binary and re-reads it after a hub restart, instead of offering an installed release as an update
+tasks: [cas-d786]
+invariants: [HUB-J3-MACHINE-VERSIONS]
+journeys: [HUB-J3]

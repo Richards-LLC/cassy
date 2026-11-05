@@ -580,6 +580,13 @@ pub struct HubSession {
 
 pub trait SessionReadModel: Clone + Send + Sync + 'static {
     fn list_sessions(&self) -> Result<Vec<HubSession>>;
+
+    /// The `cas` binary installed on this machine, which a hub restart would
+    /// run. A long-lived hub compares it with its own compiled version so
+    /// Commander can say which process is old (cas-d786).
+    fn installed_version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The machine's real session catalog, read from session files and each
@@ -1087,6 +1094,10 @@ impl SessionReadModel for LocalSessionReadModel {
         let manager = SessionManager::new();
         Ok(self.project_with_ends(&manager.list_sessions()?, manager.ended_sessions()?))
     }
+
+    fn installed_version(&self) -> Option<String> {
+        crate::factory_binary_skew::relaunch_version()
+    }
 }
 
 /// Outcome of one catalog read. Both sides are shared among its callers.
@@ -1123,6 +1134,16 @@ impl<R: SessionReadModel> SessionCatalog<R> {
             read_model,
             in_flight: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// The installed binary's version, read off the async runtime: the
+    /// probe runs `cas --version` under its own short deadline.
+    pub async fn installed_version(&self) -> Option<String> {
+        let read_model = self.read_model.clone();
+        tokio::task::spawn_blocking(move || read_model.installed_version())
+            .await
+            .ok()
+            .flatten()
     }
 
     pub async fn list(&self) -> Result<Vec<HubSession>> {
@@ -1172,6 +1193,7 @@ impl<R: SessionReadModel> SessionCatalog<R> {
 pub struct RecordingReadModel {
     sessions: Vec<HubSession>,
     reads: Arc<AtomicUsize>,
+    installed: Option<String>,
 }
 
 #[cfg(test)]
@@ -1180,7 +1202,13 @@ impl RecordingReadModel {
         Self {
             sessions,
             reads: Arc::new(AtomicUsize::new(0)),
+            installed: None,
         }
+    }
+
+    pub fn with_installed(mut self, version: &str) -> Self {
+        self.installed = Some(version.to_owned());
+        self
     }
 
     pub fn read_count(&self) -> usize {
@@ -1205,6 +1233,10 @@ impl SessionReadModel for RecordingReadModel {
     fn list_sessions(&self) -> Result<Vec<HubSession>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.sessions.clone())
+    }
+
+    fn installed_version(&self) -> Option<String> {
+        self.installed.clone()
     }
 }
 

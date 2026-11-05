@@ -43,6 +43,7 @@ function transport(multiplex = false) {
   let refused = false;
   let stalledRefresh = false;
   let catalogRevision: number | undefined;
+  let hubVersion = "4.0.0";
   let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input)).pathname;
@@ -56,7 +57,7 @@ function transport(multiplex = false) {
     }
     if (path === "/v1/machine") {
       clock += 24;
-      return Response.json({ capabilities: multiplex ? ["machine_multiplex_v2"] : [] });
+      return Response.json({ version: hubVersion, capabilities: multiplex ? ["machine_multiplex_v2"] : [] });
     }
     if (path === "/v1/sessions") {
       if (stalledRefresh && !(init?.signal)) return new Promise<Response>(() => {});
@@ -87,6 +88,7 @@ function transport(multiplex = false) {
     stallRefresh: (value: boolean) => { stalledRefresh = value; },
     refusePairing: (value: boolean) => { refused = value; },
     catalogRevision: (value: number) => { catalogRevision = value; },
+    hubVersion: (value: string) => { hubVersion = value; },
     event: (event: Record<string, unknown> = { kind: "session_added" }) => eventController!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)),
     endEvents: () => eventController!.close(),
     replay: (events: Record<string, unknown>[]) => eventController!.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""))),
@@ -1025,6 +1027,28 @@ describe("Commander live connection lifecycle", () => {
     await waitFor(() => expect(listed).toBe("catalog-2"));
     expect(TransportSocket.instances).toHaveLength(1);
     expect(socket.readyState).toBe(TransportSocket.OPEN);
+  });
+
+  it("re-reads the machine version when a replaced hub's event stream returns (cas-d786)", async () => {
+    const hub = transport();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const onMachineInfo = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("hub-replaced"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
+      onOutput: () => {}, onSocketError: () => {}, onMachineInfo,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(onMachineInfo.mock.calls.at(-1)?.[0]?.version).toBe("4.0.0");
+    // `cas update` restarted the hub on the newly installed binary.
+    hub.hubVersion("4.0.2");
+    hub.endEvents();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await waitFor(() => expect(onMachineInfo.mock.calls.at(-1)?.[0]?.version).toBe("4.0.2"));
   });
 
   it.each([false, true])("measures current ready transport reads without relaxing the send fence (multiplex=%s, cas-49cc)", async (multiplex) => {

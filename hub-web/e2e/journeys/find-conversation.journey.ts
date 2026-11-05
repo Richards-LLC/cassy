@@ -14,11 +14,12 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     return unavailable ? route.abort() : route.fulfill({ json: { tag_name: "v3.88.0" } });
   });
   const versions = { atlas: "3.9.0", studio: "3.88.0" };
+  const installedVersions: Record<string, string> = {};
   const supervisors: Machine[] = [
     { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude", mcp_version: "3.90.0", installed_version: "3.91.1" })) },
     { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session, harness: "codex", mcp_version: "3.91.1", installed_version: "3.91.1" })) },
   ];
-  await journey.hub({ machines: supervisors, paired: ["atlas", "studio"], versions });
+  await journey.hub({ machines: supervisors, paired: ["atlas", "studio"], versions, installedVersions });
   await journey.open();
   // seedPaired clears localStorage during fixture setup. Measure the cache
   // after the real returning-user navigation, independently of that warm-up.
@@ -88,6 +89,15 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     await page.reload();
     await expect(atlas).toContainText("Update available → 3.88.0");
     expect(checks).toBe(initialChecks + 1);
+  });
+  await journey.stage("A hub older than its installed binary names the restart, not an update (cas-d786)", async () => {
+    installedVersions.atlas = "3.88.0";
+    await page.reload();
+    await expect(atlas.locator(".machine-version")).toHaveText("Hub 3.9.0 · installed 3.88.0 Run cas hub restart");
+    await expect(atlas).not.toContainText("Update available");
+    await page.locator("#paired-machines-toggle").click();
+    await expect(page.locator('[data-machine-id="atlas"] .paired-machine-runtime')).toHaveText("Hub 3.9.0 · installed 3.88.0 Run cas hub restart");
+    await page.getByRole("button", { name: "Close paired machines" }).click();
   });
 });
 

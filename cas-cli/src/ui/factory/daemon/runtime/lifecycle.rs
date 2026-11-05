@@ -93,18 +93,19 @@ fn page_operator_for_idle_supervisor(
 /// One durable, deduped blocker turn to the operator (Commander and the
 /// operator route), stamped by the daemon. Shared by the supervisor-idle page
 /// (cas-7456) and the progress watchdog (cas-ddae); `dedupe_key` names the
-/// episode, so a repeat for the same episode records nothing.
+/// episode, so a repeat for the same episode records nothing. Returns whether
+/// the turn is recorded (a duplicate counts).
 pub(super) fn record_operator_page(
     cas_dir: &std::path::Path,
     source: &str,
     summary: &str,
     message: String,
     dedupe_key: &str,
-) {
+) -> bool {
     let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         tracing::warn!(source, "prompt queue unavailable; operator page skipped");
-        return;
+        return false;
     };
     let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
         schema_version: 2,
@@ -121,7 +122,7 @@ pub(super) fn record_operator_page(
         Ok(payload) => payload,
         Err(error) => {
             tracing::warn!(%error, source, "failed to encode the operator page");
-            return;
+            return false;
         }
     };
     if let Err(error) = queue.record_operator_turn(&cas_store::OperatorTurn {
@@ -139,7 +140,9 @@ pub(super) fn record_operator_page(
         },
     }) {
         tracing::warn!(%error, source, "failed to record the operator page");
+        return false;
     }
+    true
 }
 
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with

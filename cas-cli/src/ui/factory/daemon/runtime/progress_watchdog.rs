@@ -107,23 +107,24 @@ fn observe(cas_dir: &Path, session: &str) -> Option<Observation> {
 
     let mut fingerprint = Vec::new();
     let mut waiting = Vec::new();
-    let mut tasks = crate::store::open_task_store_local(cas_dir).ok()?.list(None).ok()?;
+    // Only in-flight statuses are read: a close or merge moves a task out of
+    // this set, which changes the fingerprint just as a status change does.
+    let store = crate::store::open_task_store_local(cas_dir).ok()?;
+    let mut tasks = Vec::new();
+    for status in [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::Blocked, TaskStatus::AwaitingMerge] {
+        tasks.extend(store.list(Some(status)).ok()?);
+    }
     tasks.retain(|task| task.assignee.as_ref().is_some_and(|who| identities.contains(who)));
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     for task in &tasks {
         fingerprint.push(format!("t:{}:{}:{}", task.id, task.status, task.updated_at.to_rfc3339()));
-        if matches!(
+        let title: String = task.title.chars().take(70).collect();
+        waiting.push(format!(
+            "{} {} ({}): {title}",
+            task.id,
             task.status,
-            TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked | TaskStatus::AwaitingMerge
-        ) {
-            let title: String = task.title.chars().take(70).collect();
-            waiting.push(format!(
-                "{} {} ({}): {title}",
-                task.id,
-                task.status,
-                task.assignee.as_deref().unwrap_or_default()
-            ));
-        }
+            task.assignee.as_deref().unwrap_or_default()
+        ));
     }
 
     let reminders = crate::store::open_reminder_store(cas_dir).ok()?.list_all_pending().ok()?;
@@ -236,15 +237,18 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, interval_secs: u64, now: Date
             observed.supervisor,
             n / 60
         );
-        super::lifecycle::record_operator_page(
+        // The dedupe key names the episode, so a retry after a failed write
+        // cannot page twice.
+        if super::lifecycle::record_operator_page(
             cas_dir,
             "progress-watchdog",
             &summary,
             message,
             &format!("progress-stall-page:{session}:{episode}"),
-        );
-        state.paged = true;
-        outcome = SweepOutcome::PagedOperator { minutes };
+        ) {
+            state.paged = true;
+            outcome = SweepOutcome::PagedOperator { minutes };
+        }
     }
     save_state(&path, &state);
     if !matches!(outcome, SweepOutcome::Quiet { .. }) {

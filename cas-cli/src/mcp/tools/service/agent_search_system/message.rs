@@ -8363,8 +8363,9 @@ mod cas_89e1_post_merge_message_type_tests {
 
     /// cas-207e: an ask with a deadline and a default schedules the
     /// supervisor's proceed wake; half a deadline is refused before any write.
+    /// cas-ddae: a peer ask schedules the asker's no-answer wake the same way.
     #[tokio::test(flavor = "current_thread")]
-    async fn operator_ask_with_deadline_schedules_the_proceed_wake_cas_207e() {
+    async fn an_ask_with_deadline_schedules_the_askers_wake_cas_207e_gh1500() {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", None),
             ("CAS_AGENT_NAME", None),
@@ -8438,6 +8439,40 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(
             due_in > chrono::Duration::seconds(890) && due_in <= chrono::Duration::seconds(900)
         );
+
+        // cas-ddae (GH #1500): an ask to a peer supervisor carries the same
+        // deadline; a deadline on a non-ask message is refused, not ignored.
+        let mut peer = Agent::new("peer-id".to_string(), "tender-finch-34".to_string());
+        peer.role = AgentRole::Supervisor;
+        peer.factory_session = Some("peer-session".to_string());
+        agents.register(&peer).expect("register peer supervisor");
+        let to_peer = |extra: serde_json::Value| -> AgentRequest {
+            let mut request = serde_json::json!({
+                "action": "message", "target": "tender-finch-34",
+                "summary": "review", "message": "Final review of the batch?",
+            });
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(request).expect("peer ask request")
+        };
+        let refused = service
+            .message_send(to_peer(serde_json::json!({ "remind_delay_secs": 600 })))
+            .await
+            .expect_err("a deadline on a non-ask is refused");
+        assert!(refused.message.contains("kind=ask"), "{refused:?}");
+        let response = response_text(
+            service
+                .message_send(to_peer(serde_json::json!({ "kind": "ask", "remind_delay_secs": 600 })))
+                .await
+                .expect("peer ask with a deadline queues"),
+        );
+        assert!(response.contains("if tender-finch-34 has not answered"), "{response}");
+        let pending = crate::store::open_reminder_store(&cas_root).unwrap().list_pending("supervisor-id").unwrap();
+        let peer_ask = pending
+            .iter()
+            .find(|r| r.trigger_filter.as_ref().is_some_and(|f| f.get("peer_ask").is_some()))
+            .expect("peer ask deadline");
+        assert_eq!(peer_ask.trigger_filter.as_ref().unwrap()["peer"], "tender-finch-34");
+        assert!(peer_ask.message.contains("to tender-finch-34 got no answer in 10 min"), "{}", peer_ask.message);
     }
 
     #[tokio::test(flavor = "current_thread")]

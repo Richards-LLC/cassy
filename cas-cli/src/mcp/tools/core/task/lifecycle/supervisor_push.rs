@@ -2188,8 +2188,8 @@ mod tests {
             HookDrain::NoticeDigest, 10, 0).unwrap().rows;
         assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
         let parked_notice = digest.iter().find(|row| row.id == parked).unwrap();
-        assert!(parked_notice.prompt.contains("cached origin refs")
-            && !parked_notice.prompt.contains("your pushed tip"),
+        // pin: the worker reading this notice must distinguish cached-ref provenance from a live push receipt.
+        assert!(parked_notice.prompt.contains("cached origin refs") && !parked_notice.prompt.contains("your pushed tip"),
             "the notice must name the cached publication evidence: {}", parked_notice.prompt);
         for row in &digest {
             assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),

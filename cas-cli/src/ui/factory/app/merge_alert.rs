@@ -295,8 +295,9 @@ impl Retries {
     /// episode even at the same tip; changing message ages never does.
     /// `None` is a repeat; `Some(report)` admits it, `report` saying whether
     /// its detached-job exit is new to this task (cas-d49a: once per run).
-    /// A read missing the worker's row, or with unknown CI at the admitted
-    /// tip, is uncertainty: it opens an episode only when none exists.
+    /// A read missing the worker's row, or with unknown CI at an admitted
+    /// pushed tip, is uncertainty: it opens an episode only when none exists.
+    /// A push since the admitted episode is a real change, even without CI.
     pub fn admit_idle(&mut self, cas_dir: &Path, worker: &str, task: &str, read: Option<&WorkerWait>) -> Option<bool> {
         if self.idle_loaded.insert(worker.to_string()) && !self.idle_signals.contains_key(worker)
             && let Some(saved) = std::fs::read(idle_signal_path(cas_dir, worker)).ok()
@@ -306,7 +307,7 @@ impl Retries {
         }
         let old = self.idle_signals.get(worker).filter(|old| old.task == task).cloned();
         if let Some(old) = &old
-            && read.is_none_or(|read| read.ci == "unknown" && read.tip == old.tip
+            && read.is_none_or(|read| read.ci == "unknown" && read.tip == old.tip && old.ci != "unpushed"
                 && read.completion.as_ref().is_none_or(|run| old.completed_run.as_ref() == Some(&run.id)))
         {
             return None;

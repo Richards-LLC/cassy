@@ -12,8 +12,10 @@ use crate::types::GitContext;
 
 pub(crate) mod branch_ops;
 mod epic_branch;
+mod rescue;
 
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
+pub use rescue::RescuedWork;
 
 pub(crate) const MANAGED_RECONCILE_SUBJECT: &str = "chore(cassy): reconcile managed project files";
 

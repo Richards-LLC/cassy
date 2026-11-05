@@ -472,6 +472,11 @@ impl Config {
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
             }
+            "factory.worker_local_gate" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let gate = value.trim();
+                factory.worker_local_gate = (!gate.is_empty()).then(|| gate.to_string());
+            }
             "factory.scratch_root" => {
                 let root = value.trim();
                 if !root.is_empty() && !std::path::Path::new(root).is_absolute() {

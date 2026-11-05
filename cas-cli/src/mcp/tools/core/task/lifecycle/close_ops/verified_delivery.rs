@@ -1,9 +1,11 @@
 //! An approval for correction B cannot close the already-merged delivery A.
 use super::*;
+use crate::mcp::tools::core::workflow::premerge_verification::{self, Candidate};
 
 pub(super) struct ReviewedDelivery {
     pub(super) dispatch: String,
     pub(super) repository: cas_types::RepositoryProofBoundary,
+    candidate: Option<Candidate>,
 }
 
 /// A recorded correction B on the reusable lane supersedes a preservation
@@ -50,13 +52,84 @@ pub(super) fn current(
     }) {
         return Ok(None);
     }
+    let candidate = premerge_verification::candidate_for_dispatch(root, &dispatch)?;
     Ok(dispatch.repository.map(|repository| ReviewedDelivery {
         dispatch: dispatch.id,
         repository,
+        candidate,
     }))
 }
 
 impl ReviewedDelivery {
+    fn premerge_source_is_contained(
+        &self,
+        repo: &std::path::Path,
+        task: &Task,
+        target: &str,
+        reference: &str,
+    ) -> bool {
+        let Some(candidate) = self.candidate.as_ref() else {
+            return false;
+        };
+        let Some(landed) = resolve_branch_sha(repo, reference) else {
+            return false;
+        };
+        if candidate.task_id != task.id
+            || candidate.target_branch != target
+            || task.deliverables.factory_branch_anchor.as_deref()
+                != Some(candidate.source_sha.as_str())
+            || !git_commit_is_ancestor(repo, &candidate.source_sha, &landed)
+            || !git_stdout_lines(
+                repo,
+                &["show", "-s", "--format=%P", &self.repository.head_commit],
+            )
+            .is_ok_and(|parents| {
+                parents == vec![format!("{} {}", candidate.target_sha, candidate.source_sha)]
+            })
+        {
+            return false;
+        }
+        let Some(base) = git_merge_base(repo, &candidate.target_sha, &candidate.source_sha) else {
+            return false;
+        };
+        // The first first-parent descendant of the source is its queue
+        // landing. If that descendant's first parent IS the source, the source
+        // itself landed by fast-forward. Never search for a later matching
+        // patch: that could excuse a dropping merge followed by a repair.
+        let landing = if landed == candidate.source_sha {
+            landed.clone()
+        } else {
+            let range = format!("{}..{landed}", candidate.source_sha);
+            let Some(first) = git_stdout_lines(
+                repo,
+                &[
+                    "rev-list",
+                    "--first-parent",
+                    "--reverse",
+                    "--ancestry-path",
+                    &range,
+                ],
+            )
+            .ok()
+            .and_then(|history| history.into_iter().next()) else {
+                return false;
+            };
+            let Some(parent) = resolve_branch_sha(repo, &format!("{first}^1")) else {
+                return false;
+            };
+            if parent == candidate.source_sha {
+                candidate.source_sha.clone()
+            } else {
+                first
+            }
+        };
+        // Prove the complete reviewed patch at that immutable landing. Later
+        // ordinary edits to the same lines do not undo a legitimate delivery.
+        // A private index keeps HEAD, the worktree and the real index untouched.
+        reverse_delivery_patch_applies_to_tree(repo, &base, &candidate.source_sha, &landing, None)
+            .unwrap_or(false)
+    }
+
     pub(super) fn merge_refusal(
         &self,
         repo: &std::path::Path,
@@ -71,16 +144,31 @@ impl ReviewedDelivery {
         } else {
             preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
         };
-        // Preserve an explicit canonical squash receipt only when its full
-        // tree equals this exact verified head and it is on the authoritative
-        // target. A receipt for earlier A cannot stand in for changed B.
-        if receipt.is_some_and(|receipt| {
-            git_commit_is_ancestor(repo, receipt, &reference)
-                && target_reachable_squash_of(repo, &self.repository.head_commit, receipt, target)
-        }) {
-            return None;
-        }
-        (!git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)).then(|| format!(
+        // A queue publishes its own merge, not the synthetic reviewed commit.
+        // The immutable candidate must bind this task's exact delivery and the
+        // authoritative target must contain both its identity and all its patch.
+        let contained = if self.candidate.is_some() {
+            // Synthetic approval never falls back to a squash receipt or bare
+            // commit ancestry when its bound source/patch check fails.
+            self.premerge_source_is_contained(repo, task, target, &reference)
+        } else {
+            // Preserve an explicit canonical squash receipt only when its full
+            // tree equals this exact verified head and it is on the authoritative
+            // target. A receipt for earlier A cannot stand in for changed B.
+            if receipt.is_some_and(|receipt| {
+                git_commit_is_ancestor(repo, receipt, &reference)
+                    && target_reachable_squash_of(
+                        repo,
+                        &self.repository.head_commit,
+                        receipt,
+                        target,
+                    )
+            }) {
+                return None;
+            }
+            git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)
+        };
+        (!contained).then(|| format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,
         ))
@@ -170,7 +258,7 @@ impl CasCore {
                 next.deliverables.factory_branch_anchor = Some(head.clone());
             }
             next.notes.push_str(&format!(
-                "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows pushed {branch}, replacing merged anchor {previous}. Preservation refs were not pushed.",
+                "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows measured ref {pushed}, replacing merged anchor {previous}. Preservation refs were not pushed.",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"), reviewed.dispatch,
             ));
             tasks.update_if_current(&next, task).map_err(|error| {

@@ -3761,7 +3761,7 @@ impl CasService {
                 );
                 withheld.push((
                     message.id,
-                    format!("merge request for {task_id}, already done"),
+                    format!("merge request for {task_id}, no longer current against task/Git state"),
                 ));
                 continue;
             }
@@ -3797,7 +3797,7 @@ impl CasService {
                 );
                 withheld.push((
                     message.id,
-                    format!("lifecycle relay for {task_id}, already done"),
+                    format!("lifecycle relay for {task_id}, superseded by current task state"),
                 ));
                 continue;
             }
@@ -3835,7 +3835,7 @@ impl CasService {
                 );
                 withheld.push((
                     message.id,
-                    format!("assignment for {task_id}, already started: {status}"),
+                    format!("assignment for {task_id}, task status {status}; start instruction no longer current"),
                 ));
                 continue;
             }
@@ -3874,7 +3874,7 @@ impl CasService {
                     );
                     withheld.push((
                         message.id,
-                        format!("assignment for {task_id}, already done"),
+                        format!("assignment for {task_id}, task no longer open for this recipient"),
                     ));
                     continue;
                 }
@@ -3942,7 +3942,7 @@ impl CasService {
                 rendered_named.push(message.id);
             }
         }
-        // cas-6ccb (GH #1215): a row this poll withheld as already done, or
+        // cas-6ccb (GH #1215): a row this poll withheld as no longer current, or
         // named without replaying it, is settled now, so the next turn's
         // repeat of unacknowledged polled rows never brings back its body.
         // No ack and no stage change: the recipient confirmed none of these.
@@ -3999,8 +3999,8 @@ impl CasService {
                 .collect::<Vec<_>>()
                 .join(", ");
             return Ok(Self::success(format!(
-                "No unread messages for {recipient} — withheld {} message(s) already \
-                 done: {ids}{}",
+                "No unread messages for {recipient} — withheld {} message(s) no longer \
+                 current: {ids}{}",
                 withheld.len(),
                 replay_note
                     .as_deref()
@@ -4023,7 +4023,7 @@ impl CasService {
         }
         if !withheld.is_empty() {
             output.push_str(&format!(
-                ". Withheld {} message(s) already done: {}",
+                ". Withheld {} message(s) no longer current: {}",
                 withheld.len(),
                 withheld
                     .iter()
@@ -5078,7 +5078,7 @@ mod inbox_poll_identity_tests {
         // cas-6ccb: a settled poll receipt says why, and that it is no ack.
         let settled = super::recipient_receipt_narrative(
             Some(SurfacingSource::InboxPoll),
-            Some("withheld by inbox_poll: merge request for cas-1, already done"),
+            Some("withheld by inbox_poll: merge request for cas-1, no longer current against task/Git state"),
         );
         assert!(settled.starts_with("recipient_receipt: withheld by inbox_poll:"), "{settled}");
         assert!(settled.contains("not an acknowledgement"), "{settled}");

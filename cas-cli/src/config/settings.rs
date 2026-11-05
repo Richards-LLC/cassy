@@ -972,6 +972,11 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Route spawned build tasks to a fresh same-account, same-repository
+    /// peer when local admission is saturated. Disable to release routes.
+    #[serde(default = "default_true")]
+    pub auto_route_builds: bool,
+
     /// Host pressure and load fallback thresholds for build admission.
     #[serde(default)]
     pub build_guard: BuildGuardConfig,
@@ -1332,6 +1337,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,
             render_max_fps: default_render_max_fps(),

@@ -159,6 +159,18 @@ pub(crate) struct BuildGuardSnapshot {
 }
 
 impl BuildGuardSnapshot {
+    pub(crate) fn build_capacity(&self, observed_at: chrono::DateTime<chrono::Utc>) -> crate::factory_build_routing::BuildCapacity {
+        crate::factory_build_routing::BuildCapacity {
+            observed_at,
+            free_slots: if self.violations().is_empty() {
+                self.max_concurrent_builders.saturating_sub(self.live_cargo_workers)
+            } else { 0 },
+            load_1m: self.load_1m, cpu_count: self.cpu_count,
+            cpu_psi_avg10: self.pressure.cpu_some_avg10,
+            memory_psi_avg10: self.pressure.memory_some_avg10,
+        }
+    }
+
     fn with_disk_probe(
         mut self,
         cas_root: &Path,
@@ -498,6 +510,21 @@ pub(crate) fn inspect_for_task(
     requested_workers: usize,
     task: Option<&cas_types::Task>,
 ) -> BuildGuardSnapshot {
+    inspect_task(cas_root, config, requested_workers, task, true)
+}
+
+/// Heartbeats observe admission without running destructive scratch reclaim.
+pub(crate) fn inspect_capacity(cas_root: &Path, config: &FactoryConfig) -> BuildGuardSnapshot {
+    inspect_task(cas_root, config, 1, None, false)
+}
+
+fn inspect_task(
+    cas_root: &Path,
+    config: &FactoryConfig,
+    requested_workers: usize,
+    task: Option<&cas_types::Task>,
+    reclaim: bool,
+) -> BuildGuardSnapshot {
     let cpu_count = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1);
@@ -513,7 +540,7 @@ pub(crate) fn inspect_for_task(
         snapshot.disabled = true;
         return snapshot;
     }
-    evaluate_for_task(
+    let mut snapshot = evaluate_for_task(
         cpu_count,
         None,
         live_cargo_worker_count(cas_root),
@@ -521,12 +548,16 @@ pub(crate) fn inspect_for_task(
         config.max_concurrent_builders,
         task,
     )
-    .with_host(Path::new("/proc"), config)
-    .with_disk_probe(
-        cas_root,
-        config,
-        crate::factory_target_cache::capacity_status,
-    )
+    .with_host(Path::new("/proc"), config);
+    if reclaim {
+        snapshot.with_disk_probe(cas_root, config, crate::factory_target_cache::capacity_status)
+    } else {
+        let filesystem = crate::factory_scratch::build_filesystem(cas_root, config);
+        snapshot.disk = Some(crate::factory_target_cache::capacity_status(
+            &filesystem, TargetCachePolicy::from(config),
+        ).map_err(|error| format!("disk capacity unavailable: {error}")));
+        snapshot
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1018,6 +1049,10 @@ mod tests {
                 "{label}: {:?}",
                 snapshot.violations()
             );
+            let capacity = snapshot.build_capacity(chrono::Utc::now());
+            assert_eq!(capacity.free_slots, if allowed { 4 } else { 0 }, "{label}");
+            assert_eq!(capacity.cpu_psi_avg10, snapshot.pressure.cpu_some_avg10);
+            assert_eq!(capacity.memory_psi_avg10, snapshot.pressure.memory_some_avg10);
             if allowed {
                 let crowded = BuildGuardSnapshot {
                     live_cargo_workers: 4,
@@ -1168,6 +1203,7 @@ mod tests {
     fn healthy_snapshot_has_no_guard_violation() {
         let snapshot = evaluate(32, Some(1.0), 2, 1, 4);
         assert!(snapshot.violations().is_empty());
+        assert_eq!(snapshot.build_capacity(chrono::Utc::now()).free_slots, 2);
     }
 
     #[test]

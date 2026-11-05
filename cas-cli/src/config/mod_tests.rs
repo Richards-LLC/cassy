@@ -1094,6 +1094,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.auto_route_builds", "false", "false"),
         ("factory.build_guard.max_load_ratio", "2", "2.0"),
         ("factory.build_guard.max_cpu_pressure_percent", "85.5", "85.5"),
         ("factory.build_guard.max_memory_pressure_percent", "5.5", "5.5"),

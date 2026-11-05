@@ -3120,6 +3120,34 @@ impl CasService {
             preassigned_task.as_ref(),
         );
         let force_build_guard = req.force.unwrap_or(false);
+        // Route only a single task, never silently split an ordered worker queue.
+        // Run even after admission recovers: an earlier routed request must
+        // replay its existing ask rather than queue a second local worker.
+        if req.task_ids.is_none()
+            && let Some(task_id) = req.task_id.as_deref()
+        {
+            let sender = self.inner.resolve_live_supervisor_authority().ok().or_else(|| {
+                ctx.supervisor_authorized.then(|| {
+                    open_agent_store(&self.inner.cas_root).ok()?.list(None).ok()?
+                        .into_iter().find(|agent| agent.role == cas_types::AgentRole::Supervisor
+                            && agent.is_alive() && agent.factory_session == ctx.factory_session)
+                }).flatten()
+            });
+            if let Some(sender) = sender {
+                let (root, id, brief, config, guard) = (
+                    self.inner.cas_root.clone(), task_id.to_string(), spawn_brief.clone(),
+                    factory_config.clone(), build_guard.clone(),
+                );
+                let routed = tokio::task::spawn_blocking(move || {
+                    let mut config = config;
+                    // A forced local spawn releases a prior automatic route.
+                    config.auto_route_builds &= !force_build_guard;
+                    crate::factory_build_routing::route(&root, &sender, &id, brief.as_deref(), &config, &guard)
+                }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+                if let Some(receipt) = routed { return Ok(Self::success(receipt)) }
+            }
+        }
         if !build_guard.violations().is_empty() && !force_build_guard {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,

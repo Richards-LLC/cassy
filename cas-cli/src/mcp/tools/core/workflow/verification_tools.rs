@@ -1641,6 +1641,9 @@ mod lifecycle_friction_tests {
             .await
             .expect("blocked parked deliveries need the same audited correction exit");
         assert_ne!(result.is_error, Some(true), "{result:?}");
+        // cas-cff4: the output states what was sent, never implying a handoff.
+        let output = format!("{result:?}");
+        assert!(output.contains("Assignee implementer NOT notified"), "{output}");
         let reopened = tasks.get(&task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(reopened.assignee, task.assignee);

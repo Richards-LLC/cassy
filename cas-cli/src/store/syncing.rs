@@ -398,6 +398,35 @@ mod tests {
                    "retirement preserves the source and history");
     }
 
+    #[test]
+    fn legacy_missing_rules_are_held_until_explicit_restore_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = Arc::new(SqliteRuleStore::open(&root).unwrap());
+        inner.init().unwrap();
+        let mut rule = make_rule("rule-legacy", Scope::Project);
+        rule.status = cas_types::RuleStatus::Proven;
+        rule.helpful_count = 1;
+        inner.add(&rule).unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let store = SyncingRuleStore::new(inner.clone(), target.clone(), 1)
+            .with_project_root(temp.path().to_path_buf());
+        assert!(store.list_proven().unwrap().is_empty(), "legacy missing files must not inject");
+        assert_eq!(inner.get(&rule.id).unwrap().status, cas_types::RuleStatus::Stale);
+        assert!(!target.join("rule-legacy.md").exists());
+        assert!(store.list_critical().unwrap().is_empty());
+        // A helpful/update write cannot silently adopt the held source.
+        store.update(&rule).unwrap();
+        assert!(store.list_proven().unwrap().is_empty());
+        assert!(!target.join("rule-legacy.md").exists());
+        // The original version is retained; restore is the explicit keep decision.
+        store.restore_version(&rule.id, Some(1), Some("operator"), Some("keep this rule")).unwrap();
+        assert_eq!(store.list_proven().unwrap().len(), 1);
+        assert!(target.join("rule-legacy.md").exists());
+    }
+
     /// cas-caae (skills audit M27): a proven rule naming another registered
     /// project is never written to this project's rule files, and an
     /// existing file for it is removed on its next write.

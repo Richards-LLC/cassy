@@ -1017,6 +1017,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_rule_create_uses_verbatim_active_personal_pattern_cas_83c3() {
+        use crate::types::AgentRole::{Director, Standard, Supervisor, Worker};
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for (role, factory, allowed) in [
+            (Some(Supervisor), true, true), (Some(Standard), false, true),
+            (Some(Worker), true, false), (Some(Director), false, false),
+            (Some(Standard), true, false), (None, false, false),
+        ] {
+            env.remove("CAS_FACTORY_MODE");
+            let (_dir, server, service) = fixture();
+            if let Some(role) = role {
+                let mut agent = crate::types::Agent::new_with_role("personal-author".into(), "personal-author".into(), role);
+                agent.factory_session = factory.then(|| "factory-session".into());
+                let store = service.inner.open_agent_store().unwrap();
+                store.init().unwrap();
+                store.register(&agent).unwrap();
+                service.inner.set_agent_id_for_testing(agent.id);
+            }
+            let http = server.clone();
+            let reply = allowed.then(|| std::thread::spawn(move || {
+                let mut request = http.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+                    .expect("one personal create, with no separate promote request");
+                assert_eq!(request.url(), "/api/patterns");
+                assert_eq!(request.method().as_str(), "POST");
+                let payload: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
+                assert_eq!(payload["content"], "  Keep my exact words.\nAcross every project.  ");
+                assert_eq!(payload["propagation"], "all_projects");
+                request.respond(tiny_http::Response::from_string(
+                    r#"{"id":"pat-personal","content":"  Keep my exact words.\nAcross every project.  ","status":"active","propagation":"all_projects"}"#
+                ).with_status_code(201)).unwrap();
+            }));
+            let result = service.rule(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "create", "scope": "global", "content": "An agent paraphrase",
+                "stakeholder": "Operator", "stakeholder_quote": "  Keep my exact words.\nAcross every project.  ",
+                "stakeholder_scope": "every project",
+            })).unwrap())).await;
+            if let Some(reply) = reply { reply.join().unwrap(); }
+            if allowed {
+                let result = result.expect("authenticated operator personal rule");
+                let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+                assert!(text.contains("pat-personal"), "{text}");
+                assert!(text.contains("active"), "{text}");
+                assert!(text.contains("personal-author"), "caller attribution: {text}");
+            } else {
+                assert!(result.is_err(), "untrusted callers cannot assert operator provenance");
+            }
+            assert!(server.try_recv().unwrap().is_none(), "no retry or untrusted Cloud write");
+            assert!(service.inner.open_rule_store().unwrap().list().unwrap().is_empty(), "no project Draft or duplicate policy");
+        }
+    }
+
+    #[tokio::test]
     async fn pattern_create_reports_cloud_write_outcome_cas_d16e() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         // Production deployment 7133052455, Cloud 9ed61999: POST /api/patterns

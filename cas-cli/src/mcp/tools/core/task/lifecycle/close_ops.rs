@@ -29140,7 +29140,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "same-line-evolved", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29210,6 +29210,11 @@ mod merge_state_gate_tests {
             let landed = head_sha(p);
             assert_ne!(landed, candidate.proof.head_commit);
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
+            if row == "same-line-evolved" {
+                std::fs::write(p.join("delivery.rs"), "// later main work replaces the delivered line\n").unwrap();
+                git(p, &["add", "delivery.rs"]);
+                git(p, &["commit", "-q", "-m", "ordinary later evolution of the same delivered line"]);
+            }
             // Later unrelated progress prevents full-target-tree equality being the proof.
             std::fs::write(p.join("later.txt"), "unrelated target progress\n").unwrap();
             git(p, &["add", "later.txt"]); git(p, &["commit", "-q", "-m", "advance target after queue publication"]);
@@ -29220,7 +29225,7 @@ mod merge_state_gate_tests {
                 Err(_) if row == "foreign-candidate" => {},
                 Ok(Some(reviewed)) => assert_eq!(
                     reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    row == "queue-landed", "containment guard: {row}",
+                    matches!(row, "queue-landed" | "same-line-evolved"), "containment guard: {row}",
                 ),
                 _ => panic!("missing task-bound review: {row}"),
             }
@@ -29228,7 +29233,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, row == "queue-landed", "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "same-line-evolved"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }

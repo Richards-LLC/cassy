@@ -265,6 +265,7 @@ impl CheckGroup {
             | "mcp config"
             | "mcp stdio upstreams"
             | "mcp upstream reachability"
+            | "retired mcp references"
             | "sync target"
             | "models"
             | "git hooks path"

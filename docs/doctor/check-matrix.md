@@ -17,6 +17,7 @@ confirmation). Human findings are never changed automatically.
 | `embedding drain`, `embeddings` | project | info / human | inspect provider capability and named drain error | embedding drain tests |
 | `code history index` | project | human | run `cas history backfill`; investigate named source errors | history-index tests |
 | `configuration`, `issue repositories`, `mcp config`, `mcp stdio upstreams`, `sync target`, `models` | project | info / human | restore config, repair named upstream, or run the named sync command | config, proxy, and MCP doctor tests |
+| `retired MCP references` | project + host guidance | human | review each named record or file; update obsolete guidance or restore its registration | `cli::doctor::retired_tools::tests` |
 | `rules`, `memory stats`, `tasks` | project | auto-fix / human | prune only genuinely dangling local dependency rows; cloud/quarantined rows require review | dependency health and task tests |
 | platform `integration*` rows | project | human | run the platform-specific `cas integrate …` remedy | integration doctor tests |
 | canonical ID, project aliases, cloud identity metadata | project | human | explicitly adopt aliases or purge/re-register cloud scope | canonical/cloud identity tests |

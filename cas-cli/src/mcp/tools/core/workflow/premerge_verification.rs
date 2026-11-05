@@ -59,6 +59,17 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
     Ok(Some(key.to_string()))
 }
 
+/// Outputs scripts/regenerate-generated-artifacts.sh commits after a merge.
+fn is_regenerated_output(path: &str) -> bool {
+    path.starts_with("hub-web/dist/")
+        || matches!(
+            path,
+            "cas-cli/src/builtins/reference-history.json"
+                | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
+                | ".codex/agents/task-verifier.toml"
+        )
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -379,6 +390,37 @@ impl Candidate {
             ));
         }
         Ok(tree)
+    }
+
+    /// cas-7a8f: worktree_merge may add a regeneration commit
+    /// (scripts/regenerate-generated-artifacts.sh) on top of the delivery
+    /// merge. The landing is the first-parent commit below any such
+    /// single-parent commits that touch only generated outputs.
+    fn delivery_landing(&self, landed: &str) -> Result<String, String> {
+        let mut landed = landed.to_string();
+        while landed != self.source_sha {
+            let parents = git(&self.repository, &["rev-list", "--parents", "-n", "1", &landed])?;
+            let [_, parent] = parents.split_whitespace().collect::<Vec<_>>()[..] else {
+                break;
+            };
+            let generated_only = git(
+                &self.repository,
+                &["diff", "--name-only", "--no-renames", parent, &landed],
+            )?
+            .lines()
+            .all(is_regenerated_output);
+            if !generated_only
+                || git(
+                    &self.repository,
+                    &["merge-base", "--is-ancestor", &self.source_sha, parent],
+                )
+                .is_err()
+            {
+                break;
+            }
+            landed = parent.to_string();
+        }
+        Ok(landed)
     }
 
     fn landing_base(&self, landed: &str) -> Result<String, String> {
@@ -1057,5 +1099,71 @@ impl CasCore {
             store.update_if_current(&current, &expected).map_err(fail)?;
         }
         Ok(candidate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(repo: &Path, args: &[&str]) -> String {
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@example.invalid"].iter().chain(args).copied().collect::<Vec<_>>()).unwrap()
+    }
+
+    fn commit_file(repo: &Path, path: &str, body: &str, message: &str) -> String {
+        let file = repo.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+        run(repo, &["add", "-A"]);
+        run(repo, &["commit", "-q", "-m", message]);
+        run(repo, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn landing_verifies_past_a_regenerated_artifact_commit_cas_7a8f() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let target = commit_file(repo, "README.md", "base\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "cas-cli/src/builtins/skills/s.md", "new\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        run(repo, &["merge", "-q", "--no-ff", "-m", "merge delivery", "factory/w"]);
+        let regenerated = commit_file(
+            repo,
+            "cas-cli/src/builtins/reference-history.json",
+            "{}\n",
+            "build(builtins): regenerate reference-history from merged history",
+        );
+        let tree = run(repo, &["rev-parse", &format!("{source}^{{tree}}")]);
+        let candidate = Candidate {
+            cas_root: repo.to_path_buf(),
+            task_id: "cas-7a8f".into(),
+            repository: repo.to_path_buf(),
+            source_branch: "factory/w".into(),
+            source_sha: source,
+            target_branch: "main".into(),
+            target_sha: target,
+            tree,
+            context_digest: String::new(),
+            proof: RepositoryProofBoundary {
+                repository_root: String::new(),
+                worktree_root: String::new(),
+                head_commit: String::new(),
+                state_digest: String::new(),
+                target_branch: None,
+                anchor_commits: Vec::new(),
+            },
+            preparation_ms: 0,
+        };
+        assert_eq!(candidate.verify_landing(&regenerated), Ok(()));
+
+        // Adversarial probe: an ordinary commit on top is still later target
+        // progress, never a landing of this delivery.
+        let later = commit_file(repo, "README.md", "edited\n", "unrelated");
+        assert_eq!(
+            candidate.verify_landing(&later),
+            Err("this is subsequent target progress, not the delivery landing".to_string())
+        );
     }
 }

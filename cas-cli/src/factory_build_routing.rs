@@ -279,6 +279,7 @@ mod tests {
             "id": id, "name": id, "agent_type": "primary", "status": "active",
             "last_heartbeat": (Utc::now() - Duration::seconds(age)).to_rfc3339(),
             "active_tasks": 0, "machine_id": format!("machine-{id}"),
+            "user_id": "operator-owner",
             "metadata": {
                 "role": "supervisor", "canonical_id": REPO,
                 "factory_session": "peer-factory", "hostname": id,
@@ -289,6 +290,11 @@ mod tests {
                 }).to_string()
             }
         })
+    }
+
+    fn directory(mut peers: Vec<serde_json::Value>) -> serde_json::Value {
+        peers.push(peer("local-sup", 0, 0.0, 0));
+        serde_json::json!({"agents": peers})
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -318,6 +324,10 @@ mod tests {
             row["last_heartbeat"] = Utc::now().to_rfc3339().into();
             row
         };
+        let mut teammate = peer("best", 3, 4.0, 0);
+        teammate["user_id"] = "other-owner".into();
+        let mut unknown_owner = peer("best", 3, 4.0, 0);
+        unknown_owner.as_object_mut().unwrap().remove("user_id");
         for (case, peers, off, note, expect_route) in [
             (
                 "fresh",
@@ -338,6 +348,8 @@ mod tests {
             ("saturated", vec![peer("best", 0, 4.0, 0)], false, "", false),
             ("healthy", vec![peer("best", 3, 4.0, 0)], false, "", false),
             ("off", vec![peer("best", 3, 4.0, 0)], true, "", false),
+            ("teammate", vec![teammate], false, "", false),
+            ("unknown-owner", vec![unknown_owner], false, "", false),
             (
                 "pingpong",
                 vec![peer("best", 3, 4.0, 0)],
@@ -349,9 +361,7 @@ mod tests {
             server.reset().await;
             Mock::given(method("GET"))
                 .and(path("/api/agents"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": peers})),
-                )
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(peers)))
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
@@ -452,7 +462,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cas_d1fe_spawn_and_stale_idle_assignment_use_the_peer_route() {
+    async fn cas_d1fe_only_spawn_routes_and_idle_assignments_stay_local() {
         use crate::mcp::tools::{TaskCreateRequest, TaskUpdateRequest};
         use crate::mcp::{CasCore, CasService};
         use cas_mcp::FactoryRequest;
@@ -512,8 +522,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/agents"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"agents": [peer("best", 3, 4.0, 0)]})),
+                ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 3, 4.0, 0)])),
             )
             .mount(&server)
             .await;
@@ -594,7 +603,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                text.contains("routed to best@best: 3 free slots, load/CPU 0.50"),
+                text.contains("routed to best@best: 3 free slots, load/CPU 0.50")
+                    == (action == "spawn"),
                 "{action}: {text}"
             );
             let routed = tasks
@@ -603,8 +613,16 @@ mod tests {
                 .into_iter()
                 .find(|task| task.title == format!("Overflow {action}"))
                 .unwrap();
-            assert!(routed.assignee.is_none(), "{action}");
-            assert!(routed.notes.contains("build-route:"));
+            assert_eq!(
+                routed.assignee.as_deref(),
+                if action == "spawn" {
+                    None
+                } else {
+                    Some("idle")
+                },
+                "{action}"
+            );
+            assert_eq!(routed.notes.contains("build-route:"), action == "spawn");
         }
         assert_eq!(
             crate::store::open_spawn_queue_store(&root)
@@ -620,6 +638,199 @@ mod tests {
             .into_iter()
             .filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages")
             .count();
-        assert_eq!(sends, 3);
+        assert_eq!(sends, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_d1fe_expired_and_disabled_routes_release_local_admission() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        for case in ["absent", "stale-sample", "old-route", "disabled"] {
+            server.reset().await;
+            let project = env.home().join(case);
+            std::fs::create_dir_all(&project).unwrap();
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            crate::cloud::set_canonical_id_in_config_toml(&root, REPO).unwrap();
+            crate::cloud::CloudConfig {
+                endpoint: server.uri(),
+                token: Some("test-token".into()),
+                ..Default::default()
+            }
+            .save_to_cas_dir(&root)
+            .unwrap();
+            let mut sender = cas_types::Agent::new("local-sup".into(), "local-sup".into());
+            sender.role = cas_types::AgentRole::Supervisor;
+            sender.factory_session = Some("local".into());
+            crate::store::open_agent_store(&root)
+                .unwrap()
+                .register(&sender)
+                .unwrap();
+            Mock::given(method("GET"))
+                .and(path("/api/agents"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(directory(vec![peer("best", 3, 4.0, 0)])),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/peer-messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"id": "sent", "status": "queued"})),
+                )
+                .mount(&server)
+                .await;
+            let tasks = crate::store::open_task_store(&root).unwrap();
+            tasks
+                .add(&cas_types::Task::new(
+                    "cas-release".into(),
+                    "Release expired route".into(),
+                ))
+                .unwrap();
+            let invoke = |root: std::path::PathBuf, sender: cas_types::Agent, off: bool| {
+                tokio::task::spawn_blocking(move || {
+                    let config = crate::config::FactoryConfig {
+                        auto_route_builds: !off,
+                        ..Default::default()
+                    };
+                    route(
+                        &root,
+                        &sender,
+                        "cas-release",
+                        None,
+                        &config,
+                        &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
+                    )
+                })
+            };
+            assert!(
+                invoke(root.clone(), sender.clone(), false)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_some()
+            );
+            if case == "old-route" {
+                let mut task = tasks.get("cas-release").unwrap();
+                task.notes = task
+                    .notes
+                    .lines()
+                    .map(|line| {
+                        if let Some(json) = line.strip_prefix(ROUTE_MARKER) {
+                            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+                            value["created_at"] =
+                                (Utc::now() - Duration::minutes(16)).to_rfc3339().into();
+                            format!("{ROUTE_MARKER}{value}")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                tasks.update(&task).unwrap();
+            }
+            server.reset().await;
+            let mut remote = peer("best", 3, 4.0, if case == "stale-sample" { 91 } else { 0 });
+            remote["last_heartbeat"] = Utc::now().to_rfc3339().into();
+            let peers = if case == "absent" {
+                vec![]
+            } else {
+                vec![remote]
+            };
+            Mock::given(method("GET"))
+                .and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(peers)))
+                .mount(&server)
+                .await;
+            let result = invoke(root.clone(), sender, case == "disabled")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.is_none(),
+                "{case}: route must release instead of replay: {result:?}"
+            );
+            let updated = tasks.get("cas-release").unwrap();
+            assert!(
+                updated.notes.to_ascii_lowercase().contains("expired"),
+                "{case}: {}",
+                updated.notes
+            );
+            assert!(updated.assignee.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_d1fe_bursts_route_to_each_peer_at_most_once_per_window() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, REPO).unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let mut sender = cas_types::Agent::new("local-sup".into(), "local-sup".into());
+        sender.role = cas_types::AgentRole::Supervisor;
+        sender.factory_session = Some("local".into());
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&sender)
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![
+                peer("best", 3, 4.0, 0),
+                peer("other", 2, 1.0, 0),
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/peer-messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "sent", "status": "queued"})),
+            )
+            .mount(&server)
+            .await;
+        for (id, recipient) in [
+            ("cas-first", Some("best@best")),
+            ("cas-second", Some("other@other")),
+            ("cas-third", None),
+        ] {
+            crate::store::open_task_store(&root)
+                .unwrap()
+                .add(&cas_types::Task::new(id.into(), "Burst task".into()))
+                .unwrap();
+            let (root, sender) = (root.clone(), sender.clone());
+            let result = tokio::task::spawn_blocking(move || {
+                route(
+                    &root,
+                    &sender,
+                    id,
+                    None,
+                    &Default::default(),
+                    &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            match recipient {
+                Some(recipient) => assert!(
+                    result
+                        .as_deref()
+                        .is_some_and(|text| text.contains(recipient)),
+                    "{id}: {result:?}"
+                ),
+                None => assert!(result.is_none(), "{id}: {result:?}"),
+            }
+        }
     }
 }

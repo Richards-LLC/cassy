@@ -1440,14 +1440,19 @@ mod tests {
     #[tokio::test]
     async fn rule_list_labels_store_repo_and_held_sources_cas_83c3() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let (temp, core) = isolated_core();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let raw = crate::store::SqliteRuleStore::open(&root).unwrap();
+        raw.init().unwrap();
         let mut rule = Rule::new("rule-source".into(), "Stored instruction".into());
         rule.status = RuleStatus::Proven;
         rule.helpful_count = 1;
         let mut legacy = rule.clone();
         legacy.id = "rule-held".into();
         // A legacy source must exist before projection receipts start.
-        crate::store::open_rule_store_local(&core.cas_root).unwrap().add(&legacy).unwrap();
+        raw.add(&legacy).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
         core.open_rule_store().unwrap().add(&rule).unwrap();
         std::fs::write(temp.path().join(".claude/rules/team.md"), "Repository instruction").unwrap();
         let result = core.cas_rules_list().await.unwrap();

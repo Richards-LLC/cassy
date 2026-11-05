@@ -171,6 +171,11 @@ fn scan(cas_root: &Path) -> Result<BTreeSet<String>> {
                             "server",
                             "http",
                             "mcp",
+                            "manage",
+                            "when",
+                            "opencode",
+                            "codex",
+                            "claude",
                         ]
                         .contains(&server.as_str())
                     {

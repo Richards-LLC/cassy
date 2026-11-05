@@ -45,11 +45,14 @@ impl RuntimeIdentity {
         Ok(identity)
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
+        // cas-51b3: a known build is the id build.rs stamps: a short commit
+        // hash, with "-dirty" when the tree had uncommitted edits.
+        let commit = self.build.strip_suffix("-dirty").unwrap_or(&self.build);
         if self.factory_session.is_empty()
             || self.pid == 0
             || self.pid_starttime == 0
-            || self.build.len() < 7
-            || !self.build.bytes().all(|b| b.is_ascii_hexdigit())
+            || commit.len() < 7
+            || !commit.bytes().all(|b| b.is_ascii_hexdigit())
             || self.canonical_cas_dir.canonicalize().ok().as_ref() != Some(&self.canonical_cas_dir)
             || crate::mcp::daemon::read_pid_starttime(self.pid) != Some(self.pid_starttime)
         {

@@ -188,10 +188,10 @@ impl SyncingRuleStore {
             return Ok(());
         }
         // File sync remains best-effort; never claim a projection on failure.
-        if self.syncer.sync_rule(rule).unwrap_or(false) {
-            self.record_projection(&rule.id, "projected")?;
-        } else if !Self::live(rule) {
-            self.forget_projection(&rule.id);
+        match self.syncer.sync_rule(rule) {
+            Ok(true) => self.record_projection(&rule.id, "projected")?,
+            Ok(false) => self.forget_projection(&rule.id),
+            Err(_) => {} // No new projection was successfully written.
         }
         Ok(())
     }
@@ -462,21 +462,30 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir(&root).unwrap();
-        let inner = SqliteRuleStore::open(&root).unwrap();
+        let inner = Arc::new(SqliteRuleStore::open(&root).unwrap());
         inner.init().unwrap();
         let target = temp.path().join(".claude/rules/cas");
-        let store = SyncingRuleStore::new(Arc::new(inner), target.clone(), 1)
+        let store = SyncingRuleStore::new(inner.clone(), target.clone(), 1)
             .with_project_root(temp.path().to_path_buf());
         let mut rule = make_rule("rule-deleted", Scope::Project);
         rule.status = cas_types::RuleStatus::Proven;
         rule.helpful_count = 1;
         store.add(&rule).unwrap();
         assert!(target.join("rule-deleted.md").exists());
+        let mut hard = make_rule("rule-hard-deleted", Scope::Project);
+        hard.content = "HARD RULE: operator policy".into();
+        hard.authorize_operator_hard_rule("operator:fixture");
+        store.add(&hard).unwrap();
+        assert!(target.join("rule-hard-deleted.md").exists());
         // Generated files need not be tracked: deleting the whole rules
         // directory must still withdraw the policy from prompt injection.
         std::fs::remove_dir_all(&target).unwrap();
+        // A fresh wrapper must discover the deletion from durable receipts.
+        let store = SyncingRuleStore::new(inner, target.clone(), 1)
+            .with_project_root(temp.path().to_path_buf());
         let rows = store.list().unwrap();
-        assert_eq!(rows[0].status, cas_types::RuleStatus::Retired);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|rule| rule.status == cas_types::RuleStatus::Retired));
         cas_core::Syncer::new(target.clone(), 1).sync_all(&rows).unwrap();
         assert!(!target.join("rule-deleted.md").exists());
         assert!(store.list_proven().unwrap().is_empty());
@@ -497,7 +506,9 @@ mod tests {
         rule.helpful_count = 1;
         inner.add(&rule).unwrap();
         let target = temp.path().join(".claude/rules/cas");
-        let store = SyncingRuleStore::new(inner.clone(), target.clone(), 1)
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner.clone(), target.clone(), 1, queue.clone())
             .with_project_root(temp.path().to_path_buf());
         assert!(store.list_proven().unwrap().is_empty(), "legacy missing files must not inject");
         assert_eq!(inner.get(&rule.id).unwrap().status, cas_types::RuleStatus::Stale);
@@ -507,6 +518,7 @@ mod tests {
         store.update(&rule).unwrap();
         assert!(store.list_proven().unwrap().is_empty());
         assert!(!target.join("rule-legacy.md").exists());
+        assert!(queue.pending(100, 5).unwrap().is_empty(), "a local hold must not propagate to Cloud");
         // The original version is retained; restore is the explicit keep decision.
         store.restore_version(&rule.id, Some(1), Some("operator"), Some("keep this rule")).unwrap();
         assert_eq!(store.list_proven().unwrap().len(), 1);

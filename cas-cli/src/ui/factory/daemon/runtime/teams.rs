@@ -2033,6 +2033,25 @@ fast_rows=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/fast-rows-pre-p
 if [ -x \"$fast_rows\" ]; then
   printf '%s' \"$refs\" | \"$fast_rows\" \"$@\" || exit 1
 fi
+# cas-fee3: the project's declared cheap local gate (lint + touched tests),
+# so failures stop here instead of costing a CI run. Unset means none.
+local_gate=\"$(cas config get factory.worker_local_gate 2>/dev/null)\" || local_gate=\"\"
+if [ -n \"$local_gate\" ]; then
+  # A hung gate must not hold the push forever (default 10 minutes).
+  limit=\"${CAS_LOCAL_GATE_TIMEOUT_SECS:-600}\"
+  if command -v timeout >/dev/null 2>&1; then limiter=\"timeout $limit\";
+  elif command -v gtimeout >/dev/null 2>&1; then limiter=\"gtimeout $limit\";
+  else limiter=\"\"; echo \"Cassy PUSH GUARD: no timeout command; the local gate runs without a time limit.\" >&2; fi
+  (cd \"$(git rev-parse --show-toplevel)\" && $limiter sh -c \"$local_gate\")
+  gate_status=$?
+  if [ \"$gate_status\" -eq 124 ] && [ -n \"$limiter\" ]; then
+    echo \"Cassy PUSH GUARD: the project's local gate timed out after ${limit}s (factory.worker_local_gate: $local_gate).\" >&2
+    exit 1
+  elif [ \"$gate_status\" -ne 0 ]; then
+    echo \"Cassy PUSH GUARD: the project's local gate failed (factory.worker_local_gate: $local_gate). Fix it before pushing.\" >&2
+    exit 1
+  fi
+fi
 exit 0
 ";
 
@@ -4837,6 +4856,72 @@ mod tests {
         let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
         let stdin = std::fs::read_to_string(repo.join(".git/gate-stdin")).unwrap();
         assert!(stdin.contains(&format!("refs/heads/factory/w {tip} refs/heads/factory/w ")), "{stdin}");
+        assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
+        let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
+    }
+
+    /// cas-fee3 (gabber CI audit): a worker push runs the project's declared
+    /// cheap local gate (`factory.worker_local_gate`), so lint and test
+    /// failures stop at the worker instead of costing a CI run.
+    #[test]
+    fn worker_push_runs_the_projects_declared_local_gate_cas_fee3() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+        let hook_cas_root = tempfile::tempdir().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        let remote = repo.join("remote.git");
+        assert!(git(repo, &["init", "-q", "--bare", &remote.to_string_lossy()]).status.success());
+        git(repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+        let wt = repo.parent().unwrap().join(format!(
+            "{}-local-gate-wt",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(git(repo, &["worktree", "add", "-q", "-b", "factory/w", &wt.to_string_lossy(), "main"]).status.success());
+        TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
+        // The project declares `pnpm ci:local`; this stub stands in for it.
+        let bin = hook_cas_root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cas = bin.join("cas");
+        std::fs::write(
+            &cas,
+            "#!/bin/sh\n[ \"$*\" = 'config get factory.worker_local_gate' ] && echo \"$LOCAL_GATE_CMD\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+        let push = |gate: &str| {
+            std::process::Command::new("git")
+                .args(["push", "origin", "factory/w"])
+                .env("PATH", &path)
+                .env("LOCAL_GATE_CMD", gate)
+                .env("CAS_LOCAL_GATE_TIMEOUT_SECS", "1")
+                .env("CAS_AGENT_NAME", "w")
+                .env("CAS_ROOT", hook_cas_root.path())
+                .env_remove("CAS_SESSION_ID")
+                .env_remove("CAS_FACTORY_SESSION")
+                .current_dir(&wt)
+                .output()
+                .unwrap()
+        };
+        let failed = push("echo LOCAL-GATE-RAN >&2; exit 1");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(!failed.status.success(), "a failing local gate stops the push: {stderr}");
+        assert!(stderr.contains("LOCAL-GATE-RAN"), "{stderr}");
+        // verifier ver-6b51133654a4 (c): a hung gate is cut off, not waited on.
+        let hung = push("sleep 30");
+        let stderr = String::from_utf8_lossy(&hung.stderr);
+        assert!(!hung.status.success(), "a hung local gate stops the push: {stderr}");
+        assert!(stderr.contains("timed out after 1s"), "{stderr}");
         assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }

@@ -196,6 +196,10 @@ impl Config {
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
+                "factory.worker_local_gate".to_string(),
+                factory.worker_local_gate.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.design_review_bug_threshold".to_string(),
                 factory.design_review_bug_threshold.to_string(),
             ),

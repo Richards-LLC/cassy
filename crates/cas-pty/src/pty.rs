@@ -7888,10 +7888,26 @@ echo SMOKE_DONE
 
     #[test]
     fn supervisor_contract_holds_missed_plan_targets_and_keeps_independent_work_shipping() {
-        // pin: audit finding 4; every launched supervisor must receive the
-        // same merge boundary, including after Codex drops loaded skill text.
-        for harness in ["claude", "codex", "grok", "opencode"] {
+        // pin: GH #1503 and audit finding 4; every launched supervisor must
+        // retain decision authority and the plan boundary after compaction.
+        let surfaces = ["claude", "codex", "grok", "opencode"].map(|harness| {
             let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
+            eprintln!("{harness}: {} words, {} bytes", surface.split_whitespace().count(), surface.len());
+            (harness, surface)
+        });
+        for (harness, surface) in surfaces {
+            assert!(
+                surface.contains("Decide and ship within scope when a written standard settles it."),
+                "{harness} must delegate decisions settled by standards to the supervisor"
+            );
+            assert!(
+                surface.contains("Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles."),
+                "{harness} must reserve operator asks for policy calls"
+            );
+            assert!(
+                surface.contains("Operator instructions expire with their step unless explicitly standing."),
+                "{harness} must not turn a completed step into a standing gate"
+            );
             assert!(
                 surface.contains("A delivery whose phase misses its plan's measured target does not merge: hold the work that depends on it, keep shipping everything else, and ask the operator."),
                 "{harness} must hold missed plan targets without stopping independent deliveries"

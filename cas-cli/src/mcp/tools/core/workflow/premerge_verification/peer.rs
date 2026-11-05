@@ -53,6 +53,9 @@ impl Approval {
             .map_err(|error| error.to_string())?
             .get(&self.candidate.task_id)
             .map_err(|error| error.to_string())?;
+        if context_digest(root, &task)? != self.candidate.context_digest {
+            return Err("published approval context changed before peer attestation".into());
+        }
         let receipt = PeerPremergeReceipt {
             project_id: canonical_id.clone(),
             supervisor_id: sender.into(),
@@ -136,6 +139,12 @@ fn validate_receipt(
     {
         return Err("peer approval identity missing".into());
     }
+    // Fetch the declared target: a local-only merge is never portable authority.
+    let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let target = operations
+        .fetch_merge_target(&receipt.target_branch)
+        .map_err(|error| error.to_string())?
+        .ok_or("peer publication requires a remote target")?;
     let merged = git(
         repo,
         &[
@@ -167,12 +176,6 @@ fn validate_receipt(
         preparation_ms: 0,
     };
     candidate.verify_landing(&receipt.landed_sha)?;
-    // Fetch the declared target: a local-only merge is never portable authority.
-    let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
-    let target = operations
-        .fetch_merge_target(&receipt.target_branch)
-        .map_err(|error| error.to_string())?
-        .ok_or("peer publication requires a remote target")?;
     git(
         repo,
         &["merge-base", "--is-ancestor", &receipt.landed_sha, &target],

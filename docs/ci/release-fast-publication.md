@@ -37,7 +37,7 @@ scripts/release.sh on the epic branch
         |
         v
 merge queue (merge_group)
-  ci.yml                 the required checks
+  ci.yml                 Fast Validation (sole required check; no macOS Check)
   release-prebuild.yml   pending-release: did this entry change the version?
                          build        Linux x86_64 release-fast   (hosted)
                          build-macos  macOS ARM64, LTO off, signed (hosted)
@@ -80,7 +80,7 @@ with exit 3: those need a repair, not a re-bump.
 The queue builds one entry at a time (`max_entries_to_build: 1`) and lands the
 merge commit it tested as `main`, so the queue run's head commit is the
 published commit. Starting both builds at enqueue overlaps the macOS build
-with the 15-minute queue run. They are not required checks: a failed build
+with queue validation. They are not required checks: a failed build
 never blocks a merge, and the release workflow then builds the same bytes
 itself.
 
@@ -89,6 +89,23 @@ entry is a release when its version differs from the base's, every release
 crate agrees, `CHANGELOG.md` has the heading and no `v<version>` tag exists.
 Ordinary entries cost one ~20 s job. On `main`, a changed version that cannot
 publish (reused or lowered) fails the release workflow loudly.
+
+### Why macOS runner capacity cannot eject a green queue entry
+
+Was: `macOS Check` was required on each queue tree. PR #1475 lost three queue
+attempts when GitHub never acquired a hosted macos-26 runner (zero steps), with
+"The job was not acquired by Runner of type hosted even after multiple attempts".
+Now: the November 4 operator decision removes that stage; `Fast Validation`
+is the sole required context and CI skips `macOS Check` on `merge_group`.
+Main cache maintenance, protected-PR notices, tag, scheduled and dispatched
+macOS checks keep their existing non-queue routes.
+
+`Release Prebuild/build-macos` stays on release queue entries: it compiles the
+shipped macOS artifact before publication. It also experienced non-acquisition
+in runs 41855101589 and 41860322470, but it is neither required by the ruleset
+nor a dependency of `Fast Validation`. Its failure can delay artifact adoption
+and require a fallback build; it cannot eject an otherwise green queue entry.
+The publication audits remain required before either platform is published.
 
 ### Why adoption is fail-safe and publication is fail-closed
 

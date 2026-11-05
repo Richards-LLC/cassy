@@ -39,8 +39,9 @@ with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 
 Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
    after lane CI and the lane compile, open the epic PR and let the queue run
-   the full workspace suite, doctests, archive mode and macOS Check on the exact
-   merged tree. The diagnostic before enqueue and after a failed queue run is
+   the full workspace suite, doctests and archive mode on the exact merged tree.
+   `Fast Validation` is the sole required context; macOS Check is excluded from
+   the queue, and Release Prebuild retains pre-publish macOS proof. The diagnostic before enqueue and after a failed queue run is
    the [interim queue precheck](../../cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md#interim-queue-precheck):
    a clean checkout at the SHA, root and hub-web `npm ci`, resolvable Playwright
    and Chromium, then `cargo nextest run --workspace --no-fail-fast` and

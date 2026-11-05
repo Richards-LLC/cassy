@@ -16,15 +16,14 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "Fast Validation" },
-          { "context": "macOS Check" }
+          { "context": "Fast Validation" }
         ]
       }
     },
     {
       "type": "merge_queue",
       "parameters": {
-        "check_response_timeout_minutes": 15,
+        "check_response_timeout_minutes": 30,
         "grouping_strategy": "ALLGREEN",
         "max_entries_to_build": 1,
         "max_entries_to_merge": 1,

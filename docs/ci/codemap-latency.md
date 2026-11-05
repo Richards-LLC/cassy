@@ -27,7 +27,7 @@ content-changing codemap commit cannot be created by a no-op rehearsal.
 | --- | ---: | --- | --- |
 | `AGENT_CONTROLLED_TOTAL_SECONDS` | `<=300` | structure scan/render, static freshness proof, bounded knowledge build, local commit/push readiness | runner scheduling and GitHub queue time |
 | `KNOWLEDGE_BUILD_SECONDS` | `<=90` | one complete knowledge build invocation | all other codemap work |
-| `DOCS_ONLY_REQUIRED_COMPUTE_SECONDS` | `<60` | the slower of required `Fast Validation` and `macOS Check` jobs when an Actions run is supplied | GitHub queue, checkout/runner allocation, advisory or heavy jobs |
+| `DOCS_ONLY_REQUIRED_COMPUTE_SECONDS` | `<60` | the required `Fast Validation` job when an Actions run is supplied | GitHub queue, checkout/runner allocation, advisory or heavy jobs |
 
 The local docs-only phase creates a disposable docs-only commit, runs the
 shared classifier, and executes `scripts/test-ci-test-tiers.sh`. This is the

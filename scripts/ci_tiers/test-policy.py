@@ -59,7 +59,7 @@ class PolicyTests(unittest.TestCase):
         queue = selected('merge_group','refs/heads/gh-readonly-queue/main/pr-1')
         precheck = selected('workflow_dispatch','refs/heads/precheck/'+'a'*40)
         # Publication writes queue-only flake evidence; precheck runs every producer.
-        self.assertEqual(precheck,queue-{'queue-flake-publication'})
+        self.assertEqual(precheck-{'macos-check'},queue-{'queue-flake-publication'})
         self.assertIn('fast-validation-suite-shards',precheck)
         self.assertIn('fast-validation-journeys',precheck)
         action = policy.load(policy.ROOT/'.github/actions/classify-required-diff/action.yml')
@@ -480,7 +480,6 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             ('push', 'refs/heads/main', 'merge-queue', 'false', True),
             ('push', 'refs/heads/main', 'merge-queue', '', True),
             ('push', 'refs/heads/main', '', 'true', True),
-            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', '', 'true', True),
         ]
         for event, ref, reuse, hit, expected in cases:
             with self.subTest(event=event, reuse=reuse, hit=hit):
@@ -514,6 +513,14 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 for name in ('Install Zig', 'Setup sccache', 'Probe sccache backend'):
                     step = next(s for s in job['steps'] if s.get('name') == name)
                     self.assertEqual(self.gh_expr(step['if'], context), expected)
+        # cas-04c3: neither normal queue validation nor full-gate reuse may
+        # acquire a Darwin runner. Release Prebuild owns pre-publish proof.
+        for run, reuse in [('true', ''), ('false', 'full-gate')]:
+            self.assertFalse(self.gh_expr(job['if'], {**context,
+                'github.event_name': 'merge_group',
+                'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1-abc',
+                'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': run,
+                'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse}))
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
             'github.ref': 'refs/heads/factory/x'}))
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',

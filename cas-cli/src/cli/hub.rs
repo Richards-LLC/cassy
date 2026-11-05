@@ -2693,6 +2693,18 @@ pub(crate) fn pairing_admission(
     Ok(())
 }
 
+/// cas-b790: the Tailscale Serve shim is a loopback listener for Tailscale's
+/// TLS proxy, not a Commander origin. A pairing made through it succeeds, but
+/// every API call then fails with 401, so refuse it and name the hub origin.
+fn pairing_origin_refusal(
+    record: Option<&HubProcessRecord>,
+    origin: &str,
+    hub_url: Option<&str>,
+) -> Option<String> {
+    let _ = (record, origin, hub_url);
+    None
+}
+
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
     let scopes: Vec<Scope> = args
         .scopes
@@ -4123,6 +4135,39 @@ mod tests {
             transport_warning: None,
             nofile_limit: None,
         }
+    }
+
+    /// cas-b790: pairing against the live hub's Tailscale Serve shim (the
+    /// 4.0.1 incident used 127.0.0.1:34501) is refused before any invitation,
+    /// naming the hub origin; the hub origin and remote URLs still pair, and
+    /// `cas hub status` prints the local origin to pair with.
+    #[test]
+    fn cas_b790_pairing_refuses_the_tailscale_shim_and_status_names_the_hub_origin() {
+        let mut live = record("4.0.1", 4173, Some(443));
+        live.tailscale_serve_target = Some("http://127.0.0.1:34501".to_owned());
+        let shim = "http://127.0.0.1:34501";
+        for (origin, hub_url) in [(shim, Some(shim)), (shim, None), ("http://127.0.0.1:4173", Some(shim)), ("http://localhost:34501", None)] {
+            let refusal = pairing_origin_refusal(Some(&live), origin, hub_url)
+                .unwrap_or_else(|| panic!("{origin} / {hub_url:?} pairs through the shim and must be refused"));
+            assert!(refusal.contains("Tailscale Serve shim") && refusal.contains("34501"), "{refusal}");
+            assert!(refusal.contains("--origin http://127.0.0.1:4173 --hub-url http://127.0.0.1:4173"), "{refusal}");
+            assert!(refusal.contains("https://hub.example:443"), "names the remote URL: {refusal}");
+        }
+        for (origin, hub_url) in [
+            ("http://127.0.0.1:4173", Some("http://127.0.0.1:4173")),
+            ("https://hub.petrastella.io", Some("https://hub.example:443")),
+            ("http://127.0.0.1:29925", Some("https://journey-hub.ts.net:29927")),
+        ] {
+            assert_eq!(pairing_origin_refusal(Some(&live), origin, hub_url), None, "{origin} / {hub_url:?}");
+        }
+        assert_eq!(pairing_origin_refusal(None, shim, Some(shim)), None, "no hub record: nothing to compare");
+
+        let rendered = render_status(&live, HubDisplayState::Running, "4.0.1");
+        assert!(
+            rendered.contains("Pair from this machine: cas hub pair --origin http://127.0.0.1:4173 --hub-url http://127.0.0.1:4173"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("http://127.0.0.1:34501 is the Tailscale Serve shim, not a pairing origin"), "{rendered}");
     }
 
     #[test]

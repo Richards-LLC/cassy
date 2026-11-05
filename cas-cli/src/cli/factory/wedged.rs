@@ -4057,6 +4057,35 @@ mod tests {
         }
     }
 
+    /// cas-cff4: a sandbox wrapper (bwrap) carries the worker's argv, so it is
+    /// the matched root and the harness is its child. An idle harness is not
+    /// its own background job; counting it hid every stall of such a worker.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sandboxed_harness_is_not_its_own_background_job_cas_cff4() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+
+        struct Sandbox(Child);
+        impl Drop for Sandbox {
+            fn drop(&mut self) {
+                drop(self.0.stdin.take());
+                let _ = self.0.wait();
+            }
+        }
+        let harness = r#"exec -a claude /bin/bash --noprofile --norc -c 'printf "idle\n"; read -r _' fixture --agent-name sandboxed-worker"#;
+        let mut sandbox = Sandbox(Command::new("/bin/bash")
+            .arg0("bwrap")
+            .args(["--noprofile", "--norc", "-c", &format!("({harness}) <&0 & wait \"$!\""),
+                "fixture", "--agent-name", "sandboxed-worker"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+        let mut line = String::new();
+        BufReader::new(sandbox.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "idle");
+        let observed = background_processes_for(sandbox.0.id());
+        assert_eq!(observed, BackgroundProcessState::Available(vec![]), "{observed:?}");
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn known_mcp_sidecars_do_not_count_as_worker_background_jobs() {

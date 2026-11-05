@@ -427,9 +427,14 @@ impl CasCore {
                     data: None,
                 });
             }
-            if capability.expires_at <= chrono::Utc::now()
-                || dispatch.deadline_at <= chrono::Utc::now()
-            {
+            let now = chrono::Utc::now();
+            if capability.expires_at <= now {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Verifier handoff rejected: capability expired; registered-supervisor recovery is required.",
+                ));
+            }
+            if dispatch.deadline_at <= now {
                 let latest =
                     cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
                         .map_err(|error| {

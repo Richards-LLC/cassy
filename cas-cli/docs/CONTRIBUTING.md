@@ -1086,8 +1086,10 @@ tree, plan and proof remain current and no newer dispatch supersedes it. The
 record transaction rechecks that exact boundary and consumes the original
 one-time handoff. The original deadline remains in the audit; it drives missing
 verdict alerts and recovery, not the validity of completed work. Raw bearer
-capabilities and unbound handoffs retain their expiry rules. Changed or
-superseded candidates cannot reuse late authority.
+capabilities and unbound handoffs retain their expiry rules. Official server
+credentials keep the existing hard 30-minute lifetime, independently of the
+10-minute dispatch work deadline; expired credentials always refuse. Changed
+or superseded candidates cannot reuse late authority.
 
 A confirmed publication shares a portable approval through the existing project
 peer mailbox. The daemon checks the Cloud-stamped sender against the project

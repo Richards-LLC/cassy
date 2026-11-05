@@ -2626,10 +2626,9 @@ pub fn issue_server_verifier_handoff_with_secret(
     }
 
     let issued_at = now;
-    let expires_at = std::cmp::min(
-        dispatch.deadline_at,
-        issued_at + Duration::minutes(VERIFIER_CAPABILITY_TTL_MINUTES),
-    );
+    // The work deadline can elapse while a bound verifier is still reviewing.
+    // Keep credential lifetime separate, with its original hard 30-minute cap.
+    let expires_at = issued_at + Duration::minutes(VERIFIER_CAPABILITY_TTL_MINUTES);
     let capability = VerifierCapability {
         id: format!("{SERVER_HANDOFF_ID_PREFIX}{:032x}", rand::random::<u128>()),
         task_id: task_id.to_string(),
@@ -3054,7 +3053,7 @@ fn consume_server_handoff_with_conn(
     if capability.task_id != task_id
         || capability.verifier_agent_id.as_deref() != Some(verifier_agent_id)
         || capability.consumed_at.is_some()
-        || (!late_current && capability.expires_at <= now)
+        || capability.expires_at <= now
         || dispatch.task_id != task_id
         || (!late_current && dispatch.state != VerificationDispatchState::Claimed)
         || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
@@ -3077,13 +3076,12 @@ fn consume_server_handoff_with_conn(
         "UPDATE verification_capabilities
          SET consumed_at = ?2
          WHERE id = ?1 AND consumed_at IS NULL AND verifier_agent_id = ?3
-               AND task_id = ?4 AND (expires_at > ?2 OR ?5 = 1)",
+               AND task_id = ?4 AND expires_at > ?2",
         params![
             capability.id,
             now.to_rfc3339(),
             verifier_agent_id,
-            task_id,
-            late_current as i64
+            task_id
         ],
     )?;
     if changed != 1 {

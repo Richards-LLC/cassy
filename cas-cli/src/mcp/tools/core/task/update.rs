@@ -3,6 +3,24 @@ use crate::mcp::tools::core::imports::*;
 
 use crate::cloud::{CloudConfig, TeamRegistration};
 
+impl CasCore {
+    /// Resolve authority before any peer network work. Worker self-assignment
+    /// and ordinary non-factory task edits retain their local behaviour.
+    pub(crate) async fn prepare_build_route_assignment(
+        &self, task: &mut Task,
+    ) -> Result<Option<crate::factory_build_routing::RoutePlan>, McpError> {
+        let Ok(sender) = self.resolve_live_supervisor_authority() else { return Ok(None) };
+        let (root, mut proposed) = (self.cas_root.clone(), task.clone());
+        let (proposed, plan) = tokio::task::spawn_blocking(move || {
+            let plan = crate::factory_build_routing::prepare_assignment(&root, &sender, &mut proposed)?;
+            Ok::<_, String>((proposed, plan))
+        }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        *task = proposed;
+        Ok(plan)
+    }
+}
+
 /// Heartbeat staleness window for epic_verification_owner transfer targets
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
@@ -806,6 +824,7 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let routing_expected = task.clone();
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.
@@ -2582,11 +2601,25 @@ impl CasCore {
                 status != TaskStatus::InProgress)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+        let build_route = if routing_expected.status == TaskStatus::Open
+            && routing_expected.assignee.is_none() && task.assignee.is_some()
+        {
+            self.prepare_build_route_assignment(&mut task).await?
+        } else { None };
+        task.updated_at = if build_route.is_some() {
+            task_store.update_if_current(&task, &routing_expected)
+        } else { task_store.update(&task) }.map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if let Some(plan) = build_route {
+            match crate::factory_build_routing::deliver(plan, self.cas_root.clone(), task.clone()).await {
+                Ok(receipt) => warnings.push(receipt),
+                Err(error) => warnings.push(error),
+            }
+        }
 
         crate::epic_design_review::observe(&self.cas_root, &task.id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,

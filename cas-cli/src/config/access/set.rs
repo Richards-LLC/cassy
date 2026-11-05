@@ -331,6 +331,12 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.auto_route_builds" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).auto_route_builds =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid boolean value for factory.auto_route_builds: {value}"
+                    )))?;
+            }
             "factory.build_guard.max_load_ratio"
             | "factory.build_guard.max_cpu_pressure_percent"
             | "factory.build_guard.max_memory_pressure_percent" => {

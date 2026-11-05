@@ -180,6 +180,12 @@ impl SyncingRuleStore {
             self.record_projection(&rule.id, "projected")?;
             return Ok(rule);
         }
+        if receipt.as_deref() == Some("unprojected") {
+            // An explicit write below the sync floor intentionally made no
+            // file. It is known new policy, not an unknown legacy absence.
+            self.try_sync(&rule)?;
+            return Ok(rule);
+        }
         let deleted = receipt.as_deref() == Some("projected");
         let reason = if deleted {
             "retired: previously projected rule file was removed"
@@ -206,6 +212,7 @@ impl SyncingRuleStore {
         // File sync remains best-effort; never claim a projection on failure.
         match self.syncer.sync_rule(rule) {
             Ok(true) => self.record_projection(&rule.id, "projected")?,
+            Ok(false) if Self::live(rule) => self.record_projection(&rule.id, "unprojected")?,
             Ok(false) => self.forget_projection(&rule.id),
             Err(_) => {} // No new projection was successfully written.
         }

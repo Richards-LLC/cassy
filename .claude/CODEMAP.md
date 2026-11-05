@@ -94,6 +94,7 @@
 
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task presentation and action-relay admission; internal parked-task lists stay complete.
 
+- `cas-cli/src/supervisor_message_wakes.rs` - typed wake limits and ask/answer/blocker exemptions; runtime queue selection rechecks declined wakes.
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
 
@@ -115,6 +116,7 @@
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
 - `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs and project-scoped integrated-delivery recovery actions at startup.
+- `crates/cas-store/src/history_store.rs` - batched history provenance repair and indexed worker commit-prefix lookup.
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 

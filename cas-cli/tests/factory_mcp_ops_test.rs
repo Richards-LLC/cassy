@@ -7161,8 +7161,11 @@ async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
         .unwrap();
     assert!(status.success());
     let second = git_stdout(project, &["rev-parse", "HEAD"]);
+    // The newest walk is younger than the 2-hour source window, so only its
+    // target is reclaimable once the verdict lands.
+    let recent = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
     let mut walks = Vec::new();
-    for (head, used) in [(&first, "2020-01-01T00:00:00Z"), (&second, "2020-01-02T00:00:00Z")] {
+    for (head, used) in [(&first, "2020-01-01T00:00:00Z"), (&second, recent.as_str())] {
         let managed =
             cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, head).unwrap();
         let checkout = managed.path.clone();
@@ -7177,13 +7180,26 @@ async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
         std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
         walks.push(checkout);
     }
+    // Candidate walks carry no dispatch id; the task's verification dispatch
+    // decides whether the newest walk is still needed.
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "test-supervisor-id", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.full = Some(true);
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    let result = env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
     assert!(!walks[0].join("target").exists(), "superseded walk target must be reclaimed: {}", get_text(&result));
-    assert!(walks[1].join("target/debug/output").is_file(), "newest walk must remain: {}", get_text(&result));
+    assert!(walks[1].join("target/debug/output").is_file(), "pending dispatch keeps the newest walk: {}", get_text(&result));
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "test-supervisor-id", None, true).unwrap();
+    drop(conn);
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(!walks[1].join("target").exists(), "a resolved verdict frees the newest walk's target: {}", get_text(&result));
+    assert!(walks[1].join(".git").exists(), "the newest walk's source stays: {}", get_text(&result));
 }
 
 /// A terminal task must not leave a registered proof checkout and its target

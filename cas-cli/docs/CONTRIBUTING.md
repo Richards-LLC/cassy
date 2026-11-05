@@ -1083,9 +1083,11 @@ Factory deliveries requiring a task verifier prepare a disposable candidate befo
 A merge queue need not publish the synthetic premerge candidate commit itself.
 Close validates that candidate's immutable task/proof and exact target/source
 parents, requires the bound delivery source in the authoritative target history,
-and reverse-checks the complete binary source-versus-reviewed-base patch against
-an isolated target index. Unrelated target progress is allowed; missing or
-partial delivery content and another task's candidate cannot authorize close.
+and reverse-checks the complete binary source-versus-reviewed-base patch in an
+isolated index at the first first-parent target commit containing that source.
+Source ancestry is still checked against the current target. Later ordinary
+edits, including edits to the same lines, do not revoke the landed approval;
+a merge that dropped delivery content and another task's candidate still refuse.
 Commit subjects and messages locate candidate metadata but grant no authority.
 
 A confirmed publication shares a portable approval through the existing project

@@ -92,11 +92,41 @@ impl ReviewedDelivery {
         let Some(base) = git_merge_base(repo, &candidate.target_sha, &candidate.source_sha) else {
             return false;
         };
-        // Force the reviewed base: ordinary ancestry alone also accepts a
-        // merge that dropped/reverted some delivery content. Reverse-check the
-        // entire binary patch in a private target index, without touching HEAD,
-        // the worktree or the real index. Unrelated target progress is allowed.
-        reverse_delivery_patch_applies_to_tree(repo, &base, &candidate.source_sha, &landed, None)
+        // The first first-parent descendant of the source is its queue
+        // landing. If that descendant's first parent IS the source, the source
+        // itself landed by fast-forward. Never search for a later matching
+        // patch: that could excuse a dropping merge followed by a repair.
+        let landing = if landed == candidate.source_sha {
+            landed.clone()
+        } else {
+            let range = format!("{}..{landed}", candidate.source_sha);
+            let Some(first) = git_stdout_lines(
+                repo,
+                &[
+                    "rev-list",
+                    "--first-parent",
+                    "--reverse",
+                    "--ancestry-path",
+                    &range,
+                ],
+            )
+            .ok()
+            .and_then(|history| history.into_iter().next()) else {
+                return false;
+            };
+            let Some(parent) = resolve_branch_sha(repo, &format!("{first}^1")) else {
+                return false;
+            };
+            if parent == candidate.source_sha {
+                candidate.source_sha.clone()
+            } else {
+                first
+            }
+        };
+        // Prove the complete reviewed patch at that immutable landing. Later
+        // ordinary edits to the same lines do not undo a legitimate delivery.
+        // A private index keeps HEAD, the worktree and the real index untouched.
+        reverse_delivery_patch_applies_to_tree(repo, &base, &candidate.source_sha, &landing, None)
             .unwrap_or(false)
     }
 

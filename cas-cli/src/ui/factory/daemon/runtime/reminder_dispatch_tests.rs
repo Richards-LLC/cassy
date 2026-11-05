@@ -206,18 +206,29 @@ fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &
 /// Register the fixture's Claude supervisor Active with `lines` as the
 /// transcript the wake read consults, quiet for ten minutes.
 fn write_supervisor_transcript(root: &tempfile::TempDir, daemon: &FactoryDaemon, lines: &[String]) {
-    let agents = open_agent_store(daemon.app.cas_dir()).unwrap();
-    let mut supervisor = agents.get("single-sup").unwrap();
-    let clone = root.path().to_str().unwrap().to_string();
-    supervisor.metadata.insert("clone_path".into(), clone.clone());
-    // A live Claude supervisor stays registered Active between turns; the wake
+    write_agent_transcript(root.path(), daemon.app.cas_dir(), "single-sup", lines);
+}
+
+/// Register agent `id` Active with `lines` as the Claude transcript the wake
+/// read consults, quiet for ten minutes.
+pub(crate) fn write_agent_transcript(
+    root: &std::path::Path,
+    cas: &std::path::Path,
+    id: &str,
+    lines: &[String],
+) -> std::path::PathBuf {
+    let agents = open_agent_store(cas).unwrap();
+    let mut agent = agents.get(id).unwrap();
+    let clone = root.to_str().unwrap().to_string();
+    agent.metadata.insert("clone_path".into(), clone.clone());
+    // A live Claude agent stays registered Active between turns; the wake
     // read only consults the transcript of an Active (or Stale) registration.
-    supervisor.status = cas_types::AgentStatus::Active;
-    agents.register(&supervisor).unwrap();
+    agent.status = cas_types::AgentStatus::Active;
+    agents.register(&agent).unwrap();
     let slug: String = clone.chars().map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
     let dir = dirs::home_dir().unwrap().join(".claude/projects").join(slug);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("single-sup.jsonl");
+    let path = dir.join(format!("{id}.jsonl"));
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
     std::fs::File::options()
         .write(true)
@@ -226,15 +237,13 @@ fn write_supervisor_transcript(root: &tempfile::TempDir, daemon: &FactoryDaemon,
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
         .unwrap();
     // The wake gate reads this file, not an unknown transcript.
-    let registered = agents.get("single-sup").unwrap();
+    let registered = agents.get(id).unwrap();
     assert_eq!(
-        crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            daemon.app.cas_dir(),
-            &registered,
-        ),
-        Some(path),
+        crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(cas, &registered),
+        Some(path.clone()),
         "{registered:?}"
     );
+    path
 }
 
 /// cas-3866: an idle Claude supervisor is woken by a fired `ci_completed`

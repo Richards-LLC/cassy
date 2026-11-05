@@ -126,6 +126,15 @@ fn wants_wake(row: &QueuedPrompt) -> bool {
     wants_wake_text(&row.prompt)
 }
 
+/// cas-73f7: asks, answers and blockers are the conversation itself, so the
+/// sender-pair cap never holds them. It bounds status chatter only.
+fn cap_exempt(prompt: &str) -> bool {
+    use crate::cloud::peer_mailbox::PeerMessageKind::{Answer, Ask, Blocker};
+    prompt.contains("<cas-blocker ")
+        || crate::cloud::peer_mailbox::parse_envelope(prompt)
+            .is_some_and(|peer| matches!(peer.kind, Some(Ask | Answer | Blocker)))
+}
+
 fn wants_wake_text(prompt: &str) -> bool {
     if let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(prompt) {
         peer.wakes_idle()
@@ -263,13 +272,16 @@ pub(crate) fn schedule(
         let Ok(deadline) = DateTime::parse_from_rfc3339(&row.deadline) else { continue };
         let deadline = deadline.with_timezone(&Utc);
         let Some(sender) = sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents) else { continue };
-        if wants_wake_text(&row.prompt) && !pair_capped(&sender)? {
+        if wants_wake_text(&row.prompt) && (cap_exempt(&row.prompt) || !pair_capped(&sender)?) {
             inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
         }
     }
     drop(conn);
+    let held = |row: &QueuedPrompt, sender: &String| {
+        capped[sender] && wants_wake(row) && !cap_exempt(&row.prompt)
+    };
     for (row, sender) in &candidates {
-        if capped[sender] && wants_wake(row) {
+        if held(row, sender) {
             let notice = format!(
                 "Wake cap: messages from {} to {supervisor} reached {cap} wakes/hour. Batched into this turn; read the pending messages before replying.",
                 row.source
@@ -291,7 +303,7 @@ pub(crate) fn schedule(
     }
     let wakers: Vec<_> = candidates
         .iter()
-        .filter(|(row, sender)| wants_wake(row) && !capped[sender])
+        .filter(|(row, sender)| wants_wake(row) && !held(row, sender))
         .collect();
     let deadline = wakers.iter().map(|(row, _)| row.created_at + debounce)
         .chain(inherited_deadline).min();
@@ -300,7 +312,7 @@ pub(crate) fn schedule(
     rows.retain(|row| !ids.contains(&row.id));
     if !due {
         for (row, sender) in &candidates {
-            let (detail, recheck) = if capped[sender] && wants_wake(row) {
+            let (detail, recheck) = if held(row, sender) {
                 (
                     "directed supervisor message held by sender-pair wake cap",
                     now + chrono::Duration::minutes(1),
@@ -353,7 +365,7 @@ pub(crate) fn schedule(
             } else if lead_id.is_some() {
                 passengers.push(row.clone());
             }
-        } else if wants_wake(row) && !capped[sender] {
+        } else if wants_wake(row) && !held(row, sender) {
             facts.entry(row.id).or_default().message_senders = vec![sender.clone()];
             rows.push(row.clone());
         }

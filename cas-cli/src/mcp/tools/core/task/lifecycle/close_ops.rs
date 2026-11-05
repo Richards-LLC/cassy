@@ -10362,8 +10362,18 @@ impl CasCore {
                                     // cas-defb: a no-code delivery is its external
                                     // proof; pin the reviewed commit so a sibling
                                     // merge or the lane's next task cannot stale it.
+                                    // cas-f43d: so is a factory task whose recorded
+                                    // lane is measured as delivering nothing, from a
+                                    // clean checkout, declared or not: the reviewed
+                                    // tree is exactly that commit. A legacy task with
+                                    // no lane start keeps the strict boundary.
                                     if epic_proof_ref.is_none()
-                                        && task.execution_note.as_deref() == Some("no-code")
+                                        && (task.execution_note.as_deref() == Some("no-code")
+                                            || (task.deliverables.factory_branch_start.is_some() && measure_no_delivery(
+                                                worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                                                no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,
+                                                delivery_receipt, commit_receipt_window.as_ref(),
+                                            ).is_ok() && checkout_is_clean(&proof_worktree)))
                                     {
                                         crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
                                     } else {
@@ -16421,6 +16431,13 @@ fn no_delivery_source_is_empty_or_sibling_only(repo: &std::path::Path, task: &Ta
         }
     }
     true
+}
+
+/// cas-f43d: no tracked change and no untracked file outside `.cas`.
+fn checkout_is_clean(worktree: &std::path::Path) -> bool {
+    std::process::Command::new("git").arg("-C").arg(worktree)
+        .args(["status", "--porcelain", "--", ".", ":(exclude).cas", ":(exclude).cas/**"])
+        .output().is_ok_and(|out| out.status.success() && out.stdout.is_empty())
 }
 
 /// Prove absence for a fresh no_delivery declaration, rather than interpreting
@@ -42994,6 +43011,69 @@ mod zero_change_close_tests {
         service.task(Parameters(request)).await.unwrap();
         let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
         assert_eq!(retry.id, dispatch.id, "close retries must reuse the no-code dispatch");
+
+        // cas-f43d (GH #1513 ask 4): a read-only investigation declared with
+        // no_delivery, without the no-code note, is pinned the same way: the
+        // epic tip moving and the checkout's uncommitted files changing must
+        // not stale its dispatch.
+        let mut sweep = Task::new("cas-f43d-sweep".into(), "read-only sweep".into());
+        sweep.status = TaskStatus::InProgress;
+        sweep.assignee = Some(worker.into());
+        sweep.task_type = TaskType::Spike;
+        sweep.risk = vec![TaskRisk::None];
+        sweep.deliverables.work_target = task.deliverables.work_target.clone();
+        // Like gabber's tasks, the worker started on a recorded lane at the
+        // epic tip and committed nothing to it.
+        git(p, &["branch", "factory/cas-defb-worker", "epic/live"]);
+        git(p, &["push", "-q", "origin", "factory/cas-defb-worker"]);
+        let lane = |target: &Option<WorkTarget>| Some(cas_types::FactoryBranchStart {
+            work_target: target.clone().unwrap(), assignee: worker.into(),
+            branch: "factory/cas-defb-worker".into(), base_sha: head_sha(p),
+        });
+        sweep.deliverables.factory_branch_start = lane(&sweep.deliverables.work_target);
+        store.add(&sweep).unwrap();
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": sweep.id, "no_delivery": true,
+            "reason": "read-only sweep; evidence in the artifact",
+        })).unwrap();
+        let response = service.task(Parameters(request.clone())).await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &sweep.id)
+            .unwrap().unwrap_or_else(|| panic!("no-delivery close must dispatch verification: {response:?}"));
+        let repository = dispatch.repository.clone().expect("dispatch binds a repository proof");
+        git(p, &["checkout", "-q", "-b", "factory/sibling-2", "epic/live"]);
+        commit_file(p, "sibling2.rs", "feat: another unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling-2", "-m", "merge sibling 2"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        std::fs::write(p.join("scratch.md"), "uncommitted investigation notes").unwrap();
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("epic movement and uncommitted files must not stale a no-delivery dispatch");
+        std::fs::remove_file(p.join("scratch.md")).unwrap();
+
+        // gabber cas-ef2b: a plain close with no commits of its own, with
+        // neither no_delivery nor the no-code note, is measured and pinned too.
+        let mut plain = Task::new("cas-f43d-plain".into(), "investigate a staging report".into());
+        (plain.status, plain.assignee, plain.task_type, plain.risk) =
+            (TaskStatus::InProgress, Some(worker.into()), TaskType::Spike, vec![TaskRisk::None]);
+        plain.deliverables.work_target = task.deliverables.work_target.clone();
+        git(p, &["branch", "-f", "factory/cas-defb-worker", "epic/live"]);
+        git(p, &["push", "-q", "-f", "origin", "factory/cas-defb-worker"]);
+        plain.deliverables.factory_branch_start = lane(&plain.deliverables.work_target);
+        store.add(&plain).unwrap();
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": plain.id, "reason": "investigation written up in the artifact",
+        })).unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let repository = cas_store::get_latest_verification_dispatch(&cas_dir, &plain.id).unwrap()
+            .unwrap_or_else(|| panic!("a plain close must dispatch verification: {response:?}"))
+            .repository.expect("dispatch binds a repository proof");
+        git(p, &["checkout", "-q", "-b", "factory/sibling-3", "epic/live"]);
+        commit_file(p, "sibling3.rs", "feat: a third unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling-3", "-m", "merge sibling 3"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("epic movement must not stale a plain close measured with no commits");
     }
 
     #[test]

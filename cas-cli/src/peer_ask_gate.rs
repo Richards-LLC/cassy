@@ -25,8 +25,8 @@ pub(crate) const OVERRIDE_MARKER: &str = "PEER ASK OVERRIDE";
 pub(crate) struct MergeSubject {
     pub(crate) task_id: Option<String>,
     pub(crate) pr: Option<u64>,
-    /// A PR merge whose number could not be resolved: any ask that names a
-    /// PR holds it (fail closed).
+    /// A PR merge whose number could not be resolved: every open ask holds
+    /// it (fail closed).
     pub(crate) any_pr: bool,
 }
 
@@ -39,44 +39,23 @@ fn names_word(body: &str, word: &str) -> bool {
     })
 }
 
-/// Every PR number `body` names: `#N` (also `PR#N`, `repo#N`,
-/// `owner/repo#N`), `pull/N`, `pull request N` and `PR N` / `PR-N` / `PR:N`.
-fn pr_numbers(body: &str) -> Vec<u64> {
-    let lower = body.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let digits_at = |mut at: usize, separators: &[u8]| -> Option<u64> {
-        while at < bytes.len() && separators.contains(&bytes[at]) {
-            at += 1;
-        }
-        let end = (at..bytes.len()).find(|&i| !bytes[i].is_ascii_digit()).unwrap_or(bytes.len());
-        if end == at || (end < bytes.len() && bytes[end].is_ascii_alphanumeric()) {
-            return None;
-        }
-        lower[at..end].parse().ok()
-    };
-    let mut numbers = Vec::new();
-    for (at, _) in lower.match_indices('#') {
-        numbers.extend(digits_at(at + 1, &[]));
-    }
-    for (at, _) in lower.match_indices("pull/") {
-        numbers.extend(digits_at(at + 5, &[]));
-    }
-    for (at, _) in lower.match_indices("pull request") {
-        numbers.extend(digits_at(at + 12, b" #:"));
-    }
-    for (at, _) in lower.match_indices("pr") {
-        let standalone = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
-        if standalone {
-            numbers.extend(digits_at(at + 2, b" -:#"));
-        }
-    }
-    numbers
+/// True when `body` contains `number` with no digit on either side. Any
+/// phrasing names the PR ("PRs 4249 and 4250", "PR (4249)"); a false hold is
+/// safe because the override exists.
+fn names_number(body: &str, number: u64) -> bool {
+    let needle = number.to_string();
+    body.match_indices(&needle).any(|(at, _)| {
+        let digit_before = body[..at].chars().next_back().is_some_and(|c| c.is_ascii_digit());
+        let digit_after = body[at + needle.len()..].chars().next().is_some_and(|c| c.is_ascii_digit());
+        !digit_before && !digit_after
+    })
 }
 
 fn names_subject(body: &str, subject: &MergeSubject) -> bool {
-    subject.task_id.as_deref().is_some_and(|id| names_word(body, id))
-        || subject.pr.is_some_and(|pr| pr_numbers(body).contains(&pr))
-        || (subject.any_pr && !pr_numbers(body).is_empty())
+    // An unresolvable PR merge is held by every open ask (fail closed).
+    subject.any_pr
+        || subject.task_id.as_deref().is_some_and(|id| names_word(body, id))
+        || subject.pr.is_some_and(|pr| names_number(body, pr))
 }
 
 /// The task an ask names, for the override note; else the merged task.
@@ -158,7 +137,7 @@ pub(crate) fn merge_refusal(
 
 /// A supervisor's raw `gh pr merge`: every merge in `command` resolves to
 /// its PR the way the QA merge guard does; an unresolvable merge is held by
-/// any open ask that names a PR.
+/// every open ask.
 pub(crate) fn github_merge_refusal(
     cas_root: &Path,
     cwd: &Path,

@@ -397,7 +397,6 @@ struct PrHead {
     sha: String,
 }
 
-/// Look the PR up with `gh pr view`; the error says why it could not be.
 /// The PR number a raw merge targets, resolved the way the QA merge guard
 /// resolves its head: the explicit number, else `gh pr view` of the branch or
 /// of the checked-out branch (cas-bddf9).
@@ -424,6 +423,7 @@ pub fn merge_pr_number(cwd: &Path, merge: &GithubMerge) -> Result<u64, String> {
         .ok_or_else(|| "`gh pr view` returned no PR number".to_string())
 }
 
+/// Look the PR up with `gh pr view`; the error says why it could not be.
 fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Result<PrHead, String> {
     let mut command = Command::new(gh_bin());
     command.args(["pr", "view"]);

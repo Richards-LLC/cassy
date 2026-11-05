@@ -111,7 +111,7 @@ def grouped(lines):
             if not chunk:
                 continue
             # Consecutive bullet lists stay one list; other blocks keep a gap.
-            if out[-1].strip() and not (chunk[0].startswith('- ') and out[-1].lstrip().startswith(('- ', '  '))):
+            if out[-1].strip() and not (chunk[0].startswith('- ') and out[-1].startswith(('- ', '  '))):
                 out.append('')
             out += chunk
         out.append('')

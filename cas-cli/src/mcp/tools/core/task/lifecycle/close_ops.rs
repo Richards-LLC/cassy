@@ -14634,22 +14634,25 @@ fn without_regenerated_ledger(
 }
 
 /// cas-7f95: `scripts/release.sh` folds each `changelog.d/<task>.md` fragment
-/// into CHANGELOG.md and deletes the file in the release commit, so a
-/// delivery closing after a release no longer finds its fragment. A fragment
-/// whose every entry line is in the target's CHANGELOG.md, deleted by a
-/// commit that also changed CHANGELOG.md, was promoted, not dropped. Headings
-/// are not compared: promotion merges same-title headings.
+/// into CHANGELOG.md and deletes the file in its `release: vX.Y.Z` commit, so
+/// a delivery closing after a release no longer finds its fragment. A
+/// fragment named for one of `owners` was promoted, not dropped, when the
+/// commit that deleted it on the target is a release commit that added every
+/// entry line of the fragment to CHANGELOG.md, and the target still has them.
+/// Headings are not compared: promotion merges same-title headings.
 fn without_promoted_changelog_fragments(
     repo_path: &std::path::Path,
     anchor: &str,
     parent_branch: &str,
     paths: Vec<String>,
+    owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
-    let is_fragment = |path: &str| {
+    let owned = |path: &str| {
         path.strip_prefix("changelog.d/")
-            .is_some_and(|name| name.ends_with(".md") && !name.contains('/') && name != "README.md")
+            .and_then(|name| name.strip_suffix(".md"))
+            .is_some_and(|owner| owners.contains(&owner))
     };
-    if !paths.iter().any(|path| is_fragment(path)) {
+    if !paths.iter().any(|path| owned(path)) {
         return (None, paths);
     }
     let origin = format!("origin/{parent_branch}");
@@ -14670,12 +14673,18 @@ fn without_promoted_changelog_fragments(
     let Some(changelog) = git_text(&["show", &format!("{target_ref}:CHANGELOG.md")]) else {
         return (None, paths);
     };
-    let released: std::collections::HashSet<&str> = changelog.lines().map(str::trim_end).collect();
+    let current: std::collections::HashSet<&str> = changelog.lines().map(str::trim_end).collect();
+    let is_release = |subject: &str| {
+        subject.trim().strip_prefix("release: v").is_some_and(|version| {
+            let parts: Vec<&str> = version.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+    };
     let mut promoted = Vec::new();
     let remaining = paths
         .into_iter()
         .filter(|path| {
-            if !is_fragment(path) {
+            if !owned(path) {
                 return true;
             }
             let Some(body) = git_text(&["show", &format!("{anchor}:{path}")]) else {
@@ -14686,17 +14695,27 @@ fn without_promoted_changelog_fragments(
                 .map(str::trim_end)
                 .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                 .collect();
-            if entries.is_empty() || !entries.iter().all(|line| released.contains(line)) {
-                return true;
-            }
             let Some(release) = git_text(&["log", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
                 .map(|sha| sha.trim().to_string())
                 .filter(|sha| !sha.is_empty())
             else {
                 return true;
             };
-            let changed = git_text(&["diff-tree", "--no-commit-id", "--name-only", "-r", &release, "--", "CHANGELOG.md"]);
-            if !changed.is_some_and(|names| names.lines().any(|name| name == "CHANGELOG.md")) {
+            if !git_text(&["log", "-1", "--format=%s", &release]).is_some_and(|subject| is_release(&subject)) {
+                return true;
+            }
+            // Only lines this release commit added to CHANGELOG.md count; an
+            // older section holding the same text is not this promotion.
+            let Some(diff) = git_text(&["diff", "--no-color", "--unified=0", &format!("{release}^1"), &release, "--", "CHANGELOG.md"]) else {
+                return true;
+            };
+            let added: std::collections::HashSet<&str> = diff
+                .lines()
+                .filter(|line| !line.starts_with("+++"))
+                .filter_map(|line| line.strip_prefix('+'))
+                .map(str::trim_end)
+                .collect();
+            if entries.is_empty() || !entries.iter().all(|line| added.contains(line) && current.contains(line)) {
                 return true;
             }
             promoted.push(format!("{path} by {}", &release[..release.len().min(12)]));
@@ -14715,15 +14734,17 @@ fn without_promoted_changelog_fragments(
     )
 }
 
-/// Both history-derived drop exceptions, with their notes joined.
+/// Both history-derived drop exceptions, with their notes joined. `owners`
+/// are the task ids whose changelog fragments this close may account for.
 fn without_regenerated_history(
     repo_path: &std::path::Path,
     anchor: &str,
     parent_branch: &str,
     paths: Vec<String>,
+    owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
     let (ledger, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
-    let (fragments, paths) = without_promoted_changelog_fragments(repo_path, anchor, parent_branch, paths);
+    let (fragments, paths) = without_promoted_changelog_fragments(repo_path, anchor, parent_branch, paths, owners);
     let note = match (ledger, fragments) {
         (Some(ledger), Some(fragments)) => Some(format!("{ledger}; {fragments}")),
         (ledger, fragments) => ledger.or(fragments),
@@ -15051,7 +15072,12 @@ fn epic_anchor_content_presence(
         return (presence, None);
     };
     // cas-2ea6: the history-derived ledger is judged by regeneration.
-    let (ledger_note, remaining) = without_regenerated_history(repo, anchor, target, paths.clone());
+    // Supervisor decision (cas-7f95): an epic close also accounts for its
+    // children's changelog fragments.
+    let owners: Vec<&str> = std::iter::once(task.id.as_str())
+        .chain(children.iter().map(|child| child.id.as_str()))
+        .collect();
+    let (ledger_note, remaining) = without_regenerated_history(repo, anchor, target, paths.clone(), &owners);
     if remaining.is_empty() {
         return (DeliveryContentPresence::Present { paths: paths.clone() }, ledger_note);
     }
@@ -15571,7 +15597,7 @@ fn anchored_delivery_content_gate_unbounded(
         DeliveryContentPresence::Dropped { paths } => {
             // cas-2ea6: the history-derived ledger is judged by regeneration,
             // and its note rides on whichever check accepts the rest.
-            let (ledger_note, paths) = without_regenerated_history(repo_path, anchor, parent_branch, paths);
+            let (ledger_note, paths) = without_regenerated_history(repo_path, anchor, parent_branch, paths, &[task_id.as_str()]);
             let with_ledger = |note: String| match &ledger_note {
                 Some(ledger) if note.is_empty() => ledger.clone(),
                 Some(ledger) => format!("{note}; {ledger}"),

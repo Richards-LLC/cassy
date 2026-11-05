@@ -4184,12 +4184,12 @@ mod tests {
     }
 
     /// cas-b790: pairing against the live hub's Tailscale Serve shim (the
-    /// 4.0.1 incident used 127.0.0.1:34501) is refused before any invitation,
+    /// release incident used 127.0.0.1:34501) is refused before any invitation,
     /// naming the hub origin; the hub origin and remote URLs still pair, and
     /// `cas hub status` prints the local origin to pair with.
     #[test]
     fn cas_b790_pairing_refuses_the_tailscale_shim_and_status_names_the_hub_origin() {
-        let mut live = record("4.0.1", 4173, Some(443));
+        let mut live = record("9.99.1", 4173, Some(443));
         live.tailscale_serve_target = Some("http://127.0.0.1:34501".to_owned());
         let shim = "http://127.0.0.1:34501";
         for (origin, hub_url) in [(shim, Some(shim)), (shim, None), ("http://127.0.0.1:4173", Some(shim)), ("http://localhost:34501", None)] {
@@ -4208,7 +4208,7 @@ mod tests {
         }
         assert_eq!(pairing_origin_refusal(None, shim, Some(shim)), None, "no hub record: nothing to compare");
 
-        let rendered = render_status(&live, HubDisplayState::Running, "4.0.1");
+        let rendered = render_status(&live, HubDisplayState::Running, "9.99.1");
         assert!(
             rendered.contains("Pair from this machine: cas hub pair --origin http://127.0.0.1:4173 --hub-url http://127.0.0.1:4173"),
             "{rendered}"

@@ -288,10 +288,28 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
     lines.join("\n")
 }
 
-/// cas-1c1f: a supervisor's unrequested pane exit shuts its whole factory down
-/// (the daemon's `PaneExited` arm), so the remedy must name that cost and the
-/// routes that keep the workers running.
-const SUPERVISOR_RELOAD: &str = "For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory.";
+
+/// cas-2d41: what happens to each older process, truthfully. Workers move
+/// on the existing between-task recycle; nothing else restarts by itself.
+/// cas-1c1f: a supervisor's unrequested pane exit shuts its whole factory
+/// down (the daemon's `PaneExited` arm), so the supervisor remedy names that
+/// cost and the routes that keep the workers running.
+const FLEET_PICKUP: &str = "Each older worker is recycled onto the installed build before it starts its next queued task, never mid-task; an idle worker with no queued task keeps its build until recycled. For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory. Factory daemons keep their build until the factory is next relaunched.";
+
+/// cas-2d41: true when this worker's live MCP server is older than `installed`.
+pub(crate) fn agent_mcp_older_than(cas_root: &Path, installed: &str, agent_name: &str) -> bool {
+    snapshot_with_installed(cas_root, installed, Utc::now()).is_ok_and(|snapshot| {
+        snapshot
+            .servers
+            .iter()
+            .any(|server| server.name == agent_name && server.older)
+    })
+}
+
+/// True when the worker's live MCP server is older than the installed CLI.
+pub(crate) fn agent_mcp_is_older(cas_root: &Path, agent_name: &str) -> bool {
+    installed_version().is_some_and(|installed| agent_mcp_older_than(cas_root, &installed, agent_name))
+}
 
 pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Option<String> {
     let snapshot = match snapshot(cas_root) {
@@ -309,7 +327,7 @@ pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Optio
     let versions = render(&snapshot, session);
     Some(if rows.iter().any(|row| row.older) {
         format!(
-            "⚠ Factory MCP servers older than installed Cassy.\n{versions}\nSave worker state, then recycle affected workers. {SUPERVISOR_RELOAD}"
+            "⚠ Factory MCP servers older than installed Cassy.\n{versions}\n{FLEET_PICKUP}"
         )
     } else {
         versions
@@ -338,8 +356,8 @@ fn stale_notice(snapshot: &Snapshot) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "Cassy {} is installed, but these factory sessions have older MCP servers:\n{lines}\nSave worker state, then recycle affected workers. {SUPERVISOR_RELOAD} No process was recycled automatically.",
-        snapshot.installed,
+        "Cassy {installed} is installed; these factory sessions still run older MCP servers:\n{lines}\n{FLEET_PICKUP}",
+        installed = snapshot.installed,
     ))
 }
 
@@ -419,6 +437,9 @@ mod tests {
         );
         let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         assert_eq!(snapshot.servers[0].pid, child.0.id());
+        // cas-2d41: the between-task recycle asks this same question.
+        assert!(agent_mcp_older_than(&root, "9.99.2", "old-worker"));
+        assert!(!agent_mcp_older_than(&root, "9.99.1", "old-worker"));
         let status = render(&snapshot, Some("factory-release"));
         assert!(status.contains("installed 9.99.2"), "{status}");
         assert!(status.contains("old-worker (Worker"), "{status}");
@@ -507,7 +528,7 @@ mod tests {
         let payload = &rows[0].payload;
         assert!(payload.contains("old-worker"), "{payload}");
         assert!(payload.contains("factory-release"), "{payload}");
-        assert!(payload.contains("recycle affected workers"), "{payload}");
+        assert!(payload.contains("before it starts its next queued task"), "{payload}");
     }
 
     #[test]
@@ -545,7 +566,8 @@ mod tests {
         assert!(notice.contains("session-a: worker-a"), "{notice}");
         assert!(notice.contains("session-b: supervisor-b"), "{notice}");
         assert!(!notice.contains("worker-current"), "{notice}");
-        assert!(notice.contains("recycle affected workers"), "{notice}");
+        assert!(notice.contains("before it starts its next queued task"), "{notice}");
+        assert!(notice.contains("Factory daemons keep their build"), "{notice}");
         assert!(notice.contains("MCP reconnect control"), "{notice}");
         assert!(
             notice.contains("A plain supervisor exit stops every worker"),

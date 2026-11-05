@@ -2315,12 +2315,32 @@ impl HistoryStore for SqliteHistoryStore {
             let mut seen: std::collections::HashSet<(String, String, String)> =
                 std::collections::HashSet::new();
 
-            for event in &events {
-                let exact = classify_candidate(&event.head_sha) == CandidateClass::Exact;
-                for sha in shas {
-                    if !candidate_matches(&event.head_sha, sha) {
-                        continue;
-                    }
+            // cas-5590: index the heads once, so each commit looks up its own
+            // prefixes instead of testing every head (~12 K live) per commit.
+            let mut by_head: HashMap<String, Vec<usize>> = HashMap::new();
+            for (position, event) in events.iter().enumerate() {
+                by_head
+                    .entry(event.head_sha.to_ascii_lowercase())
+                    .or_default()
+                    .push(position);
+            }
+            let mut widths: Vec<usize> = by_head.keys().map(String::len).collect();
+            widths.sort_unstable();
+            widths.dedup();
+
+            for sha in shas {
+                let lower = sha.to_ascii_lowercase();
+                // In event order, as the per-event loop visited them.
+                let mut matched: Vec<usize> = widths
+                    .iter()
+                    .filter_map(|&width| lower.get(..width).and_then(|prefix| by_head.get(prefix)))
+                    .flatten()
+                    .copied()
+                    .filter(|&position| candidate_matches(&events[position].head_sha, sha))
+                    .collect();
+                matched.sort_unstable();
+                for event in matched.into_iter().map(|position| &events[position]) {
+                    let exact = classify_candidate(&event.head_sha) == CandidateClass::Exact;
                     let key = (
                         sha.clone(),
                         event.head_sha.to_lowercase(),
@@ -5276,8 +5296,8 @@ mod tests {
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].session_id.as_deref(), Some("session-9"));
         assert!(
-            elapsed < std::time::Duration::from_secs(3),
-            "500 commits over 25 MB of notes took {elapsed:?} holding the shared connection"
+            elapsed < std::time::Duration::from_secs(2),
+            "500 commits over 25 MB of notes and 12 K commit events took {elapsed:?} holding the shared connection"
         );
     }
 

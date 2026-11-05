@@ -158,7 +158,7 @@ missing_fragment_delivery_stops_release() {
     echo 'failing peer wake regression' >"$fixture/red-test.txt"
     git -C "$fixture" add red-test.txt
     git -C "$fixture" commit --quiet -m 'test(peer): untyped peer mail must wake a peer (cas-0004 red)'
-    git -C "$fixture" commit --quiet --allow-empty -m 'test: another missing delivery (cas-0005 red)'
+    git -C "$fixture" commit --quiet --allow-empty -m 'test: another missing delivery (cas-0005, red)'
     base="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$fixture/changelog.d"
     echo 'actual peer wake fix' >"$fixture/fix.txt"

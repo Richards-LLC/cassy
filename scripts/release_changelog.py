@@ -205,7 +205,7 @@ def verify_deliveries(base_ref):
             raise ChangelogError(result.stderr.strip())
         return result.stdout.strip()
 
-    owner = re.compile(r'\((cas-[0-9a-f]+)( red)?\)$')
+    owner = re.compile(r'\((cas-[0-9a-f]+)(,? red)?\)$')
     paths = [str(path) for path in fragment_paths('CHANGELOG.md')]
     for commit in git('log', f'{base_ref}..HEAD', '--no-merges', '--format=%H',
                       '--grep=^release: v[0-9]').splitlines():

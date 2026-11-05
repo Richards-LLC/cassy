@@ -551,7 +551,17 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     .flatten();
                 let own = settled
                     .unwrap_or_else(|| classify_code_ci_response(branch, &code_sha, output));
-                if matches!(own, BranchCiState::NoChecks { .. }) {
+                // cas-f9bf: the tip's push cancelled this commit's run and the
+                // tip's own run is still going. That run replaces it; watch it.
+                let awaiting_rerun = |state: &BranchCiState| matches!(state,
+                    BranchCiState::Pending { waiting_for_rerun: true, .. }
+                        | BranchCiState::CodePending { waiting_for_rerun: true, .. });
+                let running = |state: &BranchCiState| matches!(state,
+                    BranchCiState::Pending { waiting_for_rerun: false, .. }
+                        | BranchCiState::CodePending { waiting_for_rerun: false, .. });
+                if awaiting_rerun(&own) && running(&tip_state) {
+                    tip_state
+                } else if matches!(own, BranchCiState::NoChecks { .. }) {
                     covering_code_ci(branch, &code_sha, &tip, tip_state, cwd, &repo, &binary)
                         .unwrap_or(own)
                 } else {

@@ -97,6 +97,12 @@ fn machine_id(sender: &cas_types::Agent) -> String {
         .unwrap_or_else(cas_types::Agent::get_or_generate_machine_id)
 }
 
+fn has_route(task: &cas_types::Task) -> bool {
+    task.notes
+        .lines()
+        .any(|line| line.starts_with(ROUTE_MARKER) || line.starts_with("build-route:"))
+}
+
 fn prepare(
     root: &Path,
     sender: &cas_types::Agent,
@@ -125,7 +131,7 @@ fn prepare(
     }
     // Any prior route prevents ping-pong. Only the original sender may replay
     // its exact persisted selection, including after a crash before HTTP send.
-    if task.notes.contains("build-route:") {
+    if has_route(task) {
         return Ok(task.notes.lines().find_map(|line| {
             let plan: RoutePlan = serde_json::from_str(line.strip_prefix(ROUTE_MARKER)?).ok()?;
             (plan.source_machine_id == machine_id(sender)).then_some(plan)
@@ -215,7 +221,7 @@ pub(crate) fn prepare_assignment(
     let config = crate::config::Config::load(root)
         .unwrap_or_default()
         .factory();
-    if !config.auto_route_builds && !task.notes.contains("build-route:") {
+    if !config.auto_route_builds && !has_route(task) {
         return Ok(None);
     }
     let guard = crate::factory_build_guard::inspect_for_task(root, &config, 1, Some(task));
@@ -307,6 +313,11 @@ mod tests {
             .register(&sender)
             .unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
+        let sample_only = |age| {
+            let mut row = peer("best", 3, 4.0, age);
+            row["last_heartbeat"] = Utc::now().to_rfc3339().into();
+            row
+        };
         for (case, peers, off, note, expect_route) in [
             (
                 "fresh",
@@ -322,6 +333,8 @@ mod tests {
             ("absent", vec![], false, "", false),
             ("stale", vec![peer("best", 3, 4.0, 91)], false, "", false),
             ("future", vec![peer("best", 3, 4.0, -30)], false, "", false),
+            ("old-sample", vec![sample_only(91)], false, "", false),
+            ("future-sample", vec![sample_only(-30)], false, "", false),
             ("saturated", vec![peer("best", 0, 4.0, 0)], false, "", false),
             ("healthy", vec![peer("best", 3, 4.0, 0)], false, "", false),
             ("off", vec![peer("best", 3, 4.0, 0)], true, "", false),
@@ -441,8 +454,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cas_d1fe_spawn_and_stale_idle_assignment_use_the_peer_route() {
         use crate::mcp::tools::{TaskCreateRequest, TaskUpdateRequest};
-        use cas_mcp::FactoryRequest;
         use crate::mcp::{CasCore, CasService};
+        use cas_mcp::FactoryRequest;
         use rmcp::handler::server::wrapper::Parameters;
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -481,8 +494,13 @@ mod tests {
         config.save(&root).unwrap();
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
-        let occupied = std::fs::OpenOptions::new().read(true).write(true).create(true)
-            .truncate(false).open(slots.join("slot-0.lock")).unwrap();
+        let occupied = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(slots.join("slot-0.lock"))
+            .unwrap();
         fs2::FileExt::lock_exclusive(&occupied).unwrap();
         crate::cloud::CloudConfig {
             endpoint: server.uri(),
@@ -541,6 +559,10 @@ mod tests {
                     core.cas_task_update(Parameters(req)).await.unwrap()
                 }
                 "create" => {
+                    // Public create has no explicit target; use a current
+                    // checkout. The update row exercises the stale idle
+                    // worker with its declared main target unchanged.
+                    git(&["checkout", "main"]);
                     let req: TaskCreateRequest = serde_json::from_value(serde_json::json!({"title":"Overflow create", "assignee":"idle", "risk":"none"})).unwrap();
                     core.cas_task_create(Parameters(req)).await.unwrap()
                 }

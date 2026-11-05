@@ -4841,6 +4841,62 @@ mod tests {
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }
 
+    /// cas-fee3 (gabber CI audit): a worker push runs the project's declared
+    /// cheap local gate (`factory.worker_local_gate`), so lint and test
+    /// failures stop at the worker instead of costing a CI run.
+    #[test]
+    fn worker_push_runs_the_projects_declared_local_gate_cas_fee3() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+        let hook_cas_root = tempfile::tempdir().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        let remote = repo.join("remote.git");
+        assert!(git(repo, &["init", "-q", "--bare", &remote.to_string_lossy()]).status.success());
+        git(repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+        let wt = repo.parent().unwrap().join(format!(
+            "{}-local-gate-wt",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(git(repo, &["worktree", "add", "-q", "-b", "factory/w", &wt.to_string_lossy(), "main"]).status.success());
+        TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
+        // The project declares `pnpm ci:local`; this stub stands in for it.
+        let bin = hook_cas_root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cas = bin.join("cas");
+        std::fs::write(
+            &cas,
+            "#!/bin/sh\n[ \"$*\" = 'config get factory.worker_local_gate' ] && echo 'echo LOCAL-GATE-RAN >&2; exit 1'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/w"])
+            .env("PATH", path)
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        assert!(!push.status.success(), "a failing local gate stops the push: {stderr}");
+        assert!(stderr.contains("LOCAL-GATE-RAN"), "{stderr}");
+        assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
+        let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
+    }
+
     /// GH #339: even an explicit refspec must not let a foreign checkout HEAD
     /// advance this worker's remote branch. The pre-push hook is the
     /// after-compound-command hard floor beneath the PreToolUse refusal.

@@ -153,6 +153,7 @@ impl Config {
             "factory.worker_local_gate" => Some(factory.worker_local_gate.clone().unwrap_or_default()),
             "factory.design_review_bug_threshold" => Some(factory.design_review_bug_threshold.to_string()),
             "factory.design_review_window_hours" => Some(factory.design_review_window_hours.to_string()),
+            "factory.release_train_max_age_hours" => Some(factory.release_train_max_age_hours.to_string()),
             "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
             "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),

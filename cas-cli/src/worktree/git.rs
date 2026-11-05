@@ -1501,6 +1501,46 @@ impl GitOperations {
         source_branch: &str,
         no_ff: bool,
     ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            self.merge_branch_in_dir(dir, None, source_branch, no_ff)
+        })
+    }
+
+    /// cas-dcc9: revert one merge commit (`-m 1`, its mainline parent) on
+    /// `target_branch` as a new commit, with the same detached-worktree and
+    /// compare-and-swap guarantees as a merge. History is never rewritten.
+    pub fn revert_merge_via_temp_worktree(
+        &self,
+        target_branch: &str,
+        merge_sha: &str,
+        message: &str,
+    ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            let git = |args: &[&str]| -> Result<String> {
+                let output = Command::new("git").args(args).current_dir(dir).output()?;
+                if !output.status.success() {
+                    let _ = Command::new("git").args(["revert", "--abort"]).current_dir(dir).output();
+                    return Err(GitError::CommandFailed(format!(
+                        "git {}: {}",
+                        args.join(" "),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            };
+            git(&["revert", "--no-commit", "-m", "1", merge_sha])?;
+            git(&["commit", "-q", "-m", message])?;
+            git(&["rev-parse", "HEAD"]).map(Some)
+        })
+    }
+
+    /// Run `step` in a detached worktree at `target_branch`'s tip, then
+    /// compare-and-swap the branch to the commit it returns.
+    fn advance_via_temp_worktree(
+        &self,
+        target_branch: &str,
+        step: impl FnOnce(&Path) -> Result<Option<String>>,
+    ) -> Result<Option<String>> {
         let old_tip = self
             .resolve_commit(target_branch)
             .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
@@ -1523,7 +1563,7 @@ impl GitOperations {
         }
 
         let guard = self.add_temp_worktree(&old_tip)?;
-        let merged = self.merge_branch_in_dir(guard.path(), None, source_branch, no_ff)?;
+        let merged = step(guard.path())?;
 
         let new_tip = match merged {
             Some(ref tip) if *tip != old_tip => tip.clone(),

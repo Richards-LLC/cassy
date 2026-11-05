@@ -16,7 +16,7 @@
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, script and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policies.
 - `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and system references.
-- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`; `verify-deliveries` checks their recorded task anchors before release preparation or push.
+- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`; `verify-deliveries` checks fragment and commit-subject task claims against recorded anchors once during release preparation.
 
 ## Workspace / packages
 

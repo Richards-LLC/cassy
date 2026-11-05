@@ -418,7 +418,6 @@ failing_tests() {
 }
 
 publish_branch() {
-    python3 "$script_dir/release_changelog.py" verify-deliveries "$remote/$base"
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 

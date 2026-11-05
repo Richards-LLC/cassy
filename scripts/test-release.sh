@@ -171,23 +171,34 @@ PYDB
 missing_fragment_delivery_stops_release() {
     local fixture="$tmp/missing-fix" base fix before status=0
     clone_epic "$fixture" hotfix/missing-fix missing-fix
+    # Replay af4c35f71 (red) plus d702e7333/8890a7a95 (notes), without
+    # their fix: the fragment rides in the fix commit and is dropped too.
+    echo 'failing peer wake regression' >"$fixture/red-test.txt"
+    git -C "$fixture" add red-test.txt
+    git -C "$fixture" commit --quiet -m 'test(peer): untyped peer mail must wake a peer (cas-0004 red)'
     base="$(git -C "$fixture" rev-parse HEAD)"
+    mkdir -p "$fixture/changelog.d"
     echo 'actual peer wake fix' >"$fixture/fix.txt"
-    git -C "$fixture" add fix.txt
-    git -C "$fixture" commit --quiet -m 'peer wake fix'
+    printf '### Fixed — Peer wake\n\n- **Wake** — the peer wake fix shipped.\n' >"$fixture/changelog.d/cas-0004.md"
+    printf '# delivery-lock-marker\n' >>"$fixture/Cargo.lock"
+    echo 'delivery generated bundle' >"$fixture/hub-web/dist/app.js"
+    git -C "$fixture" add fix.txt changelog.d Cargo.lock hub-web/dist
+    git -C "$fixture" commit --quiet -m 'peer wake fix and its fragment'
     fix="$(git -C "$fixture" rev-parse HEAD)"
     git -C "$fixture" reset --quiet --hard "$base"
-    mkdir -p "$fixture/changelog.d"
-    printf '### Fixed — Peer wake\n\n- **Wake** — the peer wake fix shipped.\n' >"$fixture/changelog.d/cas-0004.md"
-    git -C "$fixture" add changelog.d
-    git -C "$fixture" commit --quiet -m 'notes still claim the dropped fix'
+    mkdir -p "$fixture/docs/release-notes"
+    write_valid_draft "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
+    git -C "$fixture" add docs/release-notes
+    git -C "$fixture" commit --quiet -m 'docs(release): Slack draft'
+    sed -i 's/easier to use/safer to use/' "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
+    git -C "$fixture" commit --quiet -am 'docs(release): ships the peer wake fix only'
+    [[ ! -f "$fixture/changelog.d/cas-0004.md" && ! -f "$fixture/fix.txt" ]] || return 1
     record_delivery "$fixture" cas-0004 "$fix" "$base"
-    write_valid_draft "$tmp/missing-fix-draft.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/missing-fix-state"
     : >"$tmp/missing-fix-gh.log"
     FAKE_GH_STATE="$tmp/missing-fix-state" FAKE_GH_LOG="$tmp/missing-fix-gh.log" \
-        run "$fixture" --hotfix --no-watch --notes "$tmp/missing-fix-draft.md" >"$tmp/missing-fix.log" 2>&1 || status=$?
+        run "$fixture" --hotfix --no-watch --notes "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" >"$tmp/missing-fix.log" 2>&1 || status=$?
     [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
         grep -q 'cas-0004' "$tmp/missing-fix.log" && grep -q "$fix" "$tmp/missing-fix.log" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
@@ -195,7 +206,12 @@ missing_fragment_delivery_stops_release() {
 
     # A cherry-pick changes identity but retains the full delivery patch.
     git -C "$fixture" cherry-pick --quiet "$fix" || return 1
-    run "$fixture" --hotfix --dry-run --notes "$tmp/missing-fix-draft.md" >>"$tmp/missing-fix.log" 2>&1 || return 1
+    ! git -C "$fixture" merge-base --is-ancestor "$fix" HEAD || return 1
+    # Generated output and lock resolution may legitimately differ on a cut.
+    sed -i 's/delivery-lock-marker/regenerated-lock-marker/' "$fixture/Cargo.lock"
+    echo 'regenerated bundle' >"$fixture/hub-web/dist/app.js"
+    git -C "$fixture" commit --quiet -am 'regenerate build outputs'
+    run "$fixture" --hotfix --dry-run --notes "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" >>"$tmp/missing-fix.log" 2>&1 || return 1
     [[ ! -f "$fixture/changelog.d/cas-0004.md" ]] || return 1
     # A resumed release must recover the consumed fragment's claim, even
     # after the code is dropped from an already-prepared branch.
@@ -210,7 +226,7 @@ missing_fragment_delivery_stops_release() {
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
         ! grep -q '^pr create' "$tmp/missing-fix-gh.log"
 }
-check 'missing_fragment_delivery_stops_release' 'cas-4bdf: missing fragment fix refuses before commit, push or PR and names task and anchor'
+check 'missing_fragment_delivery_stops_release || { cat "$tmp/missing-fix.log"; false; }' 'cas-4bdf: red plus notes without fix or fragment refuses; equivalent source patch passes regenerated outputs'
 
 # cas-56bbc: a dry patch release must commit the bundle built from the new
 # manifest, not leave the old embedded version for the merge queue to reject.

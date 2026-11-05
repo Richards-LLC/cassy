@@ -878,7 +878,7 @@ mod tests {
         let foreign_tip = git(other.path(), &["rev-parse", "HEAD"]);
         git(repo, &["fetch", "-q", "origin"]);
         let refused = pushed_delivery_tip(repo, &task, "factory/w", &foreign_tip).unwrap_err();
-        assert!(refused.contains("not on w's own factory/w"), "{refused}");
+        assert!(refused.contains("not on w's local factory/w"), "{refused}");
     }
 
     /// cas-43d2: what the one-hop verdict close could not restore or record

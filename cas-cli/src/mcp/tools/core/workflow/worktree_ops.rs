@@ -3396,10 +3396,11 @@ impl CasCore {
                 ""
             };
             output.push_str(&format!(
-                "{} {} - {} (recorded status: {}){}{}\n   Epic: {}\n   Path: {}\n\n",
+                "{} {} - {} ({}: {}){}{}\n   Epic: {}\n   Path: {}\n\n",
                 status_icon,
                 wt.id,
                 wt.branch,
+                if wt.id.starts_with("git:") { "git-derived status" } else { "recorded status" },
                 wt.status,
                 path_status,
                 type_indicator,

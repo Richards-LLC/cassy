@@ -8178,7 +8178,7 @@ async fn inbox_poll_withholds_superseded_awaiting_merge_relay() {
     );
     assert!(text.contains(task_id), "withheld row must be named: {text}");
     assert!(
-        text.contains("already done"),
+        text.contains("superseded by current task state") && !text.contains("already done"),
         "stale reason must be explicit: {text}"
     );
     assert!(

@@ -14,11 +14,16 @@ through scripts/worker-memory.py, so that wrapper's import closure (host
 memory, assembly proof, release scratch and env) left this list, and a
 release-script change no longer pays ~22 min of Commander checks.
 
-Fail-closed: a Git failure exits nonzero, and the caller then runs the web
-check.
+Version changes also select the existing web step: release assets embed the
+cas-cli version even when no web path changed. --dist-policy additionally prints
+whether committed output must match: release-version changes, changed dist,
+and unreadable versions retain equality; source-only lanes defer it to release
+preparation. A Git failure exits nonzero, and the caller runs every web check.
 """
+import re
 import subprocess
 import sys
+import tomllib
 
 # Paths whose change runs the web check. Directory entries end in '/'.
 # scripts/test-hub-web-gate.py pins this list against hub-web's own repo-level
@@ -55,11 +60,21 @@ def covered(path):
     return any(path == entry or (entry.endswith('/') and path.startswith(entry)) for entry in WEB_INPUTS)
 
 
+def version(ref):
+    """An unreadable/inherited version cannot authorize a source-only lane."""
+    try:
+        value = tomllib.loads(git('show', f'{ref}:cas-cli/Cargo.toml'))['package']['version']
+        return value if isinstance(value, str) and re.fullmatch(r'\d+\.\d+\.\d+', value) else None
+    except (subprocess.CalledProcessError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        return None
+
+
 def main(argv):
-    if len(argv) != 3:
-        print(f'usage: {argv[0]} <merge-base> <head>', file=sys.stderr)
+    policy = len(argv) == 4 and argv[3] == '--dist-policy'
+    if len(argv) != 3 and not policy:
+        print(f'usage: {argv[0]} <merge-base> <head> [--dist-policy]', file=sys.stderr)
         return 2
-    base, head = argv[1], argv[2]
+    base, head = argv[1:3]
     try:
         changed = [path for path in git('diff', '--name-only', '--no-renames', base, head).splitlines() if path]
     except subprocess.CalledProcessError as error:
@@ -68,7 +83,16 @@ def main(argv):
     hits = [path for path in changed if covered(path)]
     if hits:
         print(f'classify-web-inputs: {len(hits)} web input(s) changed, first {hits[0]}', file=sys.stderr)
-    print('true' if hits else 'false')
+    base_version, head_version = version(base), version(head)
+    # The integration owner commits dist during release preparation. Only a
+    # known unchanged-version, unchanged-dist lane may defer that equality.
+    dist_needed = (base_version is None or head_version is None or base_version != head_version
+                   or any(path.startswith('hub-web/dist/') for path in changed))
+    web_needed = bool(hits) or dist_needed
+    answer = 'true' if web_needed else 'false'
+    if policy:
+        answer += ' ' + ('true' if dist_needed else 'false')
+    print(answer)
     return 0
 
 

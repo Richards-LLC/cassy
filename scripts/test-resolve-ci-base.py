@@ -32,6 +32,7 @@ class LaneBaseTests(unittest.TestCase):
             destination.parent.mkdir(exist_ok=True)
             shutil.copy2(source, destination)
         self.write('Cargo.lock', 'base\n')
+        self.write('cas-cli/Cargo.toml', '[package]\nversion = "9.99.7"\n')
         self.commit('main')
         self.main = self.git('rev-parse', 'HEAD')
         self.git('update-ref', 'refs/remotes/origin/main', self.main)

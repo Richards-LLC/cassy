@@ -3766,9 +3766,16 @@ Standalone named journeys use the same scratch builder, defaulting to ignored
 Background reuse keys include the source/build inputs and retain the original
 build provenance rather than rebinding a snapshot to a different source tip.
 
-The integration owner still rebuilds merged sources into committed dist for the
-release. The merge queue proves that integrated tree through its existing
-Commander checks; this adds no CI stage or duplicate gate.
+The integration owner produces and commits canonical dist in `scripts/release.sh`
+preparation, after merging sources and setting the release version. The queue's
+existing Commander build requires committed-output equality for version changes,
+dist changes, or unreadable base/version inputs. A proven unchanged-version,
+unchanged-dist source-only lane builds and tests without requiring generated
+commits. A version-only change selects the same Commander step even with no web
+path diff, so omitting release bundle generation still rejects stale assets.
+Journey manifests bind scratch proof to its source/hash; final release equality
+binds that source output to the committed assets embedded by the prebuild and
+adopted by commit/tree. This adds no CI stage or duplicate gate.
 
 ### Test shape and runner evidence
 
@@ -3817,8 +3824,9 @@ build, visual QA, dist drift and journeys) is narrower: `scripts/classify-web-in
 lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
 worker-memory wrapper with its imports, and the classifier itself. Any other
 `scripts/` or `.github/` change skips them, including a `.github/workflows/ci.yml`
-edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead; a
-classifier failure runs them.
+edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead.
+Release-version changes and unreadable versions also select the existing web
+checks, because the bundle embeds that version; a classifier failure runs them.
 `scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
 the list omits. Markdown fixtures beneath hub-web still require web tests. The
 scoped lane and merge queue select web checks from their changed inputs.

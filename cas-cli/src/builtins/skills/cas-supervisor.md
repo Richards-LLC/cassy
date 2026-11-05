@@ -21,7 +21,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
-- **Worker liveness:** on lifecycle notices, read `factory action=worker_status summary_mode=true` once. Trust `liveness`, never heartbeat or registry status. Recovery: [worker-recovery.md](references/worker-recovery.md).
+- **Worker liveness:** on lifecycle notices, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Recovery: [worker-recovery.md](references/worker-recovery.md).
 - **Trust refusals.** Follow the named gate/next command. Never force (`force=true`, `supervisor_override`, merge overrides) over unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
 - **No polling or sleeping.** Use events/background completion; delay reminders cover deadlines, retries or backstops. Commander wakes you.
@@ -61,4 +61,4 @@ Read once per context per phase.
 | Release or publish | [reporting and routing](references/reporting-and-routing.md) |
 | A recurring lesson | [ladder and tags](references/workflow.md#lessons-must-remove-causes) |
 | Schedule follow-up | [reminders](references/reminders.md) |
-| Bug filing | [issue registry](references/filing-cas-bugs.md): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately. |
+| Bug filing | [issue registry](references/filing-cas-bugs.md) (`issues.repo`, `issues.components.violet`, `issues.components.cloud`): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately. |

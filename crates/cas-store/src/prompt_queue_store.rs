@@ -16406,7 +16406,7 @@ mod tests {
         }
 
         // Only completed supervisor transcript mirrors may expire. Real operator
-        // messages, fresh mirrors and copies still owed to an outbox survive.
+        // messages and fresh mirrors survive; outbox delivery remains independent.
         let mut mirrors = Vec::new();
         for label in ["aged", "fresh", "outbox"] {
             let outcome = store.enqueue_idempotent(
@@ -16439,12 +16439,17 @@ mod tests {
         let report = store.message_delivery_report(mirrors[0]).unwrap().unwrap();
         assert_eq!(report.stage, DeliveryStage::Suppressed);
         assert!(report.delivered_at.is_none(), "expiry cannot fabricate a device receipt");
-        for id in [mirrors[1], mirrors[2]] {
-            let pending: bool = store.conn.lock().unwrap().query_row(
-                "SELECT processed_at IS NULL FROM prompt_queue WHERE id = ?", [id], |row| row.get(0),
-            ).unwrap();
-            assert!(pending, "fresh mirrors and undelivered outbox rows survive");
-        }
+        let conn = store.conn.lock().unwrap();
+        let fresh_pending: bool = conn.query_row(
+            "SELECT processed_at IS NULL FROM prompt_queue WHERE id = ?", [mirrors[1]], |row| row.get(0),
+        ).unwrap();
+        assert!(fresh_pending, "fresh mirrors survive");
+        let outbox_pending: bool = conn.query_row(
+            "SELECT payload_snapshot = '{}' AND retained_at IS NULL AND lease_token IS NULL
+             FROM operator_delivery_outbox WHERE prompt_id = ?", [mirrors[2]], |row| row.get(0),
+        ).unwrap();
+        assert!(outbox_pending, "the independent durable delivery snapshot still retries");
+        drop(conn);
 
         for id in [operator, commander] {
             let report = store.message_delivery_report(id).unwrap().unwrap();

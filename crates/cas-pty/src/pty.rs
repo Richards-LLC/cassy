@@ -5559,7 +5559,7 @@ echo SMOKE_DONE
         // signal → action core replaces that ritual, within a byte budget.
         for required in [
             "Supervisor core (resident",
-            "park relay (awaiting_merge) →",
+            "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge →",
             "blocker=true →",
             "worker idle or died →",
             "cas-qa-dispatch →",
@@ -7578,7 +7578,7 @@ echo SMOKE_DONE
         // cas-c145: Grok supervisors must get merge-queue-first lifecycle
         // guidance equivalent to other harnesses (no SessionStart bundle).
         assert!(
-            rules.contains("park relay")
+            rules.contains("MERGE REQUIRED")
                 && rules.contains("awaiting_merge")
                 && rules.contains("factory/<worker>")
                 && rules.contains("do not poll"),

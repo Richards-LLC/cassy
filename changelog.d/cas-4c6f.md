@@ -1,6 +1,6 @@
 ### Fixed — tool status text names the evidence it actually observed
 
-Committed writes with unfinished follow-up no longer say the action is done.
+- **Status words follow their evidence** — Committed writes with unfinished follow-up no longer say the action is done.
 Inbox suppression names obsolete instructions and current task states;
 tracked-only assignment checks and stored worktree merge/removal records name
 their scope. Merge publication verifies an equal cached ref against live origin

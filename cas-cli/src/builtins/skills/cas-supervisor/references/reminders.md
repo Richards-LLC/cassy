@@ -35,9 +35,10 @@ task must leave no stale phase reminder.
 
 ### Time checkpoint: a real deadline
 
-Use a delay only for work that becomes due at that time, such as an expiring
-context handoff or a build-admission retry. A timer that checks inbox, CI, task,
-merge or detached-job status is refused with the matching event forms.
+Use a delay for work that becomes due at that time, such as an expiring
+context handoff or a build-admission retry, or as a plain time backstop. Prefer
+the matching event for inbox, CI, task, merge or detached-job status; the
+daemon's progress watchdog wakes you after 45 minutes with no movement.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \

@@ -1,4 +1,7 @@
 ### Added — Factory
 
-- **Progress watchdog** — A factory with work in flight and nothing moving is now noticed, whatever heartbeats say. Progress means a change to an assigned task (status, notes, close or merge), a new commit on a worker's lane, or a message from one of the session's agents. Heartbeats, liveness and Cassy's own relays never count. After 45 minutes with no progress the supervisor is woken once with what is waiting on whom. After 90 minutes the operator is paged once in Commander. The next real movement starts a new episode. This also gives every supervisor turn a time backstop when its only wakes are event-based. Set `factory.progress_watchdog_secs` to change N, or `0` to turn it off.
-- **Peer ask deadlines** — `coordination action=message kind=ask remind_delay_secs=<n>` now works for any single agent, including a peer supervisor. If the peer has not answered by the deadline, the asker is woken as a blocker; an answer cancels the wake. `remind_delay_secs` on any other message is now refused instead of silently ignored.
+- **Progress watchdog** — A factory session with open work and no task, lane or message change for 45 minutes now wakes its supervisor once with what is waiting on whom. If nothing moves in another 45 minutes, the operator is paged once in Commander. Heartbeats and liveness never count as progress, so a live but silent peer no longer stalls a factory overnight unnoticed.
+
+### Changed — Factory
+
+- **Plain time reminders** — `coordination action=remind remind_delay_secs=<n>` is no longer refused when its message mentions CI, a task, a merge or the inbox. A time reminder is a valid backstop; event reminders remain the better wait.

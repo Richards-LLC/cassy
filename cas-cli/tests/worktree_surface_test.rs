@@ -4813,17 +4813,25 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
 #[cfg(unix)]
 #[tokio::test]
 async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
-    protected_main_fixture_cas_d6cf(false).await;
+    for cleanup in [false, true] {
+        protected_main_fixture_cas_d6cf(false, false, cleanup).await;
+    }
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn queued_main_uses_pr_before_local_merge_without_dispatch_cas_d6cf() {
-    protected_main_fixture_cas_d6cf(true).await;
+    protected_main_fixture_cas_d6cf(true, false, false).await;
 }
 
 #[cfg(unix)]
-async fn protected_main_fixture_cas_d6cf(queued: bool) {
+#[tokio::test]
+async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
+    protected_main_fixture_cas_d6cf(true, true, false).await;
+}
+
+#[cfg(unix)]
+async fn protected_main_fixture_cas_d6cf(queued: bool, moved: bool, cleanup: bool) {
     let mut env = test_env();
     let repo = GitRepo::new();
     let remote = TempDir::new().unwrap();
@@ -4866,10 +4874,11 @@ done
 [ "$(git rev-parse HEAD)" = '{source}' ] || exit 1
 [ -z "$(git status --porcelain --untracked-files=no)" ] || exit 1
 "#));
+        let reported_head = if moved { "0".repeat(40) } else { source.clone() };
         let gh = env.home().join("protected-gh");
         cas::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{calls}'
-pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{source}","headRefName":"factory/bob","baseRefName":"main"}}'
+pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{reported_head}","headRefName":"factory/bob","baseRefName":"main"}}'
 case "$1 $2" in
 'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
 'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":{{"id":"queue-main"}}}}}}}}' ;;
@@ -4891,8 +4900,18 @@ esac
     request.id = Some("factory/bob".into());
     request.task_id = Some(task.id.clone());
     request.allow_trunk = Some(true);
-    request.cleanup = Some(false);
-    let response = service.factory(Parameters(request.clone())).await.unwrap();
+    request.cleanup = Some(cleanup);
+    let result = service.factory(Parameters(request.clone())).await;
+    if moved {
+        let refusal = result.expect_err("a changed PR head cannot acquire auto-merge authority");
+        assert!(!armed.exists(), "{refusal:?}");
+        assert!(pr_exists.exists(), "the real PR identity check must be reached");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+        return;
+    }
+    let response = result.unwrap();
     let text = get_text(&response);
     if queued {
         // pin: no attempted remote main update is the queue-before-merge contract.

@@ -496,9 +496,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 /// without check runs still starts the close and records its unconfirmed CI.
 #[tokio::test]
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
-    // cas-c744: cas-e051 moved the existing verdict before publication.
-    // (row, CI conclusion, pre-merge verdict, Cassy closes after merge)
-    for (row, conclusion, verdict, closes) in [
+    premerge_record_then_merge(&[
         // The worker cannot close while its candidate is still under review.
         ("worker-blocked", "success", Some("approved"), true),
         // cas-46ea: merged from a pushed lane tip without a park.
@@ -509,7 +507,21 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         ("advisory-pending-docs", "pending", Some("approved"), true),
         ("red-override", "failure", Some("approved"), false),
         ("fresh-branch", "success", Some("approved"), true),
-    ] {
+    ]).await;
+}
+
+/// cas-62c3: accepting an exact late verdict must never silently discard it
+/// on the next real worktree_merge, including explicit timeout recovery.
+#[tokio::test]
+async fn late_accepted_premerge_verdict_is_reused_cas_62c3() {
+    premerge_record_then_merge(&[
+        ("late-approved", "success", Some("approved"), true),
+        ("late-timedout-approved", "success", Some("approved"), true),
+    ]).await;
+}
+
+async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
+    for &(row, conclusion, verdict, closes) in rows {
         let mut env = TestEnvGuard::temp_home();
         let repo = GitRepo::new();
         let slug = format!("eda0-{row}");
@@ -750,12 +762,34 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), target_before);
             env.set("CAS_AGENT_ROLE", "supervisor");
         }
+        if row.starts_with("late-") {
+            // Advance the dispatch's clock, never sleep through a deadline.
+            let now = chrono::Utc::now();
+            let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+            conn.execute(
+                "UPDATE verification_dispatches SET requested_at=?2,deadline_at=?3 WHERE id=?1",
+                rusqlite::params![dispatch.id, (now - chrono::Duration::minutes(12)).to_rfc3339(), (now - chrono::Duration::minutes(2)).to_rfc3339()],
+            ).unwrap();
+            drop(conn);
+            if row == "late-timedout-approved" {
+                let expired = cas_store::timeout_verification_dispatch(&cas_root, &task.id, now).unwrap().unwrap();
+                assert_eq!(expired.id, dispatch.id);
+            }
+        }
         let verdict = verdict.expect("every publication needs a candidate verdict");
         let recorded = get_text(&supervisor.verification(Parameters(verification_req(serde_json::json!({
             "action": "add", "task_id": task.id, "status": verdict,
             "summary": format!("{verdict} {row}"), "confidence": 1.0,
             "dispatch_id": dispatch.id,
         })))).await.expect("pre-merge verdict"));
+        if row.starts_with("late-") {
+            let resolved = cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().unwrap();
+            let accepted = cas_store::get_verification_for_dispatch(&cas_root, &dispatch.id).unwrap().unwrap();
+            assert_eq!(resolved.id, dispatch.id, "record keeps the reviewed dispatch");
+            assert_eq!(resolved.state, cas::types::VerificationDispatchState::Resolved);
+            assert!(accepted.created_at > resolved.deadline_at, "the record actually crossed the deadline");
+            assert!(recorded.contains("approved"), "{recorded}");
+        }
         assert_ne!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed,
             "approval alone cannot close an unpublished delivery: {row}: {recorded}");
         if verdict == "rejected" {

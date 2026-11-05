@@ -56,6 +56,36 @@ async fn bug_tagged_with_a_release_is_an_escape() {
     assert_eq!(events[1].title.as_deref(), Some("Tagged later"));
 }
 
+/// cas-87a2: in the Cassy source repository, filing a bug task is the friction
+/// write; nobody has to remember the ledger. Other task types are not friction.
+#[tokio::test]
+async fn filing_a_cassy_bug_task_records_one_friction_row() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    std::fs::create_dir_all(temp.path().join("cas-cli")).unwrap();
+    std::fs::write(temp.path().join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+
+    let created = extract_text(
+        service.cas_task_create(Parameters(bug("Shutdown loses unpushed work", "area"))).await.unwrap(),
+    );
+    let id = created.split_whitespace().nth(2).unwrap();
+    let feature: TaskCreateRequest = serde_json::from_value(serde_json::json!({
+        "title": "A new idea", "task_type": "feature", "priority": 2, "risk": "none",
+        "scope": "project",
+    }))
+    .unwrap();
+    service.cas_task_create(Parameters(feature)).await.unwrap();
+
+    let events = ledger(&temp);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let QualityPayload::Friction { source, reference, severity, .. } = &events[0].payload else {
+        panic!("not friction: {:?}", events[0].payload);
+    };
+    assert_eq!(*source, cas_store::FrictionSource::Task);
+    assert_eq!((reference.as_str(), severity.as_deref()), (id, Some("p2")));
+    assert_eq!(events[0].title.as_deref(), Some("Shutdown loses unpushed work"));
+}
+
 /// A handoff line is a verdict; prose and malformed lines are not, and the note
 /// stays out of the wire form.
 #[tokio::test]

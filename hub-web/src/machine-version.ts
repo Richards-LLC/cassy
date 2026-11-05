@@ -33,10 +33,20 @@ export function supervisorVersion(running: string | undefined, installed?: strin
   return { version, update, description };
 }
 
-export function machineVersionMarkup(runtime: string | undefined, latest?: string, unknownLabel = "Version unknown"): string {
+/**
+ * The hub's own running version beside the binary installed on its machine.
+ * A hub older than the installed binary is named as such, with the command
+ * that loads it; a published release is offered only beyond what is
+ * installed (cas-d786).
+ */
+export function machineVersionMarkup(runtime: string | undefined, latest?: string, unknownLabel = "Version unknown", installed?: string): string {
   const known = typeof runtime === "string" && runtime && runtime !== "unknown";
-  const update = isNewerRelease(runtime, latest);
-  return `<span class="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${known ? `Cassy ${escapeHtml(runtime)}` : escapeHtml(unknownLabel)}</span>${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
+  const stale = known && isNewerRelease(runtime, installed);
+  const label = !known ? escapeHtml(unknownLabel)
+    : stale ? `Hub ${escapeHtml(runtime)} · installed ${escapeHtml(installed!.replace(/^v/, ""))}` : `Cassy ${escapeHtml(runtime)}`;
+  const restart = stale ? ` <span class="machine-version-update" title="This machine's hub is still the process started before ${escapeHtml(installed!.replace(/^v/, ""))} was installed. Run cas hub restart there to load it.">Run cas hub restart</span>` : "";
+  const update = isNewerRelease(stale ? installed : runtime, latest);
+  return `<span class="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
 }
 
 /** Persist attempts as well as successes: offline reloads never hammer GitHub.

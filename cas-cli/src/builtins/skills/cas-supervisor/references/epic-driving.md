@@ -9,4 +9,4 @@
 - Set `proof_scope_fix=true` and bind `known-repos` when a receipt names the wrong repository.
 - Carry the version bump, CHANGELOG section, and release-notes draft as the epic branch’s final commit; land them through its single integration PR before tagging, for one tree, one queue cycle.
 - Own the release cut; wait for the project's release build to finish before tagging or publishing.
-- Run one [epic flow walk](epic-flow-walk.md) per epic when any child has a demo statement, concurrently with the detached gate; never rerun it on a gate retry.
+- The batch QA round is the [epic flow walk](epic-flow-walk.md); never run both.

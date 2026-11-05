@@ -185,7 +185,7 @@ pub use qa_pass_store::{
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, ensure_quality_event_schema, import_quality_events,
+    QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
     normalize_release_version, quality_events_after, quality_events_between,
     quality_events_for_task, quality_interventions_since, quality_release_events,
     record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,
@@ -259,7 +259,7 @@ pub use verification_store::{
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
-    has_active_verification_dispatch, inspect_bound_server_verifier_handoff,
+    has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,

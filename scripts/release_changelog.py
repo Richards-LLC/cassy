@@ -24,9 +24,13 @@
 
   release_changelog.py section <file> <version>
       Print the body of the <version> section.
+
+  release_changelog.py verify-deliveries <base-ref>
+      Refuse fragment/commit-subject claims whose delivery is absent from HEAD.
 """
 import re
 import sys
+import subprocess
 from pathlib import Path
 
 HEADING = re.compile(r'^## \[(?P<version>[^\]]+)\]')
@@ -193,6 +197,51 @@ def section(text, version):
     return '\n'.join(tidy(body)) + '\n'
 
 
+def verify_deliveries(base_ref):
+    """Require a non-red delivery in Git history for each explicit task claim."""
+    def git(*args):
+        result = subprocess.run(['git', *args], capture_output=True, text=True)
+        if result.returncode:
+            raise ChangelogError(result.stderr.strip())
+        return result.stdout.strip()
+
+    owner = re.compile(r'\((cas-[0-9a-f]+)(,? red)?\)$')
+    paths = [str(path) for path in fragment_paths('CHANGELOG.md')]
+    for commit in git('log', f'{base_ref}..HEAD', '--no-merges', '--format=%H',
+                      '--grep=^release: v[0-9]').splitlines():
+        paths += git('diff', '--name-only', '--diff-filter=D', f'{commit}^',
+                     commit, '--', 'changelog.d/').splitlines()
+    tasks = {Path(path).stem for path in paths
+             if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name)}
+    tasks.update(match[1] for subject in git('log', f'{base_ref}..HEAD', '--no-merges',
+                                            '--format=%s').splitlines()
+                 if (match := owner.search(subject)))
+    if not tasks:
+        return
+    deliveries, red = {}, set()
+    for line in git('log', '--all', '--no-merges', '--format=%H%x09%s').splitlines():
+        commit, _, subject = line.partition('\t')
+        if match := owner.search(subject):
+            if match[2]:
+                red.add(commit)
+            else:
+                deliveries.setdefault(match[1], []).append(commit)
+    contained = set(git('rev-list', 'HEAD').splitlines())
+    missing = []
+    for task in sorted(tasks):
+        # Older deliveries identify themselves by adding their own fragment.
+        commits = deliveries.get(task) or git('log', '--all', '--no-merges',
+            '--diff-filter=A', '--format=%H', '--', f'changelog.d/{task}.md').splitlines()
+        commits = [commit for commit in commits if commit not in red]
+        if contained.intersection(commits):
+            continue
+        if any(f'- {commit}' in git('cherry', 'HEAD', commit).splitlines() for commit in commits):
+            continue
+        missing.append(f'{task}: missing fix commit: {", ".join(commits) or "no non-red delivery found"}')
+    if missing:
+        raise ChangelogError('release is missing task deliveries:\n' + '\n'.join(missing))
+
+
 def main(argv):
     try:
         if len(argv) == 5 and argv[0] == 'promote':
@@ -205,6 +254,8 @@ def main(argv):
         elif len(argv) == 5 and argv[0] == 'rebase':
             Path(argv[4]).write_text(
                 rebase(Path(argv[1]).read_text(), Path(argv[2]).read_text(), argv[3]))
+        elif len(argv) == 2 and argv[0] == 'verify-deliveries':
+            verify_deliveries(argv[1])
         elif len(argv) == 3 and argv[0] == 'section':
             sys.stdout.write(section(Path(argv[1]).read_text(), argv[2]))
         else:

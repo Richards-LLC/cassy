@@ -305,8 +305,9 @@ invariants:
     bug:
       task: cas-7c14
   HUB-J3-MACHINE-VERSIONS:
-    statement: Each machine names its reported runtime and a newer stable release when known; the Web footer names the client release and build independently.
-    check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
+    statement: Each machine names its reported runtime and a newer stable release when known; a hub older than its installed binary is named with the restart that loads it, never as an available update, and a reconnect after a hub restart re-reads its version. The Web footer names the client release and build independently.
+    check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist, including its cas-d786 stale-hub stage, the cas-d786 machine-version and reconnect cases in project-navigation.test.ts and connection-lifecycle.test.ts, and hub::tests::h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions. Verify old, current, stale and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
+    bug: {task: cas-d786}
   HUB-J3-SUPERVISOR-VERSIONS:
     statement: Each online supervisor shows its observed MCP version; an older version than its machine has installed is marked with an upgrade arrow and reconnect guidance, while unknown versions show nothing.
     check: 'Run the cas-8125 stage in the existing machine versions HUB-J3 journey for Linux/Claude and macOS/Codex observations, the badge-state conversations unit test and the real-store catalog projection test; capture both real candidate builds and retain platform proof.'
@@ -326,8 +327,8 @@ invariants:
     check: 'Run the inspect images in a turn part of read-history.journey.ts at 390 and 1440 in light and dark, including three failed viewer-chunk clicks, a single note, failed decode, fully visible Try again without scrolling at 390x844, focus boundaries, wheel/drag, synthetic touch pinch and accessibility media captures. The attachment-sheet unit regression covers the same entry path, recovery and preserved scroll offset.'
     bug: {task: cas-3dd8}
   HUB-J4-READABLE-PROSE-TABLES:
-    statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, and wide tables scroll inside the message without widening the page.
-    check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
+    statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, each column takes one alignment for its header and cells (the markdown rule's, otherwise right only when every body cell is numeric), columns size to their content, and wide tables scroll inside the message without widening the page.
+    check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, # / What / Starts with C2/C3, and the operator''s mixed gabber supervisor / soundwave / prowl table, whose every cell starts flush left and whose table is narrower than the sheet at 1280, at 1280 and 390 in light and dark. The numeric-evidence and per-column alignment cases in conversation-view.test.ts keep numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
   HUB-J4-TABLE-COPY:
     statement: Evidence, including short status replies, uses native table headers and cells; adjacent plain progress stays quiet, escaped pipes stay in one cell, fenced pipe text stays source, and Copy Markdown or Copy CSV preserves columns with visible clipboard failure and retry.

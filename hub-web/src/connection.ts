@@ -62,6 +62,8 @@ export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-
 export interface HubMachineInfo {
   schema_version: number;
   version: string;
+  /** The `cas` binary installed on the machine, when its hub can read it (cas-d786). */
+  installed_version?: string;
   capabilities: string[];
   /** The supervisor CLI this machine starts sessions with by default, when its hub says. */
   default_supervisor_cli?: string;
@@ -489,6 +491,7 @@ export class HubConnectionSupervisor {
     this.connectionGeneration += 1;
     let stage = this.resumeStage;
     let liveSince: number | undefined;
+    let machineRead = false;
     try {
       const unsupported = unsupportedBrowserReason();
       if (unsupported) throw new UnsupportedBrowserError(unsupported);
@@ -505,6 +508,7 @@ export class HubConnectionSupervisor {
       if (stage === "auth") {
         this.transition("auth", "auth");
         await this.withStageTimeout("auth", signal => this.refreshMachineInfo(signal));
+        machineRead = true;
         stage = "attaching";
       }
       this.transition("attaching", "attaching");
@@ -513,14 +517,23 @@ export class HubConnectionSupervisor {
       if (recovering) {
         // After a machine outage it may have rebooted. Check the authoritative
         // catalog before replaying any session demand or waiting messages.
-        try {
-          await this.refreshSessions(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
-        } catch (error) {
-          // Missing catalog data is unknown. Health, auth and events already
-          // succeeded; only an authentication refusal invalidates that proof.
-          if (error instanceof AuthenticationError || this.eventAbort?.signal.aborted) {
-            this.eventAbort?.abort();
-            throw error;
+        // A stream that ended and reopened resumes past the auth stage, but
+        // the hub behind it may be a new process: `cas update` restarts it on
+        // the installed binary. Re-read its version and capabilities too, so
+        // Commander never keeps a replaced hub's version (cas-d786).
+        const reads: Array<(signal: AbortSignal) => Promise<unknown>> = [signal => this.refreshSessions(signal)];
+        if (!machineRead) reads.unshift(signal => this.refreshMachineInfo(signal));
+        for (const read of reads) {
+          try {
+            await read(anySignal([this.eventAbort!.signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+          } catch (error) {
+            // Missing catalog or machine data is unknown and keeps what the hub
+            // last said. Health, auth and events already succeeded; only an
+            // authentication refusal invalidates that proof.
+            if (error instanceof AuthenticationError || this.eventAbort?.signal.aborted) {
+              this.eventAbort?.abort();
+              throw error;
+            }
           }
         }
       }

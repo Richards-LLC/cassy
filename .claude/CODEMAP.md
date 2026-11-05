@@ -16,7 +16,7 @@
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, script and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policies.
 - `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and system references.
-- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`.
+- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`; `verify-deliveries` checks explicit task claims against Git commits and patch equivalence once during release preparation.
 
 ## Workspace / packages
 
@@ -105,6 +105,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/rule_references.rs` - immutable-tip rule coverage, declared causal anchors and stakeholder-scope checks; contract in `docs/RULE_REFERENCES.md`.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs` - merge/close reconciliation and guarded Git delivery operations.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable merge candidates, plan/evidence binding, managed review scratch, pre-publication dispatch and candidate-to-landed promotion. Reviewed and no-dispatch refusals share guarded unpublished-merge restoration.
+- `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs` - confirmed-publication receipts over authenticated peer mail, durable import into existing dispatch/verdict records, local Git rebinding and exact close validation; queue retention carries no proof authority.
 - `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - exact-source PR creation/reuse and expected-head auto-merge for confirmed default-branch queues, before local merge mutation.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
@@ -123,7 +124,7 @@
 - `cas-cli/src/fast_lane_walk.rs` - durable failed-walk Commander choice, authenticated reply binding, fifteen-minute revert default and project runner.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides. Batch persistence marks its MCP response committed before continued delivery closes; `server_handler.rs` and `lifecycle/merge_close.rs` retain bounded outcome summaries on each task, with complete long remedies in immutable receipt details. `qa_evidence.rs` excludes batch, post-commit and late-close system outcomes from producer citations, and formats restored/synced citations as separate timestamped notes. `qa_post_release.rs`'s runner also offers the supervisor, once per release SHA, the exact `batch_receipt` call for parked batch-deferred deliveries already on origin/<target> (it never records one); `qa_batch::shipped_anchor` lets close ignore blockers whose delivery is already on target.
 - `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - incremental Claude/Codex/Grok turn accounting before optional Commander mirroring; typed actions and authenticated wake provenance.
-- `cas-cli/src/migration/migrations/m292_quality_turns.rs` - append-only quality ledger CHECK upgrade, shared with store-open repair.
+- `cas-cli/src/migration/migrations/m292_quality_turns.rs`, `cas-cli/src/migration/migrations/m295_quality_friction.rs` - append-only quality ledger CHECK upgrades (Turn, Friction), shared with store-open repair.
 - `cas-cli/src/quality_ledger.rs`, `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/cli/ledger.rs` - append-only quality events, live/history queue identities and friction-ledger commands.
 - `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub service lifecycle and Serve target ownership.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE routes and MCP action schemas.

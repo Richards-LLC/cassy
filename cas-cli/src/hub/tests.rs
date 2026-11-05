@@ -1743,7 +1743,7 @@ fn h2_pair_02_pairing_throttle_reports_the_remaining_window() {
 async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions() {
     let events = MachineEventBus::new(16);
     let state = HubState::new(
-        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![]).with_installed("9.99.2")),
         Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
         MachineIdentity {
             id: "machine-test".into(),
@@ -1782,6 +1782,9 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
         "https://target.tail.ts.net/"
     );
     assert_eq!(body["cloud_devices"][0]["id"], "device-hint");
+    // cas-d786: the hub's own version beside the binary installed on its machine.
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["installed_version"], "9.99.2");
     assert!(body["default_supervisor_cli"].as_str().is_some());
     assert!(
         body["capabilities"]

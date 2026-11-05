@@ -3767,7 +3767,7 @@ fn sync_user_builtins_with_discovery(
             .collect();
         let base = provider.base_dir(&home);
         if base.is_dir() {
-            accounts.push(base);
+            accounts.push(base.clone());
         }
         for account in accounts {
             let shared_base = account == base;

@@ -434,7 +434,12 @@ impl CasCore {
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
-            queue.context_reset_from = if self.load_config().factory().restart_worker_between_tasks {
+            // cas-2d41: a worker whose MCP server predates the installed
+            // build takes the same boundary restart, so a release reaches it
+            // between tasks without an operator recycle.
+            queue.context_reset_from = if self.load_config().factory().restart_worker_between_tasks
+                || crate::factory_binary_skew::agent_mcp_is_older(&self.cas_root, &worker.name)
+            {
                 predecessor.map(|_| conversation_generation(&worker))
             } else {
                 None

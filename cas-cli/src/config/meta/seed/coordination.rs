@@ -197,6 +197,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.worker_local_gate",
+        section: "factory",
+        name: "Worker Local Gate",
+        description: "Shell command a factory worker's push runs from the repository root before the push leaves the machine: the project's cheap local CI (lint plus touched tests), for example `pnpm ci:local`. A failure stops the push. Empty runs nothing.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "worker", "push", "lint", "ci", "local", "gate", "pre-push"],
+        use_cases: &[
+            "Set to `pnpm ci:local` so lint and test failures stop at the worker instead of costing a CI run",
+            "Leave empty when the project has no cheap local gate",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.supervisor_message_debounce_secs", section: "factory", name: "Supervisor Message Debounce",
         description: "Seconds to collect directed supervisor messages into one submitted turn.", value_type: ConfigType::Int, default: "20",
         constraint: Constraint::Range(0, 300), advanced: false, requires_feature: None,

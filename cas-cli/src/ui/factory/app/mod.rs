@@ -3336,7 +3336,7 @@ Current workers: {worker_list}",
     // Claude receives its role contract above; Codex has resident developer
     // guidance and trusted native hooks. Avoid echoing that policy into its pane.
     if !matches!(supervisor_cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex) {
-        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
     }
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for

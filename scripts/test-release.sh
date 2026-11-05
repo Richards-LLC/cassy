@@ -121,7 +121,7 @@ Was: release prep lacked one check. → Now: release prep runs it before the PR.
 • *Release check* — The release cut validates the draft before publishing.
 ```
 EOF2
-    sed -i "s/DRAFT_NAME/$name/" "$path"
+    sed "s/DRAFT_NAME/$name/" "$path" > "$path.tmp" && mv "$path.tmp" "$path"
 }
 
 git init --quiet --bare -b main "$tmp/origin.git"
@@ -179,7 +179,8 @@ missing_fragment_delivery_stops_release() {
     write_valid_draft "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
     git -C "$fixture" add docs/release-notes
     git -C "$fixture" commit --quiet -m 'docs(release): Slack draft'
-    sed -i 's/easier to use/safer to use/' "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
+    sed 's/easier to use/safer to use/' "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" > "$fixture/draft.tmp" &&
+        mv "$fixture/draft.tmp" "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md"
     git -C "$fixture" commit --quiet -am 'docs(release): ships the peer wake fix only'
     [[ ! -f "$fixture/changelog.d/cas-0004.md" && ! -f "$fixture/fix.txt" ]] || return 1
     before="$(git -C "$fixture" rev-parse HEAD)"
@@ -198,7 +199,8 @@ missing_fragment_delivery_stops_release() {
     git -C "$fixture" commit --quiet --amend -m 'backport peer wake without the original subject'
     git -C "$fixture" cherry-pick --quiet "$second" || return 1
     ! git -C "$fixture" merge-base --is-ancestor "$fix" HEAD || return 1
-    sed -i 's/actual peer wake fix/later refinement/' "$fixture/fix.txt"
+    sed 's/actual peer wake fix/later refinement/' "$fixture/fix.txt" > "$fixture/fix.txt.tmp" &&
+        mv "$fixture/fix.txt.tmp" "$fixture/fix.txt"
     git -C "$fixture" commit --quiet -am 'docs: mention cas-dead1 in passing'
     git -C "$fixture" checkout --quiet -b epic/cas-dead2
     echo merged >"$fixture/merge.txt"
@@ -207,7 +209,8 @@ missing_fragment_delivery_stops_release() {
     git -C "$fixture" checkout --quiet hotfix/missing-fix
     git -C "$fixture" merge --quiet --no-ff epic/cas-dead2 -m 'Merge epic/cas-dead2 (cas-dead3)'
     # Generated output and lock resolution may legitimately differ on a cut.
-    sed -i 's/delivery-lock-marker/regenerated-lock-marker/' "$fixture/Cargo.lock"
+    sed 's/delivery-lock-marker/regenerated-lock-marker/' "$fixture/Cargo.lock" > "$fixture/Cargo.lock.tmp" &&
+        mv "$fixture/Cargo.lock.tmp" "$fixture/Cargo.lock"
     echo 'regenerated bundle' >"$fixture/hub-web/dist/app.js"
     git -C "$fixture" commit --quiet -am 'regenerate build outputs'
     run "$fixture" --hotfix --dry-run --notes "$fixture/docs/release-notes/2026-10-14-v9.99.1-slack.md" >>"$tmp/missing-fix.log" 2>&1 || return 1

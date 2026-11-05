@@ -299,6 +299,32 @@ pub(crate) struct Report {
     pub conflicts: Vec<String>,
 }
 
+const CONFLICT_RECORD: &str = "cache/managed-file-conflicts.json";
+
+/// Persist the last sync's blocking conflicts so SessionStart can report them;
+/// an unblocked sync clears the record (cas-3199). Unattended syncs otherwise
+/// leave the refusal only in a timer journal nobody reads.
+pub(crate) fn record_conflicts(cas_root: &Path, conflicts: &[String]) -> Result<()> {
+    let path = cas_root.join(CONFLICT_RECORD);
+    if conflicts.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(path.parent().context("conflict record parent")?)?;
+    std::fs::write(path, serde_json::to_vec(conflicts)?)?;
+    Ok(())
+}
+
+/// Conflicts that blocked this project's last sync; empty when none did.
+pub(crate) fn recorded_conflicts(cas_root: &Path) -> Vec<String> {
+    std::fs::read(cas_root.join(CONFLICT_RECORD))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 pub(crate) struct Reconcile {
     root: PathBuf,
     index: BTreeMap<String, (String, Vec<u8>)>,
@@ -417,6 +443,7 @@ impl Reconcile {
                                     !line.is_empty()
                                         && !line.starts_with('#')
                                         && !paths.iter().any(|p| p == line)
+                                        && !builtins::previously_shipped_gitignore_entry(line)
                                 })
                             {
                                 conflicts.push(path.clone());

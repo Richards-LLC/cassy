@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Regenerated structural map of the testing-and-CI release train (18 Rust workspace members plus TypeScript clients). Regenerate with `/codemap` when modules move.
+> Regenerated structural map for the communication release (18 Rust workspace members plus TypeScript clients). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -94,6 +94,9 @@
 
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task presentation and action-relay admission; internal parked-task lists stay complete.
 
+- `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
+- `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
+
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
@@ -115,6 +118,9 @@
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 
+- `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution and encode chores.
+- `crates/cas-types/src/entry/behavior.rs`, `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` - temporal validity and stakeholder provenance migration.
+
 ## QA and Commander
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry validation and diff-scoped journey selection.
@@ -130,6 +136,7 @@
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE routes and MCP action schemas.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/`, `cas-cli/src/hub/accounts.rs` - pairing, durable operator input and account projections.
 - `cas-cli/src/hub/dismissed_sessions.rs` - authenticated legacy session tombstones.
+- `hub-web/src/machine-version.ts`, `hub-web/src/paired-machines.ts` - running hub, installed binary and available release labels.
 - `hub-web/src/project-navigation.ts` - running-session project cards, shared minute-tied recency badges, machine filters and device-local collapse.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversation and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, subscriptions and ordered status publication.
@@ -166,10 +173,3 @@
 - MCP: `cas-cli/src/mcp/daemon.rs` (`cas serve`); bridge: `cas-cli/src/bridge/server/` (`cas bridge serve`).
 - Commander: `hub-web/src/main.ts`; Slack services: `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts`.
 - Tests: capped named nextest filters for workers; Vitest/typecheck and affected journeys for web changes; merge queue owns the full Rust suite.
-
-## Policy hygiene
-
-- `cas-cli/src/mcp/tools/core/rule_drift.rs` — read-only rule source/generated/peer snapshot comparisons.
-- `cas-cli/src/mcp/tools/core/rules.rs` — explicit stakeholder attribution and review deadlines; operator-only encode chores and pending-chore rendering.
-- `crates/cas-types/src/entry/behavior.rs` — supersession and temporal validity shared by context filters.
-- `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` — nullable provenance, without backfill.

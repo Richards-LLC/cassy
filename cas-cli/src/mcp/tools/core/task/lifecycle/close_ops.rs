@@ -29184,15 +29184,24 @@ mod merge_state_gate_tests {
             }
             let candidate = core.build_completion_candidate(&reviewed_task, p, "factory/worker", "main").unwrap();
             let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
-            core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
+            let recorded = core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
                 task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed premerge candidate before queue publication".into(), confidence: Some(1.0),
                 issues: None, files_reviewed: Some("delivery.rs,second.rs".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
-            })).await.unwrap();
+            })).await;
+            if row == "foreign-candidate" {
+                let error = recorded.expect_err("another task's candidate cannot mint this task's verdict");
+                assert!(error.message.contains("immutable dispatch proof"), "{error}");
+                assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+                assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+                continue;
+            }
+            recorded.unwrap();
             if row == "source-absent" {
                 // Identical patch content without the bound source identity is insufficient.
                 std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
                 std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
-                git(p, &["add", "delivery.rs", "second.rs"]);
+                std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+                git(p, &["add", ".gitignore", "delivery.rs", "second.rs"]);
             } else {
                 git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
                 if row == "partial-patch" { git(p, &["rm", "-q", "-f", "second.rs"]); }
@@ -29207,14 +29216,9 @@ mod merge_state_gate_tests {
             git(p, &["push", "-q", "origin", "main"]);
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
-            match verified_delivery::current(&root, &task) {
-                Ok(Some(reviewed)) => assert_eq!(
-                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    row == "queue-landed", "containment guard: {row}",
-                ),
-                Err(_) if row == "foreign-candidate" => {},
-                other => panic!("expected task-bound review for {row}: {}", other.is_ok()),
-            }
+            let reviewed = verified_delivery::current(&root, &task).unwrap().expect("task-bound review");
+            assert_eq!(reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                row == "queue-landed", "containment guard: {row}");
             let mut req = base_req(&task.id); req.commit_receipt = Some(landed);
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;

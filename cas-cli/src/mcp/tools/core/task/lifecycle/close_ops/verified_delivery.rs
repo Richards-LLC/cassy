@@ -117,19 +117,28 @@ impl ReviewedDelivery {
         // A queue publishes its own merge, not the synthetic reviewed commit.
         // The immutable candidate must bind this task's exact delivery and the
         // authoritative target must contain both its identity and all its patch.
-        if self.premerge_source_is_contained(repo, task, target, &reference) {
-            return None;
-        }
-        // Preserve an explicit canonical squash receipt only when its full
-        // tree equals this exact verified head and it is on the authoritative
-        // target. A receipt for earlier A cannot stand in for changed B.
-        if receipt.is_some_and(|receipt| {
-            git_commit_is_ancestor(repo, receipt, &reference)
-                && target_reachable_squash_of(repo, &self.repository.head_commit, receipt, target)
-        }) {
-            return None;
-        }
-        (!git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)).then(|| format!(
+        let contained = if self.candidate.is_some() {
+            // Synthetic approval never falls back to a squash receipt or bare
+            // commit ancestry when its bound source/patch check fails.
+            self.premerge_source_is_contained(repo, task, target, &reference)
+        } else {
+            // Preserve an explicit canonical squash receipt only when its full
+            // tree equals this exact verified head and it is on the authoritative
+            // target. A receipt for earlier A cannot stand in for changed B.
+            if receipt.is_some_and(|receipt| {
+                git_commit_is_ancestor(repo, receipt, &reference)
+                    && target_reachable_squash_of(
+                        repo,
+                        &self.repository.head_commit,
+                        receipt,
+                        target,
+                    )
+            }) {
+                return None;
+            }
+            git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)
+        };
+        (!contained).then(|| format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,
         ))

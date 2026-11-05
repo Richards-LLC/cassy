@@ -731,6 +731,12 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
             .contains(&f.predecessor)
     );
     assert!(reopened.notes.contains(OLD_BRANCH), "{}", reopened.notes);
+    // cas-cff4: the assignee is told once, with the decision and branch handling.
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let notices = queue.peek_for_targets(&[WORKER], None, 10).unwrap();
+    assert_eq!(notices.len(), 1, "{verdict}");
+    assert!(notices[0].prompt.contains("Rebase the reviewed correction"), "{}", notices[0].prompt);
+    assert!(notices[0].prompt.contains(OLD_BRANCH), "{}", notices[0].prompt);
     env.set("CAS_AGENT_ROLE", "worker");
     let started = text(
         f.core

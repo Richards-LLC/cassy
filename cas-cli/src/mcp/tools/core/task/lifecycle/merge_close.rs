@@ -324,7 +324,7 @@ impl CasCore {
         parked.pending_verification = false;
         parked.pending_worktree_merge = false;
         let note = format!(
-            "[{}] Cassy parked this task at its pushed delivery tip {} on {} after merge {merge_commit}; no worker re-close is needed.",
+            "[{}] Cassy parked this task at its delivery tip {} on {} (checked against cached origin refs) after merge {merge_commit}; no worker re-close is needed.",
             chrono::Utc::now().format("%Y-%m-%d %H:%M"),
             lane.tip,
             lane.branch,

@@ -2361,7 +2361,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
             let remote_after = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"]);
             if target_valid {
                 assert_eq!(target_sha, remote_after, "unrelated supervisor failure must not block push: {text}");
-                assert!(!text.contains("NOT PUSHED"), "{text}");
+                assert!(!text.contains("NOT PUSHED") && !text.contains("PUSH NOT CONFIRMED"), "{text}");
                 assert_eq!(
                     git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
                     git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
@@ -4081,7 +4081,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
             .current_dir(&repo.root).status().unwrap().success();
         assert!(contained, "both local merges and peer must land on origin; missing {tip}; receipts={results:#?}");
     }
-    assert!(results.iter().all(|result| result.as_ref().is_ok_and(|text| !text.contains("NOT PUSHED"))), "{results:#?}");
+    assert!(results.iter().all(|result| result.as_ref().is_ok_and(|text| !text.contains("NOT PUSHED") && !text.contains("PUSH NOT CONFIRMED"))), "{results:#?}");
 
     // A different push failure leaves a local-only merge. Retrying must not
     // claim containment from that local ref while origin lacks the source.
@@ -4113,7 +4113,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
     run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
-    assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
+    assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
     assert_eq!(fetches, 2 + 3,
         "two merge-path fetches plus the existing final-close integration proofs (verification is disabled in this routing fixture): {}", get_text(&landed));
@@ -4131,7 +4131,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let offline = get_text(&offline);
     // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
     assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
-    assert!(!offline.contains("NOT PUSHED"), "{offline}");
+    assert!(!offline.contains("NOT PUSHED") && !offline.contains("PUSH NOT CONFIRMED"), "{offline}");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
     assert_eq!(git_stdout(remote.path(), &["for-each-ref"]), origin_refs, "origin did not move");
 

@@ -496,7 +496,7 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your delivery tip {tip} (checked against cached origin refs), so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
                 cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
@@ -2187,6 +2187,10 @@ mod tests {
         let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
             HookDrain::NoticeDigest, 10, 0).unwrap().rows;
         assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        let parked_notice = digest.iter().find(|row| row.id == parked).unwrap();
+        assert!(parked_notice.prompt.contains("cached origin refs")
+            && !parked_notice.prompt.contains("your pushed tip"),
+            "the notice must name the cached publication evidence: {}", parked_notice.prompt);
         for row in &digest {
             assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
                 "the next turn must retain task and merge evidence");

@@ -7878,7 +7878,7 @@ mod tests {
             "{pushed}"
         );
         assert!(pushed.contains("0123456789ab"), "{pushed}");
-        assert!(!pushed.contains("NOT PUSHED"), "{pushed}");
+        assert!(!pushed.contains("NOT PUSHED") && !pushed.contains("PUSH NOT CONFIRMED"), "{pushed}");
 
         // The three benign states must never render the loud warning: a
         // receipt that warns on every local-only repo trains supervisors
@@ -7891,7 +7891,7 @@ mod tests {
             },
         ] {
             let note = describe_target_push_state("main", &outcome);
-            assert!(!note.contains("NOT PUSHED"), "{outcome:?} -> {note}");
+            assert!(!note.contains("NOT PUSHED") && !note.contains("PUSH NOT CONFIRMED"), "{outcome:?} -> {note}");
             assert!(note.contains("Push state:"), "{outcome:?} -> {note}");
             assert!(outcome.is_published());
         }

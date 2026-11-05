@@ -43,6 +43,9 @@ struct Promotion {
     landed_sha: String,
 }
 
+mod peer;
+pub(crate) use peer::ingest_peer_receipt;
+
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
@@ -574,6 +577,7 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
+        self.share_published()?;
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -618,6 +622,7 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
+            self.share_published()?;
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -668,6 +673,9 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
+        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
+            return Ok(());
+        }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {
             return Ok(());

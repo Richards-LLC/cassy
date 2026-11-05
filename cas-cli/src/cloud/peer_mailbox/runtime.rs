@@ -173,6 +173,7 @@ impl PeerMailboxRuntime {
                 &history,
                 &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
+                    crate::mcp::tools::core::workflow::premerge_verification::ingest_peer_receipt(&cas_dir, recipient, message)?;
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
                             tracing::info!(message = %message.id, %why, "epic split message ignored");

@@ -1486,6 +1486,11 @@ pub(crate) fn send_raw(
     )
 }
 
+/// Internal publication path: stable delivery identity in the existing outbox.
+pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
+    outbox::enqueue_and_send(root, message, label)
+}
+
 /// One durable logical expiry notice, reused if reconciliation restarts after
 /// Cloud acceptance but before its split work flag is settled.
 pub(crate) fn send_split_expiry(

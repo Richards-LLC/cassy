@@ -43,6 +43,9 @@ struct Promotion {
     landed_sha: String,
 }
 
+mod peer;
+pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
+
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
@@ -203,9 +206,7 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
-fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
     hash.update(serde_json::to_vec(&task_context(task)).map_err(|error| error.to_string())?);
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let specs = crate::store::open_spec_store(root).map_err(|error| error.to_string())?;
@@ -230,6 +231,20 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
         linked.sort_by(|a, b| a.id.cmp(&b.id));
         hash.update(serde_json::to_vec(&linked).map_err(|error| error.to_string())?);
     }
+    Ok(())
+}
+
+fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-peer-premerge-plan-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-premerge-candidate-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",
@@ -574,6 +589,7 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
+        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -618,6 +634,7 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
+            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -668,6 +685,9 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
+        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
+            return Ok(());
+        }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {
             return Ok(());
@@ -1150,6 +1170,7 @@ mod tests {
             tree,
             context_digest: String::new(),
             proof: RepositoryProofBoundary {
+                peer_premerge: None,
                 repository_root: String::new(),
                 worktree_root: String::new(),
                 head_commit: String::new(),

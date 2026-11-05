@@ -1526,6 +1526,7 @@ mod tests {
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let deadline = Utc::now() + chrono::Duration::minutes(10);
         let proof = cas_types::RepositoryProofBoundary {
+        peer_premerge: None,
             repository_root: root.path().to_string_lossy().into_owned(),
             worktree_root: root.path().join("candidate").to_string_lossy().into_owned(),
             head_commit: "c".repeat(40), state_digest: "immutable candidate".into(),

@@ -3667,7 +3667,11 @@ verdict while integration proof still blocks close; an approval never waives
 missing delivery content. After a failed review, a supervisor can use
 `task action=request_changes` from AwaitingMerge or Blocked with a recorded
 parked delivery. It preserves the assignee and historical merge facts and
-invalidates the declined proof before the next implementation cycle.
+invalidates the declined proof before the next implementation cycle. The assignee
+receives a waking notice with the decision and branch handling. The response
+names the queued prompt, or explicitly reports why no worker was notified so
+the supervisor can contact it. A worker start surfaces any unread correction
+before acquiring the task; the worker reads it, then retries start.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

@@ -1652,7 +1652,7 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                     (uptime_secs - start_ticks as f64 / ticks_per_second as f64).max(0.0) as u64;
                 let command = process_command_name(child);
                 let harness = std::fs::read(format!("/proc/{child}/cmdline"))
-                    .is_ok_and(|raw| is_root_harness(root_agent.as_deref(), &raw));
+                    .is_ok_and(|raw| is_root_harness(root_pid, parent, root_agent.as_deref(), &raw));
                 if !harness && !is_cas_sidecar(&command, child) {
                     processes.push(BackgroundProcess { command, age_secs });
                 }
@@ -1702,7 +1702,7 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                     })
                     .unwrap_or_else(|| "<command unavailable>".to_string());
                 if !raw.as_deref().is_some_and(|raw| {
-                    is_root_harness(root_agent.as_deref(), raw)
+                    is_root_harness(root_pid, parent, root_agent.as_deref(), raw)
                         || is_known_sidecar_commandline(&command, raw)
                 }) {
                     processes.push(BackgroundProcess {
@@ -1882,13 +1882,18 @@ fn process_command_name(pid: u32) -> String {
         .unwrap_or_else(|| "<command unavailable>".to_string())
 }
 
-/// cas-cff4: a sandbox wrapper such as bwrap carries the worker's argv, so it
-/// is the matched root and the harness is its descendant. That descendant is
-/// the worker itself, not a background job; counting it hid every stall.
-/// Its own children are still walked, so real jobs below it count.
+/// A sandbox wrapper can be the matched root. Only its direct harness child
+/// shares that exemption; deeper jobs still count even with identical argv.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn is_root_harness(root_agent: Option<&str>, raw: &[u8]) -> bool {
-    root_agent.is_some_and(|root| agent_name_from_cmdline(raw).as_deref() == Some(root))
+fn is_root_harness(root_pid: u32, parent_pid: u32, root_agent: Option<&str>, raw: &[u8]) -> bool {
+    if parent_pid != root_pid {
+        return false;
+    }
+    let executable = raw.split(|byte| *byte == 0).next()
+        .and_then(|arg| std::str::from_utf8(arg).ok())
+        .and_then(|arg| Path::new(arg).file_name()?.to_str());
+    matches!(executable, Some("claude" | "codex" | "grok" | "opencode"))
+        && root_agent.is_some_and(|root| agent_name_from_cmdline(raw).as_deref() == Some(root))
 }
 
 /// Persistent MCP/harness sidecars are inherited by every worker; treating
@@ -4094,7 +4099,7 @@ mod tests {
         for (program, active) in [
             (r#"exec -a claude /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, false),
             (r#"exec -a cargo /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, true),
-            (r#"exec -a claude /bin/bash --noprofile --norc -c '(/bin/bash --noprofile --norc -c '\''printf "ready\n"; read -r _'\'' fixture --agent-name sandboxed-worker) <&0 & wait "$!"' fixture --agent-name sandboxed-worker"#, true),
+            (r#"exec -a claude /bin/bash --noprofile --norc -c '(exec -a claude /bin/bash --noprofile --norc -c '\''printf "ready\n"; read -r _'\'' fixture --agent-name sandboxed-worker) <&0 & wait "$!"' fixture --agent-name sandboxed-worker"#, true),
         ] {
             let mut sandbox = Sandbox(Command::new("/bin/bash")
                 .arg0("bwrap")

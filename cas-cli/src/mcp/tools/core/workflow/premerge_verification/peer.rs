@@ -20,6 +20,12 @@ impl Approval {
         {
             return Ok(());
         }
+        let current = cas_store::get_latest_verification_dispatch(root, &self.candidate.task_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("published dispatch missing")?;
+        if current.id != self.dispatch_id || current.state != VerificationDispatchState::Resolved {
+            return Err("published approval is no longer the current proof cycle".into());
+        }
         let verdict = cas_store::get_verification_for_dispatch(root, &self.dispatch_id)
             .map_err(|error| error.to_string())?
             .ok_or("published verdict missing")?;

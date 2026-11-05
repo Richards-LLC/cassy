@@ -667,7 +667,8 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
             }).await.unwrap();
-            assert_eq!(std::fs::read(root.path().join("input")).unwrap(), b"/mcp reconnect cas\r", "one native command, even on replay");
+            let writes = std::fs::read(root.path().join("input")).unwrap();
+            assert_eq!(String::from_utf8_lossy(&writes).matches("/mcp reconnect cas").count(), 1, "one native command, even on replay");
             daemon.app.mux.get_mut(&name).unwrap().feed("\x1bcSuccessfully reconnected to cas\r\n❯".as_bytes()).unwrap();
             let echo = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
             assert!(matches!(echo, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));

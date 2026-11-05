@@ -5044,7 +5044,9 @@ printf '%s\n' "$peer" > '{}'
     let result = service.factory(Parameters(request.clone())).await;
     if mode == "probe_failed" {
         let refusal = result.expect_err("an unknown queue state must refuse");
+        // pin: the refusal must name the unknown queue so the supervisor retries.
         assert!(refusal.message.contains("merge queue state unknown"), "{refusal:?}");
+        // pin: no push of refs/heads/main is the refuse-before-local-merge contract.
         assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().contains("refs/heads/main"),
             "no local merge may be published: {refusal:?}");
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);

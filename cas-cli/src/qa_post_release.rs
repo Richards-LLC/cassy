@@ -207,6 +207,7 @@ mod tests {
         fs::write(project.join(".gitignore"), ".cas/\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
         let anchor = |name: &str| {
             fs::write(project.join(name), name).unwrap();
             git(&["add", name]);
@@ -229,9 +230,21 @@ mod tests {
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per release SHA");
+        // A delivery parked later at the already-noticed tip still gets its own offer.
+        let mut late = Task::new("cas-late".into(), "late".into());
+        late.status = cas_types::TaskStatus::AwaitingMerge;
+        late.deliverables.factory_branch_anchor = Some(base.clone());
+        tasks.add(&late).unwrap();
+        cas_store::defer_qa_batch_evidence(&cas, "cas-late", &base).unwrap();
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
-        assert_eq!(rows.len(), 1);
-        let payload = &rows[0].payload;
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late] staging_sha={live}"))),
+            "{:?}",
+            rows.iter().map(|row| &row.payload).collect::<Vec<_>>()
+        );
+        let payload = &rows.iter().find(|row| row.payload.contains("cas-live")).unwrap().payload;
         assert!(
             payload.contains(&format!("verification action=batch_receipt task_ids=[cas-live] staging_sha={live}")),
             "{payload}"
@@ -860,7 +873,8 @@ fn batch_offers_pending(cas_root: &Path) -> bool {
 /// cas-4b22: offer, never record, the batch QA receipt for parked deliveries
 /// whose anchor is already on origin/<target>. A receipt needs a supervisor
 /// recorder and an independent ledger author, so Cassy sends the supervisor
-/// one notice per release SHA naming the exact call. Returns notices sent.
+/// one notice per release SHA naming the exact call, plus one more for tasks
+/// that later go live at that SHA. Returns notices sent.
 pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
     use crate::qa_batch::{ancestor, commit, delivery_anchor, task_context};
     let pending = cas_store::pending_qa_batch_deferrals(cas_root)?;
@@ -885,8 +899,11 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
     let offered = cas_root.join("post-release").join("batch-offers");
     let mut sent = 0;
     for ((target, tip), ids) in live {
+        // A task that goes live at an already-noticed tip still gets its offer.
         let marker = offered.join(&tip);
-        if marker.exists() {
+        let noticed = fs::read_to_string(&marker).unwrap_or_default();
+        let ids: Vec<_> = ids.into_iter().filter(|id| !noticed.lines().any(|seen| seen == id)).collect();
+        if ids.is_empty() {
             continue;
         }
         let detail = format!(
@@ -900,9 +917,11 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         );
         let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
         let recipient = crate::supervisor_notices::resolve(&agents, None, None);
-        crate::supervisor_notices::enqueue(cas_root, &recipient, "batch_receipt_offer", &detail, &tip)?;
+        let occurrence = format!("{tip}:{}", ids.join(","));
+        crate::supervisor_notices::enqueue(cas_root, &recipient, "batch_receipt_offer", &detail, &occurrence)?;
         fs::create_dir_all(&offered)?;
-        fs::write(&marker, ids.join("\n"))?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&marker)?;
+        std::io::Write::write_all(&mut file, format!("{}\n", ids.join("\n")).as_bytes())?;
         sent += 1;
     }
     Ok(sent)

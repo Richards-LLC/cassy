@@ -19763,8 +19763,9 @@ pub(crate) fn resolve_task_commit_receipt_sha(
 }
 
 /// cas-4b22: the timed-out dispatch a shipped override close may pass. It
-/// needs a merged PR or merge-queue run on record, a commit_receipt contained
-/// in origin/<target>, and a reason naming the exact timed-out dispatch.
+/// needs a merged PR or merge-queue run on record, a commit_receipt that is the
+/// task's own anchor or recorded merge commit and is contained in
+/// origin/<target>, and a reason naming the exact timed-out dispatch.
 fn shipped_timeout_waiver(
     cas_root: &std::path::Path,
     task: &Task,
@@ -19791,6 +19792,16 @@ fn shipped_timeout_waiver(
     }
     let (repo, target) = crate::qa_batch::task_context(cas_root, task).ok()?;
     let receipt = crate::qa_batch::commit(&repo, receipt)?;
+    // Only this task's own delivery or recorded merge proves it shipped.
+    let own = [
+        shipped.factory_branch_anchor.as_deref(),
+        shipped.delivery_pr_merge_commit.as_deref(),
+        shipped.green_merge_commit.as_deref(),
+        shipped.merge_commit.as_deref(),
+    ];
+    if !own.into_iter().flatten().any(|rev| crate::qa_batch::commit(&repo, rev).as_deref() == Some(receipt.as_str())) {
+        return None;
+    }
     let origin = crate::qa_batch::commit(&repo, &format!("origin/{target}"))?;
     (crate::qa_batch::ancestor(&repo, &receipt, &origin) == Some(true)).then_some(dispatch.id)
 }

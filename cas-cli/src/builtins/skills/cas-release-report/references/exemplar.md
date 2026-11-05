@@ -27,7 +27,7 @@ publication date/time line, and a verdict paragraph. Then provide these exact
    zero row. A v1 table (`Surface | Issues closed | Issue numbers`) still renders
    for older sources; its zero rows are not drawn.
 2. `Release at a glance`: a three-column table (`Measure | Value | Definition`),
-   followed by the counting note. Lead with `Changes shipped` and then
+   followed by the counting note. Lead with `Changes listed` and then
    `GitHub issues closed`. List only measured, nonzero values, with short
    definitions; name zero and unmeasured values in the counting note instead.
 3. `What you can do now`: `###` themes and `####` change titles; each change has

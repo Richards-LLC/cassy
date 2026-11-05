@@ -2122,6 +2122,10 @@ merge request after correcting the cause.
 
 ## Build, assembly and CI policy
 
+Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
+Name cached or recorded state as such; a successful mutation does not establish
+that its follow-up, release publication, or installation on another host completed.
+
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
 
 ### Commands

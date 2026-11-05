@@ -1,6 +1,6 @@
 use crate::store::{open_agent_store, open_task_store_cached};
 use crate::ui::factory::app::imports::*;
-use crate::worktree::RemoveOutcome;
+use crate::worktree::{RemoveOutcome, RescuedWork};
 
 fn validate_live_spawn_repo_root(
     repo_root: &std::path::Path,
@@ -3942,6 +3942,22 @@ impl FactoryApp {
                 if let Some(manager) = self.worktree_manager.as_mut() {
                     manager.forget_worker(name);
                 }
+            }
+            Some(Ok(RemoveOutcome::RemovedPreserved(rescued))) => {
+                if let Some(manager) = self.worktree_manager.as_mut() {
+                    manager.forget_worker(name);
+                }
+                // cas-2879: removal kept commits that were on no remote;
+                // name every one so the next session can find them.
+                let detail = format!(
+                    "Worker '{name}' worktree removed; {}",
+                    rescued.iter().map(RescuedWork::describe).collect::<Vec<_>>().join("; ")
+                );
+                tracing::warn!(worker = name, "{detail}");
+                if let Some(session) = self.factory_session.as_deref() {
+                    crate::ui::factory::record_daemon_lifecycle(session, "work_rescued", &detail);
+                }
+                self.set_error(detail);
             }
             Some(Err(error)) => {
                 self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));

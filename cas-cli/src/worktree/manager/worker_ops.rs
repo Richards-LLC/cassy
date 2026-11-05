@@ -5,7 +5,7 @@ use crate::types::Worktree;
 use crate::worktree::external_symlinks::{
     ExternalSymlink, scan_external_symlinks_into, scan_project_node_modules_symlinks_into,
 };
-use crate::worktree::git::GitOperations;
+use crate::worktree::git::{GitError, GitOperations, RescuedWork};
 use crate::worktree::manager::{
     WorktreeError, WorktreeManager, WorktreeResult, provision_worker_project_config,
 };
@@ -41,6 +41,9 @@ pub enum RemoveOutcome {
     NotTracked,
     /// Worktree was clean and has been removed; branch deleted best-effort.
     Removed,
+    /// Removed as above, after unpushed commits were kept on rescue refs
+    /// (cas-2879). The caller must say where.
+    RemovedPreserved(Vec<RescuedWork>),
     /// Worktree had uncommitted work; left on disk for deferred salvage.
     DirtyDeferred(DirtyWorktreeWarning),
     /// Live external symlinks resolve into the worktree; left on disk so
@@ -55,6 +58,41 @@ pub struct CleanupReport {
     pub cleaned: Vec<String>,
     pub dirty_deferred: Vec<DirtyWorktreeWarning>,
     pub external_symlinks_blocked: Vec<ExternalSymlinkWarning>,
+    /// cas-2879: work kept on rescue refs before removal, by worker.
+    pub rescued: Vec<(String, RescuedWork)>,
+    /// cas-2879: worktrees kept because their work could not be preserved.
+    pub rescue_failed: Vec<(String, String)>,
+}
+
+/// cas-2879: before a worker's worktree and branch are removed, keep every
+/// commit on no remote (and, with `include_dirty`, every uncommitted file)
+/// on a rescue ref. An error means the teardown must not go ahead.
+pub(crate) fn rescue_before_teardown(
+    git: &GitOperations,
+    worker_name: &str,
+    worktree: &crate::types::Worktree,
+    include_dirty: bool,
+) -> Result<Vec<RescuedWork>, GitError> {
+    let mut revs = Vec::new();
+    if worktree.path.exists() {
+        revs.push((GitOperations::new(worktree.path.clone()).ref_sha("HEAD")?, include_dirty));
+    }
+    if let Some(tip) = git.resolve_commit(&format!("refs/heads/{}", worktree.branch)) {
+        if revs.iter().all(|(rev, _)| rev != &tip) {
+            revs.push((tip, false));
+        }
+    }
+    let mut rescued = Vec::new();
+    for (rev, dirty) in revs {
+        let worktree_path = dirty.then_some(worktree.path.as_path());
+        rescued.extend(git.rescue_unpushed_work(
+            worker_name,
+            Some(&worktree.branch),
+            &rev,
+            worktree_path,
+        )?);
+    }
+    Ok(rescued)
 }
 
 impl WorktreeManager {
@@ -344,6 +382,17 @@ impl WorktreeManager {
                     }
                 }
 
+                match rescue_before_teardown(&git, &name, &worktree, force) {
+                    Ok(rescued) => report
+                        .rescued
+                        .extend(rescued.into_iter().map(|work| (name.clone(), work))),
+                    Err(error) => {
+                        report.rescue_failed.push((name.clone(), error.to_string()));
+                        self.workers.insert(name, worktree);
+                        continue;
+                    }
+                }
+
                 if worktree.path.exists() {
                     let _ = git.remove_worktree(&worktree.path, force);
                 }
@@ -400,6 +449,20 @@ impl WorktreeManager {
             // above, or `reject_or_warn_on_dirty(path, true)` already vetted
             // the tree as safe to remove (blocking on untracked too, not
             // just tracked changes).
+            match rescue_before_teardown(&git, worker_name, &worktree, true) {
+                Ok(rescued) => {
+                    for work in rescued {
+                        tracing::warn!(worker = worker_name, "{}", work.describe());
+                    }
+                }
+                Err(error) => {
+                    self.workers.insert(worker_name.to_string(), worktree);
+                    return Err(WorktreeError::Git(GitError::CommandFailed(format!(
+                        "worktree kept: could not preserve its unpushed work first: {error}"
+                    ))));
+                }
+            }
+
             if worktree.path.exists() {
                 git.remove_worktree(&worktree.path, true)?;
             }
@@ -426,7 +489,7 @@ impl WorktreeManager {
             return Ok(RemoveOutcome::NotTracked);
         };
         let outcome = remove_worker_worktree_io(&plan);
-        if matches!(outcome, Ok(RemoveOutcome::Removed)) {
+        if matches!(outcome, Ok(RemoveOutcome::Removed | RemoveOutcome::RemovedPreserved(_))) {
             self.forget_worker(worker_name);
         }
         outcome
@@ -498,10 +561,23 @@ pub fn remove_worker_worktree_io(plan: &WorkerRemovalPlan) -> WorktreeResult<Rem
                 file_count,
             }));
         }
+    }
 
+    // cas-2879: a clean tree can still hold commits on no remote; deleting
+    // its branch stranded them (QA cas-881f). Keep them first, or keep all.
+    let rescued = rescue_before_teardown(&git, &plan.worker_name, worktree, false).map_err(|error| {
+        WorktreeError::Git(GitError::CommandFailed(format!(
+            "worktree kept: could not preserve its unpushed commits first: {error}"
+        )))
+    })?;
+    if worktree.path.exists() {
         git.remove_worktree(&worktree.path, false)?;
     }
 
     let _ = git.delete_branch(&worktree.branch, true);
-    Ok(RemoveOutcome::Removed)
+    Ok(if rescued.is_empty() {
+        RemoveOutcome::Removed
+    } else {
+        RemoveOutcome::RemovedPreserved(rescued)
+    })
 }

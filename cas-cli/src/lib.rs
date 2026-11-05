@@ -105,6 +105,7 @@ pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod qa_ledger;
 pub(crate) mod quality_ledger;
+pub(crate) mod peer_ask_gate;
 pub(crate) mod ci_waste;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;

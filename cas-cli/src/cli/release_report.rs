@@ -1760,7 +1760,7 @@ fn assemble_markdown(
                 format!("{tag} has no listed changes in the available release sources.")
             } else {
                 format!(
-                    "{tag} ships {} across {}.",
+                    "{tag} lists {} across {}.",
                     plural(change_count, "change", "changes"),
                     plural(areas.len(), "area", "areas")
                 )
@@ -1777,7 +1777,7 @@ fn assemble_markdown(
     let claim = match areas.as_slice() {
         [] => "No changes are listed for this release yet.".to_string(),
         [only] => format!(
-            "{} shipped, all in {}.",
+            "{} listed, all in {}.",
             plural(change_count, "change", "changes"),
             only.area
         ),
@@ -1788,7 +1788,7 @@ fn assemble_markdown(
                 .collect::<Vec<_>>();
             let (last, rest) = parts.split_last().expect("at least two areas");
             format!(
-                "{} shipped: {} and {last}.",
+                "{} listed: {} and {last}.",
                 plural(change_count, "change", "changes"),
                 rest.join(", ")
             )
@@ -1798,7 +1798,7 @@ fn assemble_markdown(
                 .iter()
                 .fold(&areas[0], |top, area| if area.changes > top.changes { area } else { top });
             format!(
-                "{} shipped across {} areas; {} has the most, {}.",
+                "{} listed across {} areas; {} has the most, {}.",
                 plural(change_count, "change", "changes"),
                 areas.len(),
                 top.area,
@@ -1841,7 +1841,7 @@ fn assemble_markdown(
             }
         }
         glance.push((
-            "Changes shipped".to_string(),
+            "Changes listed".to_string(),
             change_count.to_string(),
             format!(
                 "{}; tests, docs, known limits and upgrade notes not counted",
@@ -3464,9 +3464,11 @@ mod tests {
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
         assert!(
-            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
+            report.contains("| Changes listed | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
             "{report}"
         );
+        assert!(!report.contains("shipped") && !report.contains("ships 2"),
+            "CHANGELOG entries without publication evidence cannot prove shipment: {report}");
         assert!(report.contains(
             "| Sessions | 1 | The factory daemon loop no longer stalls on reminder probes |"
         ));

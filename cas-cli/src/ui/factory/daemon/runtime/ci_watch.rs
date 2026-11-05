@@ -1189,7 +1189,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     supervisor_prs: &[SupervisorPr],
     previously_queued: &BTreeSet<u64>,
     previously_armed: &BTreeSet<u64>,
-    _previously_held: &BTreeSet<u64>,
+    previously_held: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
     let pulls = transport.merge_queue_pull_requests()?;
     let runs = transport.completed_runs()?;
@@ -1251,19 +1251,20 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
         // polls/restarts. Keying one path by queue-exit and the other by run
         // delivered the same failure twice. The PR update retains distinct
         // later queue exits even when GitHub still lists an older red run.
-        let occurrence = if arm_vanished
-            && failed_run_id.is_none()
-            && !previously_queued.contains(&pr.number)
-        {
+        let disarmed = arm_vanished && failed_run_id.is_none() && !previously_queued.contains(&pr.number);
+        // cas-73fa: a PR GitHub is merging can look dequeued for one poll, and
+        // its failed run can be listed a poll after the exit. Hold a run-less
+        // exit for one confirming poll, and key the episode by the exit alone
+        // so a run listed later is the same notice.
+        if !disarmed && failed_run_id.is_none() && !previously_held.contains(&pr.number) {
+            poll.held_exits.insert(pr.number);
+            poll.queued_prs.insert(pr.number);
+            continue;
+        }
+        let occurrence = if disarmed {
             format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
         } else {
-            format!(
-                "queue-exit:{}:{}",
-                pr.updated_at,
-                failed_run_id
-                    .map(|run_id| format!("merge-group-run:{run_id}"))
-                    .unwrap_or_else(|| "no-failed-run".to_string())
-            )
+            format!("queue-exit:{}", pr.updated_at)
         };
         poll.ejections.push(MergeQueueEjection {
             task_id: task_id.clone(),
@@ -2364,7 +2365,7 @@ mod tests {
         .unwrap();
         assert_eq!(first.ejections.len(), 1);
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
-        assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z:merge-group-run:901");
+        assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z");
 
         let observed_exit = collect_merge_queue_ejections(
             &ejected, std::slice::from_ref(&delivery), &BTreeSet::from([556]),

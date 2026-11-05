@@ -1890,8 +1890,9 @@ pub fn generate_prompt_at(
                         "Worker {worker} is idle while task {} ({}) is still {}{}.\n\
                          This is a worker-lifecycle idle signal, not a task completion.\n\
                          Check live state: `{supervisor_prefix}task action=show id={}`\n\
-                         If close was rejected, resolve the rejection before acting on the task as closed.",
-                        task.task_id, task.task_title, task.task_status, rejection, task.task_id
+                         If close was rejected, resolve the rejection before acting on the task as closed.\n\
+                         Next action: message {worker} with its next step, or reassign {}.",
+                        task.task_id, task.task_title, task.task_status, rejection, task.task_id, task.task_id
                     )
                 };
 

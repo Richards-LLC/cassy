@@ -243,6 +243,10 @@ pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; 
 /// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
 /// remediation meant for genuine refusals, and keeps any conflict finding.
 pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Option<&str>) -> String {
+    // Other parked outcomes (e.g. DELIVERY CONTENT DROPPED) keep their own text.
+    if !super::gate_preflight::is_merge_handoff(merge_required) {
+        return merge_required.to_string();
+    }
     let conflict = ["\n\n⚠️ This branch has a genuine", "\n\n⚠️ Cassy could not determine"]
         .iter()
         .find_map(|marker| merge_required.find(marker))

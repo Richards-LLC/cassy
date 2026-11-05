@@ -52,7 +52,9 @@ pub(crate) fn epic_pr_draft_refusal(
             "🚫 EPIC PR NOT DRAFT: open the {head} PR with `--draft`. Every merge into a ready epic PR reruns its full CI \
              and cancels the last run (gabber: 43% of all CI). The release PR is the gate: mark it ready with \
              `gh pr ready` only then. Note GitHub still runs `pull_request` workflows on drafts unless the \
-             workflow skips them (`if: github.event.pull_request.draft == false`)."
+             workflow skips them (`if: github.event.pull_request.draft == false`) and lists \
+             `ready_for_review` in its `pull_request` types, so the checks run when the PR is marked ready \
+             instead of the skipped draft run counting as a pass."
         ));
     }
     None

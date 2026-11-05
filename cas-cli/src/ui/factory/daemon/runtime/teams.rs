@@ -2037,10 +2037,20 @@ fi
 # so failures stop here instead of costing a CI run. Unset means none.
 local_gate=\"$(cas config get factory.worker_local_gate 2>/dev/null)\" || local_gate=\"\"
 if [ -n \"$local_gate\" ]; then
-  (cd \"$(git rev-parse --show-toplevel)\" && sh -c \"$local_gate\") || {
+  # A hung gate must not hold the push forever (default 10 minutes).
+  limit=\"${CAS_LOCAL_GATE_TIMEOUT_SECS:-600}\"
+  if command -v timeout >/dev/null 2>&1; then limiter=\"timeout $limit\";
+  elif command -v gtimeout >/dev/null 2>&1; then limiter=\"gtimeout $limit\";
+  else limiter=\"\"; echo \"Cassy PUSH GUARD: no timeout command; the local gate runs without a time limit.\" >&2; fi
+  (cd \"$(git rev-parse --show-toplevel)\" && $limiter sh -c \"$local_gate\")
+  gate_status=$?
+  if [ \"$gate_status\" -eq 124 ] && [ -n \"$limiter\" ]; then
+    echo \"Cassy PUSH GUARD: the project's local gate timed out after ${limit}s (factory.worker_local_gate: $local_gate).\" >&2
+    exit 1
+  elif [ \"$gate_status\" -ne 0 ]; then
     echo \"Cassy PUSH GUARD: the project's local gate failed (factory.worker_local_gate: $local_gate). Fix it before pushing.\" >&2
     exit 1
-  }
+  fi
 fi
 exit 0
 ";

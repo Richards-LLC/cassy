@@ -547,11 +547,7 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    CI that runs the full suite on the exact landing SHA is this gate. The
    epic closes once its tip is contained in base.
    <!-- cas-src:end -->
-   <!-- cas-src:begin -->
    Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-   <!-- cas-src:else -->
-   Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in CI on that SHA, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-   <!-- cas-src:end -->
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
    <!-- cas-src:begin -->
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project

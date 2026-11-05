@@ -4832,6 +4832,8 @@ mod tests {
     use cas_factory::{embedded_registry, render_route_table, render_spawn_recipes};
     use std::process::Command;
 
+    const FULL_SUITE_OWNER_RULE: &str = "Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
+
     /// cas-3199: personal dirs outrank project skills everywhere, so syncing
     /// them must not spread cas-src tooling; only the cas-src checkout keeps it.
     #[test]
@@ -4856,7 +4858,9 @@ mod tests {
                 if file.path.starts_with("skills/cas-cut-release/") {
                     continue; // The Cassy runtime release skill is cas-src by definition.
                 }
-                let lowered = installed.to_lowercase();
+                // The shared ownership rule (GH #1243) names the queue only as the
+                // first of three conditional gates; every other mention is cas-src.
+                let lowered = installed.replace(FULL_SUITE_OWNER_RULE, "").to_lowercase();
                 leaks.extend(cas_src_only.iter().filter(|token| lowered.contains(**token))
                     .chain([CAS_SRC_BEGIN, CAS_SRC_END].iter().filter(|marker| installed.contains(**marker)))
                     .map(|token| format!("{}: {token}", file.path)));
@@ -5429,7 +5433,7 @@ This is the body content."#;
     #[test]
     fn full_suite_owner_rule_syncs_for_every_harness_cas_7e91e() {
         // pin: GH #1243 requires this one identical ownership sentence across installed skill surfaces.
-        const RULE: &str = "Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
+        const RULE: &str = FULL_SUITE_OWNER_RULE;
         for harness in [
             SupervisorCli::Claude,
             SupervisorCli::Codex,

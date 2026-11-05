@@ -94,11 +94,7 @@ a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
-<!-- cas-src:begin -->
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-<!-- cas-src:else -->
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in CI on that SHA, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-<!-- cas-src:end -->
 For a supervisor's integrated run, record
 `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
 the epic. Child closes reference the epic's integration proof; final-gate

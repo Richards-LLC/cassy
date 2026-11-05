@@ -46,11 +46,7 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Record the scoped command's result in the task; a zero-test success is not proof.
 - Factory workers run targeted tests under [`cas-worker` discipline](../cas-worker/references/discipline.md): commit and run red, then commit the fix and run that filter green.
 
-<!-- cas-src:begin -->
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-<!-- cas-src:else -->
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in CI on that SHA, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-<!-- cas-src:end -->
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

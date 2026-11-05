@@ -233,7 +233,7 @@ write_valid_draft "$epic/$original_notes"
 # cas-f2be: a per-delivery fragment rides into the version section.
 mkdir -p "$epic/changelog.d"
 printf 'How fragments work.\n' >"$epic/changelog.d/README.md"
-printf '### Fixed — Fragments\n\n- **Fragment entry** — fragment shipped.\n' >"$epic/changelog.d/cas-0001.md"
+printf '### Fixed — Fragments\n\n- **Fragment entry** — fragment shipped,\n  on a wrapped line.\n' >"$epic/changelog.d/cas-0001.md"
 # cas-7f95: same-area fragments (and the epic's own [Unreleased] area) share one heading.
 printf '### Added — alpha\n\n- **Second alpha** — the follow-up landed.\n' >"$epic/changelog.d/cas-0002.md"
 printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipped.\n' >"$epic/changelog.d/cas-0003.md"
@@ -252,6 +252,7 @@ released_section="$(sed -n '/^## \[9.100.0\]/,/^## \[9.99.0\]/p' "$epic/CHANGELO
 heading_line() { grep -n -m1 -F -- "$1" <<<"$released_section" | cut -d: -f1; }
 check '[[ "$(grep -c "^### Fixed — Fragments$" <<<"$released_section")" -eq 1 && "$(grep -c "^### Added — alpha$" <<<"$released_section")" -eq 1 ]]' 'cas-7f95: entries sharing a section title share one heading'
 check '(( $(heading_line "### Fixed — Fragments") < $(heading_line "third fragment shipped") && $(heading_line "third fragment shipped") < $(heading_line "### Added — alpha") && $(heading_line "### Added — alpha") < $(heading_line "- alpha shipped.") ))' 'cas-7f95: headings keep first-seen order and gather every entry under them'
+check '[[ "$(heading_line "third fragment shipped")" -eq $(( $(heading_line "on a wrapped line.") + 1 )) ]]' 'cas-7f95: a bullet after a wrapped bullet stays in the same list'
 check 'python3 "$script_dir/markdownlint.py" --config "$script_dir/../.markdownlint-cli2.jsonc" "$epic/CHANGELOG.md" >"$tmp/lint.out" 2>&1 || { cat "$tmp/lint.out"; false; }' 'cas-7f95: the promoted CHANGELOG passes the Docs Lint markdownlint policy (MD024)'
 check 'grep -q "Live on production — User — Cassy v9.100.0" "$epic/docs/release-notes/2026-10-15-v9.100.0-slack.md"' 'the draft is named and filled for the version'
 check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$head_files" == *slack.md* ]]' 'one commit carries bump, lock, CHANGELOG and draft'

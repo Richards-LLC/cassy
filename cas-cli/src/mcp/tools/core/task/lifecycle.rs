@@ -1785,9 +1785,6 @@ impl CasCore {
                 message: Cow::from(format!("Task not created: {message}")),
                 data: None,
             })?;
-        let build_route = if task.assignee.is_some() && blocked_by_ids.is_empty() {
-            self.prepare_build_route_assignment(&mut task).await?
-        } else { None };
         let assignee_receipt = task.assignee.as_deref()
             .map(|assignee| format!("\nAssignee: {assignee}"))
             .unwrap_or_default();
@@ -1845,14 +1842,8 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
-        let build_route_notice = if let Some(plan) = build_route {
-            match crate::factory_build_routing::deliver(plan, self.cas_root.clone(), task.clone()).await {
-                Ok(receipt) => format!("\n{receipt}"),
-                Err(error) => format!("\n{error}"),
-            }
-        } else { String::new() };
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
-            Ok(_) => build_route_notice,
+            Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
         };
 

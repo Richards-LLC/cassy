@@ -5223,10 +5223,11 @@ mod tests {
     }
 
     /// cas-5590: the daemon's 500-commit repair batch must not scan `tasks`
-    /// once per commit. It holds the process's shared connection, and two
-    /// scans per SHA over the live notes froze every MCP call for ~40 s.
+    /// or the worker commit events once per commit. It holds the process's
+    /// shared connection, and per-SHA scans over the live store froze every
+    /// MCP call for ~40 s.
     #[test]
-    fn a_repair_batch_reads_tasks_once_not_once_per_commit_cas_5590() {
+    fn a_repair_batch_reads_each_edge_once_not_once_per_commit_cas_5590() {
         let (_t, store) = store();
         let shas: Vec<String> = (0..500).map(|i| format!("{i:08x}{}", "c".repeat(32))).collect();
         {
@@ -5250,6 +5251,19 @@ mod tests {
             let mention = format!("{receipts} receipt {}", shas[7].to_uppercase());
             insert.execute(params!["cas-mention", mention]).unwrap();
         }
+        // The live store holds ~12 K usable worker_git_commit heads.
+        create_events_table(&store);
+        store
+            .lock()
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 11999)
+                 INSERT INTO events (event_type, entity_type, entity_id, summary, metadata, created_at)
+                 SELECT 'worker_git_commit', 'worker', 'w', 's',
+                        json_object('head_sha', 'f' || printf('%07x', i)), '2026-08-08T01:00:00Z'
+                   FROM n;",
+            )
+            .unwrap();
+        emit_worker_git_commit(&store, &shas[9][..8], "session-9");
 
         let started = std::time::Instant::now();
         let resolved = store.resolve_provenance("/repo", &shas).unwrap();
@@ -5258,6 +5272,9 @@ mod tests {
         let links = &resolved[&shas[7]].links;
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].task_id.as_deref(), Some("cas-mention"));
+        let links = &resolved[&shas[9]].links;
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].session_id.as_deref(), Some("session-9"));
         assert!(
             elapsed < std::time::Duration::from_secs(3),
             "500 commits over 25 MB of notes took {elapsed:?} holding the shared connection"

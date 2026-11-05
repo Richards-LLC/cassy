@@ -730,6 +730,13 @@ mod tests {
     #[test]
     fn template_names_violet_not_retired_issue_key() {
         let section = build_agents_section();
+        // pin: operator directive applies in every project's managed AGENTS.
+        for required in [
+            "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+            "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+        ] {
+            assert!(section.contains(required), "missing {required}");
+        }
         assert!(
             section.contains("issues.components.{cassy,violet,cloud}"),
             "{section}"

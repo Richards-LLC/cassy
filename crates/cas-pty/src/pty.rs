@@ -7772,6 +7772,19 @@ echo SMOKE_DONE
     /// and safe urgent-stop recovery — on the surface each runtime consumes.
     #[test]
     fn test_all_six_launch_shapes_carry_full_role_contract() {
+        // pin: operator defect-reporting directive; a missed relay or false
+        // tool output must reach Cassy's tracker from every launched role.
+        for harness in ["claude", "codex", "grok", "opencode"] {
+            for role in [ContractRole::Supervisor, ContractRole::Worker] {
+                let surface = rendered_contract_surface(harness, role);
+                for required in [
+                    "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
+                    "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+                ] {
+                    assert!(surface.contains(required), "{harness}/{role:?} missing {required}");
+                }
+            }
+        }
         let shapes = [
             ("claude", ContractRole::Supervisor),
             ("claude", ContractRole::Worker),

@@ -38,7 +38,7 @@ pub use external_symlinks::{
     DanglingNodeModulesSymlink, ExternalSymlink, scan_dangling_node_modules_symlinks,
     scan_external_symlinks_into, scan_project_node_modules_symlinks_into,
 };
-pub use git::{GitError, GitOperations};
+pub use git::{GitError, GitOperations, RescuedWork};
 pub(crate) use manager::WorktreeError;
 pub use manager::{
     CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorkerRemovalPlan,

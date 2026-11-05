@@ -4865,6 +4865,39 @@
         }
       ],
       "any_of": []
+    },
+    "skills/finish/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/finish/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "at most 10 minutes",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "one line per worker",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "`[NOT PUSHED:",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "refs/cas/rescue/",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        },
+        {
+          "text": "Do not report the session finished while any worker",
+          "reason": "cas-2879 (QA cas-881f): /finish must wait for workers to push and park, report their real push state, and never report done over a worker's unsaved work."
+        }
+      ],
+      "absent": [],
+      "any_of": []
     }
   },
   "alternatives": [

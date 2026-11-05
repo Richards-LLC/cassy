@@ -1417,6 +1417,26 @@ mod tests {
         (temp, core)
     }
 
+    #[tokio::test]
+    async fn rule_list_labels_store_repo_and_held_sources_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, core) = isolated_core();
+        let mut rule = Rule::new("rule-source".into(), "Stored instruction".into());
+        rule.status = RuleStatus::Proven;
+        rule.helpful_count = 1;
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+        let mut legacy = rule.clone();
+        legacy.id = "rule-held".into();
+        crate::store::open_rule_store_local(&core.cas_root).unwrap().add(&legacy).unwrap();
+        std::fs::write(temp.path().join(".claude/rules/team.md"), "Repository instruction").unwrap();
+        let result = core.cas_rules_list().await.unwrap();
+        let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+        for expected in ["source: store", "source: repo", "team.md", "rule-held", "held: file absent"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert_eq!(text.matches("rule-source").count(), 1, "generated projection is not a second rule");
+    }
+
     fn update_rule(id: &str, tags: Option<&str>, sources: Option<&str>) -> RuleUpdateRequest {
         RuleUpdateRequest {
             stakeholder: None,

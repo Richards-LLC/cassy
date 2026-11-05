@@ -76,15 +76,15 @@ pub(crate) fn pushed_delivery_tip(
         return Err(format!("{branch} is not {worker}'s delivery branch for {}", task.id));
     }
     let Some(pushed) = super::close_ops::resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}")) else {
-        return Err(format!("origin/{branch} does not exist"));
+        return Err(format!("cached origin/{branch} does not resolve; live publication is unknown"));
     };
     if pushed != tip && !super::close_ops::git_commit_is_ancestor(repo, tip, &pushed) {
-        return Err(format!("{tip} is not pushed to origin/{branch}"));
+        return Err(format!("{tip} is absent from cached origin/{branch}; live publication is unknown"));
     }
     let local = super::close_ops::resolve_branch_sha(repo, &format!("refs/heads/{branch}"));
     if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) {
         return Err(format!(
-            "{tip} is on origin/{branch} but not on {worker}'s own {branch}; a commit pushed by someone else is not the worker's delivery"
+            "{tip} is on cached origin/{branch} but not on {worker}'s local {branch}; this does not establish the worker's own delivery"
         ));
     }
     Ok(())

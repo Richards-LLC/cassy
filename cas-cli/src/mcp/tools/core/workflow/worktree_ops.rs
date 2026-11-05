@@ -1449,9 +1449,9 @@ pub(crate) fn describe_target_push_state(
                 .unwrap_or("(no origin ref)");
             format!(
                 "\n\n⚠️  NOT PUSHED — THIS MERGE IS LOCAL ONLY (origin moved).\n\
-                 Local {target_branch} is at {}; origin/{target_branch} is at {remote} and is \
-                 AHEAD — it carries commits this merge does not contain, which is why the push \
-                 was rejected.\n\
+                 Local {target_branch} is at {}; cached origin/{target_branch} is at {remote}. \
+                 Git rejected a non-fast-forward update: origin was AHEAD of, or diverged from, \
+                 this local history at the push attempt. Fetch to read its current tip.\n\
                  `{push}` CANNOT succeed until the two are \
                  reconciled.\n\
                  REQUIRED NEXT STEP: {fetch} && {merge}   (from a checkout on {target_branch}), then re-run \
@@ -1471,14 +1471,14 @@ pub(crate) fn describe_target_push_state(
                 .map(short_sha)
                 .unwrap_or("(no origin ref)");
             format!(
-                "\n\n⚠️  NOT PUSHED — THIS MERGE IS LOCAL ONLY.\n\
-                 Local {target_branch} is at {local}; origin/{target_branch} is at {remote} \
-                 and is BEHIND.\n\
+                "\n\n⚠️  PUSH NOT CONFIRMED — PUBLICATION UNKNOWN.\n\
+                 Local {target_branch} is at {local}; cached origin/{target_branch} is at {remote}. \
+                 This attempt did not confirm publication or the live remote tip.\n\
                  Task close measures merge evidence against BOTH {target_branch} and \
                  origin/{target_branch}, and other checkouts only ever see origin. Until this \
                  is published, closes for work delivered by this merge can be rejected with \
                  \"commit(s) from this task not on {target_branch}\".\n\
-                 REQUIRED NEXT STEP: {push}\n\
+                 Read the live remote first; if it still lacks this tip, retry: {push}\n\
                  Automatic push did not land: {reason}"
             )
         }
@@ -3396,7 +3396,7 @@ impl CasCore {
                 ""
             };
             output.push_str(&format!(
-                "{} {} - {} {}{}{}\n   Epic: {}\n   Path: {}\n\n",
+                "{} {} - {} (recorded status: {}){}{}\n   Epic: {}\n   Path: {}\n\n",
                 status_icon,
                 wt.id,
                 wt.branch,
@@ -3440,7 +3440,7 @@ impl CasCore {
 
         let path_exists = worktree.path.exists();
         Ok(Self::success(format!(
-            "Worktree: {}\n\nBranch: {}\nParent: {}\nStatus: {}\nPath: {} {}\nEpic: {}\nCreated by: {}\nCreated: {}",
+            "Worktree: {}\n\nBranch: {}\nParent: {}\nrecorded status: {}\nPath: {} {}\nEpic: {}\nCreated by: {}\nCreated: {}",
             worktree.id,
             worktree.branch,
             worktree.parent_branch,
@@ -3745,7 +3745,7 @@ impl CasCore {
 
         let system = if is_system_b { "System B" } else { "System A" };
         let reachable_via = if branch_is_reachable {
-            format!("merged — reachable from {}", containers.join(", "))
+            format!("tip reachable from local refs: {}", containers.join(", "))
         } else {
             "UNMERGED (force=true supplied)".to_string()
         };
@@ -7705,12 +7705,11 @@ mod tests {
             },
         );
 
-        // The three things the supervisor could not learn from the old
-        // bare "Merged ..." receipt: that origin is behind, that closes
-        // will bounce because of it, and the exact command that fixes it.
-        assert!(note.contains("NOT PUSHED"), "{note}");
+        // A failed attempt may leave publication unknown; a cached remote
+        // SHA cannot establish that origin is behind.
+        assert!(note.contains("PUSH NOT CONFIRMED"), "{note}");
         assert!(note.contains("origin/main"), "{note}");
-        assert!(note.contains("BEHIND"), "{note}");
+        assert!(note.contains("cached origin/main") && !note.contains("is BEHIND"), "{note}");
         assert!(note.contains("git push origin main"), "{note}");
         assert!(
             note.contains("Permission denied (publickey)"),

@@ -558,7 +558,7 @@ impl CasService {
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
                     return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                        "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
+                        "COMMITTED: `{tool_name} action={action}` write committed ({description}). Its \
                          remaining work was still running {grace_s:.1}s after the commit and \
                          finishes in the background. Do not retry it; read the task's notes \
                          for the rest.",
@@ -568,7 +568,7 @@ impl CasService {
                 }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                    "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \
+                    "COMMITTED: task{task} {action} write committed ({description}). Its post-commit work \
                      (search index, reminders, the lifecycle outbox, dependents, leases) was still \
                      running {grace_s:.1}s after the commit and finishes in the background. Do not \
                      retry; `task action=show` reflects the committed state.",

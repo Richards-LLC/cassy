@@ -2368,7 +2368,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 );
             } else {
                 assert_eq!(Some(remote_after), remote_before, "a failing target hook must not publish the merge");
-                assert!(text.contains("NOT PUSHED"), "an unrelated passing tree must not bypass target validation: {text}");
+                assert!(text.contains("PUSH NOT CONFIRMED"), "an unrelated passing tree must not bypass target validation: {text}");
             }
         }
     }
@@ -2897,7 +2897,7 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                     attempt.cleanup = Some(change == "unpublished cleanup");
                     let failed = fixture.service.factory(Parameters(attempt)).await.unwrap();
                     // pin: a rejected push must leave the publication explicitly unconfirmed.
-                    assert!(get_text(&failed).contains("NOT PUSHED"), "{}", get_text(&failed));
+                    assert!(get_text(&failed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&failed));
                     std::fs::remove_file(hook).unwrap();
                     assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
                         target_before_push, "a rejected reviewed push cannot leave this delivery in the shared target for another lane to publish");
@@ -4100,7 +4100,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
             std::time::Duration::ZERO,
         ))
         .unwrap();
-    assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
+    assert!(get_text(&rejected).contains("PUSH NOT CONFIRMED"), "{}", get_text(&rejected));
     assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));

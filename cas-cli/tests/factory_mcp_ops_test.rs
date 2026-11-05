@@ -11810,19 +11810,30 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         active.assignee = Some(worker.to_string());
         active.status = TaskStatus::InProgress;
         env.task_store().add(&active).unwrap();
-        let busy = assign(&env, &task_b, assignee)
-            .await
-            .expect_err("a mid-task worker must still be refused");
-        assert!(busy.contains("commits behind"), "{busy}");
-        // cas-8aa1: a queued task the worker has not started holds no
-        // worktree, and task start cuts each task from its own target.
-        active.status = TaskStatus::Open;
-        env.task_store().update(&active).unwrap();
-        let queued = assign(&env, &task_b, assignee)
-            .await
-            .expect("a queued, unstarted task must not make an idle worker stale");
-        assert!(!queued.contains("commits behind"), "{queued}");
-        store.update(&targeted).unwrap();
+        // cas-8aa1: parked and queued work do not hold the checkout; started
+        // work still does, even when the agent's registry status says Idle.
+        for (prior_status, accepted) in [
+            (TaskStatus::AwaitingMerge, true),
+            (TaskStatus::InProgress, false),
+            (TaskStatus::Open, true),
+        ] {
+            active.status = prior_status;
+            store.update(&active).unwrap();
+            let result = assign(&env, &task_b, assignee).await;
+            if accepted {
+                let assigned = result.unwrap_or_else(|error| {
+                    panic!("{prior_status:?} work must not make an idle worker stale: {error}")
+                });
+                assert!(!assigned.contains("commits behind"), "{assigned}");
+                assert_eq!(store.get(&task_b).unwrap().assignee.as_deref(), Some(worker));
+                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
+                store.update(&targeted).unwrap();
+            } else {
+                let busy = result.expect_err("a mid-task worker must still be refused");
+                assert!(busy.contains("commits behind"), "{busy}");
+                assert!(store.get(&task_b).unwrap().assignee.is_none());
+            }
+        }
         active.status = TaskStatus::Closed;
         env.task_store().update(&active).unwrap();
 

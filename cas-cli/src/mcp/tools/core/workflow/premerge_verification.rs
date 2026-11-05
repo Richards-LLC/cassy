@@ -1170,6 +1170,7 @@ mod tests {
             tree,
             context_digest: String::new(),
             proof: RepositoryProofBoundary {
+                peer_premerge: None,
                 repository_root: String::new(),
                 worktree_root: String::new(),
                 head_commit: String::new(),

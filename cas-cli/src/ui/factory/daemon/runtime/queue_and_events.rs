@@ -1487,10 +1487,10 @@ fn report_spawn_warnings(
             "warning",
             warning,
         );
-        // cas-73fa: an informational base (chosen, refreshed, ready,
-        // materialized, preserved) stays in the audit above. Only a base the
-        // supervisor must repair is sent.
-        if !SPAWN_BASE_ACTIONS.iter().any(|kind| warning.starts_with(kind)) {
+        // cas-73fa: a purely informational base (chosen, refreshed, ready,
+        // materialized, preserved) stays in the audit above. Every other
+        // warning names a repair and is still sent.
+        if SPAWN_BASE_INFORMATIONAL.iter().any(|kind| warning.starts_with(kind)) {
             continue;
         }
         let _ = enqueue_spawn_warning_notice(
@@ -1504,12 +1504,14 @@ fn report_spawn_warnings(
     }
 }
 
-/// cas-73fa: spawn-base warnings that name a repair for the supervisor.
-const SPAWN_BASE_ACTIONS: &[&str] = &[
-    "EPIC BRANCH UNPUBLISHED",
-    "EPIC BRANCH UNVERIFIED",
-    "EPIC BRANCH LOCAL-ONLY",
-    "EPIC BRANCH DIVERGED",
+/// cas-73fa: spawn warnings that only report what happened and ask nothing.
+const SPAWN_BASE_INFORMATIONAL: &[&str] = &[
+    "SPAWN BASE: ",
+    "SPAWN BASE REFRESHED",
+    "SPAWN BASE MATERIALIZED",
+    "EPIC BRANCH READY",
+    "EPIC BRANCH MATERIALIZED",
+    "EPIC BRANCH PRESERVED",
 ];
 
 /// cas-00d5: close out a shutdown request. The row gets a terminal

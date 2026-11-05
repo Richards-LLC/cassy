@@ -119,7 +119,7 @@ pub use task::{
     validate_task_execution_state,
 };
 pub use verification::{
-    IssueSeverity, RepositoryProofBoundary, Verification, VerificationDispatch,
+    IssueSeverity, PeerPremergeAttestation, PeerPremergeReceipt, RepositoryProofBoundary, Verification, VerificationDispatch,
     VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
     VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
     VerifierCapability,

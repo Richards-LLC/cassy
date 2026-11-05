@@ -370,6 +370,34 @@ mod tests {
         r
     }
 
+    #[test]
+    fn deleting_projected_rule_files_retires_their_store_source_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = SqliteRuleStore::open(&root).unwrap();
+        inner.init().unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let store = SyncingRuleStore::new(Arc::new(inner), target.clone(), 1)
+            .with_project_root(temp.path().to_path_buf());
+        let mut rule = make_rule("rule-deleted", Scope::Project);
+        rule.status = cas_types::RuleStatus::Proven;
+        rule.helpful_count = 1;
+        store.add(&rule).unwrap();
+        assert!(target.join("rule-deleted.md").exists());
+        // Generated files need not be tracked: deleting the whole rules
+        // directory must still withdraw the policy from prompt injection.
+        std::fs::remove_dir_all(&target).unwrap();
+        let rows = store.list().unwrap();
+        assert_eq!(rows[0].status, cas_types::RuleStatus::Retired);
+        cas_core::Syncer::new(target.clone(), 1).sync_all(&rows).unwrap();
+        assert!(!target.join("rule-deleted.md").exists());
+        assert!(store.list_proven().unwrap().is_empty());
+        assert_eq!(store.get("rule-deleted").unwrap().content, rule.content,
+                   "retirement preserves the source and history");
+    }
+
     /// cas-caae (skills audit M27): a proven rule naming another registered
     /// project is never written to this project's rule files, and an
     /// existing file for it is removed on its next write.

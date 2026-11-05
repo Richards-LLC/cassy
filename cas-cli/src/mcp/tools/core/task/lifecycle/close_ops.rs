@@ -42994,6 +42994,34 @@ mod zero_change_close_tests {
         service.task(Parameters(request)).await.unwrap();
         let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
         assert_eq!(retry.id, dispatch.id, "close retries must reuse the no-code dispatch");
+
+        // cas-f43d (GH #1513 ask 4): a read-only investigation declared with
+        // no_delivery, without the no-code note, is pinned the same way: the
+        // epic tip moving and the checkout's uncommitted files changing must
+        // not stale its dispatch.
+        let mut sweep = Task::new("cas-f43d-sweep".into(), "read-only sweep".into());
+        sweep.status = TaskStatus::InProgress;
+        sweep.assignee = Some(worker.into());
+        sweep.task_type = TaskType::Spike;
+        sweep.risk = vec![TaskRisk::None];
+        sweep.deliverables.work_target = task.deliverables.work_target.clone();
+        store.add(&sweep).unwrap();
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": sweep.id, "no_delivery": true,
+            "reason": "read-only sweep; evidence in the artifact",
+        })).unwrap();
+        let response = service.task(Parameters(request.clone())).await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &sweep.id)
+            .unwrap().unwrap_or_else(|| panic!("no-delivery close must dispatch verification: {response:?}"));
+        let repository = dispatch.repository.clone().expect("dispatch binds a repository proof");
+        git(p, &["checkout", "-q", "-b", "factory/sibling-2", "epic/live"]);
+        commit_file(p, "sibling2.rs", "feat: another unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling-2", "-m", "merge sibling 2"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        std::fs::write(p.join("scratch.md"), "uncommitted investigation notes").unwrap();
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("epic movement and uncommitted files must not stale a no-delivery dispatch");
     }
 
     #[test]

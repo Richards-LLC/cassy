@@ -7508,7 +7508,7 @@ echo SMOKE_DONE
         // cas-c145: Grok supervisors must get merge-queue-first lifecycle
         // guidance equivalent to other harnesses (no SessionStart bundle).
         assert!(
-            rules.contains("MERGE REQUIRED")
+            rules.contains("park relay")
                 && rules.contains("awaiting_merge")
                 && rules.contains("factory/<worker>")
                 && rules.contains("do not poll"),
@@ -7711,7 +7711,11 @@ echo SMOKE_DONE
         for (harness, role) in shapes {
             let surface = rendered_contract_surface(harness, role);
             // pin: every launch must delegate merged completion to the verdict.
-            assert!(surface.contains("merge verdict closes or reopens the task"), "{harness}/{role:?}: {surface}");
+            let verdict = match role {
+                ContractRole::Supervisor => "merge verdict closes or reopens the task",
+                ContractRole::Worker => "the merge verdict closes it",
+            };
+            assert!(surface.contains(verdict), "{harness}/{role:?}: {surface}");
             assert!(!surface.contains("re-close after"), "{harness}/{role:?}: {surface}");
             let missing = missing_contract_elements(&surface, role);
             assert!(

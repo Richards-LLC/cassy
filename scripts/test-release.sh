@@ -150,6 +150,68 @@ clone_epic "$tmp/epic" epic/alpha alpha
 epic="$tmp/epic"
 run() { (cd "$1" && shift && ./scripts/release.sh "$@"); }
 
+# Delivery anchors live in the selected clone's store, including worktrees.
+record_delivery() {
+    python3 - "$1" "$2" "$3" "$4" <<'PYDB'
+import json, sqlite3, sys
+from pathlib import Path
+root, task, anchor, base = sys.argv[1:]
+folder = Path(root) / '.cas'
+folder.mkdir(exist_ok=True)
+with sqlite3.connect(folder / 'cas.db') as db:
+    db.execute('CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, deliverables TEXT)')
+    db.execute('INSERT OR REPLACE INTO tasks VALUES (?, ?)',
+               (task, json.dumps({'factory_branch_anchor': anchor,
+                                  'factory_branch_start': {'base_sha': base}})))
+with (Path(root) / '.git/info/exclude').open('a') as out:
+    out.write('\n.cas/\n')
+PYDB
+}
+
+missing_fragment_delivery_stops_release() {
+    local fixture="$tmp/missing-fix" base fix before status=0
+    clone_epic "$fixture" hotfix/missing-fix missing-fix
+    base="$(git -C "$fixture" rev-parse HEAD)"
+    echo 'actual peer wake fix' >"$fixture/fix.txt"
+    git -C "$fixture" add fix.txt
+    git -C "$fixture" commit --quiet -m 'peer wake fix'
+    fix="$(git -C "$fixture" rev-parse HEAD)"
+    git -C "$fixture" reset --quiet --hard "$base"
+    mkdir -p "$fixture/changelog.d"
+    printf '### Fixed — Peer wake\n\n- **Wake** — the peer wake fix shipped.\n' >"$fixture/changelog.d/cas-0004.md"
+    git -C "$fixture" add changelog.d
+    git -C "$fixture" commit --quiet -m 'notes still claim the dropped fix'
+    record_delivery "$fixture" cas-0004 "$fix" "$base"
+    write_valid_draft "$tmp/missing-fix-draft.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    mkdir -p "$tmp/missing-fix-state"
+    : >"$tmp/missing-fix-gh.log"
+    FAKE_GH_STATE="$tmp/missing-fix-state" FAKE_GH_LOG="$tmp/missing-fix-gh.log" \
+        run "$fixture" --hotfix --no-watch --notes "$tmp/missing-fix-draft.md" >"$tmp/missing-fix.log" 2>&1 || status=$?
+    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -q 'cas-0004' "$tmp/missing-fix.log" && grep -q "$fix" "$tmp/missing-fix.log" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
+        ! grep -q '^pr create' "$tmp/missing-fix-gh.log" || return 1
+
+    # A cherry-pick changes identity but retains the full delivery patch.
+    git -C "$fixture" cherry-pick --quiet "$fix" || return 1
+    run "$fixture" --hotfix --dry-run --notes "$tmp/missing-fix-draft.md" >>"$tmp/missing-fix.log" 2>&1 || return 1
+    [[ ! -f "$fixture/changelog.d/cas-0004.md" ]] || return 1
+    # A resumed release must recover the consumed fragment's claim, even
+    # after the code is dropped from an already-prepared branch.
+    git -C "$fixture" rm --quiet fix.txt
+    git -C "$fixture" commit --quiet -m 'drop fix after preparation'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    status=0
+    FAKE_GH_STATE="$tmp/missing-fix-state" FAKE_GH_LOG="$tmp/missing-fix-gh.log" \
+        run "$fixture" --hotfix --no-watch >>"$tmp/missing-fix.log" 2>&1 || status=$?
+    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -q "$fix" "$tmp/missing-fix.log" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/hotfix/missing-fix &&
+        ! grep -q '^pr create' "$tmp/missing-fix-gh.log"
+}
+check 'missing_fragment_delivery_stops_release' 'cas-4bdf: missing fragment fix refuses before commit, push or PR and names task and anchor'
+
 # cas-56bbc: a dry patch release must commit the bundle built from the new
 # manifest, not leave the old embedded version for the merge queue to reject.
 dry_release_rebuilds_commander() {
@@ -239,6 +301,9 @@ printf '### Added — alpha\n\n- **Second alpha** — the follow-up landed.\n' >
 printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipped.\n' >"$epic/changelog.d/cas-0003.md"
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
+for task in cas-0001 cas-0002 cas-0003; do
+    record_delivery "$epic" "$task" "$(git -C "$epic" rev-parse HEAD^)" "$(git -C "$epic" rev-parse HEAD^^)"
+done
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
 head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"

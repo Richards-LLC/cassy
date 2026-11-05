@@ -300,6 +300,7 @@ prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
     fetch_base
     sync_with_base
+    python3 "$script_dir/release_changelog.py" verify-deliveries "$remote/$base"
     base_version="$(version_at "$remote/$base")"
     [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
     version="$(next_version "$base_version")"
@@ -417,6 +418,7 @@ failing_tests() {
 }
 
 publish_branch() {
+    python3 "$script_dir/release_changelog.py" verify-deliveries "$remote/$base"
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 

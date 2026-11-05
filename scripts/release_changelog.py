@@ -24,9 +24,17 @@
 
   release_changelog.py section <file> <version>
       Print the body of the <version> section.
+
+  release_changelog.py verify-deliveries <base-ref>
+      Refuse fragment claims whose recorded delivery is absent from HEAD.
 """
 import re
 import sys
+import json
+import os
+import sqlite3
+import subprocess
+import tempfile
 from pathlib import Path
 
 HEADING = re.compile(r'^## \[(?P<version>[^\]]+)\]')
@@ -193,6 +201,68 @@ def section(text, version):
     return '\n'.join(tidy(body)) + '\n'
 
 
+def verify_deliveries(base_ref):
+    """Check fragment claims against the selected clone's recorded deliveries."""
+    def git(*args, **kwargs):
+        return subprocess.run(['git', *args], capture_output=True, **kwargs)
+
+    def output(*args):
+        result = git(*args)
+        if result.returncode:
+            raise ChangelogError(result.stderr.decode(errors='replace').strip())
+        return result.stdout.decode().strip()
+
+    paths = [str(path) for path in fragment_paths('CHANGELOG.md')]
+    # A previous prepare consumed the fragments. Keep checking its claims on
+    # reruns/re-bumps, rather than silently trusting the promoted prose.
+    for commit in output('log', f'{base_ref}..HEAD', '--format=%H',
+                         '--grep=^release: v[0-9]').splitlines():
+        paths += output('diff', '--name-only', '--diff-filter=D', f'{commit}^',
+                        commit, '--', 'changelog.d/').splitlines()
+    tasks = sorted({Path(path).stem for path in paths
+                    if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name)})
+    if not tasks:
+        return
+    # Worktrees share their clone's store. Never use an inherited CAS_ROOT
+    # from the factory that launched a release in a different fixture/clone.
+    common = Path(output('rev-parse', '--path-format=absolute', '--git-common-dir'))
+    database = common.parent / '.cas' / 'cas.db'
+    try:
+        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+            for task in tasks:
+                row = db.execute('SELECT deliverables FROM tasks WHERE id = ?', (task,)).fetchone()
+                delivery = json.loads(row[0]) if row and row[0] else {}
+                if isinstance(delivery, str):
+                    delivery = json.loads(delivery)
+                history = delivery.get('historical_factory_branch_anchors') or []
+                anchor = delivery.get('factory_branch_anchor') or (history[-1] if history else None)
+                if not anchor:
+                    raise ChangelogError(f'{task}: no recorded delivery commit for release fragment')
+                missing = f'{task}: delivery commit {anchor} is missing from HEAD'
+                if not re.fullmatch(r'[0-9a-f]{40}', anchor) or git('cat-file', '-e', f'{anchor}^{{commit}}').returncode:
+                    raise ChangelogError(missing)
+                if git('merge-base', '--is-ancestor', anchor, 'HEAD').returncode == 0:
+                    continue
+                start = (delivery.get('factory_branch_start') or {}).get('base_sha')
+                if not start or git('merge-base', '--is-ancestor', start, anchor).returncode:
+                    raise ChangelogError(missing + '; no resolvable delivery base for patch comparison')
+                delta = git('diff', '--binary', start, anchor, '--', '.', ':(exclude)changelog.d/')
+                if delta.returncode:
+                    raise ChangelogError(missing + '; cannot read its delivery patch')
+                patch = delta.stdout
+                # A cherry-pick/squash may change the commit identity. Check
+                # the whole recorded delivery delta against HEAD, not just a
+                # final docs commit. Promotion legitimately removes fragments.
+                with tempfile.TemporaryDirectory(prefix='release-delivery-') as scratch:
+                    env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / 'index'))
+                    if git('read-tree', 'HEAD', env=env).returncode:
+                        raise ChangelogError(missing + '; cannot read HEAD for patch comparison')
+                    if patch and git('apply', '--cached', '--reverse', '--check', env=env, input=patch).returncode:
+                        raise ChangelogError(missing + '; its delivery patch is absent too')
+    except (sqlite3.Error, ValueError, AttributeError, TypeError) as error:
+        raise ChangelogError(f'cannot verify release deliveries in {database}: {error}') from error
+
+
 def main(argv):
     try:
         if len(argv) == 5 and argv[0] == 'promote':
@@ -205,6 +275,8 @@ def main(argv):
         elif len(argv) == 5 and argv[0] == 'rebase':
             Path(argv[4]).write_text(
                 rebase(Path(argv[1]).read_text(), Path(argv[2]).read_text(), argv[3]))
+        elif len(argv) == 2 and argv[0] == 'verify-deliveries':
+            verify_deliveries(argv[1])
         elif len(argv) == 3 and argv[0] == 'section':
             sys.stdout.write(section(Path(argv[1]).read_text(), argv[2]))
         else:

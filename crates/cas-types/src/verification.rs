@@ -357,6 +357,8 @@ pub enum VerificationProvenance {
     SupervisorDirect,
     /// Trusted internal close-flow record; never accepted from MCP input.
     System,
+    /// Authenticated peer-mailbox attestation; never accepted from generic writes.
+    PeerAttested,
 }
 
 impl fmt::Display for VerificationProvenance {
@@ -366,6 +368,7 @@ impl fmt::Display for VerificationProvenance {
             VerificationProvenance::TaskVerifier => write!(f, "task_verifier"),
             VerificationProvenance::SupervisorDirect => write!(f, "supervisor_direct"),
             VerificationProvenance::System => write!(f, "system"),
+            VerificationProvenance::PeerAttested => write!(f, "peer_attested"),
         }
     }
 }
@@ -379,6 +382,7 @@ impl FromStr for VerificationProvenance {
             "task_verifier" => Ok(VerificationProvenance::TaskVerifier),
             "supervisor_direct" => Ok(VerificationProvenance::SupervisorDirect),
             "system" => Ok(VerificationProvenance::System),
+            "peer_attested" => Ok(VerificationProvenance::PeerAttested),
             _ => Err(TypeError::Parse(format!(
                 "invalid verification provenance: {s}"
             ))),
@@ -491,6 +495,34 @@ impl FromStr for VerificationRecoveryAction {
     }
 }
 
+/// Portable approval of one published pre-merge candidate. Paths and local
+/// verifier capabilities deliberately never cross the mailbox boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPremergeReceipt {
+    pub project_id: String,
+    pub supervisor_id: String,
+    pub task_id: String,
+    pub source_branch: String,
+    pub source_sha: String,
+    pub target_branch: String,
+    pub target_sha: String,
+    pub candidate_tree: String,
+    pub landed_sha: String,
+    pub dispatch_id: String,
+    pub verdict_id: String,
+    pub task_context: serde_json::Value,
+}
+
+/// Transport provenance supplied only by the authenticated daemon admission.
+/// It is persisted with the dispatch, independently of prompt retention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPremergeAttestation {
+    pub receipt: PeerPremergeReceipt,
+    pub message_id: String,
+    pub sender_machine_id: String,
+    pub sender_session: String,
+}
+
 /// Immutable snapshot of the repository state inspected by a verifier.
 ///
 /// The digest covers the exact worktree contents (including untracked files)
@@ -507,6 +539,8 @@ impl FromStr for VerificationRecoveryAction {
 /// (nothing delivered yet) the whole boundary must still match exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryProofBoundary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_premerge: Option<PeerPremergeAttestation>,
     pub repository_root: String,
     pub worktree_root: String,
     pub head_commit: String,

@@ -885,6 +885,27 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
     }
 
+    // cas-bddf9: a supervisor's raw PR merge waits on its own unanswered ask
+    // to a peer about that PR, unless the ask is visibly overridden.
+    if tool_name == "Bash"
+        && crate::harness_policy::is_supervisor(input)
+        && let Some(root) = cas_root
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal(
+            root,
+            std::path::Path::new(&input.cwd),
+            cmd,
+            &crate::hooks::handlers::handlers_state::current_agent_id(input),
+            &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        )
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
     // ========================================================================
     // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
     //

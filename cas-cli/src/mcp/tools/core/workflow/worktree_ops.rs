@@ -4403,6 +4403,23 @@ impl CasCore {
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            // cas-bddf9: the merging supervisor's own unanswered ask to a
+            // peer about this task holds the merge until answered or
+            // visibly overridden.
+            if let Ok(caller) = self.get_agent_id()
+                && let Some(refusal) = {
+                    let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
+                    crate::peer_ask_gate::merge_refusal(
+                        &cas_root,
+                        &caller,
+                        agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
+                        agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
+                        &crate::peer_ask_gate::MergeSubject { task_id: Some(task_id.to_string()), pr: None, any_pr: false },
+                    )
+                }
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            }
         }
 
         // cas-9c34: the supervisor is acting on this task's merge request,

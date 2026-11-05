@@ -48,7 +48,7 @@ const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = concat!(
     "Factory Supervisor (OpenCode). Coordinate; never implement worker tasks. ",
     simplest_complete!(),
     " Follow-ups require a reproduced, observable defect affecting someone today. Tools: cas_coordination, cas_task. task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake; receipts/acknowledgements/broadcasts/wake=false wait in the inbox on the next turn. Blockers: blocker=true; merges: merge_request=true. Merge READY TO MERGE/awaiting_merge. ",
-    "Hold deliveries below their plan target and their dependents; ship independent work. Decide and ship within scope when a written standard settles it. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles. Operator instructions expire with their step unless explicitly standing. The merge verdict closes or reopens the task. Overrides: authority/reason. ",
+    "Hold deliveries below their plan target and their dependents; ship independent work. Written standards settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'. The merge verdict closes or reopens the task. Overrides: authority/reason. ",
     cassy_defects!()
 );
 const OPENCODE_WORKER_INSTRUCTIONS: &str = concat!(
@@ -442,7 +442,7 @@ READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first: `{prefix}
 action=worktree_merge id=<worker> task_id=<task-id>` (`factory/<worker>`). Find via \
 `{prefix}factory action=epic_status id=<epic-id>` or `{prefix}task action=list \
 status=awaiting_merge`. Honor refusals; overrides need authority/reason. Hold deliveries below their plan target and their dependents; ship independent work. \
-Decide and ship within scope when a written standard settles it. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles. Operator instructions expire with their step unless explicitly standing. \
+Written standards settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'. \
 The merge verdict closes or reopens the task. blocker=true → answer or reassign this turn. worker idle or died → \
 `{prefix}factory action=worker_status`; assign or recycle. `{prefix}task \
 action=start` on a new assignment clears an urgent-stop halt. cas-qa-dispatch → assign its QA task. \
@@ -7913,16 +7913,16 @@ echo SMOKE_DONE
         for (harness, surface) in surfaces {
             assert!(
                 surface
-                    .contains("Decide and ship within scope when a written standard settles it."),
+                    .contains("Written standards settle within-scope calls: decide and ship."),
                 "{harness} must delegate decisions settled by standards to the supervisor"
             );
             assert!(
-                surface.contains("Ask the operator only for scope, production promotion, money policy, irreversible/external actions or trade-offs no standard settles."),
+                surface.contains("Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs."),
                 "{harness} must reserve operator asks for policy calls"
             );
             assert!(
                 surface.contains(
-                    "Operator instructions expire with their step unless explicitly standing."
+                    "Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'."
                 ),
                 "{harness} must not turn a completed step into a standing gate"
             );

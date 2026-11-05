@@ -125,6 +125,10 @@
         {
           "text": "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
           "reason": "Operator directive: surface Cassy defects immediately, route reports with evidence, and staff fixes in the Cassy source repository."
+        },
+        {
+          "text": "Cassy glitches: reassign/replace workers, file; skip 'go'.",
+          "reason": "Operator directive: a Cassy-caused hold is routed around and filed; only genuine policy calls reach the operator."
         }
       ],
       "absent": [

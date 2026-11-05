@@ -99,10 +99,34 @@ fn launch_context(prompt: &str) -> bool {
             && prompt.ends_with("</environment_context>"))
 }
 
+/// cas-d511: a turn with no authenticated queue row. A harness background-task
+/// notification is the agent's own work resuming, and CAS's fixed spawn and
+/// watchdog texts are the daemon's. Anything else arrived as pane input. None
+/// of these makes a reply an answer.
+fn unqueued_wake(prompt: &str, origin: Option<&str>, agent: &Agent) -> WakeChannel {
+    if origin == Some("task-notification") {
+        return match agent.role {
+            AgentRole::Supervisor => WakeChannel::Supervisor,
+            AgentRole::Worker => WakeChannel::Worker,
+            AgentRole::Director => WakeChannel::Director,
+            _ => WakeChannel::Terminal,
+        };
+    }
+    let prompt = prompt.trim_start();
+    if prompt.starts_with(cas_pty::WORKER_STARTUP_BRIEF_PREFIX)
+        || prompt.starts_with(cas_pty::CODEX_WORKER_STARTUP_PREFIX)
+        || prompt.contains(super::queue_and_events::DELIVERY_WATCHDOG_NUDGE)
+    {
+        return WakeChannel::Daemon;
+    }
+    WakeChannel::Terminal
+}
+
 /// IDs inside a Teams envelope or a pointer select only authenticated queue
 /// facts addressed to this recipient. Sender prose never grants provenance.
 fn wake(
     prompt: &str,
+    origin: Option<&str>,
     agent: &Agent,
     session: &str,
     queue: &dyn PromptQueueStore,
@@ -115,12 +139,17 @@ fn wake(
     let Some(row) = ids
         .filter_map(|id| queue.queued_prompt(id).ok().flatten())
         .find(|row| {
-            row.factory_session.as_deref() == Some(session)
+            (row.factory_session.as_deref() == Some(session)
                 && (row.target == agent.name
-                    || (agent.role == AgentRole::Supervisor && row.target == "supervisor"))
+                    || (agent.role == AgentRole::Supervisor && row.target == "supervisor")))
+                // cas-d511: the supervisor startup envelope carries no session;
+                // a daemon row naming this exact agent is still its own.
+                || (row.factory_session.is_none()
+                    && row.target == agent.name
+                    && row.origin == Some(QueueOrigin::Daemon))
         })
     else {
-        return (WakeChannel::Unknown, false);
+        return (unqueued_wake(prompt, origin, agent), false);
     };
     let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
@@ -177,6 +206,27 @@ fn candidate(name: &str, input: &Value) -> Option<(TurnAction, bool)> {
         }
         return Some((TurnAction::TaskMutation, false));
     }
+    // cas-d511: merges, spawns, verdicts and subagent checks are actions too.
+    for tool in ["factory", "verification"] {
+        if short.ends_with(tool) {
+            if !crate::mcp::tools::service::potentially_mutating_call(tool, action)
+                || action.ends_with("status")
+            {
+                return None;
+            }
+            let staffing = tool == "factory"
+                && ["spawn", "shutdown", "respawn", "assign"].iter().any(|verb| action.contains(verb));
+            return Some((if staffing { TurnAction::Assignment } else { TurnAction::Decision }, false));
+        }
+    }
+    if matches!(short, "Agent" | "Task") {
+        return Some((TurnAction::Check, false));
+    }
+    if short == "exec"
+        && let Some(script) = input.as_str()
+    {
+        return code_mode_action(script).map(|action| (action, false));
+    }
     if short.ends_with("coordination") && matches!(action, "message" | "interrupt") {
         let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
         let message = input.get("message").and_then(Value::as_str).unwrap_or("");
@@ -208,23 +258,50 @@ fn candidate(name: &str, input: &Value) -> Option<(TurnAction, bool)> {
             .get("cmd")
             .or_else(|| input.get("command"))
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
-        let action = if command.starts_with("git commit ") {
-            TurnAction::Commit
-        } else if command.starts_with("git push ") {
-            TurnAction::Push
-        } else if command.starts_with("cargo nextest ")
-            || command.starts_with("cargo check ")
-            || command.starts_with("npm test")
-        {
-            TurnAction::Check
-        } else {
-            return None;
-        };
-        return Some((action, true));
+            .unwrap_or("");
+        return shell_action(command).map(|action| (action, true));
     }
     None
+}
+
+fn shell_action(command: &str) -> Option<TurnAction> {
+    let command = command.trim();
+    if command.starts_with("git commit ") {
+        Some(TurnAction::Commit)
+    } else if command.starts_with("git push ") {
+        Some(TurnAction::Push)
+    } else if command.starts_with("cargo nextest ")
+        || command.starts_with("cargo check ")
+        || command.starts_with("npm test")
+    {
+        Some(TurnAction::Check)
+    } else {
+        None
+    }
+}
+
+/// cas-d511: Codex code mode wraps its tools in one JavaScript `exec` call.
+/// Its patches and commands are the same actions as their direct forms.
+fn code_mode_action(script: &str) -> Option<TurnAction> {
+    if script.contains("tools.apply_patch(") {
+        return Some(TurnAction::FileEdit);
+    }
+    script.split("tools.exec_command(").skip(1).find_map(|call| {
+        // `{cmd:"…"}` or `{"cmd": "…"}`
+        let after = call.split_once("cmd")?.1.trim_start_matches(['"', '\'']).trim_start();
+        let after = after.strip_prefix(':')?.trim_start();
+        let quote = after.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+        let mut command = String::new();
+        let mut chars = after[quote.len_utf8()..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => command.extend(chars.next()),
+                c if c == quote => return shell_action(&command),
+                c => command.push(c),
+            }
+        }
+        None
+    })
 }
 
 fn failed(value: &Value) -> bool {
@@ -287,6 +364,7 @@ impl Pending {
     fn attribute(
         &mut self,
         prompt: &str,
+        origin: Option<&str>,
         agent: &Agent,
         session: &str,
         queue: &dyn PromptQueueStore,
@@ -295,7 +373,7 @@ impl Pending {
         if self.wake.is_some() || launch_context(prompt) {
             return;
         }
-        let (channel, may_answer) = wake(prompt, agent, session, queue, agents);
+        let (channel, may_answer) = wake(prompt, origin, agent, session, queue, agents);
         self.wake = Some(channel);
         self.may_answer = may_answer;
     }
@@ -434,7 +512,10 @@ impl Cursor {
                     self.pending = Some(Pending::new(id, at, self.usage));
                 }
                 if let Some(turn) = &mut self.pending {
-                    turn.attribute(&prompt, agent, session, queue, agents);
+                    // Claude stamps harness-generated input, e.g. a
+                    // background-task notification, with its origin kind.
+                    let origin = value.pointer("/origin/kind").and_then(Value::as_str);
+                    turn.attribute(&prompt, origin, agent, session, queue, agents);
                 }
             } else if kind == "assistant" {
                 if let Some(turn) = &mut self.pending {
@@ -528,7 +609,7 @@ impl Cursor {
         {
             match entry {
                 "message" if payload["role"] == "user" && turn.wake.is_none() => {
-                    turn.attribute(&text(&payload["content"]), agent, session, queue, agents);
+                    turn.attribute(&text(&payload["content"]), None, agent, session, queue, agents);
                 }
                 "message"
                     if payload["role"] == "assistant" && payload["phase"] == "final_answer" =>
@@ -614,6 +695,7 @@ impl Cursor {
             "user_message_chunk" if turn.wake.is_none() => {
                 turn.attribute(
                     update["content"]["text"].as_str().unwrap_or(""),
+                    None,
                     agent,
                     session,
                     queue,

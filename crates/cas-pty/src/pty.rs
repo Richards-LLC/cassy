@@ -24,7 +24,10 @@ const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Superviso
 /// Instructions injected into Codex worker agents via `--config developer_instructions`.
 
 /// Prefix for the Codex worker startup prompt. The worker name is appended at runtime.
-const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker startup now: confirm identity, check assigned tasks, then start any assigned task with a progress note. My Cassy session is already registered automatically (do NOT call session_start). Successful task action=start is authoritative assignment acceptance; no prose ACK is required.\n1) Run mcp__cs__coordination action=whoami";
+/// cas-d511: the first prompt of every CAS-spawned worker starts with one of
+/// these, so the turn ledger can attribute that turn to the daemon.
+pub const WORKER_STARTUP_BRIEF_PREFIX: &str = "Read the complete worker startup brief from the file at the following JSON-quoted path. Follow its contents as this turn's instructions:\n";
+pub const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker startup now: confirm identity, check assigned tasks, then start any assigned task with a progress note. My Cassy session is already registered automatically (do NOT call session_start). Successful task action=start is authoritative assignment acceptance; no prose ACK is required.\n1) Run mcp__cs__coordination action=whoami";
 
 /// Instructions injected into Grok Build supervisor agents via `--rules`
 /// (EPIC cas-8888, cas-6569 Phase 2).
@@ -1469,9 +1472,7 @@ impl PtyConfig {
             .iter_mut()
             .find(|arg| arg.as_str() == WORKER_STARTUP_BRIEF_ARG)
             .ok_or_else(|| Error::pty("Worker launch has no startup brief argument"))?;
-        *arg = format!(
-            "Read the complete worker startup brief from the file at the following JSON-quoted path. Follow its contents as this turn's instructions:\n{path}"
-        );
+        *arg = format!("{WORKER_STARTUP_BRIEF_PREFIX}{path}");
         Ok(Some(file.into_temp_path()))
     }
 

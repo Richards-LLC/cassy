@@ -779,7 +779,10 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     if !worker.is_empty() && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
-        &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
+        // cas-d511: the worker can only wait for the supervisor here, so its
+        // copy rides the next turn instead of waking it.
+        &format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
+            cas_store::QUIET_MESSAGE_MARKER),
         factory_session.as_deref(),
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
@@ -861,6 +864,7 @@ fn enqueue_delivery_pr_merged_wake(
     worker: &str,
     pr_number: u64,
     merge_commit: &str,
+    release_wait: bool,
 ) -> Result<(), String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
@@ -887,6 +891,7 @@ fn enqueue_delivery_pr_merged_wake(
         worker,
         pr_number,
         merge_commit,
+        release_wait,
     );
     queue
         .enqueue_idempotent(
@@ -1119,6 +1124,7 @@ fn apply_delivery_pr_observation(
                 &observation.worker,
                 observation.pr_number,
                 merge_commit,
+                crate::qa_batch::awaits_release_verdict(cas_dir, &task),
             )?;
         }
         task.deliverables.delivery_pr_merge_commit = Some(merge_commit.to_string());
@@ -1157,7 +1163,11 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
         let Ok(age) = (now - merged_at).to_std() else {
             continue;
         };
-        if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE {
+        // cas-d511 (cas-6c03): a close waiting on the release verdict is the
+        // designed batch state, not a stuck merge.
+        if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE
+            || crate::qa_batch::awaits_release_verdict(cas_dir, &task)
+        {
             continue;
         }
         let detail = format!(
@@ -3063,9 +3073,12 @@ mod worker_attention_tests {
             && row.prompt.contains(
                 "Failing job: Fast Validation — CI tiers › Test release publication guards."
             )));
+        // cas-d511: the worker can only wait for recovery instructions, so its
+        // copy is next-turn context, not a wake.
         assert!(
             rows.iter()
-                .any(|row| row.target == "fast-jaguar-59" && row.prompt.contains("PR #556"))
+                .any(|row| row.target == "fast-jaguar-59" && row.prompt.contains("PR #556")
+                    && crate::supervisor_message_wakes::quiet(&row.prompt))
         );
         let persisted = task_store.get("cas-fc35").unwrap();
         assert_eq!(
@@ -3075,7 +3088,7 @@ mod worker_attention_tests {
                 .count(),
             1
         );
-        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234").unwrap();
+        enqueue_delivery_pr_merged_wake(&cas_dir, "cas-fc35", "fast-jaguar-59", 556, "abcdef1234", false).unwrap();
         // A replayed ejection is one failure; the later merge is the pass.
         let outcomes: Vec<_> = cas_store::quality_events_for_task(&cas_dir, "cas-fc35")
             .unwrap()
@@ -3218,6 +3231,67 @@ mod worker_attention_tests {
         assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
             &supervisor_row.prompt
         ));
+    }
+
+    /// cas-d511 (cas-6c03): a merged Tier 1 delivery waiting on the release
+    /// verdict is the designed batch state. The worker's merge notice asks for
+    /// nothing and the supervisor gets no "inspect or recover" timeout.
+    #[test]
+    fn release_verdict_wait_sends_no_merge_wake_or_timeout_cas_d511() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "release-wait")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]).args(args)
+                .output().unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "// base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("src/lib.rs"), "// delivered\n").unwrap();
+        git(&["commit", "-qam", "cas-7eb1: delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        git(&["branch", "factory/calm-octopus-51"]);
+        let cas_dir = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id='release-wait'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        register_supervisor(&cas_dir, "release-wait");
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-7eb1".to_string(), "delivery".to_string());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("calm-octopus-51".to_string());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some("factory/calm-octopus-51".into());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
+            assignee: "calm-octopus-51".into(),
+            branch: "factory/calm-octopus-51".into(),
+            base_sha: base,
+        });
+        task_store.add(&task).unwrap();
+        git(&["merge", "-q", "--ff-only", "factory/calm-octopus-51"]);
+        assert!(crate::qa_batch::awaits_release_verdict(&cas_dir, &task), "fixture is the release-verdict wait");
+
+        apply_delivery_pr_observation(&cas_dir, &crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+            task_id: "cas-7eb1".to_string(), worker: "calm-octopus-51".to_string(),
+            branch: "factory/calm-octopus-51".to_string(), pr_number: 933,
+            head_sha: anchor.clone(), merge_commit: Some(anchor),
+        }).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), "{}", rows[0].prompt);
+        let mut aged = task_store.get("cas-7eb1").unwrap();
+        aged.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+        task_store.update(&aged).unwrap();
+        relay_delivery_pr_merge_timeouts(&cas_dir);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1, "no timeout relay while the release verdict owns the close");
     }
 }
 

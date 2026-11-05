@@ -1190,7 +1190,7 @@ mod tests {
                 let noop = serde_json::to_value(&rows[1].payload).unwrap();
                 assert_eq!(noop["no_op"], true);
                 assert_eq!(noop["actions"], serde_json::json!([]));
-                assert_eq!(noop["woken_by"], "unknown", "wrong-recipient envelope is untrusted");
+                assert_eq!(noop["woken_by"], "terminal", "a wrong-recipient envelope is untrusted pane input");
                 assert!(noop["input_tokens"].is_null(), "missing usage must stay unknown");
                 // Truncation replays with the same natural keys, never duplicates.
                 std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
@@ -1258,6 +1258,78 @@ mod tests {
             } else {
                 vec![serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":reply}]}}),
                     serde_json::json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete","turn_id":id}})]
+            }
+        }
+    }
+
+    /// cas-d511: 29 turns in one release had no role. Every wake now names one.
+    #[test]
+    fn turns_without_a_session_queue_row_still_name_who_woke_them_cas_d511() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            let startup = f.queue.enqueue_urgent_with_outcome("cas-startup", "turn-worker", "You are a worker.", None,
+                None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            let mut cases = vec![
+                ("typed", "lots of supervisor mistakes today".to_string(), "terminal"),
+                ("brief", format!("{}\"/repo/.cas/cas-worker-abc\"", cas_pty::WORKER_STARTUP_BRIEF_PREFIX), "daemon"),
+                ("codex-startup", format!("{}\n2) Run task mine", cas_pty::CODEX_WORKER_STARTUP_PREFIX), "daemon"),
+                ("watchdog", format!("Message from lifecycle-wake:delivery-watchdog: {}",
+                    super::super::queue_and_events::DELIVERY_WATCHDOG_NUDGE), "daemon"),
+                ("startup", format!("[cas #{startup} agent-authored 0s first]\nYou are a worker."), "daemon"),
+            ];
+            if cli == cas_mux::SupervisorCli::Claude {
+                cases.push(("notification", "<task-notification>\n<task-id>b1</task-id>\n</task-notification>".into(), "worker"));
+            }
+            for (index, (id, prompt, expected)) in cases.into_iter().enumerate() {
+                let mut input = f.input(id, &prompt, index as u32 * 5);
+                if id == "notification" {
+                    input[0]["origin"] = serde_json::json!({"kind": "task-notification"});
+                } else if cli == cas_mux::SupervisorCli::Claude {
+                    input[0]["origin"] = serde_json::json!({"kind": "human"});
+                }
+                f.append(&input);
+                f.append(&f.end(id, "Done.", index as u32 * 5 + 1));
+                f.scan();
+                assert_eq!(f.rows().last().unwrap()["woken_by"], expected, "{cli:?} {id}");
+            }
+        }
+    }
+
+    /// cas-d511: 15 of 27 daemon "no-op" turns in one release merged, spawned, ran a
+    /// verifier or launched a check through Codex code mode.
+    #[test]
+    fn merges_subagents_and_code_mode_checks_are_turn_actions_cas_d511() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            let merge = serde_json::json!({"action": "worktree_merge", "id": "w", "task_id": "cas-1"});
+            let read = serde_json::json!({"action": "worker_status"});
+            let calls: Vec<(&str, &str, Value, bool)> = if cli == cas_mux::SupervisorCli::Claude {
+                vec![("merge", "mcp__cas__factory", merge, false), ("read", "mcp__cas__factory", read, true),
+                    ("verifier", "Agent", serde_json::json!({"subagent_type": "task-verifier", "prompt": "verify"}), false)]
+            } else {
+                vec![("merge", "mcp__cs__factory", merge, false), ("read", "mcp__cs__factory", read, true),
+                    ("check", "exec", Value::String("text(await tools.exec_command({cmd:\"tail -4 a.log\"}));\ntext(await tools.exec_command({cmd:\"cargo nextest run -p cas --lib -E 'test(x)' > a.log 2>&1 &\"}));".into()), false),
+                    ("patch", "exec", Value::String("text(await tools.apply_patch(\"*** Begin Patch\\n*** End Patch\"));".into()), false)]
+            };
+            for (index, (id, name, input, no_op)) in calls.into_iter().enumerate() {
+                let second = index as u32 * 5;
+                let at = format!("2026-11-02T12:00:{:02}Z", second + 1);
+                f.append(&f.input(id, "Detached job exited", second));
+                f.append(&if cli == cas_mux::SupervisorCli::Claude {
+                    vec![serde_json::json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}),
+                        serde_json::json!({"type":"user","timestamp":at,"message":{"content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}})]
+                } else if name == "exec" {
+                    vec![serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"custom_tool_call","call_id":id,"name":name,"input":input}}),
+                        serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"custom_tool_call_output","call_id":id,"output":[{"type":"input_text","text":"Script completed"}]}})]
+                } else {
+                    vec![serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"function_call","call_id":id,"name":name,"arguments":input.to_string()}}),
+                        serde_json::json!({"type":"response_item","timestamp":at,"payload":{"type":"function_call_output","call_id":id,"output":"ok"}})]
+                });
+                f.append(&f.end(id, "Done.", second + 2));
+                f.scan();
+                assert_eq!(f.rows().last().unwrap()["no_op"], no_op, "{cli:?} {id}");
             }
         }
     }

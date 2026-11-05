@@ -71,13 +71,56 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err(format!(
-            "candidate git {}: {}",
-            args[0],
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        // cas-c5db: `merge-base --is-ancestor` answers "no" with an empty
+        // stderr; name the whole command and its exit so a refusal is actionable.
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("exited with {} and no stderr", output.status)
+        } else {
+            stderr
+        };
+        return Err(format!("candidate `git {}`: {detail}", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// cas-4af9: review against origin's tip when the local target merely lags
+/// it. The merge fast-forwards a lagging target before publishing, so a
+/// candidate built on the stale local ref reviews a base that never lands.
+fn review_target(repo: &Path, target: &str) -> Result<String, String> {
+    let local = git(repo, &["rev-parse", target])?;
+    let Ok(remote) = git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{target}^{{commit}}")],
+    ) else {
+        return Ok(local);
+    };
+    if remote != local && git(repo, &["merge-base", "--is-ancestor", &local, &remote]).is_ok() {
+        return Ok(remote);
+    }
+    Ok(local)
+}
+
+/// Refresh origin's copy of the target and refuse a diverged target before
+/// any candidate review is dispatched; the merge would refuse it afterwards.
+fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
+    let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+    // Offline keeps the existing local authority; the merge reports it.
+    let Ok(Some(remote)) = operations.fetch_merge_target(target) else {
+        return Ok(());
+    };
+    let local = git(repo, &["rev-parse", target])?;
+    let ordered = |older: &str, newer: &str| {
+        git(repo, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+    };
+    if local != remote && !ordered(&local, &remote) && !ordered(&remote, &local) {
+        return Err(format!(
+            "TARGET_DIVERGED_FROM_ORIGIN: local {target} at {} and origin/{target} at {} each hold commits the other lacks. No candidate review was dispatched. Reconcile {target} with origin/{target} (`git fetch origin {target}` then `git merge origin/{target}` on {target}), then retry worktree_merge",
+            &local[..local.len().min(12)],
+            &remote[..remote.len().min(12)],
+        ));
+    }
+    Ok(())
 }
 
 fn fail(message: impl std::fmt::Display) -> McpError {
@@ -266,7 +309,7 @@ impl Candidate {
         }
         repository_proof::verify_repository_proof(&self.proof)
             .map_err(|error| error.to_string())?;
-        let target = git(&self.repository, &["rev-parse", &self.target_branch])?;
+        let target = review_target(&self.repository, &self.target_branch)?;
         if git(
             &self.repository,
             &["merge-base", "--is-ancestor", &self.source_sha, &target],
@@ -281,6 +324,17 @@ impl Candidate {
 
     /// Independently reviewed siblings cannot widen this delivery's approval.
     fn tree_on(&self, target: &str) -> Result<String, String> {
+        // cas-4af9: the approval covers (source tip, candidate tree). A target
+        // move that recomputes the exact reviewed tree, such as a ref fast-
+        // forward or a queue merge of commits the source already carries,
+        // changes no reviewed content, whatever the path overlap says.
+        if let Ok(merged) = git(
+            &self.repository,
+            &["merge-tree", "--write-tree", target, &self.source_sha],
+        ) && merged.lines().next() == Some(self.tree.as_str())
+        {
+            return Ok(self.tree.clone());
+        }
         git(
             &self.repository,
             &["merge-base", "--is-ancestor", &self.target_sha, target],
@@ -699,6 +753,7 @@ impl CasCore {
         {
             return Ok(None);
         }
+        refresh_review_target(repo, target).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         let repository = repo.canonicalize().map_err(fail)?;
         if let Some(dispatch) = latest.as_ref()
@@ -842,7 +897,7 @@ impl CasCore {
     ) -> Result<Candidate, McpError> {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
-        let target_sha = git(repo, &["rev-parse", target]).map_err(fail)?;
+        let target_sha = review_target(repo, target).map_err(fail)?;
         let repository = repo.canonicalize().map_err(fail)?;
         let key = candidate_key(
             &task.id,

@@ -3233,6 +3233,21 @@ fn is_shipped_builtin_reference_version(path: &str, content_hash: &str) -> bool 
         .is_some_and(|hashes| hashes.contains(content_hash))
 }
 
+/// True when `entry` is a `.gitignore` line Cassy itself wrote for a builtin
+/// file it once shipped (`/<harness dir>/<catalog path>`), including paths a
+/// later release retired. A managed block holding only such lines is Cassy's
+/// own earlier write, never a user edit (cas-3199).
+pub(crate) fn previously_shipped_gitignore_entry(entry: &str) -> bool {
+    let Some(rest) = entry.strip_prefix('/') else {
+        return false;
+    };
+    let Some((directory, path)) = rest.split_once('/') else {
+        return false;
+    };
+    matches!(directory, ".claude" | ".codex" | ".grok" | ".opencode")
+        && builtin_reference_history().files.contains_key(path)
+}
+
 /// Split `skills/<dir>/<child>` into `(<dir>, <child>)`. `None` for anything
 /// that is not a child of a skill directory (agents, flat files).
 fn skill_dir_child(path: &str) -> Option<(&str, &str)> {

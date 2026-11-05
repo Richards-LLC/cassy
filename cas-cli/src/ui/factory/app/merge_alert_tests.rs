@@ -1490,3 +1490,53 @@ fn project_hold_generates_no_ready_backlog_and_next_event_alerts_once() {
     assert!(prompts[0].is_merge_ready());
     assert!(f.relay().is_empty(), "the decision is delivered only once");
 }
+
+/// cas-d49a: a merged delivery whose detached job exited woke the supervisor
+/// about every 15 s. Reads that lost the worker row alternated with complete
+/// ones, each looked new, and the relay quoted the park's stale MERGE REQUIRED.
+#[test]
+fn cas_d49a_merged_delivery_with_exited_job_wakes_once_across_lost_reads_and_restart() {
+    use cas_store::EventStore;
+    let mut f = Fixture::new();
+    f.in_progress();
+    f.advance_target(true);
+    cas_store::SqliteEventStore::open(&f.app.cas_dir).unwrap().record(
+        &cas_types::Event::new(
+            cas_types::EventType::WorkerVerificationBlocked, cas_types::EventEntityType::Agent,
+            "merge-w", "task close rejected: cas-9efb-test MERGE REQUIRED".to_string(),
+        ).with_session("merge-w".to_string()).with_metadata(serde_json::json!({
+            "task_id": "cas-9efb-test", "close_rejected": true, "reason": "MERGE REQUIRED",
+        })),
+    ).unwrap();
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
+    let log = f.repo.path().join("detached.log");
+    std::fs::write(&log, "").unwrap();
+    let run = crate::factory_worker_runs::register(&f.app.cas_dir, f.repo.path(), &log, now)
+        .unwrap().unwrap();
+    crate::factory_worker_runs::bind(&f.app.cas_dir, &run, std::process::id()).unwrap();
+    crate::factory_worker_runs::finish(&f.app.cas_dir, &run, 0, now).unwrap();
+
+    let first = f.relay();
+    assert_eq!(first.len(), 1, "one idle wake for the merged delivery");
+    assert!(first[0].text.contains("Detached job"), "the exit is reported: {}", first[0].text);
+    assert!(!first[0].text.contains("MERGE REQUIRED"),
+        "an in-progress task's close gate is no longer the park's MERGE REQUIRED: {}", first[0].text);
+    let events = vec![f.event.clone()];
+    for round in 0..3 {
+        let mut lost = f.app.delivery_request(&events).read(None);
+        lost.worker_waits.clear();
+        assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, lost).1.is_empty(),
+            "a read without the worker's row is not a new episode (round {round})");
+        assert!(f.relay().is_empty(), "the complete read matches the admitted episode (round {round})");
+    }
+    f.app.merge_alert_retries = Default::default();
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty(), "a daemon restart keeps the admitted episode");
+
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new tip\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test new tip"]);
+    let next = f.relay();
+    assert_eq!(next.len(), 1, "a new tip is a new episode");
+    assert!(!next[0].text.contains("Detached job"), "the same exit is reported once: {}", next[0].text);
+}

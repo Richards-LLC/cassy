@@ -59,8 +59,17 @@ pub(super) fn prune_ready_receipts(cache: &ProbeCache, cas_dir: &Path, now: Date
         if last.is_some_and(|last| now.signed_duration_since(last) < SETTLED_RETRY) { return; }
         *last = Some(now);
     }
-    let Ok(entries) = std::fs::read_dir(cas_dir.join("receipts/merge-ready")) else { return; };
     let Ok(tasks) = crate::store::open_task_store_local(cas_dir) else { return; };
+    // cas-d49a: an idle episode retires with its task too.
+    for entry in std::fs::read_dir(cas_dir.join("receipts/idle-signal")).into_iter().flatten().flatten() {
+        if std::fs::read(entry.path()).ok()
+            .and_then(|bytes| serde_json::from_slice::<IdleSignal>(&bytes).ok())
+            .is_some_and(|signal| tasks.get(&signal.task).is_ok_and(|task| task.is_terminal()))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(cas_dir.join("receipts/merge-ready")) else { return; };
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(receipt) = std::fs::read(&path).ok()
@@ -205,12 +214,35 @@ pub(super) fn read_delivery(
     (ready, wait)
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct IdleSignal {
     task: String,
     tip: Option<String>,
-    ci: &'static str,
+    ci: String,
     completed_run: Option<String>,
+}
+
+fn idle_signal_path(cas_dir: &Path, worker: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    cas_dir.join("receipts/idle-signal").join(format!("{:x}.json", Sha256::digest(worker.as_bytes())))
+}
+
+/// cas-d49a: the admitted episode outlives a daemon restart. A failed write
+/// keeps the in-memory episode; it never withholds the relay.
+fn save_idle_signal(cas_dir: &Path, worker: &str, signal: &IdleSignal) {
+    use std::io::Write;
+    let path = idle_signal_path(cas_dir, worker);
+    let write = || -> std::io::Result<()> {
+        let parent = path.parent().expect("idle signal parent");
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&serde_json::to_vec(signal)?)?;
+        file.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    if let Err(error) = write() {
+        tracing::warn!(%error, worker, "idle signal receipt failed; dedupe is in memory only");
+    }
 }
 
 struct Retry {
@@ -226,6 +258,8 @@ pub(super) struct Retries {
     /// One relay per unchanged worker/task/delivery/completed-run episode.
     /// Timer expiration and temporary waits never create another episode.
     idle_signals: HashMap<String, IdleSignal>,
+    /// Workers whose persisted episode this daemon has already read.
+    idle_loaded: std::collections::HashSet<String>,
     #[cfg(test)]
     pub now: Option<DateTime<Utc>>,
 }
@@ -259,17 +293,37 @@ impl Retries {
 
     /// Consume only a rendered live relay. A new completed run re-arms the
     /// episode even at the same tip; changing message ages never does.
-    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait) -> bool {
+    /// `None` is a repeat; `Some(report)` admits it, `report` saying whether
+    /// its detached-job exit is new to this task (cas-d49a: once per run).
+    /// A read missing the worker's row, or with unknown CI at an admitted
+    /// pushed tip, is uncertainty: it opens an episode only when none exists.
+    /// A push since the admitted episode is a real change, even without CI.
+    pub fn admit_idle(&mut self, cas_dir: &Path, worker: &str, task: &str, read: Option<&WorkerWait>) -> Option<bool> {
+        if self.idle_loaded.insert(worker.to_string()) && !self.idle_signals.contains_key(worker)
+            && let Some(saved) = std::fs::read(idle_signal_path(cas_dir, worker)).ok()
+                .and_then(|bytes| serde_json::from_slice::<IdleSignal>(&bytes).ok())
+        {
+            self.idle_signals.insert(worker.to_string(), saved);
+        }
+        let old = self.idle_signals.get(worker).filter(|old| old.task == task).cloned();
+        if let Some(old) = &old
+            && read.is_none_or(|read| read.ci == "unknown" && read.tip == old.tip && old.ci != "unpushed"
+                && read.completion.as_ref().is_none_or(|run| old.completed_run.as_ref() == Some(&run.id)))
+        {
+            return None;
+        }
+        let old_run = old.and_then(|old| old.completed_run);
+        let completed_run = read.and_then(|read| read.completion.as_ref())
+            .map(|run| run.id.clone()).or_else(|| old_run.clone());
         let signal = IdleSignal {
-            task: read.task.clone(), tip: read.tip.clone(), ci: read.ci,
-            completed_run: read.completion.as_ref().map(|run| run.id.clone()).or_else(|| {
-                self.idle_signals.get(worker).filter(|old| old.task == read.task)
-                    .and_then(|old| old.completed_run.clone())
-            }),
+            task: task.to_string(), tip: read.and_then(|read| read.tip.clone()),
+            ci: read.map_or("unknown", |read| read.ci).to_string(), completed_run,
         };
-        if self.idle_signals.get(worker) == Some(&signal) { return false; }
+        if self.idle_signals.get(worker) == Some(&signal) { return None; }
+        let report = signal.completed_run.is_some() && signal.completed_run != old_run;
+        save_idle_signal(cas_dir, worker, &signal);
         self.idle_signals.insert(worker.to_string(), signal);
-        true
+        Some(report)
     }
 
     pub fn clock(&self) -> DateTime<Utc> {
@@ -320,6 +374,8 @@ impl Retries {
 
     pub fn due(&mut self, now: DateTime<Utc>, data: &DirectorData) -> Vec<DirectorEvent> {
         self.idle_signals.retain(|worker, _| data.agents.iter().any(|agent| agent.name == *worker));
+        // A dropped worker re-reads its persisted episode if it returns.
+        self.idle_loaded.retain(|worker| self.idle_signals.contains_key(worker));
         self.entries.retain(|task_id, retry| {
             let DirectorEvent::WorkerIdle { worker, .. } = &retry.event else {
                 return false;

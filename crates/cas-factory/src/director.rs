@@ -714,8 +714,15 @@ impl DirectorData {
                         task_id: task.id.clone(),
                         task_title: task.title.clone(),
                         task_status: task.status,
+                        // cas-d49a: a MERGE REQUIRED rejection always parks
+                        // the task (cas-6883). Off AwaitingMerge, a merge or
+                        // reopen has replaced that gate; do not quote it.
                         close_rejected_reason: close_rejections
                             .get(&(a.id.clone(), task.id.clone()))
+                            .filter(|reason| {
+                                task.status == TaskStatus::AwaitingMerge
+                                    || !reason.starts_with("MERGE REQUIRED")
+                            })
                             .cloned(),
                         pending_qa: (task.status == TaskStatus::AwaitingMerge)
                             .then(|| pending_qa_round(cas_dir, &task.id, chrono::Utc::now()))

@@ -1949,15 +1949,10 @@ impl FactoryApp {
                 {
                     // Missing refs or an unavailable fresh read still owe one
                     // liveness relay, not an unbounded relay every retry minute.
-                    let unknown = merge_alert::WorkerWait {
-                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false, completion: None,
-                    };
-                    let read = worker_waits.get(worker)
-                        .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
-                    if !self.merge_alert_retries.admit_idle(worker, read) {
-                        continue;
-                    }
-                    if let Some(completion) = &read.completion {
+                    let read = worker_waits.get(worker).filter(|read| read.task == task.task_id);
+                    let Some(report) = self.merge_alert_retries
+                        .admit_idle(&self.cas_dir, worker, &task.task_id, read) else { continue; };
+                    if report && let Some(completion) = read.and_then(|read| read.completion.as_ref()) {
                         prompt.text = format!("{}\n{}", completion.detail(), prompt.text);
                     }
                 }

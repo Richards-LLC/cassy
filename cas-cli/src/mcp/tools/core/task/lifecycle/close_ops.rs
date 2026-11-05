@@ -35385,6 +35385,65 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         assert_eq!(String::from_utf8_lossy(&status.stdout), "", "the gate must not rewrite the checkout");
     }
 
+    /// cas-7f95: the cas-db9d shape. A delivery's changelog.d fragment lands,
+    /// then the release commit promotes it into CHANGELOG.md with the real
+    /// scripts/release_changelog.py and deletes the file. Closing afterwards
+    /// is no drop. A target that later loses the promoted entry still is.
+    #[test]
+    fn a_release_promoted_changelog_fragment_is_not_a_dropped_delivery_cas_7f95() {
+        const PROMOTER: &str = include_str!("../../../../../../../scripts/release_changelog.py");
+        const FRAGMENT: &str = "changelog.d/cas-test1.md";
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let write = |relative: &str, body: &str| {
+            let path = p.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        git(p, &["checkout", "-q", "main"]);
+        write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-11-01\n\n- The base release.\n");
+        write("scripts/release_changelog.py", PROMOTER);
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "changelog"]);
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+        write(FRAGMENT, "### Fixed — Factory\n\n- **Kept entry** — Was: lost at release. Now: kept.\n");
+        write("src/feature.rs", "pub fn feature() {}\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
+        let promoted = std::process::Command::new("python3")
+            .args(["scripts/release_changelog.py", "promote", "CHANGELOG.md", "1.0.1", "2026-11-04", "1.0.0"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(promoted.status.success(), "{}", String::from_utf8_lossy(&promoted.stderr));
+        assert!(!p.join(FRAGMENT).exists(), "the release promotion deletes the fragment");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "release: v1.0.1"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("cas-7f95") && note.contains(FRAGMENT), "{note}")
+            }
+            other => panic!("a release-promoted fragment is delivered: {other:?}"),
+        }
+
+        // A later edit that loses the promoted entry is a real drop.
+        let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
+        write("CHANGELOG.md", &changelog.replace("- **Kept entry** — Was: lost at release. Now: kept.\n", ""));
+        git(p, &["commit", "-q", "-am", "lose the promoted entry"]);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED") && message.contains(FRAGMENT), "{message}")
+            }
+            other => panic!("a fragment whose entry left CHANGELOG.md still refuses: {other:?}"),
+        }
+    }
+
     /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a
     /// draft block in guarded.txt. Changes are requested, so round two starts
     /// from the newer target and moves that block (the task's own later

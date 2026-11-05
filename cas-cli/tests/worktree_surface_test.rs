@@ -2648,6 +2648,85 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
     }
 }
 
+/// cas-4af9 (cas-343c, cas-dd05) and cas-c5db (cas-c9ec): the delivery already
+/// carries target commits that reach origin before and after its review. The
+/// candidate must be built on the fetched origin tip, and the one approval must
+/// survive a pure target-ref move and a queue-built landing with the same tree.
+#[tokio::test]
+async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() {
+    let mut env = test_env();
+    for landing in ["worktree_merge", "merge queue"] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+        // The source carries two target commits (A1, A2) below its own delivery.
+        run_git(&["reset", "--hard", "epic/rebound"], &fixture.worker);
+        let mut shared = Vec::new();
+        for file in ["shared_one.rs", "shared_two.rs"] {
+            std::fs::write(fixture.worker.join(file), format!("// {file} landed on the target too\n")).unwrap();
+            run_git(&["add", file], &fixture.worker);
+            run_git(&["commit", "-m", &format!("Target work in {file}")], &fixture.worker);
+            shared.push(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
+        }
+        std::fs::write(fixture.worker.join("delivery.txt"), "approved task delivery\n").unwrap();
+        run_git(&["add", "delivery.txt"], &fixture.worker);
+        run_git(&["commit", "-m", "cas-e429: approved delivery"], &fixture.worker);
+        run_git(&["push", "--force", "origin", &fixture.branch], &fixture.worker);
+        let tip = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+        let tip_tree = git_stdout(&fixture.worker, &["rev-parse", "HEAD^{tree}"]);
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        // Origin gains A1 while this checkout's local target still lags.
+        run_git(&["push", "origin", &format!("{}:refs/heads/epic/rebound", shared[0])], &fixture.worker);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let _ = fixture.service.factory(Parameters(merge.clone())).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap()
+            .expect("the merge dispatches one candidate review");
+        let candidate = &dispatch.repository.as_ref().expect("candidate proof").head_commit;
+        assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", &format!("{candidate}^1")]), shared[0],
+            "{landing}: the candidate is built on the fetched origin target, not the stale local ref");
+        let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Approve the candidate once",
+        })))).await.unwrap();
+        assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        // Only the target ref moves: A2 is already inside the reviewed source.
+        let landed = if landing == "merge queue" {
+            let queued = git_stdout(&fixture.repo.root, &["commit-tree", &tip_tree, "-p", &shared[1], "-p", &tip,
+                "-m", "Merge pull request from the merge queue"]);
+            run_git(&["push", "origin", &format!("{queued}:refs/heads/epic/rebound")], &fixture.repo.root);
+            Some(queued)
+        } else {
+            run_git(&["push", "origin", &format!("{}:refs/heads/epic/rebound", shared[1])], &fixture.worker);
+            None
+        };
+        run_git(&["fetch", "origin", "epic/rebound"], &fixture.repo.root);
+        run_git(&["update-ref", "refs/heads/epic/rebound", "refs/remotes/origin/epic/rebound"], &fixture.repo.root);
+        let retry = fixture.service.factory(Parameters(merge)).await;
+        let text = match &retry { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
+        assert!(retry.as_ref().is_ok_and(|result| !result.is_error.unwrap_or(false)),
+            "{landing}: the approved delivery publishes or reconciles: {text}");
+        assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap().id,
+            dispatch.id, "{landing}: the approval carries over; no second review: {text}");
+        let published = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        if let Some(queued) = landed {
+            assert_eq!(published, queued, "{landing}: reconciliation does not merge again: {text}");
+        }
+        run_git(&["merge-base", "--is-ancestor", &tip, &published], &fixture.repo.root);
+        assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound^{tree}"]), tip_tree,
+            "{landing}: the target holds exactly the approved tree");
+    }
+}
+
 #[tokio::test]
 async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_once() {
     let mut env = test_env();

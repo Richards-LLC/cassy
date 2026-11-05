@@ -440,7 +440,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cas_d1fe_spawn_and_stale_idle_assignment_use_the_peer_route() {
-        use crate::mcp::tools::types::{FactoryRequest, TaskCreateRequest, TaskUpdateRequest};
+        use crate::mcp::tools::{TaskCreateRequest, TaskUpdateRequest};
+        use cas_mcp::FactoryRequest;
         use crate::mcp::{CasCore, CasService};
         use rmcp::handler::server::wrapper::Parameters;
         let server = MockServer::start().await;

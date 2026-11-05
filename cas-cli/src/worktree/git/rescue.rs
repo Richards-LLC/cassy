@@ -274,5 +274,20 @@ mod tests {
             "{}",
             rescued.describe()
         );
+
+        // Adversarial: origin is gone. The work is still kept, locally, and
+        // the description says so instead of claiming a push.
+        drop(origin);
+        let local = ops
+            .rescue_unpushed_work("w", None, "HEAD", Some(dir))
+            .unwrap()
+            .expect("still rescued without a reachable origin");
+        assert!(local.pushed.is_err(), "{:?}", local.pushed);
+        assert_eq!(git(dir, &["rev-parse", &local.refname]), local.sha);
+        assert!(
+            local.describe().contains("local only: push to origin failed"),
+            "{}",
+            local.describe()
+        );
     }
 }

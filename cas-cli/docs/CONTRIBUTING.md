@@ -1080,6 +1080,17 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A confirmed publication shares a portable approval through the existing project
+peer mailbox. The daemon checks the Cloud-stamped sender against the project
+supervisor registry, matches the task/source/candidate/landing, and atomically
+imports a peer-attested dispatch and verdict into the receiving store. Repository
+paths are rebound locally; acknowledging or retiring a prompt never removes the
+proof. Generic verification writes cannot claim peer authority, and replay cannot
+replace an existing cycle or revive a reopened delivery. This requires the peer
+mailbox and sender registry to be available when receiving; failures retain the
+Cloud message for retry rather than inferring approval from its prose.
+
+
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.

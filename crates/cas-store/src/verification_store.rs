@@ -4882,6 +4882,15 @@ mod tests {
         assert_eq!(row.provenance, VerificationProvenance::Legacy);
         assert!(row.capability_id.is_none());
         assert!(row.issuer_agent_id.is_none());
+
+        for provenance in [VerificationProvenance::System, VerificationProvenance::PeerAttested,
+            VerificationProvenance::SupervisorDirect, VerificationProvenance::TaskVerifier] {
+            let mut forged = Verification::new(format!("ver-forged-{provenance}"), "cas-legacy".into());
+            forged.provenance = provenance;
+            let error = store.add(&forged).expect_err("generic writes cannot mint typed authority");
+            assert!(error.to_string().contains("provenance lacks exact durable authority"), "{error}");
+            assert!(store.get(&forged.id).is_err());
+        }
     }
 }
 

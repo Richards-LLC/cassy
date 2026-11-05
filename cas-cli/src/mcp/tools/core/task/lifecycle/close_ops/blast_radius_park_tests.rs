@@ -1050,6 +1050,15 @@ async fn peer_premerge_verdict_survives_mailbox_ack_and_closes_on_worker_machine
     env.set("CAS_AGENT_ROLE", "worker");
     let closed = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
     assert_eq!(f.task().status, TaskStatus::Closed, "{closed}");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reopened = call(&f.supervisor, serde_json::json!({"action":"reopen", "id":ID, "reason":"a new proof cycle"})).await;
+    assert_eq!(f.task().status, TaskStatus::Open, "{reopened}");
+    *claimed.lock().unwrap() = envelope;
+    let root = f.cas_dir();
+    let report = tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "worker-factory").unwrap().tick_blocking()).await.unwrap();
+    assert!(!report.errors.is_empty(), "a replay must not restore the reopened task's old authority");
+    assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().state, cas_types::VerificationDispatchState::Invalidated);
+
 }
 
 /// cas-3d70, through the real close: the commit-time anchor names a commit on

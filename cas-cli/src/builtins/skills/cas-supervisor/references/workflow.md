@@ -221,12 +221,18 @@ factory action=worktree_merge id=<worker> task_id=<task-id>
 
 `worktree_merge` admits a lane on its CI state and the merge preflight's
 conflict and dirt checks. It runs no local release rows and needs no compile
+<!-- cas-src:begin -->
 receipt. CI runs the fast rows once per lane; the worker's pre-push hook gives
 early feedback. Park reads a test receipt in each changed crate, without
 trusting local fast-row receipts or exceptions. `CAS_LANE_SLIM=true` omits broad
 Rust tests from lanes. The merge queue
 is the Rust compile and suite proof. Rust merges still use the detached venue's
 clean-target-checkout rule; commit or stash target-checkout dirt first.
+<!-- cas-src:else -->
+receipt. CI on the lane gives the merge signal; the worker's pre-push hook gives
+early feedback. Park reads a test receipt in each changed crate. The final gate
+in Phase 4 is the full suite proof.
+<!-- cas-src:end -->
 
 ### Wall-clock is a resource
 
@@ -263,10 +269,16 @@ The default merge preserves the worker checkout for continued work. A later
 has no nonterminal tasks. Keep the worker running while another process
 depends on its checkout path.
 
+<!-- cas-src:begin -->
 A merge into an `epic/` branch runs no local suite (3.54.0). The epic's one
 integration proof is the merge queue run for its PR. When that PR leaves the
 queue without merging, the daemon sends one `merge_queue_ejected` wake naming
 the PR and the failing job; nothing is re-enqueued automatically.
+<!-- cas-src:else -->
+A merge into an `epic/` branch runs no local suite. The epic's one
+integration proof is the final gate on its PR (CI on the landing SHA, or the
+supervisor's integrated run).
+<!-- cas-src:end -->
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
@@ -278,8 +290,13 @@ the PR and the failing job; nothing is re-enqueued automatically.
 Before landing a worker lane, do these two checks. Workers may carry capped
 `check: PASS <sha>` and targeted `test: PASS <sha> <package> <filter> <count>`
 evidence; verify they name the delivered commit and affected scope. The full
+<!-- cas-src:begin -->
 Rust build and suite run once, at the Phase 4 final gate: the merge queue where
 base has one, otherwise local assembly.
+<!-- cas-src:else -->
+build and suite run once, at the Phase 4 final gate: CI on the landing SHA,
+otherwise the supervisor's integrated run.
+<!-- cas-src:end -->
 
 For public surfaces, score distinctiveness, fit and hierarchy 1–5 using
 cas-codebase-design before merge; the floor is 4/5. Record exceptions/remedies.
@@ -399,8 +416,13 @@ After the rebase, run the same command against the new base.
   `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
 A matching patch-id proves the diff is the same. It does not prove the diff
+<!-- cas-src:begin -->
 still integrates with the new base: the merge queue run on the epic PR
 still proves that. A green CI run is not a review verdict. Runtime evidence
+<!-- cas-src:else -->
+still integrates with the new base: the final gate on the epic PR
+still proves that. A green CI run is not a review verdict. Runtime evidence
+<!-- cas-src:end -->
 and independent QA have separate reuse limits in [correction proof](correction-proof.md).
 
 ## Phase 3: Review (Shared Mode)
@@ -457,10 +479,15 @@ release.
 
 Scope freezes when closeout starts. A new finding goes to the next board unless it
 loses data, hides state or hurts someone today. A fix for something hurting the
+<!-- cas-src:begin -->
 operator ships alone with `scripts/release.sh --hotfix`.
+<!-- cas-src:else -->
+operator ships alone as a hotfix release.
+<!-- cas-src:end -->
 
 ## Interim queue precheck
 
+<!-- cas-src:begin -->
 Until the hosted precheck (cas-298f) ships, the supervisor runs this diagnostic
 in a new, clean checkout at the reviewed or corrected SHA. Replace the
 source path, destination and SHA below; the destination must not exist. Use the normal shell
@@ -490,21 +517,39 @@ precheck, not final merged-tree proof; the queue still owns that proof.
 Do not substitute `assembly-proof.py`: its scrubbed environment cannot resolve
 Playwright or browser installations outside `/home` on soundwave. cas-298f
 replaces this manual precheck when its hosted command is available.
+<!-- cas-src:else -->
+This precheck belongs to the Cassy source repository. In other projects, CI
+check-runs on the reviewed SHA (or the supervisor's integrated run of the
+commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
+<!-- cas-src:end -->
 
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
+   <!-- cas-src:begin -->
    Then run the closeout in this order, once: freeze scope; start one full review; put every finding into one batch fix; re-review only the fix diff; run one QA round; enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
+   <!-- cas-src:else -->
+   Then run the closeout in this order, once: freeze scope; start one full review; put every finding into one batch fix; re-review only the fix diff; run one QA round; merge or enqueue. Fix tasks run only their touched tests. The final gate (step 4) is the one full-suite proof. Restart from a handoff at freeze, after the batch fix and after the QA receipt, and keep supervisor context under 200K tokens.
+   <!-- cas-src:end -->
 2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
-3. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 4), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
+3. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate (step 4).
+   <!-- cas-src:begin -->
+   Where a merge queue is the final gate, enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
+   <!-- cas-src:end -->
 4. Run the final assembled-tree gate. This is the epic's single full-suite run, on the tree that lands; skip it when the queue or CI already ran it.
+   <!-- cas-src:begin -->
    **When the base branch lands through a merge queue that runs the full suite
    on the merged tree, that queue run is this gate.** Do not run a local full
    suite before the PR: lane CI admits lanes, the epic PR
    enters the queue, and the queue proves the exact tree that becomes base. The
    epic closes once its tip is contained in base.
+   <!-- cas-src:else -->
+   CI that runs the full suite on the exact landing SHA is this gate. The
+   epic closes once its tip is contained in base.
+   <!-- cas-src:end -->
    Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
    Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
+   <!-- cas-src:begin -->
    if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
    with `scripts/assembly-proof.py` that gate is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
@@ -514,6 +559,10 @@ replaces this manual precheck when its hosted command is available.
    names its source worktree and HEAD. For scoped Cargo checks outside assembly,
    run `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`;
    `scripts/run-scoped-tests.sh` uses the same isolation automatically.
+   <!-- cas-src:else -->
+   if unavailable, run the project's full suite (the commands its CLAUDE.md or
+   AGENTS.md names) on that SHA and record it on the epic.
+   <!-- cas-src:end -->
    A matching code tree reuses its durable two-context PASS; integration recovery and the
    release gate cite that receipt instead of running the suite again.
    On exit 0, record a progress note on the epic:

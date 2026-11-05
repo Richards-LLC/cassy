@@ -1079,6 +1079,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.slot_id", " second-supervisor ", "second-supervisor"),
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
+        ("factory.worker_local_gate", " pnpm ci:local ", "pnpm ci:local"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),

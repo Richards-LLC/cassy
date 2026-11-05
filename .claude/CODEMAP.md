@@ -16,7 +16,7 @@
 - `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, script and toolchain roots.
 - `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policies.
 - `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and system references.
-- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`.
+- `changelog.d/` - per-delivery unreleased changelog fragments; `scripts/release_changelog.py promote` folds them into `CHANGELOG.md`; `verify-deliveries` checks explicit task claims against Git commits and patch equivalence once during release preparation.
 
 ## Workspace / packages
 
@@ -49,7 +49,7 @@
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded mutations and shared-link repair.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/cli/limits.rs` - harness launch, login, account choice and capacity reports.
 - `cas-cli/src/agent_model.rs` - role-scoped model/effort observations used by hooks, Commander and status.
-- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs` - health, update receipts and account/root readiness.
+- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs` - health (including retired MCP guidance), update receipts and account/root readiness.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
 - `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/` - hook dispatch, native lifecycle handlers and policy, including pattern-signal refusal for every factory role and inherited native subagents.
 - `cas-cli/src/hooks/handoff_updates.rs` - bounded Violet reads of handoff-named channels and threads; newer human posts precede the saved handoff.

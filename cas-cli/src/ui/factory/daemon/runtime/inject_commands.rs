@@ -47,6 +47,8 @@ pub(crate) struct BroadcastTally {
     pub(crate) attempted: u32,
     pub(crate) succeeded: u32,
     pub(crate) failed: u32,
+    /// cas-99b5: members held for an in-flight tool call; the row stays open.
+    pub(crate) held: u32,
     pub(crate) notes: Vec<String>,
     /// Members whose inject has not reported yet.
     pub(crate) pending: usize,
@@ -59,6 +61,7 @@ impl BroadcastTally {
             attempted,
             succeeded: 0,
             failed: 0,
+            held: 0,
             notes: Vec::new(),
             pending: 0,
         }

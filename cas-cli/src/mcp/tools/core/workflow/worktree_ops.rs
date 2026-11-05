@@ -1675,11 +1675,22 @@ fn restore_unreviewed_protected_merge(
     operations: &crate::worktree::GitOperations,
     target: &str,
     base: Option<&str>,
+    attempted: Option<&str>,
+    source: Option<&str>,
     outcome: &crate::worktree::git::TargetPushOutcome,
 ) -> String {
-    let (Some(base), crate::worktree::git::TargetPushOutcome::ProtectedDefaultBranch { sha, .. }) = (base, outcome) else {
+    let (Some(base), Some(attempted), Some(source), crate::worktree::git::TargetPushOutcome::ProtectedDefaultBranch { sha, .. }) = (base, attempted, source, outcome) else {
         return "No new local merge was owned by this attempt; no history was rewound.".into();
     };
+    // Publication may observe a later writer after the merge returned. It
+    // owns neither that commit nor subsequent progress containing this source.
+    let parent = operations.first_parent(sha);
+    if sha != attempted || parent.as_deref().is_some_and(|parent| operations.is_ancestor(source, parent)) {
+        return "Local rollback declined: subsequent target progress was preserved; inspect the target before retrying.".into();
+    }
+    // A writer before the actual merge belongs to its first parent. Restore
+    // that real base rather than discarding progress after the earlier probe.
+    let base = if sha == source { base } else { parent.as_deref().unwrap_or(base) };
     match super::premerge_verification::restore_unpublished_merge(operations, target, base, sha) {
         Ok(()) => format!("Unconfirmed merge restored locally to {base}. Source retained for the PR route."),
         Err(error) => format!("Local rollback declined: {error}. Concurrent history and working edits were preserved; inspect the target before retrying."),
@@ -5822,7 +5833,8 @@ impl CasCore {
             }
             if let Some(error) = protected_error {
                 let restored = restore_unreviewed_protected_merge(
-                    manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), &push_outcome,
+                    manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(),
+                    Some(&target_tip), Some(&receipt.commit_sha), &push_outcome,
                 );
                 return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
             }
@@ -6024,7 +6036,8 @@ impl CasCore {
         }
         if let Some(error) = protected_error {
             let restored = restore_unreviewed_protected_merge(
-                manager.git(), &push_branch, unpublished_merge_base.as_deref(), &push_outcome,
+                manager.git(), &push_branch, unpublished_merge_base.as_deref(),
+                merge_commit.as_deref(), observed_source_tip.as_deref(), &push_outcome,
             );
             return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
         }

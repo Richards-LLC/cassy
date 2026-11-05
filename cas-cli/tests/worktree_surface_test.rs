@@ -4814,24 +4814,32 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
 #[tokio::test]
 async fn protected_main_refusal_without_dispatch_restores_target_cas_d6cf() {
     for cleanup in [false, true] {
-        protected_main_fixture_cas_d6cf(false, false, cleanup).await;
+        protected_main_fixture_cas_d6cf("unknown", cleanup).await;
     }
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn queued_main_uses_pr_before_local_merge_without_dispatch_cas_d6cf() {
-    protected_main_fixture_cas_d6cf(true, false, false).await;
+    protected_main_fixture_cas_d6cf("queued", false).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
-    protected_main_fixture_cas_d6cf(true, true, false).await;
+    protected_main_fixture_cas_d6cf("moved", false).await;
 }
 
 #[cfg(unix)]
-async fn protected_main_fixture_cas_d6cf(queued: bool, moved: bool, cleanup: bool) {
+#[tokio::test]
+async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
+    protected_main_fixture_cas_d6cf("subsequent", false).await;
+}
+
+#[cfg(unix)]
+async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
+    let queued = matches!(mode, "queued" | "moved");
+    let moved = mode == "moved";
     let mut env = test_env();
     let repo = GitRepo::new();
     let remote = TempDir::new().unwrap();
@@ -4892,6 +4900,16 @@ esac
 "#, calls=gh_calls.display(), exists=pr_exists.display(), armed=armed.display(), url=pr_url));
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
     }
+    let peer_tip = remote.path().join("peer-tip");
+    if mode == "subsequent" {
+        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/post-merge"), &format!(r#"#!/bin/sh
+head=$(git rev-parse HEAD)
+tree=$(git rev-parse 'HEAD^{{tree}}')
+peer=$(git commit-tree "$tree" -p "$head" -m 'Subsequent target progress')
+git update-ref refs/heads/main "$peer" "$head"
+printf '%s\n' "$peer" > '{}'
+"#, peer_tip.display()));
+    }
     let operator_edit = "unrelated operator edit\n";
     std::fs::write(repo.root.join("README.md"), operator_edit).unwrap();
     env.set_current_dir(&repo.root);
@@ -4913,6 +4931,15 @@ esac
     }
     let response = result.unwrap();
     let text = get_text(&response);
+    if mode == "subsequent" {
+        let peer = std::fs::read_to_string(peer_tip).unwrap();
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), peer.trim(),
+            "rollback must decline a later target commit: {text}");
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), source);
+        assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), operator_edit);
+        return;
+    }
     if queued {
         // pin: no attempted remote main update is the queue-before-merge contract.
         assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().lines().any(|line| line == "refs/heads/main"),

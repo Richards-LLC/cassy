@@ -696,17 +696,19 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
             }).await.expect("registry replacement must complete the original receipt");
-            quiet_for(&mut daemon, &name, COMMAND_SETTLE);
             let replay = Request::Run { command, confirmed: false };
-            daemon.dispatch_supervisor_command(replay.clone(), "reload-timeout".into(), owner.clone()).await.unwrap();
-            let timeout_owner = ("reload-owner".into(), "reload-timeout".into());
-            daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap().started -= Duration::from_secs(91);
-            let run_timeout = daemon.dispatch_supervisor_command(replay, "reload-timeout".into(), owner.clone()).await.unwrap();
+            let timeout_owner = ("reload-owner".into(), "reload".into());
+            // Exercise an expired submitted receipt without issuing a second
+            // native command while the original paced input is still draining.
+            let record = daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap();
+            record.receipt.phase = Phase::Submitted;
+            record.started -= Duration::from_secs(91);
+            let run_timeout = daemon.dispatch_supervisor_command(replay, "reload".into(), owner.clone()).await.unwrap();
             let DaemonMessage::SupervisorCommandReceipt { receipt: run_timeout } = run_timeout else { panic!("owned reload receipt") };
             assert_eq!(run_timeout.phase, Phase::Unconfirmed);
             assert!(run_timeout.detail.contains("replacement live MCP PID and version"), "{}", run_timeout.detail);
             daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap().receipt.phase = Phase::Submitted;
-            let status_timeout = daemon.dispatch_supervisor_command(Request::Status, "reload-timeout".into(), owner.clone()).await.unwrap();
+            let status_timeout = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
             assert!(matches!(status_timeout, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed && receipt.detail == run_timeout.detail));
         }
     }

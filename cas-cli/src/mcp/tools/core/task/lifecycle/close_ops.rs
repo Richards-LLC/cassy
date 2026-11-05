@@ -10362,16 +10362,16 @@ impl CasCore {
                                     // cas-defb: a no-code delivery is its external
                                     // proof; pin the reviewed commit so a sibling
                                     // merge or the lane's next task cannot stale it.
-                                    // cas-f43d: so is any close measured with no
-                                    // commit of its own (the no-code flag's own
-                                    // check), declared or not.
+                                    // cas-f43d: so is a close measured as delivering
+                                    // nothing from a clean checkout, declared or not:
+                                    // the reviewed tree is exactly that commit.
                                     if epic_proof_ref.is_none()
-                                        && (empty_delivery
-                                            || task.execution_note.as_deref() == Some("no-code")
-                                            || task_without_own_commits_judged(
+                                        && (task.execution_note.as_deref() == Some("no-code")
+                                            || (measure_no_delivery(
                                                 worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
-                                                &task, &resolved_parent_branch, delivery_receipt, false,
-                                            ))
+                                                no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch,
+                                                delivery_receipt, commit_receipt_window.as_ref(),
+                                            ).is_ok() && checkout_is_clean(&proof_worktree)))
                                     {
                                         crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
                                     } else {
@@ -16429,6 +16429,13 @@ fn no_delivery_source_is_empty_or_sibling_only(repo: &std::path::Path, task: &Ta
         }
     }
     true
+}
+
+/// cas-f43d: no tracked change and no untracked file outside `.cas`.
+fn checkout_is_clean(worktree: &std::path::Path) -> bool {
+    std::process::Command::new("git").arg("-C").arg(worktree)
+        .args(["status", "--porcelain", "--", ".", ":(exclude).cas", ":(exclude).cas/**"])
+        .output().is_ok_and(|out| out.status.success() && out.stdout.is_empty())
 }
 
 /// Prove absence for a fresh no_delivery declaration, rather than interpreting

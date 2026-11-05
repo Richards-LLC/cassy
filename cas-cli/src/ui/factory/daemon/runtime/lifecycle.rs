@@ -145,6 +145,67 @@ pub(super) fn record_operator_page(
     true
 }
 
+/// cas-d4b7: a dispatch whose verifier is still alive and progressing keeps
+/// its deadline instead of expiring at ten minutes behind build admission.
+/// Progress is a verifier heartbeat or an active verifier-lane checkout at
+/// the bound head. Each sweep moves a due-soon deadline ten minutes out,
+/// never past an hour after the request. Returns how many were extended.
+fn extend_progressing_verification_dispatches(
+    cas_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    use chrono::Duration;
+    // The sweep runs every 60 s; extend before the deadline can lapse.
+    let lead = Duration::minutes(2);
+    let extension = Duration::minutes(10);
+    let hard_cap = Duration::minutes(60);
+    let heartbeat_fresh = Duration::minutes(3);
+    let lane_fresh = Duration::minutes(5);
+    let Ok(due) = cas_store::expired_verification_dispatches(cas_dir, now - hard_cap, now + lead, 1000)
+    else {
+        return 0;
+    };
+    let agents = crate::store::open_agent_store(cas_dir).ok();
+    due.into_iter()
+        .filter(|dispatch| {
+            matches!(
+                dispatch.state,
+                cas_types::VerificationDispatchState::Pending
+                    | cas_types::VerificationDispatchState::Claimed
+            )
+        })
+        .filter(|dispatch| {
+            let heartbeat = dispatch.verifier_agent_id.as_deref().is_some_and(|verifier| {
+                agents.as_ref().and_then(|agents| agents.get(verifier).ok()).is_some_and(|agent| {
+                    matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
+                        && now - agent.last_heartbeat <= heartbeat_fresh
+                })
+            });
+            heartbeat
+                || dispatch.repository.as_ref().is_some_and(|proof| {
+                    crate::factory_review_scratch::verifier_lane_active(
+                        cas_dir,
+                        &dispatch.task_id,
+                        &dispatch.id,
+                        &proof.head_commit,
+                        now,
+                        lane_fresh,
+                    )
+                })
+        })
+        .filter(|dispatch| {
+            cas_store::extend_verification_dispatch_deadline(
+                cas_dir,
+                &dispatch.id,
+                now,
+                now + extension,
+                hard_cap,
+            )
+            .is_ok_and(|extended| extended.is_some())
+        })
+        .count()
+}
+
 /// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
 /// no verdict wakes the supervisor through a durable worker-attention relay,
 /// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
@@ -162,6 +223,7 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
+    extend_progressing_verification_dispatches(cas_dir, now);
     let since = now - chrono::Duration::hours(
         crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
     );
@@ -1944,6 +2006,81 @@ mod worker_attention_tests {
         assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
         // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
         assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
+    }
+
+    /// cas-d4b7 replays cas-5597/cas-cff4/cas-4b22/cas-62c3: the verifier was
+    /// still building behind admission when the ten-minute deadline passed.
+    /// A live heartbeat or an active verifier lane keeps the dispatch out of
+    /// the expiry relay; silence still expires; an hour is the hard cap.
+    #[test]
+    fn a_progressing_verifier_keeps_its_dispatch_until_the_hard_cap_cas_d4b7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SESSION", "dispatch-progress-test"),
+            ("CAS_FACTORY_DISABLE_TARGET_SEED", "1"),
+        ]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"]).args(args)
+                .output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "base"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        register_supervisor(&cas_dir, "dispatch-progress-test");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut verifier = Agent::new("verifier-live".into(), "task-verifier".into());
+        verifier.status = AgentStatus::Active;
+        agents.register(&verifier).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        let proof = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: repo.display().to_string(),
+            worktree_root: repo.display().to_string(), head_commit: head.clone(),
+            state_digest: String::new(), target_branch: None, anchor_commits: Vec::new(),
+        });
+        let dispatch = |task: &str| {
+            tasks.add(&cas_types::Task::new(task.into(), task.into())).unwrap();
+            cas_store::create_verification_dispatch_bound(&cas_dir, task, "worker-id", "supervisor-id",
+                &proof, now + chrono::Duration::minutes(1), false).unwrap()
+        };
+        let heartbeat = dispatch("cas-heartbeat");
+        cas_store::claim_verification_dispatch_bound(&cas_dir, &heartbeat.id, "supervisor-id", "verifier-live", "cap-live")
+            .unwrap();
+        let lane = dispatch("cas-lane");
+        drop(crate::factory_review_scratch::create(&cas_dir, &repo, "cas-lane", Some(&lane.id), &head).unwrap());
+        let silent = dispatch("cas-silent");
+
+        // The deadline passed 30 s ago; the sweep is the only expiry alarm.
+        let swept = now + chrono::Duration::seconds(90);
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, swept), 1);
+        let relays = |at| {
+            escalate_expired_verification_dispatches(&cas_dir, at);
+            crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap()
+        };
+        let rows = relays(swept);
+        assert!(rows.len() == 1 && rows[0].prompt.contains(&silent.id), "only silence expires: {rows:?}");
+        for id in [&heartbeat.id, &lane.id] {
+            let extended = cas_store::get_verification_dispatch(&cas_dir, id).unwrap();
+            assert_eq!(extended.deadline_at, swept + chrono::Duration::minutes(10), "{id}");
+        }
+
+        // Adversarial probe: a verifier that still heartbeats past the hour
+        // cap expires; the extension never moves the deadline into the past.
+        let capped = heartbeat.requested_at + chrono::Duration::minutes(61);
+        let mut verifier = agents.get("verifier-live").unwrap();
+        verifier.last_heartbeat = capped;
+        agents.update(&verifier).unwrap();
+        let rows = relays(capped);
+        assert!(rows.iter().any(|row| row.prompt.contains(&heartbeat.id)), "the hour cap is hard: {rows:?}");
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &heartbeat.id).unwrap().deadline_at,
+            swept + chrono::Duration::minutes(10));
     }
 
     /// cas-b080: more expiries in the window than one sweep relays. The

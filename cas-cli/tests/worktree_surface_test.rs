@@ -2829,6 +2829,99 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
     }
 }
 
+/// cas-d4b7 replays the six manual rebinds (cas-d1fe, cas-015e, cas-8aa1,
+/// cas-cff4 twice, cas-62c3): after approval the target edits a file the
+/// delivery also edits, so the reviewed tree no longer recomputes, yet the
+/// patch the merge adds is unchanged. Far and context-only edits rebind
+/// the one approval with a receipt; a target edit that changes the
+/// delivered patch still dispatches a fresh review.
+#[tokio::test]
+async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
+    let mut env = test_env();
+    let shared = |edits: &[(usize, &str)]| {
+        (1..=20)
+            .map(|n| edits.iter().find(|(line, _)| *line == n)
+                .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
+            .collect::<String>()
+    };
+    for (case, line, text) in [
+        ("full-context", 18, "target 18"),
+        ("zero-context", 5, "target 5"),
+        ("changed patch", 3, "delivered 3"),
+    ] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+        let sync_target = || {
+            run_git(&["fetch", "origin", "epic/rebound"], &fixture.repo.root);
+            run_git(&["update-ref", "refs/heads/epic/rebound", "refs/remotes/origin/epic/rebound"], &fixture.repo.root);
+        };
+        run_git(&["reset", "--hard", "epic/rebound"], &fixture.worker);
+        std::fs::write(fixture.worker.join("shared.rs"), shared(&[])).unwrap();
+        run_git(&["add", "shared.rs"], &fixture.worker);
+        run_git(&["commit", "-m", "Shared file on the target"], &fixture.worker);
+        run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &fixture.worker);
+        std::fs::write(fixture.worker.join("shared.rs"), shared(&[(3, "delivered 3")])).unwrap();
+        std::fs::write(fixture.worker.join("delivery.txt"), "approved task delivery\n").unwrap();
+        run_git(&["add", "shared.rs", "delivery.txt"], &fixture.worker);
+        run_git(&["commit", "-m", "cas-e429: approved delivery"], &fixture.worker);
+        run_git(&["push", "--force", "origin", &fixture.branch], &fixture.worker);
+        let tip = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+        sync_target();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let _ = fixture.service.factory(Parameters(merge.clone())).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Approve this delivered patch once",
+        })))).await.unwrap();
+        assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        // A sibling delivery lands an edit in the same file before the merge.
+        let writer = fixture.cas_root.join("target-writer");
+        run_git(&["worktree", "add", "--detach", writer.to_str().unwrap(), "refs/remotes/origin/epic/rebound"],
+            &fixture.repo.root);
+        std::fs::write(writer.join("shared.rs"), shared(&[(line, text)])).unwrap();
+        run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
+        run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
+        sync_target();
+        let result = fixture.service.factory(Parameters(merge)).await;
+        let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
+        let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        let handoffs = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap().peek_all(100).unwrap()
+            .iter().filter(|row| row.source.starts_with("verification-dispatch:")).count();
+        let published = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
+                .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
+        assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
+        if case == "changed patch" {
+            assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
+            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
+            assert!(!landed, "{case}: nothing publishes before that review: {text}");
+            continue;
+        }
+        let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &latest.id).unwrap().unwrap();
+        assert_eq!(latest.state, cas::types::VerificationDispatchState::Resolved, "{case}: {text}");
+        assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
+        assert!(verdict.summary.starts_with("VERDICT REBIND") && verdict.summary.contains(case)
+            && verdict.summary.contains(&dispatch.id), "{case}: the receipt names the patch-id match: {}", verdict.summary);
+        assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
+        assert!(landed, "{case}: the rebound approval publishes: {text}");
+        assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
+            shared(&[(3, "delivered 3"), (line, text)]).trim_end(), "{case}");
+    }
+}
+
 #[tokio::test]
 async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_once() {
     let mut env = test_env();

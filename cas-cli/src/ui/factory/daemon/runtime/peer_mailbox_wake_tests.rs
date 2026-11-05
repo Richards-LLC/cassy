@@ -196,25 +196,47 @@ async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
     );
 }
 
+/// cas-7dd1d: replay gabber's three overnight untyped asks to prowl (rows
+/// 2581417-2581419, Nov 5) through the real sender stamp. They were stamped
+/// kind=receipt and parked quiet for 7 h. Each must now fire a wake, whether
+/// it comes from a same-repo peer on another machine, another project on
+/// another machine, or another project on this machine; a legacy body with
+/// no intent line still wakes too.
 #[tokio::test(flavor = "current_thread")]
-async fn peer_fyi_real_queue_wakes_without_a_kind_cas_1e7e2() {
+async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
+    use crate::cloud::peer_mailbox::{PeerScope, attach_message_intent};
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_root, mut daemon) = peer_fixture().await;
-    let imported = import(&daemon, vec![peer_message("pm-fyi", false)]);
-    assert_eq!(imported.delivered, 1);
-    age_imported(&daemon);
-    daemon.process_prompt_queue().await.unwrap();
-    super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
-    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    let report = queue
-        .message_delivery_report(imported.admitted[0])
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        report.wake_attempt,
-        cas_store::WakeAttempt::Fired,
-        "no-kind field report wakes an idle supervisor: {report:?}"
-    );
+    let stamp = |body: &str| attach_message_intent(body, None, false).unwrap();
+    let cases = [
+        ("pm-9b7b9e0b", PeerScope::Project, "other-box", stamp("Release frozen and green. Please start the review now.")),
+        ("pm-8e716afb", PeerScope::User, "other-box", stamp("What's its ETA?")),
+        ("pm-9c915946", PeerScope::User, "this-box", stamp("Reply right away: the release is waiting on you.")),
+        ("pm-legacy", PeerScope::Project, "other-box", "Substantive field report".to_string()),
+    ];
+    for (id, scope, machine, body) in cases {
+        let (_root, mut daemon) = peer_fixture().await;
+        let mut message = peer_message(id, false);
+        (message.scope, message.body) = (scope, body);
+        message.sender_machine_id = Some(machine.into());
+        if scope == PeerScope::User {
+            message.project_id = "github.com/acme/gabber".into();
+        }
+        let imported = import(&daemon, vec![message]);
+        assert_eq!(imported.delivered, 1, "{id}: {imported:?}");
+        age_imported(&daemon);
+        daemon.process_prompt_queue().await.unwrap();
+        super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        let report = queue
+            .message_delivery_report(imported.admitted[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            report.wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "{id}: an untyped peer message wakes an idle supervisor: {report:?}"
+        );
+    }
 }
 
 async fn action_wakes(kind: &str) {

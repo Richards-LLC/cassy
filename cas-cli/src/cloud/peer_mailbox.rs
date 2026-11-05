@@ -281,8 +281,10 @@ pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> R
     let kind = if blocker {
         PeerMessageKind::Blocker
     } else {
-        // Untyped peer mail is an FYI. An explicit action opts into a wake.
-        kind.unwrap_or(PeerMessageKind::Receipt)
+        // cas-7dd1d: untyped directed peer mail is an ask, so it wakes an
+        // idle peer. Only an explicit receipt/quiet, wake=false (the body's
+        // quiet marker) or a content-free acknowledgement stays quiet.
+        kind.unwrap_or(PeerMessageKind::Ask)
     };
     Ok(format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()))
 }

@@ -3686,6 +3686,8 @@ impl FactoryDaemon {
         // lose both its auto-merge arm and queue entry without a merge-group
         // run, which still needs one supervisor wake.
         let mut last_auto_merge_membership = std::collections::BTreeSet::new();
+        // cas-73fa: run-less queue exits awaiting their confirming poll.
+        let mut last_held_queue_exits = std::collections::BTreeSet::new();
         // cas-e753 (GH #1145): Violet push-wake. Claims run on the blocking
         // pool every 15 s; channel sweeps run as their own task so a slow
         // Violet read never holds up the next claim.
@@ -3932,6 +3934,7 @@ impl FactoryDaemon {
                     let watch_cas_dir = self.app.cas_dir().to_path_buf();
                     let previously_queued = last_merge_queue_membership.clone();
                     let previously_armed = last_auto_merge_membership.clone();
+                    let previously_held = last_held_queue_exits.clone();
                     let mut watched_branches =
                         std::collections::BTreeSet::from(["main".to_string()]);
                     if let Some(manager) = self.app.worktree_manager() {
@@ -3983,6 +3986,7 @@ impl FactoryDaemon {
                             &supervisor_prs,
                             &previously_queued,
                             &previously_armed,
+                            &previously_held,
                         )?;
                         // Reuse this existing bounded background read. Presence
                         // publishes the local snapshot; the control loop does
@@ -4028,6 +4032,7 @@ impl FactoryDaemon {
                             self.pending_ci_wakes.extend(ci_wakes);
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
+                            last_held_queue_exits = queue_poll.held_exits;
                             // GH #1165: persisting the results is store work;
                             // it runs on the store worker, in order.
                             let cas_dir = self.app.cas_dir().to_path_buf();

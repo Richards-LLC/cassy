@@ -2501,6 +2501,88 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 }
 
 #[tokio::test]
+async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
+    let mut env = test_env();
+    for continuation in ["generated", "foreign", "spoofed"] {
+        let f = rebound_merge_fixture(&mut env).await;
+        run_git(&["switch", "main"], &f.repo.root);
+        std::fs::write(f.repo.root.join("released.txt"), "released upstream\n").unwrap();
+        run_git(&["add", "released.txt"], &f.repo.root);
+        run_git(&["commit", "-m", "fix(cas-abcd): released upstream"], &f.repo.root);
+        run_git(&["push", "origin", "main"], &f.repo.root);
+        run_git(&["merge", "--no-ff", "main", "-m", "merge(cas-e429): import main"], &f.worker);
+        let attributed = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        let tasks = open_task_store(&f.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.deliverables.factory_branch_anchor = Some(attributed.clone());
+        tasks.update(&task).unwrap();
+
+        run_git(&["switch", "epic/rebound"], &f.repo.root);
+        std::fs::write(f.repo.root.join("sibling.txt"), "integrated sibling\n").unwrap();
+        run_git(&["add", "sibling.txt"], &f.repo.root);
+        run_git(&["commit", "-m", "fix(cas-abcd): advance target"], &f.repo.root);
+        run_git(&["push", "origin", "epic/rebound"], &f.repo.root);
+        run_git(&["merge", "--no-ff", "epic/rebound", "-m", "sync target before first park"], &f.worker);
+        let merged = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        let generated = "cas-cli/src/builtins/reference-history.json";
+        std::fs::create_dir_all(f.worker.join(generated).parent().unwrap()).unwrap();
+        std::fs::write(f.worker.join(generated), "{}\n").unwrap();
+        run_git(&["add", generated], &f.worker);
+        run_git(&["commit", "-m", "build(builtins): regenerate reference-history from merged history", "-m",
+            &format!("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9])], &f.worker);
+        if continuation != "generated" {
+            std::fs::write(f.worker.join("foreign.txt"), "another task's work\n").unwrap();
+            run_git(&["add", "foreign.txt"], &f.worker);
+            let (subject, body) = if continuation == "foreign" {
+                ("feat(cas-abcd): unrelated continuation", "Another task's delivery")
+            } else {
+                ("build(builtins): regenerate reference-history from merged history",
+                 "Rebuilt by scripts/regenerate-generated-artifacts.sh after merging HEAD (cas-fb11).")
+            };
+            run_git(&["commit", "-m", subject, "-m", body], &f.worker);
+        }
+        let head = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", &f.branch], &f.worker);
+        let local_before = git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]);
+        let remote_before = git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        env.set_current_dir(&f.worker);
+        let closed = delivery_service(&f.cas_root, "rebound-worker").task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": format!("PASS {head}: fixture proof"),
+        })))).await.unwrap();
+        let text = get_text(&closed);
+        let parked = tasks.get(&task.id).unwrap();
+        if continuation == "foreign" {
+            assert_eq!(parked.status, TaskStatus::InProgress, "{text}");
+            assert!(text.contains("DELIVERY BRANCH UNRESOLVED"), "{text}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
+        env.set_current_dir(&f.repo.root);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(f.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        if continuation != "generated" {
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            let refused = f.service.factory(Parameters(merge)).await.expect_err("foreign continuation must never land");
+            assert!(refused.message.contains("PARKED DELIVERY SOURCE MOVED"), "{continuation}: {refused}");
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()),
+            "cas-9533: first park must bind the pushed, validated HEAD, not the earlier attributed merge: {text}");
+        let merged = f.service.factory(Parameters(merge)).await.expect("the first parked HEAD must merge without a re-park");
+        assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
+        assert_eq!(git_stdout(&f.repo.root, &["show", &format!("epic/rebound:{generated}")]), "{}");
+    }
+    env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+}
+
+#[tokio::test]
 async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
     let mut env = test_env();
     for verdict in ["timed_out", "approved", "rejected"] {

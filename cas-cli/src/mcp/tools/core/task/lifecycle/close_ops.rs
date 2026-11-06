@@ -9369,7 +9369,13 @@ impl CasCore {
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, anchor.as_deref(),
                         ).or_else(|| task.deliverables.factory_branch_anchor.clone())
-                    } else { parking.deliverables.factory_branch_anchor.clone().or(anchor.clone()) };
+                    } else {
+                        // Predict the same handoff/anchor decision that the
+                        // guarded park will persist, including branch changes.
+                        let mut delivery = parking.deliverables.clone();
+                        delivery.record_park(measured_branch.as_deref(), anchor.as_deref(), task.assignee.as_deref());
+                        delivery.factory_branch_anchor
+                    };
                     if tip_is_pushed && let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
                         for boundary in req.commit_receipt.as_deref().into_iter()
                             .chain(park_anchor.as_deref())
@@ -25207,6 +25213,38 @@ pub(crate) fn target_sync_only_advance(
         })
 }
 
+/// Regeneration provenance names the task that introduced the generator,
+/// not the task delivering these outputs. Only its canonical subject, body
+/// and output paths may cross the foreign-task message fence.
+fn generated_delivery_continuation(
+    repo: &std::path::Path,
+    commit: &str,
+    parent: &str,
+    message: &str,
+) -> bool {
+    let (tag, outputs): (&str, &[&str]) = match message.trim().lines().next() {
+        Some("build(builtins): regenerate reference-history from merged history") => (
+            "cas-fb11",
+            &[REFERENCE_HISTORY_LEDGER, "cas-cli/src/builtins/codex/agents/task-verifier.toml", ".codex/agents/task-verifier.toml"],
+        ),
+        Some("build(hub-web): regenerate dist from merged sources") => ("cas-0c988", &[]),
+        _ => return false,
+    };
+    let provenance = message.lines().any(|line| {
+        line.strip_prefix("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging ")
+            .and_then(|line| line.strip_suffix(&format!(" ({tag}).")))
+            .is_some_and(|reference| reference == "HEAD"
+                || ((9..=64).contains(&reference.len())
+                    && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && git_commit_is_ancestor(repo, reference, parent)))
+    });
+    provenance && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", parent, commit, "--"])
+        .is_ok_and(|paths| !paths.is_empty() && paths.iter().all(|path| {
+            if tag == "cas-0c988" { path.starts_with("hub-web/dist/") }
+            else { outputs.contains(&path.as_str()) }
+        }))
+}
+
 /// cas-9668: an epic sync imports sibling commits without transferring the
 /// task's delivery identity. Each side parent must belong to the declared
 /// target or released trunk to bypass the foreign-task check; direct commits
@@ -25236,7 +25274,7 @@ fn parked_anchor_advance_with_target_is_attributable(
         .args([
             "log",
             "--first-parent",
-            "--format=%P%x1f%ct%x1f%B%x1e",
+            "--format=%H%x1f%P%x1f%ct%x1f%B%x1e",
             &format!("{recorded}..{candidate}"),
             "--",
         ])
@@ -25253,9 +25291,11 @@ fn parked_anchor_advance_with_target_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (sha, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (parents, rest) = rest.split_once('\u{1f}')?;
             let (epoch, message) = rest.split_once('\u{1f}')?;
             Some((
+                sha,
                 parents.split_whitespace().collect::<Vec<_>>(),
                 epoch.trim().parse::<i64>().ok()?,
                 message,
@@ -25269,11 +25309,11 @@ fn parked_anchor_advance_with_target_is_attributable(
     // under the same rule cas-985f applies before park.
     let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
-    commits.last().is_some_and(|(parents, _, _)| {
+    commits.last().is_some_and(|(_, parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
-    }) && commits.iter().all(|(parents, epoch, message)| {
+    }) && commits.iter().all(|(sha, parents, epoch, message)| {
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
@@ -25282,7 +25322,8 @@ fn parked_anchor_advance_with_target_is_attributable(
                     })
             });
         (target_import
-            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            || (parents.len() == 1 && (!message_claims_other_task(message, Some(task_id))
+                || generated_delivery_continuation(repo_path, sha, parents[0], message))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })

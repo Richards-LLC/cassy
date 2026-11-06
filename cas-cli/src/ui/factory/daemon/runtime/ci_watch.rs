@@ -124,6 +124,11 @@ pub(crate) trait CiTransport {
     }
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError>;
+    /// The listing read from GitHub now, never a shared cached snapshot: the
+    /// confirming poll of a held queue exit must see whether the PR merged.
+    fn merge_queue_pull_requests_fresh(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        self.merge_queue_pull_requests()
+    }
     fn delivery_pull_requests(
         &self,
         branch: &str,
@@ -983,6 +988,36 @@ impl GhCiTransport {
         Ok(output.stdout)
     }
 
+    fn merge_queue_listing(&self, fresh: bool) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
+            .ok_or_else(|| {
+                CiWatchError::Unavailable(
+                    "invalid GitHub repository for merge-queue watcher".to_string(),
+                )
+            })?;
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let args = [
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={query}"),
+            "-F".to_string(),
+            format!("owner={}", repo.owner),
+            "-F".to_string(),
+            format!("name={}", repo.repo),
+        ];
+        // cas-c24e: every daemon on this machine shares one listing per repo
+        // per minute instead of each polling it every 30 s.
+        let bytes = crate::gh_budget::shared_read(
+            &format!("merge-queue-{}", self.repo),
+            if fresh { Duration::ZERO } else { MERGE_QUEUE_PROBE_TTL },
+            || self.gh_bytes(&args),
+        )?;
+        let response: MergeQueueGraphqlResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid merge-queue JSON: {e}")))?;
+        Ok(response.data.repository.pull_requests.nodes)
+    }
+
     #[track_caller]
     fn gh_text(&self, args: &[String]) -> Result<String, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
@@ -1118,33 +1153,11 @@ impl CiTransport for GhCiTransport {
     }
 
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
-        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
-            .ok_or_else(|| {
-                CiWatchError::Unavailable(
-                    "invalid GitHub repository for merge-queue watcher".to_string(),
-                )
-            })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
-        let args = [
-            "api".to_string(),
-            "graphql".to_string(),
-            "-f".to_string(),
-            format!("query={query}"),
-            "-F".to_string(),
-            format!("owner={}", repo.owner),
-            "-F".to_string(),
-            format!("name={}", repo.repo),
-        ];
-        // cas-c24e: every daemon on this machine shares one listing per repo
-        // per minute instead of each polling it every 30 s.
-        let bytes = crate::gh_budget::shared_read(
-            &format!("merge-queue-{}", self.repo),
-            MERGE_QUEUE_PROBE_TTL,
-            || self.gh_bytes(&args),
-        )?;
-        let response: MergeQueueGraphqlResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| CiWatchError::Malformed(format!("invalid merge-queue JSON: {e}")))?;
-        Ok(response.data.repository.pull_requests.nodes)
+        self.merge_queue_listing(false)
+    }
+
+    fn merge_queue_pull_requests_fresh(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        self.merge_queue_listing(true)
     }
 
     fn delivery_pull_requests(
@@ -1313,7 +1326,13 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     previously_armed: &BTreeSet<u64>,
     previously_held: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
-    let pulls = transport.merge_queue_pull_requests()?;
+    // cas-c24e: a held exit's confirming poll reads GitHub itself; a shared
+    // snapshot from before the PR merged would report a false ejection.
+    let pulls = if previously_held.is_empty() {
+        transport.merge_queue_pull_requests()?
+    } else {
+        transport.merge_queue_pull_requests_fresh()?
+    };
     let runs = transport.completed_runs()?;
     let mut failed_runs = BTreeMap::<u64, &CiRun>::new();
     for run in &runs {
@@ -2072,6 +2091,52 @@ mod tests {
             assert!(pulls[0].is_in_merge_queue);
         }
         assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_held_exit_confirms_against_github_not_the_shared_snapshot_cas_c24e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let temp = tempfile::TempDir::new().unwrap();
+        let (gh, listing) = (temp.path().join("gh"), temp.path().join("listing.json"));
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\ncase \"$2\" in graphql) cat '{}' ;; *) printf '%s' '{{\"workflow_runs\":[]}}' ;; esac\n",
+                listing.display()
+            ),
+        );
+        let open = |nodes: &str| {
+            std::fs::write(&listing, format!(r#"{{"data":{{"repository":{{"pullRequests":{{"nodes":[{nodes}]}}}}}}}}"#)).unwrap()
+        };
+        let daemon = || GhCiTransport {
+            repo: "org/repo".to_string(),
+            cwd: temp.path().to_path_buf(),
+            gh_binary: gh.clone(),
+            completed: Default::default(),
+        };
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-held".to_string(),
+            worker: "w".to_string(),
+            branch: "factory/w".to_string(),
+            branch_tip: None,
+            pr_number: Some(5),
+        };
+        // GitHub is merging PR 5: it looks dequeued for one poll, so it is held.
+        open(r#"{"number":5,"headRefName":"factory/w","headRefOid":"tip","isInMergeQueue":false,"updatedAt":"2026-11-06T01:00:00Z"}"#);
+        let empty = BTreeSet::new();
+        let held = collect_tracked_merge_queue_ejections(
+            &daemon(), std::slice::from_ref(&delivery), &[], &BTreeSet::from([5]), &empty, &empty,
+        )
+        .unwrap();
+        assert_eq!(held.held_exits, BTreeSet::from([5]));
+        // It merged within the shared listing's lifetime: no longer open.
+        open("");
+        let confirmed = collect_tracked_merge_queue_ejections(
+            &daemon(), std::slice::from_ref(&delivery), &[], &held.queued_prs, &empty, &held.held_exits,
+        )
+        .unwrap();
+        assert!(confirmed.ejections.is_empty(), "a merged PR is never ejected: {:?}", confirmed.ejections);
     }
 
     #[test]

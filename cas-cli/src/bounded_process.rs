@@ -74,7 +74,20 @@ pub(crate) fn run_command_cancellable(
     stdin: Stdio,
     cancelled: Option<&AtomicBool>,
 ) -> Result<Output, BoundedCommandError> {
-    let gh = crate::gh_budget::GhCall::start(command, std::panic::Location::caller());
+    run_command_at(command, deadline, per_command_cap, stdin, cancelled, std::panic::Location::caller())
+}
+
+/// As [`run_command_cancellable`], counting a `gh` run against `caller`: for
+/// a transport that records where it was built rather than its own line.
+pub(crate) fn run_command_at(
+    command: &mut Command,
+    deadline: Deadline,
+    per_command_cap: Duration,
+    stdin: Stdio,
+    cancelled: Option<&AtomicBool>,
+    caller: &'static std::panic::Location<'static>,
+) -> Result<Output, BoundedCommandError> {
+    let gh = crate::gh_budget::GhCall::start(command, caller);
     if let Some(output) = gh.as_ref().and_then(crate::gh_budget::GhCall::backoff_output) {
         return Ok(output);
     }

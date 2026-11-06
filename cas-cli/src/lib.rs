@@ -105,6 +105,7 @@ pub mod otel;
 pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod qa_ledger;
+pub(crate) mod qa_walk_progress;
 pub(crate) mod quality_ledger;
 pub(crate) mod peer_ask_gate;
 pub(crate) mod ci_waste;

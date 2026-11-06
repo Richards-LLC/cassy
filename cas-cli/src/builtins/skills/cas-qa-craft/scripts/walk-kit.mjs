@@ -80,16 +80,18 @@ export function shouldRun(step, open) {
 }
 
 // Expectations precede execution; every record atomically publishes live progress.
-export function createLedger({ file, task, build, scope, surface, label = 'real-build' }) {
+export function createLedger({ file, task, build, scope, surface, label = 'real-build', now = Date.now }) {
   if (!SHA.test(build ?? '')) throw new Error('createLedger: explicit build SHA required');
   if (!['real-build', 'fixture', 'eyewitness'].includes(label)) throw new Error('invalid evidence label');
   const plan = new Map(), rows = new Map(), frames = new Set(), verdicts = new Map();
+  let progressAt = null;
   const write = () => {
     const list = [...rows.values()];
     const count = verdict => list.filter(row => row.verdict.startsWith(verdict)).length;
     const out = [
       `# QA evidence: ${clean(task)}`, '', 'schema: 2', `build: ${build}`,
       `scope: ${clean(scope)}`, `surface: ${clean(surface)}`, 'budget: 30 minutes',
+      `progress_at: ${progressAt ?? 'unknown'}`,
       `cells=${list.length}; PASS=${count('PASS')}; FAIL=${count('FAIL')}; NOT EXERCISED=${count('NOT EXERCISED')}; NOT A ROUTE=${count('NOT A ROUTE')}`,
       `labels: ${label}=${list.length}`, 'sweep: not configured', '',
       '| id | cell | expected | observed | verdict | label | evidence path | defect task |',
@@ -151,6 +153,7 @@ export function createLedger({ file, task, build, scope, surface, label = 'real-
         rows.set(key, { ...expectation, id: step.id, defect: verdict === 'FAIL' ? step.defect : undefined,
           verdict, observed: [line], seen: new Set([where]), evidence, captures: graded ? [evidence] : [] });
       }
+      progressAt = new Date(now()).toISOString();
       write();
       return rows.get(key);
     },

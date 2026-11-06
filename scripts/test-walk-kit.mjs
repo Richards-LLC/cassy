@@ -89,7 +89,8 @@ test('scripted answers run only for the question actually open', () => {
 
 test('ledger writes versioned live rows, merges one defect and refuses unsupported verdicts', t => {
   const root = directory(t), file = path.join(root, 'LEDGER.md');
-  const ledger = createLedger({ file, task: 'cas-fixture', build: 'abcdef0', scope: 'revise', surface: 'web', label: 'fixture' });
+  let now = Date.parse('2026-11-06T12:00:00Z');
+  const ledger = createLedger({ file, task: 'cas-fixture', build: 'abcdef0', scope: 'revise', surface: 'web', label: 'fixture', now: () => now });
   for (const id of ['W1', 'W2', 'W3']) ledger.expect(id, {
     cell: 'revise draft', expected: 'revised hook', cite: 'docs/guide.md:17', quote: 'show the revised draft',
   });
@@ -101,11 +102,16 @@ test('ledger writes versioned live rows, merges one defect and refuses unsupport
   const step = { channel: 'web', view: '390', sent: { text: 'revise the hook', url: 'https://candidate.test/chat' },
     verdict: 'FAIL', defect: 'cas-fixture', observed: 'old hook', claims: ['old hook'] };
   ledger.record({ ...step, id: 'W1', frame: frame('a', 'old hook') });
+  assert.match(fs.readFileSync(file, 'utf8'), /progress_at: 2026-11-06T12:00:00.000Z/);
+  now += 8 * 60_000;
+  ledger.write();
+  assert.match(fs.readFileSync(file, 'utf8'), /progress_at: 2026-11-06T12:00:00.000Z/);
   ledger.record({ ...step, id: 'W2', view: '1440', frame: frame('b', 'old hook') });
   assert.equal(ledger.rows.size, 1);
   const saved = fs.readFileSync(file, 'utf8');
   assert.match(saved, /schema: 2/);
   assert.match(saved, /cells=1; PASS=0; FAIL=1/);
+  assert.match(saved, /progress_at: 2026-11-06T12:08:00.000Z/);
   assert.ok(saved.includes(`[kit:${WALK_KIT_VERSION}; web/390, web/1440]`));
   assert.match(saved, /source: docs\/guide.md:17/);
   assert.throws(() => ledger.record({ ...step, id: 'W1', verdict: 'PASS', defect: undefined }), /conflicting verdicts/);

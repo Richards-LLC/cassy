@@ -2148,6 +2148,12 @@ for setup, doctor and release-preflight diagnostics and manual repair.
 
 ## Build, assembly and CI policy
 
+While a release train is open in the target repository, `worktree_merge` refuses
+direct main/trunk merges, including `allow_trunk=true`. Merge fixes into the
+train; ship a one-item hotfix train with `scripts/release.sh --hotfix` from its
+lane, through the existing release PR, merge queue and publication workflow.
+With no train open, the existing merge behavior applies.
+
 Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
 managed `cas` MCP server. It preserves the conversation and confirms a new
 live server PID and its recorded version. A command echo is not success.

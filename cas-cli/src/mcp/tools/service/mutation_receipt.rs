@@ -21,7 +21,7 @@ pub(crate) struct Receipt {
     /// cas-3937 review: the outcome of the work after a merge's commit (its
     /// task close), for the note recorded once that work finishes.
     pub followup: std::sync::Mutex<Option<String>>,
-    phases: std::sync::Mutex<std::collections::BTreeMap<&'static str, std::time::Duration>>,
+    phases: std::sync::Mutex<Vec<(&'static str, std::time::Instant, Option<std::time::Duration>)>>,
 }
 
 tokio::task_local! { static CURRENT: Arc<Receipt>; }
@@ -35,7 +35,7 @@ impl Receipt {
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
-            phases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            phases: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -192,18 +192,29 @@ pub(crate) struct Phase {
     receipt: Option<Arc<Receipt>>,
     name: &'static str,
     started: std::time::Instant,
+    index: Option<usize>,
 }
 
 pub(crate) fn phase(name: &'static str) -> Phase {
-    Phase { receipt: current(), name, started: std::time::Instant::now() }
+    let receipt = current();
+    let started = std::time::Instant::now();
+    let index = receipt.as_ref().and_then(|receipt| {
+        let mut phases = receipt.phases.lock().ok()?;
+        let index = phases.len();
+        phases.push((name, started, None));
+        Some(index)
+    });
+    Phase { receipt, name, started, index }
 }
 
 impl Drop for Phase {
     fn drop(&mut self) {
         if let Some(receipt) = &self.receipt {
             let elapsed = self.started.elapsed();
-            if let Ok(mut phases) = receipt.phases.lock() {
-                *phases.entry(self.name).or_default() += elapsed;
+            if let Some(index) = self.index
+                && let Ok(mut phases) = receipt.phases.lock()
+            {
+                phases[index].2 = Some(elapsed);
             }
             tracing::info!(tool = receipt.tool, action = receipt.action,
                 phase = self.name, elapsed_ms = elapsed.as_millis() as u64,
@@ -214,9 +225,20 @@ impl Drop for Phase {
 
 impl Receipt {
     pub(crate) fn timings(&self) -> String {
-        self.phases.lock().map(|phases| phases.iter()
-            .map(|(name, elapsed)| format!("{name}={}ms", elapsed.as_millis()))
-            .collect::<Vec<_>>().join(", ")).unwrap_or_default()
+        let mut totals = std::collections::BTreeMap::new();
+        for name in ["merge-tree", "push", "close_gates", "dispatch", "notes"] {
+            totals.insert(name, (std::time::Duration::ZERO, false));
+        }
+        if let Ok(phases) = self.phases.lock() {
+            for (name, started, elapsed) in phases.iter() {
+                let entry = totals.entry(name).or_default();
+                entry.0 += elapsed.unwrap_or_else(|| started.elapsed());
+                entry.1 |= elapsed.is_none();
+            }
+        }
+        totals.into_iter().map(|(name, (elapsed, running))| format!(
+            "{name}={}ms{}", elapsed.as_millis(), if running { "+" } else { "" },
+        )).collect::<Vec<_>>().join(", ")
     }
 
     pub(crate) fn action(&self) -> &str {

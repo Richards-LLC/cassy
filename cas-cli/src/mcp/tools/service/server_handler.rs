@@ -572,7 +572,7 @@ impl CasService {
                          for the rest.",
                         action = receipt.action(),
                         grace_s = grace.as_secs_f64(),
-                    ))]));
+                    ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(

@@ -127,7 +127,27 @@ export interface EpicSessionProgress {
   readonly stale: boolean;
   readonly received: number;
 }
-export type EpicTaskGroup = "In progress" | "Open";
+export type EpicTaskGroup = "In progress" | "Open" | "Merged";
+
+/** One task-state source for an epic's sections and its split: a merged
+ * delivery is Merged whatever its parked status or worker activity says. */
+export function epicTaskGroup(task: ProgressTask): EpicTaskGroup | undefined {
+  if (task.delivery_state === "merged") return "Merged";
+  const label = statusLabel(task.status);
+  if (["In progress", "Awaiting merge", "Awaiting verification"].includes(label)) return "In progress";
+  return ["Open", "Ready", "Blocked"].includes(label) ? "Open" : undefined;
+}
+
+/** The split as drawn: open and in progress counted from the very task rows
+ * the sections list, merged as the producer's delivered closures plus any
+ * listed task whose delivery has merged. Undefined when unreported. */
+export function displayCounts(epic: ReleaseEpic | undefined, tasks: readonly ProgressTask[]): (EpicCounts & { total: number }) | undefined {
+  const base = epicCounts(epic);
+  if (!base) return undefined;
+  const count = (group: EpicTaskGroup) => tasks.filter(task => epicTaskGroup(task) === group).length;
+  const split = { open: count("Open"), in_progress: count("In progress"), merged: base.merged + count("Merged") };
+  return { ...split, total: split.open + split.in_progress + split.merged };
+}
 export interface EpicTaskRow { readonly task: ProgressTask; readonly worker?: string; readonly machine: string; readonly state: string; readonly group: EpicTaskGroup }
 export interface ProjectEpic {
   readonly key: string;
@@ -174,9 +194,7 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
       entry.stale &&= source.stale;
       const tasks = source.tasks.filter(task => task.epic_id === epic.id);
       for (const task of tasks) {
-        const label = statusLabel(task.status);
-        const group: EpicTaskGroup | undefined = ["In progress", "Awaiting merge", "Awaiting verification"].includes(label) ? "In progress"
-          : ["Open", "Ready", "Blocked"].includes(label) ? "Open" : undefined;
+        const group = epicTaskGroup(task);
         if (!group || entry.rows.has(task.id)) continue;
         const worker = workers.find(item => item.currentTask === task.id)
           ?? (task.assignee ? workers.find(item => item.name === task.assignee || item.agent?.id === task.assignee) : undefined);
@@ -196,8 +214,8 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
     const count = (state: string) => rows.filter(row => row.state === state).length;
     const blocked = count("Blocked");
     const parked = count("Parked");
-    return { key, epic: entry.epic, title: epicTitle(entry.epic), counts: epicCounts(entry.epic), machines: [...entry.machines], workers: [...entry.workers.values()], rows, stale: entry.stale,
-      blocked, parked, building: rows.filter(row => row.group === "In progress" && row.state !== "Merged").length - parked };
+    return { key, epic: entry.epic, title: epicTitle(entry.epic), counts: displayCounts(entry.epic, rows.map(row => row.task)), machines: [...entry.machines], workers: [...entry.workers.values()], rows, stale: entry.stale,
+      blocked, parked, building: rows.filter(row => row.group === "In progress").length - parked };
   });
   const live = all.filter(item => item.building + item.parked + item.blocked > 0 || item.workers.length > 0);
   return {

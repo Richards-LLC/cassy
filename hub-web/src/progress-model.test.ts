@@ -99,7 +99,7 @@ it("keeps Live epics to the selected project across machines, titled, deduplicat
   expect(live.map(epic => [epic.key, epic.title])).toEqual([["blocked", "Blocked work"], ["busy", "Busy"], ["shared", "Commander rail"]]);
   const shared = live[2]!;
   expect(shared.machines).toEqual(["prowl", "soundwave"]);
-  expect(shared.counts).toEqual({ open: 4, in_progress: 2, merged: 6, total: 12 });
+  expect(shared.counts).toEqual({ open: 0, in_progress: 1, merged: 6, total: 7 });
   expect(shared.workers.map(worker => worker.machine)).toEqual(["prowl", "soundwave"]);
   expect(shared.rows.map(row => [row.task.title, row.group, row.state])).toEqual([["Ship the rail", "In progress", "Building"]]);
   expect(live[1]).toMatchObject({ building: 1, parked: 1, blocked: 0, counts: undefined });

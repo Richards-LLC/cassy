@@ -48,3 +48,18 @@ it("discloses tasks in place, shows five rows before Show more and never draws u
   expect(section.querySelector(".live-epics-more")).toBeNull();
   expect(liveEpicsSection(document, { project: "other", live: [], quiet: 0, multiMachine: false, pending: [], failed: [], retry: () => {} })).toBeUndefined();
 });
+
+it("draws the split and the task sections from one task state, so a merged delivery leaves In progress", async () => {
+  const { projectEpics } = await import("./progress-model");
+  const { live } = projectEpics([{ project: "cas-src", machine: "prowl", machineLabel: "prowl", session: "s", supervisor: "sup", roster: ["worker"], stale: false, received: 1,
+    // The worker still reports executing on a task whose delivery has merged.
+    agents: [{ name: "worker", status: "active", current_task: "landed", liveness: "executing" }],
+    tasks: [{ id: "landed", epic_id: "e", title: "Landed", status: "awaiting_merge", delivery_state: "merged", assignee: "worker" },
+      { id: "work", epic_id: "e", title: "Work", status: "in_progress" }, { id: "next", epic_id: "e", title: "Next", status: "open" }],
+    epics: [{ id: "e", title: "Epic", status: "in_progress", counts: { open: 1, in_progress: 2, merged: 2 } }] }], "cas-src");
+  const section = liveEpicsSection(document, { project: "split", live, quiet: 0, multiMachine: false, pending: [], failed: [], retry: () => {} })!;
+  expect(section.querySelector(".live-epic-split")?.textContent).toBe("1 open · 1 in progress · 3 merged");
+  expect(section.querySelector(".live-epic-ratio")?.textContent).toBe("3/5");
+  expect([...section.querySelectorAll(".live-epic-group-label")].map(label => label.textContent)).toEqual(["In progress · 1", "Open · 1", "Merged · 3"]);
+  expect(section.querySelector(".live-epic-merged")?.textContent).toContain("Landed");
+});

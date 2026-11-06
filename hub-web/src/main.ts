@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { projectEpics, type EpicSessionProgress } from "./progress-model";
+import { displayCounts, projectEpics, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -5737,7 +5737,9 @@ function renderStatus(status?: Record<string, unknown>): void {
   // Release train, then Live epics, then Workers and the task groups.
   const trainTasks = release ? tasks.filter(task => task.epic_id === release.id && task.delivery_state !== "merged") : [];
   const trainState = (label: string) => trainTasks.filter(task => statusLabel(task.status) === label).length;
-  const lead: HTMLElement[] = [releaseHeader(document, release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
+  // The header's split comes from the same task rows the sections use.
+  const trainCounts = release ? displayCounts(release, tasks.filter(task => task.epic_id === release.id)) : undefined;
+  const lead: HTMLElement[] = [releaseHeader(document, release && trainCounts ? { ...release, counts: trainCounts } : release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
     workers: workers.filter(worker => trainTasks.some(task => task.id === worker.currentTask)).length } : undefined)];
   const epicSection = liveEpicsSection(document, { ...liveEpics, explorerHref: explorerBase ? explorerUrl(explorerBase, session?.cloud_project_id) : null,
     retry: () => { for (const id of machines.keys()) refreshEpicSessions(id, true); } });

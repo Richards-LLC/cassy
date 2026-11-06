@@ -139,7 +139,11 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         agents: ["builder", "reviewer"].map((name, i) => ({ name, generation: 1, status: "active", current_task: i ? "rail-1" : "train-0", liveness: "executing" })),
         tasks: [{ id: "train-0", title: "Check the release", status: "in_progress", epic_id: "train", assignee: "builder", updated_at: at },
           { id: "rail-1", title: "Build the progress rail", status: "in_progress", epic_id: "rail", assignee: "reviewer", updated_at: at },
-          { id: "rail-2", title: "Wait on the design review", status: "blocked", epic_id: "rail", updated_at: at }],
+          { id: "rail-2", title: "Wait on the design review", status: "blocked", epic_id: "rail", updated_at: at },
+          { id: "rail-3", title: "Park the token pass", status: "awaiting_merge", epic_id: "rail", updated_at: at },
+          // The producer's split counts exactly these rows (session.rs epic_counts).
+          ...[1, 2, 3].flatMap(n => [{ id: `train-open-${n}`, title: `Queue release step ${n}`, status: "open", epic_id: "train", updated_at: at },
+            { id: `rail-open-${n}`, title: `Queue rail step ${n}`, status: "open", epic_id: "rail", updated_at: at }])],
         epics: [{ id: "train", title: "Release train", status: "inprogress", counts: { open: 3, in_progress: 1, merged: 1 }, progress: { merged: 1, total: 5, merges_per_hour: 1, last_merged_at: at } },
           { id: "rail", title: "EPIC: Commander progress rail", status: "inprogress", counts: { open: 4, in_progress: 2, merged: 6 } },
           { id: "untitled", title: "EPIC:", status: "inprogress" }, { id: "quiet", title: "Someday", status: "open" }],
@@ -147,8 +151,9 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       };
       const follow: FleetWorld = {
         agents: [{ name: "remote-worker", generation: 1, status: "active", current_task: "follow-1", liveness: "waiting_for_input" }],
-        tasks: [{ id: "follow-1", title: "Follow up on the release", epic_id: "follow-ups", status: "awaiting_merge", assignee: "remote-worker", updated_at: at }],
-        epics: [{ id: "follow-ups", title: "Follow-ups", status: "open", counts: { open: 20, in_progress: 1, merged: 2 } },
+        tasks: [{ id: "follow-1", title: "Follow up on the release", epic_id: "follow-ups", status: "awaiting_merge", assignee: "remote-worker", updated_at: at },
+          ...[1, 2].map(n => ({ id: `follow-open-${n}`, title: `Queue follow-up ${n}`, status: "open", epic_id: "follow-ups", updated_at: at }))],
+        epics: [{ id: "follow-ups", title: "Follow-ups", status: "open", counts: { open: 2, in_progress: 1, merged: 2 } },
           { id: "rail", title: "EPIC: Commander progress rail", status: "inprogress", counts: { open: 4, in_progress: 2, merged: 6 } }],
         focused_epic: null, spawnNames: [],
       };
@@ -227,14 +232,20 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await expect(peer).toHaveAttribute("aria-expanded", "true");
         await expect(tasks).toContainText("Follow up on the release");
         await expect(tasks).not.toContainText("follow-1");
-        await expect(tasks.locator(".live-epic-task-machine")).toHaveText("prowl");
-        await expect(tasks.locator(".live-epic-chip")).toHaveText("Parked");
-        await expect(tasks.getByText("Merged · 2")).toBeVisible();
+        const parked = tasks.locator(".live-epic-task").filter({ hasText: "Follow up on the release" });
+        await expect(parked.locator(".live-epic-task-machine")).toHaveText("prowl");
+        await expect(parked.locator(".live-epic-chip")).toHaveText("Parked");
+        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["In progress · 1", "Open · 2", "Merged · 2"]);
+        await expect(peer).toContainText("2 open · 1 in progress · 2 merged");
+        // The delivery merges while its task is still parked and its worker still live:
+        // the row moves to Merged and the split moves with it.
         follow.tasks[0].delivery_state = "merged";
-        follow.epics[0].counts = { open: 20, in_progress: 0, merged: 3 };
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["prowl.test", "remote-session"]);
-        await expect(peer).toContainText("20 open · 0 in progress · 3 merged");
-        await expect(peer).toContainText("3/23");
+        await expect(peer).toContainText("2 open · 0 in progress · 3 merged");
+        await expect(peer).toContainText("3/5");
+        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["Open · 2", "Merged · 3"]);
+        await tasks.locator(".live-epic-merged summary").click();
+        await expect(tasks.locator(".live-epic-merged")).toContainText("Follow up on the release");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
         expect(statusReads).not.toContain("gabber-session");
         if (process.env.EPIC_PROGRESS_QA) await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}-expanded.png` });

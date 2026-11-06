@@ -47,11 +47,7 @@ function activityText(epic: ProjectEpic): string {
     .filter(([value]) => value > 0).map(([value, label]) => `${value} ${label}`).join(" · ");
 }
 
-function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" | "Open", multiMachine: boolean): HTMLElement | undefined {
-  const rows = epic.rows.filter(row => row.group === label);
-  if (!rows.length) return undefined;
-  const group = element(document, "section", "live-epic-group");
-  group.append(element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`));
+function taskList(document: Document, rows: readonly ProjectEpic["rows"][number][], multiMachine: boolean): HTMLUListElement {
   const list = element(document, "ul", "live-epic-task-list");
   for (const row of rows) {
     const item = element(document, "li", `live-epic-task${row.state === "Blocked" ? " is-blocked" : ""}`);
@@ -64,7 +60,14 @@ function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" |
     item.append(meta);
     list.append(item);
   }
-  group.append(list);
+  return list;
+}
+
+function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" | "Open", multiMachine: boolean): HTMLElement | undefined {
+  const rows = epic.rows.filter(row => row.group === label);
+  if (!rows.length) return undefined;
+  const group = element(document, "section", "live-epic-group");
+  group.append(element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`), taskList(document, rows, multiMachine));
   return group;
 }
 
@@ -106,13 +109,17 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     const group = taskGroup(document, epic, label, options.multiMachine);
     if (group) panel.append(group);
   }
-  if (epic.counts?.merged) {
-    // Closed tasks are not part of the status snapshot; Merged states the
-    // authoritative count and points at the full board.
+  const mergedRows = epic.rows.filter(row => row.group === "Merged");
+  const mergedCount = epic.counts?.merged ?? mergedRows.length;
+  if (mergedCount) {
+    // Closed tasks are not part of the status snapshot: Merged lists the
+    // merged deliveries it has and points at the full board for the rest.
     const merged = element(document, "details", "live-epic-group live-epic-merged");
-    merged.append(element(document, "summary", "live-epic-group-label", `Merged · ${epic.counts.merged}`));
+    merged.append(element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`));
+    if (mergedRows.length) merged.append(taskList(document, mergedRows, options.multiMachine));
     const note = element(document, "p", "live-epic-merged-note");
-    if (options.explorerHref) {
+    if (mergedRows.length >= mergedCount) note.hidden = true;
+    else if (options.explorerHref) {
       const link = element(document, "a", undefined, "Open the merged tasks in Explorer");
       link.href = options.explorerHref; link.target = "cassy-explorer"; link.rel = "noopener noreferrer";
       note.append(link);

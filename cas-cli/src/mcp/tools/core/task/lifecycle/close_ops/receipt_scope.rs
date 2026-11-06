@@ -204,7 +204,7 @@ fn changelog_refusal(
     let changelog_changed = changed_paths
         .iter()
         .any(|path| if fragments { is_changelog_fragment(path) } else { path == "CHANGELOG.md" });
-    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges) {
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges, &task.id) {
         return None;
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -285,13 +285,15 @@ pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
 /// only fragment files count (cas-f2be). `delivery_ranges` are the close's
 /// task-attributed (base, tip) segments, which keep a same-task predecessor
 /// merge and drop target-sync and other tasks' merges (cas-2a65). Without
-/// them, only single-parent first-parent commits since the merge-base count,
-/// so a merge can never credit entries another branch wrote.
+/// them, first-parent commits since the merge-base count. A merge can credit
+/// only this task's fragment newly authored in its result, absent from every
+/// parent, so entries imported from another branch cannot count.
 fn has_titled_unreleased_delta(
     repo: &Path,
     head: &str,
     target: &str,
     delivery_ranges: Option<&[(String, String)]>,
+    task_id: &str,
 ) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -317,8 +319,8 @@ fn has_titled_unreleased_delta(
         Some(entries)
     };
     let changelog = vec!["CHANGELOG.md".to_string()];
-    let ranges = match delivery_ranges {
-        Some(ranges) => ranges.to_vec(),
+    let ranges: Vec<(Vec<String>, String)> = match delivery_ranges {
+        Some(ranges) => ranges.iter().map(|(base, tip)| (vec![base.clone()], tip.clone())).collect(),
         None => {
             let Some(base) = git(&["merge-base", head, target]) else {
                 return false;
@@ -330,14 +332,26 @@ fn has_titled_unreleased_delta(
             commits
                 .lines()
                 .filter_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
-                    [commit, parent] => Some((parent.to_string(), commit.to_string())),
+                    [commit, ref parents @ ..] if !parents.is_empty() => {
+                        Some((parents.iter().map(|parent| parent.to_string()).collect(), commit.to_string()))
+                    }
                     _ => None,
                 })
                 .collect()
         }
     };
-    ranges.iter().any(|(base, tip)| {
-        let paths = if fragments {
+    ranges.iter().any(|(parents, tip)| {
+        let base = &parents[0];
+        let paths = if parents.len() > 1 {
+            let path = format!("{CHANGELOG_FRAGMENT_DIR}/{task_id}.md");
+            if !fragments || parents.iter().any(|parent| {
+                git(&["ls-tree", "--name-only", parent, "--", &path])
+                    .is_none_or(|tracked| !tracked.trim().is_empty())
+            }) {
+                return false;
+            }
+            vec![path]
+        } else if fragments {
             let Some(changed) = git(&["diff", "--no-renames", "--name-only", base, tip, "--", CHANGELOG_FRAGMENT_DIR])
             else {
                 return false;
@@ -944,7 +958,7 @@ mod tests {
         let titled = commit_changelog_fixture(repo.path(), "add release note");
         let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
         assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
-        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None));
+        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None, &task.id));
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");
 

@@ -120,10 +120,13 @@ pub(crate) fn read(
                 .to_string();
             match progress(&file, now) {
                 Some((stamp, age)) if age >= config.factory().stall_threshold_secs as i64 => {
-                    report.advisories.push(Advisory {
+                    let advisory = Advisory {
                         key: format!("qa-flat:{}:{name}:{stamp}", task.id),
                         text: format!("QA output flat: {} / {} / {name}: no recorded result for {age}s (threshold {}s). Native execution liveness is separate; inspect the walk or split independent surfaces.", worker.name, task.id, config.factory().stall_threshold_secs),
-                    });
+                    };
+                    if held.as_ref().is_none_or(|held| held.contains(&worker.name) || held.contains(&worker.id)) {
+                        report.lines.push(advisory.text);
+                    } else { report.advisories.push(advisory); }
                 }
                 Some((_, age)) => report.lines.push(format!("QA output: {} / {} / {name}: last recorded result {age}s ago", worker.name, task.id)),
                 None => report.lines.push(format!("QA output: {} / {} / {name}: progress unknown (missing, legacy or invalid progress_at)", worker.name, task.id)),

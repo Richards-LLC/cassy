@@ -17,6 +17,7 @@ use regex::Regex;
 
 const HARNESSES: [&str; 4] = ["claude", "codex", "grok", "opencode"];
 
+const SUPERVISOR_RECOVERY: &str = "Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.";
 const CLOSE: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
 const SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
 const BATCH_CLOSE: &str = "In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.";
@@ -145,6 +146,16 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
     .chain(workers.iter().map(|(h, t)| (*h, t.as_str())))
     {
         carries(surface, text, "done signal / park vs merge", SIGNAL);
+    }
+
+    for (surface, text) in [
+        ("worker skill", skill("skills/cas-worker/SKILL.md").to_string()),
+        ("worker close-gate", skill("skills/cas-worker/references/close-gate.md").to_string()),
+        ("worker recovery", skill("skills/cas-worker/references/recovery.md").to_string()),
+        ("dispatch gate", dispatch_gate(true)),
+        ("pending dispatch", gate_text::worker_pending_dispatch("cas-0000", "vd-1", "o", "d", "")),
+    ] {
+        carries(surface, &text, "remaining close recovery owner", SUPERVISOR_RECOVERY);
     }
 
     // Who closes a batch-mode delivery, and when QA walks it.

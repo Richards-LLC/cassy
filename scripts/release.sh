@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
-# hotfix branch) once the work is code-done:
+# train branch) once the work is code-done:
 #
 #   scripts/release.sh                 # next minor version
 #   scripts/release.sh --hotfix        # next patch version
@@ -426,7 +426,10 @@ fi
 context="$("$cas_bin" release context --branch "$branch")"
 [[ "$(jq -r .branch <<<"$context")" == "$branch" ]] || die "check out the open release train branch first"
 base="$(jq -er .integration <<<"$context")"
-train_base="$(jq -er .base_commit <<<"$context")"
+# Refresh the canonical integration before timing: a stale origin ref can
+# otherwise make already-landed main work look like the train's first child.
+fetch_base
+train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
 version="$(prepare)"
 if "$dry_run"; then

@@ -383,7 +383,19 @@ open_or_update_pr() {
         printf 'error: PR #%s has no auto-merge and no merge-queue entry after enqueue; repair admission and rerun.\n' "$pr_number" >&2
         exit 3
     }
-    say "PR #$pr_number admission verified; the merge queue proves this tree"
+    if jq -e '.state == "MERGED" or .mergeQueueEntry != null' <<<"$state" >/dev/null; then
+        say "PR #$pr_number admission verified; the merge queue proves this tree"
+    else
+        # One snapshot of required checks distinguishes an auto-merge request
+        # from actual admission. This never watches or waits for PR CI.
+        local checks
+        checks="$("$gh_bin" pr checks "$pr_number" --required --json name,bucket 2>/dev/null || true)"
+        if jq -e 'any(.[]; .bucket == "fail" or .bucket == "cancel")' <<<"${checks:-[]}" >/dev/null; then
+            say "PR #$pr_number not admitted: required checks failed; repair and rerun"
+            exit 3
+        fi
+        say "PR #$pr_number auto-merge requested; not admitted yet"
+    fi
 }
 
 # One enqueue smoke check, never a watch or CI polling loop.
@@ -421,11 +433,16 @@ fi
 
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
 
-# Resolve through Cassy's canonical train helper before changing release files.
-# The CLI owns train selection/owner/base; the script only verifies its checkout.
-context="$("$cas_bin" release context --branch "$branch")"
-[[ "$(jq -r .branch <<<"$context")" == "$branch" ]] || die "check out the open release train branch first"
-base="$(jq -er .integration <<<"$context")"
+# Train membership is advisory: explicit hotfix/non-train branches retain the
+# caller's --base (main by default). The canonical CLI owns the branch check.
+train_tracking=false
+if context="$("$cas_bin" release context --branch "$branch" 2>&1)" &&
+   train_integration="$(jq -er .integration <<<"$context" 2>/dev/null)"; then
+    base="$train_integration"
+    train_tracking=true
+else
+    say "train tracking skipped; using --base $base (no matching train context)"
+fi
 # Refresh the canonical integration before timing: a stale origin ref can
 # otherwise make already-landed main work look like the train's first child.
 fetch_base
@@ -438,8 +455,12 @@ if "$dry_run"; then
 fi
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
-"$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" --first-child "$first_child"
+if "$train_tracking"; then
+    if ! "$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" --first-child "$first_child"; then
+        say "release tracking unavailable; continuing the cut without reminders"
+    fi
+fi
 publish_branch
 repo_slug="$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner)"
 open_or_update_pr "$version"
-say "v$version is prepared; durable landing and publication reminders are armed"
+say "v$version is prepared; PR handoff complete"

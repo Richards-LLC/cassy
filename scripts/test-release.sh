@@ -42,7 +42,7 @@ case "$1 $2" in
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
-    elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}'
+    elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
     else echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}'; fi ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
@@ -58,7 +58,7 @@ case "$1 $2" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
       different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
     esac
-    printf '{"branch":"%s","integration":"main","base_commit":"%s"}\n' "$(git branch --show-current)" "$(git merge-base origin/main HEAD)" ;;
+    printf '{"branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
 esac

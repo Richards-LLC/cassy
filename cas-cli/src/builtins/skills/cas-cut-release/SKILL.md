@@ -35,12 +35,19 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    train and integration branch, merges the base when behind, bumps versions,
    promotes the changelog, builds Commander, commits and pushes. It reuses the
    train PR, requests auto-merge only when needed and checks admission once.
+   An auto-merge request awaiting required checks is reported as not admitted;
+   a red required-check snapshot exits nonzero without a CI polling loop.
    It returns after admission; `--no-watch` behaves the same way. No PR-CI watch
    or PR polling stage runs: the queue proves the prepared tree once.
-   `scripts/release.sh --hotfix` takes the next patch version on the train.
+   A hotfix is a branch from `main` released with `scripts/release.sh --hotfix`
+   (next patch), through the same queue. No train or a different train lane
+   keeps the caller's `--base` flow (default `main`); tracking is advisory and
+   cannot prevent the cut. Missing/unreachable owners use the shared resolver's
+   peer fallback, or print one clear tracking-skipped message.
 3. The command automatically arms cross-session `branch_contained_in` for the
    release SHA and integration branch, plus `tag_exists` for the version, even
-   with `--no-watch`. A retry reuses these durable occurrences. Do not arm a
+   with `--no-watch`. A retry reuses these durable occurrences; a version
+   re-bump cancels the previous version's landing and tag watches. Do not arm a
    duplicate CI/PR watcher. A missing admission is exit 3; resolve the named
    queue failure in one batch and rerun. If another version landed first,
    rerunning merges it and takes the next version. Exit 4 names a code conflict:

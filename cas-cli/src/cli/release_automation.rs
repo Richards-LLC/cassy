@@ -39,7 +39,6 @@ struct ReleaseContext {
     repository: String,
     branch: String,
     integration: String,
-    base_commit: String,
     release_commit: Option<String>,
     first_child_commit: Option<String>,
     first_child_epoch: Option<i64>,
@@ -126,25 +125,16 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
     let owner = train
         .epic_verification_owner
         .clone()
-        .context("train has no supervisor owner")?;
+        .unwrap_or_else(|| "operator".into());
     let repository = crate::github_repo::origin_slug(repo, std::time::Duration::from_secs(3))
         .map_err(anyhow::Error::msg)?
         .context("release checkout has no GitHub origin")?;
-    let base_commit = git(
-        repo,
-        &[
-            "merge-base",
-            &branch,
-            &format!("refs/remotes/origin/{integration}"),
-        ],
-    )?;
     Ok(ReleaseContext {
         train_id: train.id.clone(),
         owner,
         repository,
         branch,
         integration,
-        base_commit,
         release_commit: None,
         first_child_commit: None,
         first_child_epoch: None,
@@ -202,7 +192,7 @@ fn track_on_train(
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path.with_extension("lock"))?;
+        .open(path.parent().unwrap().join("tracking.lock"))?;
     fs2::FileExt::lock_exclusive(&lock)?;
     if path.exists() {
         expected = serde_json::from_slice(&fs::read(&path)?)?;
@@ -233,11 +223,11 @@ fn track_on_train(
     let agents = open_agent_store(root)?.list(None)?;
     let recipient =
         crate::supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
-    ensure!(
-        recipient.id != "operator",
-        "no live train supervisor; restore its session before cutting"
-    );
+    if train.epic_verification_owner.is_none() {
+        expected.owner = recipient.id.clone();
+    }
     let reminders = open_reminder_store(root)?;
+    cancel_superseded_watches(root, &expected.train_id, &args.version, reminders.as_ref())?;
     let mut existing = reminders.list_all_pending()?;
     if previous_commit
         .as_deref()
@@ -254,6 +244,13 @@ fn track_on_train(
     existing.extend(reminders.list_recently_fired(7 * 24 * 3600)?);
     // Save between effects; a crashed retry also recognizes the durable reminder row.
     save(&path, &expected)?;
+    if recipient.id == "operator" {
+        println!(
+            "Release v{} tracking skipped: no reachable train supervisor; cut can continue",
+            args.version
+        );
+        return Ok(());
+    }
     let landing = serde_json::json!({"commit": args.commit, "target_branch": expected.integration});
     let publish = serde_json::json!({"tag": format!("v{}", args.version)});
     for (event, filter, slot) in [
@@ -270,6 +267,8 @@ fn track_on_train(
         }
         let found = existing.iter().find(|r| {
             r.task_id.as_deref() == Some(&train.id)
+                && r.message
+                    .starts_with(&format!("Release v{}:", args.version))
                 && r.trigger_event.as_deref() == Some(event)
                 && r.trigger_filter.as_ref() == Some(&filter)
         });
@@ -302,6 +301,48 @@ fn track_on_train(
         expected.landing_reminder.unwrap(),
         expected.publish_reminder.unwrap()
     );
+    Ok(())
+}
+
+/// A new version supersedes both old conditions for this train. The caller
+/// holds the project tracking lock, so simultaneous cuts cannot race this scan.
+fn cancel_superseded_watches(
+    root: &Path,
+    train_id: &str,
+    version: &str,
+    reminders: &dyn cas_store::ReminderStore,
+) -> Result<()> {
+    let current = semver::Version::parse(version)?;
+    let pending = reminders.list_all_pending()?;
+    for entry in fs::read_dir(root.join("releases"))? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(previous) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix('v'))
+            .and_then(|s| semver::Version::parse(s).ok())
+        else {
+            continue;
+        };
+        if previous >= current {
+            continue;
+        }
+        let old: ReleaseContext = serde_json::from_slice(&fs::read(&path)?)?;
+        if old.train_id != train_id {
+            continue;
+        }
+        for id in [old.landing_reminder, old.publish_reminder]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(row) = pending.iter().find(|r| r.id == id) {
+                reminders.cancel(id, &row.owner_id)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -498,9 +539,11 @@ mod tests {
     }
     #[test]
     fn release_tracking_owner_fallback_never_blocks() {
-        for peer_available in [true, false] {
+        for (recorded_owner, peer_available) in [(false, true), (false, false), (true, false)] {
             let (temp, root, mut train, owner, args) = fixture();
-            train.epic_verification_owner = None;
+            if !recorded_owner {
+                train.epic_verification_owner = None;
+            }
             if !peer_available {
                 open_agent_store(&root)
                     .unwrap()

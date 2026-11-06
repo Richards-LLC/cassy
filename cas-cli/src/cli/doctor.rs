@@ -7066,6 +7066,42 @@ mod tests {
         assert!(github_origin_check(empty.path()).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn github_queue_drift_is_report_only_with_one_read_cas_e47b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "https://github.com/acme/repo.git"]] {
+            assert!(std::process::Command::new("git").current_dir(temp.path()).args(args).status().unwrap().success());
+        }
+        let gh = temp.path().join("gh");
+        let response = temp.path().join("response.json");
+        let log = temp.path().join("calls");
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/merge-queue-health.json")).unwrap();
+        crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat '{}'\n", log.display(), response.display()));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        for (build, merge, grouping, warning) in [(1, 1, "ALLGREEN", true), (5, 5, "ALLGREEN", false), (8, 5, "HEADGREEN", true)] {
+            let mut value = fixture.clone();
+            value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"] = serde_json::json!({"maxEntriesToBuild":build,"maxEntriesToMerge":merge,"groupingStrategy":grouping});
+            fs::write(&response, serde_json::to_vec(&value).unwrap()).unwrap();
+            fs::write(&log, "").unwrap();
+            let check = github_origin_check(temp.path()).unwrap();
+            assert_eq!(matches!(check.status, CheckStatus::Warning), warning, "{}", check.message);
+            assert!(check.message.contains("merge queue"), "{}", check.message);
+            if warning {
+                assert!(check.message.contains("gh api -X PUT repos/acme/repo/rulesets/42"), "{}", check.message);
+            }
+            let calls = fs::read_to_string(&log).unwrap();
+            assert_eq!(calls.lines().count(), 1, "{calls}");
+            assert!(!calls.contains("PUT"), "report must never mutate: {calls}");
+        }
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\necho 'API rate limit exceeded: fixture-secret' >&2\nexit 1\n");
+        let check = github_origin_check(temp.path()).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("unavailable"), "{}", check.message);
+        assert!(!check.message.contains("fixture-secret"));
+    }
+
     /// cas-0140: doctor errors on a failing hub audit writer and stays OK on a
     /// log that is merely quiet.
     #[test]

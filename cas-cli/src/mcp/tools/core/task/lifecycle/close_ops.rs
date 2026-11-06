@@ -6559,6 +6559,12 @@ impl CasCore {
             // cas-ec74: `updated_at` is store-owned; derive the occurrence from
             // the stamp the store persisted, not from the pre-write value.
             Ok(persisted_at) => {
+                crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+                    &task.id,
+                    &format!("task `{}` parked awaiting_merge on {} at {}", task.id,
+                        parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
+                        parked.deliverables.factory_branch_anchor.as_deref().unwrap_or("recorded delivery tip")),
+                );
                 self.retire_delivered_worker_cache(&parked);
                 // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
                 // relay. A refused close stays a tool error for the worker.
@@ -7740,6 +7746,7 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
             .into_iter()
@@ -9489,6 +9496,7 @@ impl CasCore {
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
+                    drop(_phase);
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
                         // this cycle survives the park (`record_park`). When
@@ -12061,7 +12069,10 @@ impl CasCore {
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
         // the caller while it finishes.
-        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+        drop(_phase);
+        crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+            &req.id, &format!("task `{}` closed", req.id),
+        );
 
         let epic_override_note_pending = deferred_epic_override_note.is_some();
         if let Some(note) = deferred_epic_override_note {
@@ -20431,6 +20442,7 @@ fn update_close_snapshot_preserving_notes(
 }
 
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("notes");
     if task.notes.contains(note) {
         return false;
     }

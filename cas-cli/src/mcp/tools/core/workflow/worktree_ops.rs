@@ -2177,7 +2177,9 @@ async fn post_merge_test_delay() {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
     {
-        tokio::time::sleep(std::time::Duration::from_millis(ms.min(10_000))).await;
+        // Model the real synchronous Git/store work after publication. An
+        // async sleep hid runtime starvation from the response-budget test.
+        std::thread::sleep(std::time::Duration::from_millis(ms.min(10_000)));
     }
 }
 

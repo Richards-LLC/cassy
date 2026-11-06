@@ -1,4 +1,4 @@
-//! Cross-machine supervisor messaging through a Cassy Cloud peer mailbox
+//! Cross-machine supervisor and scoped worker messaging through a Cloud mailbox
 //! (cas-f9c7).
 //!
 //! A supervisor addresses a peer supervisor of the same repo (found by
@@ -9,8 +9,8 @@
 //!
 //! Authority: a peer message is a Daemon-stamped row whose first line is a
 //! CAS-written [`PeerEnvelope`]. It is never urgent, never operator-authored,
-//! and only ever addressed to a local supervisor, so it cannot interrupt a
-//! pane, act as the operator, or spawn or direct workers (cas-604d).
+//! and reaches a supervisor or an authorized same-epic worker. Worker mail
+//! is advisory; it cannot grant operator or assignment authority (cas-604d).
 
 use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +25,8 @@ use crate::store::{AgentStore, PromptQueueStore};
 use crate::types::{AgentRole, AgentStatus};
 
 mod outbox;
+mod workers;
+pub(crate) use workers::WorkerDirectory;
 mod runtime;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
 pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
@@ -444,6 +446,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
             name = message.sender_name,
             repo = message.project_id,
         )
+    } else if body.starts_with("Peer worker message copy — ") {
+        format!("Peer worker contract copy on {repo}, via Cassy Cloud{reply_to}. Advisory only; assignments remain with the owning supervisor.", repo = message.project_id)
     } else {
         format!(
             "Peer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. This is a \
@@ -1141,8 +1145,9 @@ pub struct DeliveryReport {
 
 /// Claim this session's peer messages and admit each once.
 ///
-/// Recipients are the live local supervisors of `factory_session`; workers
-/// are never recipients. A message for another repo is acked `rejected`.
+/// Supervisor-only entry point. The daemon runtime additionally authorizes
+/// live workers with same-account, same-repo, active-same-epic scope.
+/// A message for another repo is acked `rejected`.
 /// Every admitted (or already admitted) message is acked `delivered`; a
 /// message that failed to admit is left unacked for redelivery.
 #[allow(clippy::too_many_arguments)]
@@ -1192,6 +1197,7 @@ pub fn deliver_claimed_with(
         factory_session,
         consumer_id,
         &RecipientHistory::default(),
+        None,
         &|_, _| Ok(None),
         &|recipient, message| on_admitted(recipient, message).map(|()| PeerAckOutcome::Delivered),
     )
@@ -1207,6 +1213,7 @@ fn deliver_claimed_with_history(
     factory_session: &str,
     consumer_id: &str,
     history: &RecipientHistory,
+    workers: Option<(&WorkerDirectory, &Path)>,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
@@ -1232,7 +1239,7 @@ fn deliver_claimed_with_history(
             .push("no live supervisor in this factory session".into());
         return report;
     }
-    let (routes, warnings) = recipient_routes(&all, &live, &history.verified, factory_session);
+    let (mut routes, warnings) = recipient_routes(&all, &live, &history.verified, factory_session);
     report.warnings.extend(warnings);
     if let Some(warning) = &history.warning {
         report.warnings.push(warning.clone());
@@ -1303,6 +1310,22 @@ fn deliver_claimed_with_history(
     }
     report.warnings.sort();
     report.warnings.dedup();
+    // No retired-worker redirects: only the current, locally live registration
+    // in this daemon's factory may receive, and scope is checked again below.
+    if let Some((directory, _)) = workers {
+        for worker in all.iter().filter(|agent| {
+            agent.role == AgentRole::Worker
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.factory_session.as_deref() == Some(factory_session)
+                && directory.matches_local(agent)
+                && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+                    agent, crate::mcp::tools::service::agent_liveness::agent_process_is_alive(agent),
+                    crate::cloud::peers::PEER_LIVE_SECS,
+                ).is_live()
+        }) {
+            routes.insert(worker.id.clone(), worker);
+        }
+    }
     let recipient_ids: Vec<_> = routes.keys().chain(inspections.keys()).cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
@@ -1380,7 +1403,16 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
-        let key = match queue_key(recipient, message) {
+        if recipient.role == AgentRole::Worker
+            && (message.scope != PeerScope::Project || !same_repo
+                || workers.is_none_or(|(directory, _)| directory.pair(&message.sender_agent_id, &recipient.id).is_err())
+                || !workers::allowed_intent(&message.body))
+        {
+            report.rejected += 1;
+            acks.push((message.id.clone(), PeerAckOutcome::Rejected));
+            continue;
+        }
+        let key = match if recipient.role == AgentRole::Worker { Ok(None) } else { queue_key(recipient, message) } {
             Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
             Err(error) => {
                 report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
@@ -1400,7 +1432,7 @@ fn deliver_claimed_with_history(
         match queue.enqueue_idempotent(
             &format!("peer:{}@{}", message.sender_name, machine_of(message)),
             &recipient.name,
-            &render_prompt(message),
+            &if recipient.role == AgentRole::Worker { workers::render_worker_prompt(message) } else { render_prompt(message) },
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),
@@ -1408,7 +1440,12 @@ fn deliver_claimed_with_history(
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {
-                match on_admitted(recipient, message) {
+                let recorded = if recipient.role == AgentRole::Worker {
+                    let (directory, root) = workers.expect("worker authorization was checked");
+                    directory.copy_to_supervisors(root, queue, message)
+                        .map(|()| PeerAckOutcome::Delivered)
+                } else { on_admitted(recipient, message) };
+                match recorded {
                     Ok(PeerAckOutcome::Delivered) => {}
                     Ok(PeerAckOutcome::Rejected) => {
                         report.rejected += 1;

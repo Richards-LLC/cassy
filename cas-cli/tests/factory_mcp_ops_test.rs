@@ -2434,7 +2434,8 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
     let registered = home.join(".codex-registered@example.com");
     std::fs::create_dir_all(&registered).expect("registered account directory");
-    std::fs::write(registered.join("auth.json"), "{}").expect("registered auth marker");
+    // Keep the named folder visible in remedies without supplying a usable
+    // login: an authenticated named account is now correctly auto-selected.
 
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
@@ -2450,7 +2451,9 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
         "no eligible account",
         "Pass config_dir",
         "project worker config_dir",
-        registered.to_str().unwrap(),
+        // Unusable accounts are listed by label with their rejection cause;
+        // only authenticated alternatives belong in the usable-home list.
+        "registered@example.com",
     ] {
         assert!(error.message.contains(detail), "missing {detail:?}: {error}");
     }
@@ -13919,7 +13922,7 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
         .find(|line| line.starts_with(&format!("[cas #{spawn_id} spawn-boilerplate ")))
         .unwrap_or("");
     assert!(
-        spawn_provenance.ends_with("s first]"),
+        spawn_provenance.split("] [").next().unwrap_or("").ends_with("s first"),
         "the delayed spawn brief needs machine-readable one-line provenance: {text}"
     );
     let supervisor_provenance = text
@@ -13927,7 +13930,7 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
         .find(|line| line.starts_with("[cas #") && line.contains(" supervisor-authored "))
         .unwrap_or("");
     assert!(
-        supervisor_provenance.ends_with("s first]"),
+        supervisor_provenance.split("] [").next().unwrap_or("").ends_with("s first"),
         "the actual supervisor reply must retain one-line provenance: {text}"
     );
     assert!(

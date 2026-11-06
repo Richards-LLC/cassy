@@ -135,24 +135,62 @@ fn control_socket(fd: i32) -> Result<tokio::net::UnixStream> {
     Ok(stream)
 }
 
+async fn control_reply(output: &mut (impl tokio::io::AsyncWrite + Unpin), reply: &Value) -> Result<()> {
+    output.write_all(&serde_json::to_vec(reply)?).await?;
+    output.write_all(b"\n").await?;
+    output.flush().await?;
+    Ok(())
+}
+
+fn startup_diagnostic(error: &anyhow::Error) -> String {
+    let mut diagnostic = crate::cli::human_error_message(error);
+    if let Some(suggestion) = error.downcast_ref::<crate::error::CasError>()
+        .and_then(crate::error::CasError::suggestion)
+    {
+        diagnostic.push_str("\nSuggestion:\n");
+        diagnostic.push_str(suggestion);
+    }
+    diagnostic
+}
+
 pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
-    let control = control_socket(fd)?;
+    let mut control = control_socket(fd)?;
     let front_pid = std::os::unix::process::parent_id();
     let root = super::runtime::resolve_mcp_serve_root()?;
     let watchdog = super::parent_watchdog::spawn();
-    if !crate::store::detect::cas_store_present(&root) { bail!("no initialized Cassy store; run cas init first") }
+    if !crate::store::detect::cas_store_present(&root) {
+        let error = anyhow::anyhow!("no initialized Cassy store; run cas init first");
+        if !standby {
+            control_reply(&mut control, &json!({"error":startup_diagnostic(&error)})).await?;
+        }
+        return Err(error);
+    }
     if standby && crate::migration::check_migrations(&root)?.has_pending() {
         bail!("candidate requires schema migrations; reconnect after an explicit migration instead");
     }
     let switchable = Switchable::standby(root.clone());
     let input = super::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
+    let mut daemon = None;
+    if !standby {
+        // Initial startup retains the eager store/schema checks and readiness
+        // banner even before a client sends initialize. Replacements stay inert.
+        let (service, running_daemon) = match super::runtime::prepare_service(root.clone()).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                control_reply(&mut control, &json!({"error":startup_diagnostic(&error)})).await?;
+                return Err(error);
+            }
+        };
+        daemon = running_daemon;
+        let _ = switchable.active.set(service);
+        control_reply(&mut control, &json!({"event":"ready"})).await?;
+    }
     let server = switchable.clone().serve((input, tokio::io::stdout())).await?;
     let cancel = server.cancellation_token();
     let waiting = server.waiting();
     tokio::pin!(waiting);
     let (read, mut write) = control.into_split();
     let mut control = BufReader::new(read);
-    let mut daemon = None;
     let mut retire = false;
     let end_reason = loop {
         let mut line = String::new();
@@ -192,9 +230,7 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
                     Ok(()) => json!({"id":request["id"], "ok":true}),
                     Err(error) => json!({"id":request["id"], "ok":false, "error":error.to_string()}),
                 };
-                write.write_all(&serde_json::to_vec(&reply)?).await?;
-                write.write_all(b"\n").await?;
-                write.flush().await?;
+                control_reply(&mut write, &reply).await?;
                 if retire { break "backend_retired"; }
             }
         }

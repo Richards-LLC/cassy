@@ -624,7 +624,8 @@ mod tests {
         assert!(notice.contains("session-b: supervisor-b"), "{notice}");
         assert!(!notice.contains("worker-current"), "{notice}");
         assert!(notice.contains("before it starts its next queued task"), "{notice}");
-        assert!(notice.contains("Factory daemons keep their build"), "{notice}");
+        // pin: the supported daemon re-exec remedy survives automatic update requests.
+        assert!(notice.contains("cas factory reexec --session <session>"), "{notice}");
         assert!(notice.contains("MCP reconnect control"), "{notice}");
         assert!(
             notice.contains("A plain supervisor exit stops every worker"),

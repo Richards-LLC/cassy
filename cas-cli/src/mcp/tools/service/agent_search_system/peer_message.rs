@@ -29,6 +29,11 @@ impl CasService {
             || target.starts_with("inbox:") || super::message::target_is_reserved_source(target)
         { return Ok(None); }
         let root = self.inner.cas_root.clone();
+        // An unqualified local typo must reach local authority checks when
+        // Cloud is unavailable. Explicit remote targets keep their auth error.
+        if !target.contains('@') && crate::cloud::CloudConfig::load_from_cas_dir(&root)
+            .is_ok_and(|config| !config.is_logged_in())
+        { return Ok(None); }
         // Existing local messaging owns local names and its session policy.
         if !target.contains('@') && crate::store::open_agent_store(&root).ok()
             .and_then(|store| store.list(None).ok()).is_some_and(|agents| agents.iter()

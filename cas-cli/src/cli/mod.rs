@@ -1095,20 +1095,15 @@ fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
         #[cfg(not(unix))]
         { anyhow::bail!("private MCP backends require Unix control sockets") }
     } else { runtime.block_on(crate::mcp::run_server()) };
-    if result.is_err() || args.backend {
-        // cas-1895: the pre-initialize guard (cas-2a49) reads stdin from the
-        // first moment of startup. Tokio's stdin is a blocking read that
-        // cannot be cancelled, and dropping the runtime waits for it, so a
-        // failed startup hung until the client wrote or closed stdin instead
-        // of exiting with its diagnostic (cas-5c05). Give other blocking work
-        // a short grace, then abandon the read.
-        runtime.shutdown_timeout(SERVE_FAILED_STARTUP_GRACE);
-    }
+    // Tokio's stdin read cannot be cancelled. Both startup refusal and the
+    // parent watchdog must exit even while another process holds stdin open.
+    // Give other blocking work a short grace, then abandon that read.
+    runtime.shutdown_timeout(SERVE_SHUTDOWN_GRACE);
     result
 }
 
-/// How long a failed `cas serve` startup waits for blocking tasks before exit.
-const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long `cas serve` waits for blocking tasks after its transport ends.
+const SERVE_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {

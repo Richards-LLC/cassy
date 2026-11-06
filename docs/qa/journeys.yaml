@@ -22,6 +22,11 @@ bug_families:
     tasks: [cas-f0a9]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
+  mcp-eager-initial-backend:
+    title: Initial MCP startup validates its store and reports readiness without waiting for a client handshake; replacement candidates remain inactive
+    tasks: [cas-bdda]
+    invariants: [HUB-J27-CARD-RELOAD]
+    journeys: [HUB-J27]
   approved-dispatch-close-owner:
     title: Approved dispatch and batch receipt recovery use ordinary close gates without worker retries or repeated covered QA offers
     tasks: [cas-abb0]

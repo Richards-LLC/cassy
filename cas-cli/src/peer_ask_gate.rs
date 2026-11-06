@@ -3,7 +3,7 @@
 //!
 //! The gabber supervisor asked prowl to review PR #4249, then merged the PR
 //! to staging without the answer; the review later found two money P1s. The
-//! ask is already recorded in the peer outbox and any reply carries its id, so
+//! ask is already recorded in the peer outbox and answers are matched there, so
 //! no new gate object is needed: `worktree_merge` and a supervisor's raw
 //! `gh pr merge` are refused while the merging supervisor has an unanswered
 //! ask (or blocker) to a peer that names the task or PR being merged.
@@ -121,9 +121,13 @@ pub(crate) fn merge_refusal(
             continue;
         }
         let note_task = task_for_override(cas_root, ask, subject);
+        let answer_state = match ask.unlinked_answer.as_deref() {
+            Some(id) => format!("peer answer {id} arrived but is not linked to this ask"),
+            None => "no answer is linked to this ask".to_string(),
+        };
         return Some(format!(
-            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and no reply has arrived. \
-             Wait for the answer, or override visibly: \
+            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and {answer_state}. \
+             Wait for an answer that identifies this ask, or override visibly: \
              `task action=notes id={note_task} note_type=decision notes=\"{OVERRIDE_MARKER} {}: <reason>\"`, \
              then retry the merge (the operator is told).",
             ask.recipient,
@@ -306,6 +310,72 @@ mod tests {
         let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
             .await.expect_err("the missing source remains subject to normal merge guards");
         assert!(!after.message.contains("UNANSWERED PEER ASK"), "arrived answer must release the ask: {after}");
+    }
+
+    #[test]
+    fn peer_answers_match_only_their_unambiguous_question_cas_7435() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        for case in ["single", "named", "explicit", "ambiguous", "wrong-peer", "wrong-target",
+            "wrong-reference", "stale", "receipt", "status", "untyped", "prefix",
+            "ambiguous-then-explicit", "duplicate", "queued", "wrong-source"]
+        {
+            let (_env, _temp, root, conn) = fixture();
+            sent_ask(&conn, "ask-7435", "Please review PR #4249.");
+            let two_asks = matches!(case, "named" | "explicit" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
+            if two_asks {
+                sent_ask(&conn, "ask-74350", "Please review PR #4250.");
+            }
+            conn.execute("UPDATE peer_message_outbox SET payload=json_set(payload, '$.recipient_agent_id', 'peer-agent'), created_at=strftime('%s','now')-10", []).unwrap();
+            if case == "queued" {
+                conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL, state='pending'", []).unwrap();
+            }
+            let mut reply = PeerEnvelope {
+                id: "reply-7435".into(), sender_name: "lively-cheetah-57".into(),
+                sender_agent_id: "peer-agent".into(), machine: "prowl".into(),
+                session: None, repo: "cassy".into(), in_reply_to: None,
+                kind: Some(PeerMessageKind::Answer), scope: PeerScope::Project,
+            };
+            match case {
+                "explicit" => reply.in_reply_to = Some("ask-7435".into()),
+                "wrong-reference" => reply.in_reply_to = Some("unrelated-ask".into()),
+                "wrong-peer" => reply.sender_agent_id = "different-peer".into(),
+                "receipt" => reply.kind = Some(PeerMessageKind::Receipt),
+                "status" => reply.kind = Some(PeerMessageKind::Status),
+                "untyped" => reply.kind = None,
+                _ => {}
+            }
+            let insert = |reply: &PeerEnvelope, body: &str| {
+                let source = if case == "wrong-source" { "peer:someone-else@prowl".into() }
+                    else { format!("peer:{}@{}", reply.sender_name, reply.machine) };
+                let target = if case == "wrong-target" { "another-supervisor" } else { "cosmic-shark-29" };
+                conn.execute("INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![source, target, format!("{}\n{body}", render_envelope(reply))]).unwrap();
+            };
+            insert(&reply, match case {
+                "named" => "Reviewed ask-7435; approved.",
+                "prefix" | "duplicate" => "Reviewed ask-74350; approved.",
+                _ => "Relayed the boundary; approved.",
+            });
+            if case == "stale" {
+                conn.execute("UPDATE prompt_queue SET created_at=datetime('now','-60 seconds')", []).unwrap();
+            }
+            if case == "ambiguous-then-explicit" {
+                reply.id = "explicit-second-answer".into();
+                reply.in_reply_to = Some("ask-74350".into());
+                insert(&reply, "Second question approved.");
+            } else if case == "duplicate" {
+                insert(&reply, "A duplicate delivery cannot answer the remaining question.");
+            }
+            let refusal = pr_merge(&root, "sup-soundwave", 4249);
+            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit"), "{case}: {refusal:?}");
+            if matches!(case, "ambiguous" | "ambiguous-then-explicit" | "wrong-reference" | "queued") {
+                assert!(refusal.as_deref().unwrap().contains("reply-7435"), "{case}: {refusal:?}");
+            }
+            if two_asks {
+                let other_answered = matches!(case, "prefix" | "ambiguous-then-explicit" | "duplicate");
+                assert_eq!(pr_merge(&root, "sup-soundwave", 4250).is_none(), other_answered, "other ask in {case}");
+            }
+        }
     }
 
     /// Verifiers ver-37f17bf1f171 and ver-aaa79541a589: any way an ask writes

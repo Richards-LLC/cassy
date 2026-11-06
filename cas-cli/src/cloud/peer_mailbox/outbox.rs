@@ -309,44 +309,123 @@ pub struct OpenPeerAsk {
     pub cloud_id: Option<String>,
     pub recipient: String,
     pub body: String,
+    /// An arrived answer that could not safely be associated with this ask.
+    pub unlinked_answer: Option<String>,
+}
+
+struct PendingAsk {
+    ask: OpenPeerAsk,
+    sender_name: String,
+    peer_id: Option<String>,
+    created_at: i64,
+    answered: bool,
+}
+
+impl PendingAsk {
+    fn from_peer(&self, reply: &PeerEnvelope) -> bool {
+        match self.peer_id.as_deref() {
+            Some(id) => id == reply.sender_agent_id,
+            None => self.ask.recipient.eq_ignore_ascii_case(
+                &format!("{}@{}", reply.sender_name, reply.machine),
+            ),
+        }
+    }
+}
+
+fn names_ask(body: &str, id: &str) -> bool {
+    body.match_indices(id).any(|(at, _)| {
+        let part = |c: char| c.is_ascii_alphanumeric() || c == '-';
+        !body[..at].chars().next_back().is_some_and(part)
+            && !body[at + id.len()..].chars().next().is_some_and(part)
+    })
 }
 
 /// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
 /// `sender_agent_id` in the last `window_secs` that no delivered peer reply
-/// answers: a reply naming it with `in_reply_to` whose kind is not a
-/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
-/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
-/// the peer.
+/// answers. Explicit replies retain legacy kind handling; unlinked typed
+/// answers need an ask id in their body or exactly one open ask to that peer.
+/// Replay in arrival order so an ambiguous answer cannot later answer another
+/// question when the first is resolved. Abandoned sends never reached the peer.
 pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
     let Ok(conn) = connection(root) else {
         return Vec::new();
     };
     let since = chrono::Utc::now().timestamp() - window_secs;
     let Ok(mut statement) = conn.prepare(
-        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body')
+        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body'),
+                o.sender_name, json_extract(o.payload, '$.recipient_agent_id'), o.created_at
          FROM peer_message_outbox o
          WHERE o.sender_agent_id = ?1 AND o.created_at >= ?2 AND o.state != 'abandoned'
            AND (json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
                 OR json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"blocker\"/>%')
-           AND (o.cloud_id IS NULL OR NOT EXISTS (
-                SELECT 1 FROM prompt_queue q
-                WHERE q.source LIKE 'peer:%'
-                  AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
          ORDER BY o.id",
     ) else {
         return Vec::new();
     };
-    statement
+    let mut asks: Vec<_> = statement
         .query_map(params![sender_agent_id, since], |row| {
-            Ok(OpenPeerAsk {
-                cloud_id: row.get(0)?,
-                recipient: row.get(1)?,
-                body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            Ok(PendingAsk {
+                ask: OpenPeerAsk {
+                    cloud_id: row.get(0)?,
+                    recipient: row.get(1)?,
+                    body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    unlinked_answer: None,
+                },
+                sender_name: row.get(3)?,
+                peer_id: row.get(4)?,
+                created_at: row.get(5)?,
+                answered: false,
             })
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if asks.is_empty() {
+        return Vec::new();
+    }
+    let replies = (|| -> rusqlite::Result<Vec<(String, String, String, i64)>> {
+        let mut statement = conn.prepare(
+            "SELECT source, target, prompt, CAST(strftime('%s', created_at) AS INTEGER) AS epoch
+             FROM prompt_queue WHERE source LIKE 'peer:%' AND epoch >= ?1 ORDER BY epoch, id",
+        )?;
+        Ok(statement.query_map([since], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?.filter_map(Result::ok).collect())
+    })().unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    for (source, target, prompt, arrived_at) in replies {
+        let Some(reply) = parse_envelope(&prompt) else { continue; };
+        if source != format!("peer:{}@{}", reply.sender_name, reply.machine)
+            || !seen.insert(reply.id.clone())
+            || matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status))
+        {
+            continue;
+        }
+        let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
+            (!ask.answered && ask.created_at <= arrived_at && ask.from_peer(&reply)
+                && (target == ask.sender_name || target == sender_agent_id)).then_some(i)
+        }).collect();
+        let answer = if let Some(id) = reply.in_reply_to.as_deref() {
+            candidates.iter().copied().find(|&i| asks[i].ask.cloud_id.as_deref() == Some(id))
+        } else if reply.kind == Some(PeerMessageKind::Answer) {
+            let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
+            let named: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
+                ask.ask.cloud_id.as_deref().is_some_and(|id| names_ask(body, id)).then_some(i)
+            }).collect();
+            match named.as_slice() {
+                [i] if candidates.contains(i) => Some(*i),
+                [] if candidates.len() == 1 => Some(candidates[0]),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(i) = answer.filter(|&i| asks[i].ask.cloud_id.is_some()) {
+            asks[i].answered = true;
+        } else if reply.kind == Some(PeerMessageKind::Answer) {
+            for i in candidates {
+                asks[i].ask.unlinked_answer.get_or_insert_with(|| reply.id.clone());
+            }
+        }
+    }
+    asks.into_iter().filter(|ask| !ask.answered).map(|ask| ask.ask).collect()
 }

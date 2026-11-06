@@ -2288,7 +2288,7 @@ mod tests {
         let current = cas_store::get_verification_dispatch(root, &dispatch.id).unwrap();
         reconcile_blocked_task_alert(root, &task.id, current.resolved_at.unwrap() + chrono::Duration::minutes(5)).unwrap();
         let rows = crate::store::open_prompt_queue_store(root).unwrap().peek_all(50).unwrap();
-        let alerts = rows.iter().filter(|row| row.prompt.contains("five minutes")).collect::<Vec<_>>();
+        let alerts = rows.iter().filter(|row| row.source.starts_with(LIFECYCLE_WAKE_SOURCE_PREFIX)).collect::<Vec<_>>();
         assert_eq!(alerts.len(), 1, "{rows:?}");
         // pin: no-delivery approval finishes close automatically; a hold requires supervisor repair, never a worker retry.
         assert!(alerts[0].prompt.contains("no-delivery") && !alerts[0].prompt.contains("worker has not retried close"),

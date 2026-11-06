@@ -94,8 +94,8 @@ fn recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7() {
         assert_eq!(rows.len(), 2, "{case}: exactly one follow-up");
         if owns_wait {
             let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id)
-                && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state");
-            assert!(is_lifecycle_wake_source(&completed.source), "{case}: completion must wake");
+                && row.prompt.contains(&terminal.to_string())).unwrap();
+            assert!(is_lifecycle_wake_source(&completed.source), "{case}");
             assert!(!block_hold::answered_blocker_alert(&root, completed), "{case}: a linked answer cannot withdraw completion at delivery");
         }
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked, "{case}: preserve the explicit hold");

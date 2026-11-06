@@ -66,7 +66,7 @@ Follow `verifier-evidence-gate.md` → Verdict recording for the issue template 
 - **Escalate** only when no rejection condition applies: `status=supervisor_call`, summary starting `SUPERVISOR CALL:` with the question, for `NOT EXERCISED` rows or anything only the supervisor can decide. The supervisor answers on the same `dispatch_id`.
 - Confidence is about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 
-Never create, update or promote a rule. A rejection that teaches a reusable lesson is recorded with `rule action=observe` per the gate's Rule candidates, never as a lesson that mandates test counts, per-case fixtures, new test files or test scope beyond the changed code.
+Never create, update or promote a rule. Record a reusable lesson with `rule action=observe` only after citing at least two independent incidents from different tasks, per the gate's Rule candidates. One verdict is not enough: keep that finding in the verdict. Never propose a lesson that mandates test counts, per-case fixtures, new test files or test scope beyond the changed code.
 
 ## Epic verification
 

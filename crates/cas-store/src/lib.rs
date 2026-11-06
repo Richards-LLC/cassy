@@ -565,6 +565,14 @@ pub trait RuleStore: Send + Sync {
         self.update(&rule)
     }
 
+    /// Retire only drafts created on/before the cutoff, atomically retaining history.
+    /// Unversioned stores refuse rather than discard lifecycle evidence.
+    fn retire_expired_drafts(
+        &self, _cutoff: chrono::DateTime<chrono::Utc>, _change_note: &str,
+    ) -> Result<Vec<Rule>> {
+        Err(StoreError::Parse("draft rule retirement requires a versioned store".into()))
+    }
+
     /// Delete a rule
     fn delete(&self, id: &str) -> Result<()>;
 

@@ -80,6 +80,7 @@ impl Config {
                     .map(|slack| slack.violet_bot_user_ids().join(","))
                     .unwrap_or_default(),
             ),
+            "rules.draft_ttl_days" => Some(self.rules().draft_ttl_days.to_string()),
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
             "sync.target" => Some(self.sync.target.clone()),

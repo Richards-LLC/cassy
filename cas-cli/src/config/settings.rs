@@ -1,6 +1,17 @@
 use cas_factory::AutoPromptConfig;
 use serde::{Deserialize, Serialize};
 
+/// Lifetime of unpromoted project rules.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RulesConfig {
+    pub draft_ttl_days: u32,
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self { Self { draft_ttl_days: 30 } }
+}
+
 /// Slack writes use Violet unless the operator explicitly opts out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

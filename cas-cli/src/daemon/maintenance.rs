@@ -409,6 +409,31 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
+    // Draft probation uses the existing maintenance pass and versioned store.
+    let draft_expiry = (|| -> Result<(), CasError> {
+        let days = crate::config::Config::load(&config.cas_root)?.rules().draft_ttl_days;
+        if days == 0 { return Err(CasError::Other("rules.draft_ttl_days must be positive".into())); }
+        let Some(cutoff) = chrono::Duration::try_days(i64::from(days))
+            .and_then(|window| started_at.checked_sub_signed(window)) else {
+                // A window beyond the supported date range cannot expire a rule.
+                return Ok(());
+            };
+        let rules = crate::store::open_rule_store(&config.cas_root)?;
+        let retired = rules.retire_expired_drafts(cutoff,
+            &format!("auto-retired: not promoted within {days} days"))?;
+        if !retired.is_empty() {
+            let tasks = crate::store::open_task_store(&config.cas_root)?;
+            for rule in &retired {
+                let version = rules.list_versions(&rule.id)?.first().map(|v| v.version).unwrap_or_default();
+                crate::rule_refs::file_cleanup(&config.cas_root, tasks.as_ref(), rule,
+                    &[crate::rule_refs::RuleChange::Retired], &format!("v{version}"))
+                    .map_err(|error| CasError::Other(error.to_string()))?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = draft_expiry { errors.push(format!("Draft rule expiry failed: {error}")); }
+
     // cas-56266: an expired stakeholder review lists the rule's cited sites.
     if let Err(error) = crate::rule_refs::file_expired_review_cleanups(&config.cas_root) {
         errors.push(format!("Rule review cleanup failed: {error:#}"));

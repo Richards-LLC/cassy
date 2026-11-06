@@ -131,7 +131,7 @@ pub fn similar_rule_candidates(root: &Path, content: &str) -> Result<Vec<(RuleCa
     Ok(similar)
 }
 
-/// Record one verifier observation. It joins `candidate_id` when given, else
+/// Atomically record a complete bundle of independent incidents. It joins `candidate_id` when given, else
 /// the most similar existing candidate, else starts a new candidate. A repeat
 /// of the same task and verdict is not counted again.
 pub fn observe_rule_candidate(
@@ -139,13 +139,14 @@ pub fn observe_rule_candidate(
     candidate_id: Option<&str>,
     content: &str,
     category: &str,
-    task_id: &str,
-    verdict_id: &str,
+    incidents: &[(&str, &str)],
 ) -> Result<RuleCandidate> {
-    let (content, task_id, verdict_id) = (content.trim(), task_id.trim(), verdict_id.trim());
-    if content.is_empty() || task_id.is_empty() || verdict_id.is_empty() {
+    let content = content.trim();
+    let incidents: Vec<_> = incidents.iter().map(|(task, verdict)| (task.trim(), verdict.trim())).collect();
+    if content.is_empty() || incidents.iter().any(|(task, verdict)| task.is_empty() || verdict.is_empty())
+        || incidents.iter().map(|(task, _)| *task).collect::<HashSet<_>>().len() < 2 {
         return Err(StoreError::Parse(
-            "a rule candidate observation needs content, a task and a verdict".into(),
+            "a rule candidate needs at least two independent task/verdict incidents and content".into(),
         ));
     }
     let conn = connection(root)?;
@@ -176,11 +177,13 @@ pub fn observe_rule_candidate(
             }
         },
     };
-    tx.execute(
-        "INSERT OR IGNORE INTO rule_candidate_occurrences
-        (candidate_id, task_id, verdict_id, observed_at) VALUES (?1, ?2, ?3, ?4)",
-        params![id, task_id, verdict_id, Utc::now().to_rfc3339()],
-    )?;
+    for (task_id, verdict_id) in incidents {
+        tx.execute(
+            "INSERT OR IGNORE INTO rule_candidate_occurrences
+            (candidate_id, task_id, verdict_id, observed_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, task_id, verdict_id, Utc::now().to_rfc3339()],
+        )?;
+    }
     let candidate = load(&tx)?
         .into_iter()
         .find(|candidate| candidate.id == id)
@@ -216,14 +219,13 @@ mod tests {
             None,
             "A concurrent observation must wait for the SQLite writer",
             "concurrency",
-            "cas-lock",
-            "ver-lock",
+            &[("cas-lock", "ver-lock"), ("cas-other", "ver-other")],
         )
         .expect("observation should wait for the foreign writer and be recorded");
         holder.join().unwrap();
 
-        assert_eq!(candidate.distinct_tasks(), 1);
-        assert_eq!(candidate.occurrences.len(), 1);
+        assert_eq!(candidate.distinct_tasks(), 2);
+        assert_eq!(candidate.occurrences.len(), 2);
         assert_eq!(candidate.occurrences[0].verdict_id, "ver-lock");
     }
 }

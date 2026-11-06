@@ -244,6 +244,8 @@ def has_text_pin_reason(source, start):
 
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
+    if '/' in body and not re.search(r'\s', body):
+        return False  # Resource routes are machine paths, not human wording.
     words = re.findall(r"[A-Za-z0-9_'-]+", body)
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (
         '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None

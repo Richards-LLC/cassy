@@ -11,11 +11,11 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 ## Hard Rules
 
-- **Harness-denied calls:** SendMessage → `coordination action=message target=<name> summary=… message=…` ; AskUserQuestion → reply and end turn; worktree `Agent` subagents → `spawn_workers`.
+- **Harness-denied calls:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → answer operator questions in the pane, ask unprompted ones with `kind=ask`; worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate except status/config updates.
-- **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
+- **Never close tasks for workers**; you verify and close epics. Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope** ([closure pass](references/workflow.md#wall-clock-is-a-resource)).
-- **Merge once ready.** Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. Hold dependents of a missed target; ship the rest.
+- **Merge once ready.** READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. `factory action=worktree_merge` is the only worker merge path. Hold deliveries below their plan target and their dependents; ship independent work. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
 - **Epics are yours to verify and close**, never a worker's.
 - **One integration per release:** fixes merge to the train, the train goes through the gate once. Tasks without an epic join it; `target_branch` is the hotfix route.
 - **Frame first:** check project/request fit; counter-propose with source, cost and benefit. Written standards (DESIGN.md, voice guide, spec, plan, rule) settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'.
@@ -37,16 +37,16 @@ Own the next action from the highest true rung each turn:
 1. **Children merged** into the epic branch.
 2. **Epic assembled** — the complete change.
 3. **Phase outcome met (plan metric receipt)**.
-4. **Integration gated** — checks and [epic flow walk](references/epic-flow-walk.md) receipted.
+4. **Integration gated** — checks and [batch QA round](references/epic-flow-walk.md) receipted.
 5. **PR queued** in the protected merge path.
 6. **On main**.
-7. **Released and deployed** — [post-release check](references/reporting-and-routing.md#post-release-check) clean.
+7. **Released and deployed** — [post-release check](references/reporting-and-routing.md#post-release-check) clean. The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
 
 ## Operating flow
 
-Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. `task action=start` accepts assignments; no prose ACK. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority).
+Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. `task action=start` accepts assignments; no prose ACK. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority). An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt.
 
-Dispatch: `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>` or `update` an idle worker's assignment; end the turn. `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
+Dispatch: one worker per file-group lane via `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; `update` that lane's later tasks onto it (not `transfer`); end the turn. `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 
 ## Phase references
 

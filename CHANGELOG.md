@@ -7,6 +7,40 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.5] - 2026-11-06
+
+### Fixed — Factory
+
+- **Reviews follow the published target** — Candidate review now uses the fetched target on origin even when the local branch has an unpublished merge. Rolling that local merge back no longer triggers another verifier when the published target advances without changing the reviewed delivery. Source, plan, evidence and delivery-content checks still apply; merge-queue CI checks interactions with other deliveries.
+- **Build disk no longer fills with worker and verifier caches** — Was: worker Cargo caches and verifier walks were freed only once disk use reached the build-admission watermark and lanes were already refused, and on hosts with other users' processes the in-use check counted every unreadable process (and any process working in the checkout) as a user, so nothing was deleted. Now: parking a delivery trims the retained cache to its compiled dependencies (dropping `incremental/` and per-commit test executables) and prunes parked caches beyond retention; after every park and every 15 minutes, Cassy reclaims relocated worker targets idle for 30 minutes without waiting for disk pressure, keeping the newest idle cache warm. A cache counts as in use only when a process's working directory, executable, arguments, mappings or open files are inside the cache itself. Verifier walks superseded by a newer walk of the same task are reclaimed without waiting for the task to close. Park markers for removed worktrees are swept, and freed space is logged in GB.
+- **Idle workers with queued work can take new tasks** — Assigning a task to a clean, idle worker no longer fails with "N commits behind main, ask the worker to rebase" just because another task is queued for that worker but not yet started. `task start` cuts each task's branch from its own target. A worker that is mid-task or has uncommitted changes is still refused.
+- **Requested changes reach the worker** — A supervisor's `request_changes` now sends the assigned worker one waking message with the decision and branch handling. Its output says which prompt carried it, or why no worker was told, instead of implying a handoff. Previously the task reopened silently and the worker sat idle until someone messaged it.
+- **Stall alerts for sandboxed Claude workers** — Stall detection no longer counts a sandboxed worker's own harness process as a background job. Previously every Claude worker launched under a sandbox wrapper looked permanently busy, so neither the in-progress nor the assigned-but-unstarted stall alert could fire for it.
+
+### Fixed — Verification
+
+- **Queue-landed deliveries can close** — A premerge approval now recognizes the bound delivery tip after the merge queue publishes its own merge commit. Close checks current source ancestry and the complete reviewed patch at its first landing, so later edits to the same lines retain approval; dropping merges and another task's proof still refuse.
+- **Late pre-merge reviews stay usable** — An already-bound task verifier with unexpired authority can record a completed review after its dispatch deadline when the same source and candidate tree remain current. Changed or superseded candidates still refuse, and the original handoff remains one-use.
+- **Read-only investigations stay verified while the epic moves** — A close that Cassy measures as delivering nothing, from a clean checkout, now pins its verification to the exact commit it was reviewed at, whether or not it declared `no_delivery`. This applies to factory tasks with a recorded lane; legacy tasks keep the strict proof. A sibling merge into the epic, the worker starting its next task, or uncommitted notes in the checkout no longer invalidate the verifier's dispatch and force a second review.
+
+### Fixed — Commander
+
+- **Reload Cassy from a phone** — `/mcp` and **Reload Cassy** in a Claude supervisor's command menu reconnect its Cassy MCP server through Claude's native command, verified on Claude Code 2.1.311, 2.1.316 and 2.1.318. Versions older than 2.1.311 or unknown running Claude versions are refused as unverified. The receipt confirms the replacement process ID and its recorded version; command output alone never proves reload. Codex, Grok and unknown harnesses receive a named refusal. The owning factory daemon must already run this build; an older daemon needs its normal update/relaunch before it can handle the action. Automatic updates without reconnect remain follow-up work.
+- **Grok replies in conversation** — Completed Grok supervisor replies now appear in Commander and remain in conversation history after reconnect. Answers link to the originating terminal question or verified Commander send; thought chunks, tool progress and cancelled turns stay out of the reply. Native synthetic prompts cannot claim an operator question, and image pastes keep the text prompt for answer threading.
+
+### Fixed — Closes
+
+- **Closes track what has already shipped** — Parked deliveries whose code was already live on staging or main used to sit in AwaitingMerge until someone noticed that no batch QA receipt had been recorded. The background release runner now sends the supervisor one notice per release SHA. The notice lists those deliveries and gives the exact `verification action=batch_receipt` call to record. Cassy still does not record the receipt itself, because a receipt needs an independent ledger author.
+- **One supervisor close for shipped work** — A parked blocker whose current delivery is already on its target no longer holds a dependent task's close; a blocker reopened for rework still holds it. A supervisor override close with the task's own delivery or merge SHA on origin/<target> now passes a timed-out verifier dispatch, if the task has a merged PR or merge-queue run and the reason names that dispatch. Ordinary closes keep every timeout, and the timeout refusal now names this route.
+
+### Fixed — Factory instructions
+
+- **One answer per contested factory rule** — worker and supervisor rules now say the same thing in the skills, launch contracts, assignment text and refusal messages. A worker's close parks the delivery and the merge verdict closes it. The park relay is the only completion signal. The supervisor merges with `worktree_merge`, decides within its authority and asks the operator only for policy calls. Batch QA is the only epic walk, and the full suite runs once on the landing tree. A successful park now reads "PARKED … nothing more to do" instead of telling the worker to merge and retry. A new parity test keeps retired answers from coming back.
+
+### Added — Factory
+
+- **Place build overflow on your other machine** — Supervisors publish builder slots, load and pressure in peer presence. When spawn admission is saturated, a new task can go to a fresh supervisor of the same account and repository, with its full brief and capacity receipt. Each peer gets at most one new route per 90 seconds. Routes expire after 15 minutes or when the peer goes stale; disabling `factory.auto_route_builds` also releases them to local admission. Existing worker assignments stay local.
+
 ## [4.0.4] - 2026-11-05
 
 ### Fixed — CI

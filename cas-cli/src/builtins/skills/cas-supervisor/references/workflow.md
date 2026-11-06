@@ -9,7 +9,7 @@ Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy
 
 ## Worker Count Strategy
 
-Spawn by independent file groups, not task count. Tasks that touch the same files share one lane; the worker count is the number of parallel lanes.
+Group tasks that touch the same files into one lane; the worker count is the number of parallel lanes. Spawn one isolated worker per lane, pre-assigned to its first task (`spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`), and assign that lane's later tasks to the same worker.
 
 ## Phase 1: Plan
 
@@ -24,7 +24,7 @@ Spawn by independent file groups, not task count. Tasks that touch the same file
 
 ```text
 task action=create title="..." description="..." risk=none
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<task-id>
+factory action=spawn_workers count=1 lane=standard isolate=true task_id=<task-id>
 ```
 
 ### Brief fields: no spawn without them
@@ -40,6 +40,8 @@ A task needs four fields before you spawn onto it or assign it; fill a missing o
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: the touched tests; never name suites or evals | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
+A brief names a full or stress run only as a named, justified exception. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
+
 For rule-driven work, cite each rule id and its verbatim stakeholder scope. Declare known causal anchors with `Rule-driven sites:` (`rule_id`, `path`, `anchor`) or require them in the close receipt; code and tests carry `cas-rule: <id> scope: <JSON string>` comments. Unrelated work does not inherit the rule's scope.
 
 Tasks with `qa.user_facing_labels` need a `demo_statement` (`As a <user>, I <do X> and see <Y>`). Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md); name the target project only when it is not the worker's checkout, and review the close's `design:` line against the output.
@@ -48,7 +50,7 @@ A worker's close reason starts `PASS`, or `ISSUES` with the known defects, then 
 
 ## Phase 2: Coordinate
 
-1. Spawn workers. **Tier every spawn:** pass `lane=<light|standard|taste|heavy>` (the registry reports any fallback) or a complete `cli=`/`model=`/`effort=` recipe, never both ([model-selection.md](model-selection.md)). Spawn one `spawn_workers` call per tier the ready backlog needs:
+1. Spawn one worker per lane ([worker count](#worker-count-strategy)). **Tier every spawn:** pass `lane=<light|standard|taste|heavy>` (the registry reports any fallback) or a complete `cli=`/`model=`/`effort=` recipe, never both ([model-selection.md](model-selection.md)). Spawn one `spawn_workers` call per tier the ready backlog needs:
 
 <!-- Generated recipes retain their generator-owned fence formatting. -->
 <!-- markdownlint-disable MD031 MD040 -->
@@ -77,16 +79,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
    `spawn_workers` refuses a request past `[factory] max_concurrent_builders` or host CPU capacity; pass `force=true` only for a deliberate override. Workers never inherit your GitHub credentials: Cassy attaches a cited issue's body and comments at assignment, and a read-only token exported as `CAS_WORKER_GITHUB_READ_TOKEN` before the factory starts becomes each worker's `GH_TOKEN`.
 2. Confirm the workers are live: `factory action=worker_status summary_mode=true`.
 3. Assign: `task action=update id=<id> assignee=<worker>`. Pin the epic in the TUI with `factory action=focus_epic id=<epic-id>` (`clear=true` when it wraps).
-4. Add context the task record lacks in one message:
-
-   ```text
-   coordination action=message target=<worker> \
-     summary="Task <id> assignment" \
-     message="Task <id>: <context the task record lacks>."
-   ```
-
-<!-- markdownlint-disable-next-line MD029 -->
-5. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Wait on a concrete event with `coordination action=remind remind_event=<event> remind_message="..."` or the harness background-task notice; never poll.
+4. **Own the next exit rung.** The brief lives in the task record; send no assignment message. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Wait on a concrete event with `coordination action=remind remind_event=<event> remind_message="..."` or the harness background-task notice; never poll.
 
 ### Resuming an Existing EPIC
 
@@ -98,11 +91,11 @@ Workers from previous sessions are gone; stale DB records are not live processes
 
 ## Phase 3: Merge and Sync (Isolated Mode)
 
-Merge each completed lane into the epic branch, then have other workers sync. For optional advisory Spec/Standards reviews beside the verifier, use [cas-shadow-review](../../cas-shadow-review/SKILL.md).
+Merge each completed lane into the epic branch. For optional advisory Spec/Standards reviews beside the verifier, use [cas-shadow-review](../../cas-shadow-review/SKILL.md).
 
 ### Merge workers with Cassy
 
-`factory action=worktree_merge` is the worker merge path: it resolves the target from task state and keeps tracking, leases and cleanup consistent. Run the canonical merge-time diff review ([Required merge-review discipline](#required-merge-review-discipline)) before landing each lane.
+`factory action=worktree_merge` is the only worker merge path. It resolves the target from task state and keeps tracking, leases and cleanup consistent. Run the canonical merge-time diff review ([Required merge-review discipline](#required-merge-review-discipline)) before landing each lane.
 
 ```text
 factory action=worktree_merge id=<worker> task_id=<task-id>
@@ -140,11 +133,11 @@ Before landing a lane, check that the worker's capped `check: PASS <sha>` and ta
 
 **READY TO MERGE / MERGE REQUIRED:**
 
-1. Merge on `READY TO MERGE`, a task in `awaiting_merge`, or a worker's `status: ready` naming its pushed tip, even when a close gate refused park. Green lane CI without a ready signal is not ready. A delivery that misses its plan's measured target does not merge: hold only its dependents and ask the operator. Drain ready merges before free-form replies.
+1. READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Green lane CI without a park is not ready. Hold deliveries below their plan target and their dependents; ship independent work. Drain ready merges before free-form replies.
 2. Confirm the tip and target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`.
-   A user-facing delivery parks only after its own QA evidence bundle validates; send the worker the command the refusal names. When only a deployment can sign in, set `cas config set qa.deployed_origins <origin>` and cite a `deployed` bundle. Waive with `supervisor_override=true reason="…"` only when no evidence can be produced.
+   In qa.mode=per_task only, a user-facing delivery parks only after its own QA evidence bundle validates; send the worker the command the refusal names. When only a deployment can sign in, set `cas config set qa.deployed_origins <origin>` and cite a `deployed` bundle. Waive with `supervisor_override=true reason="…"` only when no evidence can be produced.
    On `INDEPENDENT QA DISPATCHED` or a `<cas-qa-dispatch>` wake, spawn a reviewer who is not the implementer, on the account with the most room and the cheapest recipe that has passed this kind of review:
-   `factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<qa-task>`.
+   `factory action=spawn_workers count=1 lane=standard isolate=true task_id=<qa-task>`.
    Merge and close refuse until its `qa_record` approves the exact tip, and a rejection returns the task to its implementer. Waive only with a logged reason (`verification action=qa_waive task_id=<task-id> summary="..."`). Code already merged without parking gets no round: close it with `commit_receipt=<merged sha>`.
 3. Merge into the epic branch and read the echoed task and target:
 
@@ -152,7 +145,7 @@ Before landing a lane, check that the worker's capped `check: PASS <sha>` and ta
    factory action=worktree_merge id=<worker> task_id=<task-id>
    ```
 
-4. The merge starts the close. A Tier 1 delivery in `qa.mode=batch` waits for the release verdict; any other opens a verification dispatch at the merge commit: run the verifier on it and send the worker nothing. PASS closes the task; FAIL returns it to the same worker with the findings. Message the worker only when a receipt names a gate that still holds.
+4. The merge starts the close. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. A delivery with its own verifier (Tier 2, `force-verifier`, `qa.mode=per_task`): `worktree_merge` prepares a candidate and opens a pre-merge dispatch; run the verifier on it and send the worker nothing. PASS publishes and closes the task; FAIL returns it to the same worker with the findings. Message the worker only when a receipt names a gate that still holds.
 5. Hand the worker its next task. Do not poll for merge state.
 
 To reject a parked delivery on review, use `task action=request_changes id=<task-id>`; it reopens the task for the same worker.
@@ -161,7 +154,6 @@ To reject a parked delivery on review, use `task action=request_changes id=<task
 
 After the epic branch advances, run `factory action=sync_all_workers branch=epic/<slug>`. It rebases idle or stale worktrees, skips live and mid-rebase ones, and reports each skip; tell live workers to rebase at their next task start.
 
-If `worktree_merge` cannot act, stop and ask the operator; do not invent a second merge procedure.
 
 ### Re-verify a rebased lane by patch-id
 
@@ -202,7 +194,7 @@ When a walk needs records only your credentials can create, the worker drafts a 
 
 ## Batch QA
 
-Batch QA is the default; `qa.mode=per_task` enables per-delivery reviews. Run one round per release, after the fix-diff re-review: build a candidate at the frozen tip, walk the combined matrix and report every failing row in one ledger. Fix them in one batch and re-walk only those rows, once; a row still failing is reverted to the next release unless it loses operator data. Record `verification action=batch_receipt` with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author` (who walked it and implemented no listed task); every listed delivery must be in that commit. Then close those deliveries.
+In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task. The round runs after the fix-diff re-review and before enqueue: build a candidate at the frozen tip, walk the combined matrix ([epic flow walk](epic-flow-walk.md)) within `qa.pass_timeout_mins` and report every failing row in one ledger. Fix them in one batch and re-walk only those rows, once; a row still failing is reverted to the next release unless it loses operator data. Record `verification action=batch_receipt` with `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author` (who walked it and implemented no listed task); every listed delivery must be in that commit. In qa.mode=batch the release batch_receipt closes merged deliveries.
 
 A lane not merged at freeze ships next release. After freeze, a new finding waits for the next board unless it loses data, hides state or hurts someone today; a fix for something hurting the operator ships alone
 <!-- cas-src:begin -->
@@ -246,9 +238,9 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
 
 1. Verify every child is closed and merged with `factory action=epic_status id=<epic-id>`.
    <!-- cas-src:begin -->
-   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round; enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Hand off to a fresh context at freeze, after the batch fix and after the QA receipt, keeping supervisor context under 200K tokens.
+   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; the [batch QA round](#batch-qa); enqueue. Fix tasks run only their touched tests. The merge queue is the one full-suite proof. Restart from a handoff only when your own context nears its limit, not at fixed phases.
    <!-- cas-src:else -->
-   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; one QA round; merge or enqueue. Fix tasks run only their touched tests. The final gate (step 4) is the one full-suite proof. Hand off to a fresh context at freeze, after the batch fix and after the QA receipt, keeping supervisor context under 200K tokens.
+   Then run the closeout once, in order: freeze scope; one full review; one batch fix; re-review only the fix diff; the [batch QA round](#batch-qa); merge or enqueue. Fix tasks run only their touched tests. The final gate (step 4) is the one full-suite proof. Restart from a handoff only when your own context nears its limit, not at fixed phases.
    <!-- cas-src:end -->
 2. **Phase outcome met (plan metric receipt)** — require evidence that the measured phase target was achieved before advancing.
 3. Hold the main merge until the assembled diff passes review and the final gate.
@@ -275,6 +267,6 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    factory action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    ```
 
-   Then merge the epic branch to base. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
+   With a queue, the queue landing is the merge to base; the local merge applies only without one. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
 8. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
 9. Shut down the epic's workers by name once each has pushed and parked: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`.

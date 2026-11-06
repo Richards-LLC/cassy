@@ -240,12 +240,11 @@ pub(crate) fn neon_production_write_denial(
     Some(format!(
         "🚫 NEON PRODUCTION WRITE: this {tool_name} call carries a write statement ({keyword}) and resolved to {resolved}. \
          Workers may write only to a non-production branch.\n\n\
-         Workers cannot create Neon branches. Ask the supervisor for one: \
-         `{coord} action=message target=supervisor blocker=true summary=\"db branch for <task-id>\" message=\"...\"`; \
-         its db_branch_create writes DATABASE_URL to .env.cas-db in your worktree. \
+         Workers cannot create Neon branches. {steps} \
+         The supervisor's db_branch_create writes DATABASE_URL to .env.cas-db in your worktree. \
          If a non-production branch is already recorded for this task, pass its id as `branchId`. \
          Read-only statements (SELECT, SHOW, EXPLAIN) need no branch and are not blocked.",
-        coord = format!("{}coordination", crate::harness_policy::own_tool_prefix()),
+        steps = super::worker_denied_tools::blocker_steps("db branch for <task-id>", "..."),
     ))
 }
 

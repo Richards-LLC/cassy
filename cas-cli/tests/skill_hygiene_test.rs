@@ -32,8 +32,7 @@ fn ct2_p1_skill_one_message_per_event() {
     for phrase in [
         "One event gets one message.",
         "A close is the lifecycle report; never send a post-close",
-        "send one `merge_request=true` message",
-        "do not send a separate prose summary or ACK before",
+        "The park relay is the completion signal; send merge_request=true only for local_merge.",
         "wait for the supervisor's",
         "summary or echo the close relay",
         "send no follow-up update",
@@ -55,7 +54,6 @@ fn ct2_p3_worker_lane_documented() {
         "same factory session",
         "sends a copy",
         "kind=status",
-        "kind=ready",
         "typed action wake",
     ] {
         assert!(
@@ -244,7 +242,7 @@ fn playwright_debug_is_selected_by_playwright_detection() {
     fs::create_dir_all(plain.path().join(".cas")).unwrap();
     fs::write(
         plain.path().join("package.json"),
-        r#"{"dependencies":{"vite":"^5.0.0"}}"#,
+        r#"{"dependencies":{"vite":"^9.99.0"}}"#,
     )
     .unwrap();
     assert!(!installed(plain.path()), "no Playwright, no skill");

@@ -37,7 +37,7 @@ use crate::git_evidence::{
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
-    is_supervisor_from_env, worker_needs_supervisor_verification_from_env, supervisor_harness_from_env,
+    is_supervisor_from_env, supervisor_harness_from_env,
     verification_policy, worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
@@ -7767,14 +7767,26 @@ impl CasCore {
         // close path (including awaiting-merge re-close) observes the same
         // invariant. Terminal tasks retain their existing idempotent close
         // behavior even if a dependency was added after they closed.
-        if !task.is_terminal()
-            && let Err(error) = super::super::ensure_no_open_blockers(
-                task_store.as_ref(),
-                &req.id,
-                "close",
-            )
-        {
-            return Ok(Self::tool_error(error.message.to_string()));
+        // cas-4b22: a blocker whose own delivery is already on its target has
+        // shipped; only its bookkeeping close is missing, so it no longer holds.
+        if !task.is_terminal() {
+            let mut held = Vec::new();
+            for blocker in super::super::open_blocker_ids(task_store.as_ref(), &req.id)? {
+                match task_store.get(&blocker).ok().and_then(|row| crate::qa_batch::shipped_anchor(&self.cas_root, &row)) {
+                    Some(anchor) => close_notes.record(&mut task, &format!(
+                        "Blocker {blocker} already shipped: its delivery {anchor} is on its target, so it does not hold this close."
+                    )),
+                    None => held.push(blocker),
+                }
+            }
+            if !held.is_empty() {
+                return Ok(Self::tool_error(format!(
+                    "Cannot close task {}: blocking dependencies are still open: {}. Close those blocker tasks first, \
+                     or remove an incorrect `blocks` dependency with `{}task action=dep_remove id={} to_id=<blocker-id> dep_type=blocks`. \
+                     A blocker whose delivery is already on its target no longer holds a close; these have none there.",
+                    req.id, held.join(", "), crate::mcp::tools::core::guidance::caller_prefix(), req.id
+                )));
+            }
         }
 
         let supervisor_override = req.supervisor_override.unwrap_or(false);
@@ -7976,12 +7988,35 @@ impl CasCore {
                 ))),
             }
         } else { None };
+        // cas-4b22: supervisor policy. Shipped work may pass a timed-out
+        // verifier dispatch only on a supervisor_override close whose reason
+        // names that dispatch. Ordinary closes keep every timeout.
+        let shipped_timeout_waiver = (supervisor_override
+            && superseding_release_verdict.is_none()
+            && close_disposition.requires_delivery_gates())
+        .then(|| shipped_timeout_waiver(&self.cas_root, &task, req.commit_receipt.as_deref(), req.reason.as_deref()))
+        .flatten();
+        if let Some(dispatch_id) = shipped_timeout_waiver.as_deref() {
+            if let Err(error) = cas_store::timeout_verification_dispatch(&self.cas_root, &req.id, chrono::Utc::now()) {
+                return Ok(Self::tool_error(format!(
+                    "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} could not record timed-out dispatch {dispatch_id}: {error}", req.id
+                )));
+            }
+            close_notes.record(&mut task, &format!(
+                "[{}] ✅ DECISION supervisor_override passed timed-out verification dispatch {dispatch_id}: the delivery is already shipped (merged PR or queue run; commit_receipt on origin target). Reason: {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                req.reason.as_deref().unwrap_or_default().trim(),
+            ));
+        }
 
         // An explicitly persisted proof cycle is stronger than configuration,
         // depth, orphan, and review convenience paths. Once one exists, no
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
-        if close_disposition != TaskCloseDisposition::Decision && superseding_release_verdict.is_none() {
+        if close_disposition != TaskCloseDisposition::Decision
+            && superseding_release_verdict.is_none()
+            && shipped_timeout_waiver.is_none()
+        {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
@@ -9515,6 +9550,12 @@ impl CasCore {
                             &resolved_parent_branch, head).err()
                     }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
                         .unwrap_or_default();
+                    // Supervisors keep the full text: it names their exits.
+                    let msg = if crate::harness_policy::is_worker_from_env() {
+                        gate_text::parked_reply(&msg, qa_anchor.as_deref(), measured_branch.as_deref(), &resolved_parent_branch)
+                    } else {
+                        msg
+                    };
                     let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
@@ -9805,8 +9846,10 @@ impl CasCore {
             && !rapid_unsampled
             && !tier_skips_verifier
             && !release_verdict_covers
+            && shipped_timeout_waiver.is_none()
         {
-            let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
+            // cas-5597: every factory worker's close parks; the merge verdict closes.
+            let is_worker_without_subagents = crate::harness_policy::is_worker_from_env();
 
             // Check for approved verification
             if let Ok(verification_store) = self.open_verification_store() {
@@ -10040,15 +10083,9 @@ impl CasCore {
                             v.summary,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate tool aliases.
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
                                 format!(
-                                    "To fix: Address the issues in this worker.\n\
-                                     Then ask supervisor to run verification \
-                                     (task-verifier or direct {sup_ver}) \
-                                     and close the task on your behalf."
+                                    "To fix: address the issues in this worker and commit; your next close parks the fix. {}",
+                                    gate_text::WORKER_CLOSE_OWNERSHIP
                                 )
                             } else {
                                 format!(
@@ -10058,21 +10095,7 @@ impl CasCore {
                             close_reason_note,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate coordination tool.
-                                let coord = format!(
-                                    "{}coordination",
-                                    crate::mcp::tools::core::guidance::caller_prefix()
-                                );
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Suggested message: {coord} action=message target=supervisor summary=\"verification requested\" \
-                                     message=\"Task {id} is ready for re-verification. \
-                                     Please verify (task-verifier or direct {sup_ver}) \
-                                     and close if approved.\"",
-                                    id = req.id
-                                )
+                                String::new()
                             } else {
                                 format!(
                                     "To verify: Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
@@ -10481,9 +10504,9 @@ impl CasCore {
                                 };
                                 return Ok(Self::tool_error(gate_text::worker_verification_required(
                                     &req.id,
-                                    &format!(
-                                        "Task {} close is pending existing dispatch {}, owned by {}, deadline {}. {} Ask the supervisor to finish this exact dispatch's verdict, then retry task close.",
-                                        req.id, dispatch.id, dispatch.owner_agent_id, dispatch.deadline_at, conflict,
+                                    &gate_text::worker_pending_dispatch(
+                                        &req.id, &dispatch.id, &dispatch.owner_agent_id,
+                                        &dispatch.deadline_at.to_string(), conflict,
                                     ),
                                 )));
                             }
@@ -10590,14 +10613,6 @@ impl CasCore {
                             // and buries the row that can. The command stays
                             // as the stated fallback for the case where the
                             // enqueue failed or the supervisor stays silent.
-                            let handoff_line = if dispatch_handoff_queued {
-                                "Cassy has already delivered this dispatch to the supervisor \
-                                 (they are woken with it, not left to find it). Wait for the \
-                                 verdict; re-send only if the supervisor does not respond:\n\n"
-                            } else {
-                                "Forward to supervisor (workers cannot spawn task-verifier \
-                                 directly):\n\n"
-                            };
                             let bound_head = dispatch
                                 .repository
                                 .as_ref()
@@ -10607,21 +10622,16 @@ impl CasCore {
                                 .as_deref()
                                 .map(|id| format!(" Previous approved verdict: {id}."))
                                 .unwrap_or_default();
-                            format!(
-                                "Factory worker verification gate: task {id} close is pending \
-                                     dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
-                                     {bound_head}{superseded_verdict}\
-                                     This close will only succeed after a legitimate verifier records a verdict.\n\n\
-                                     {handoff_line}\
-                                     {coord} action=message target=supervisor \
-                                     summary=\"Ready to close {id}\" \
-                                     message=\"Task {id} is ready to close.{close_reason_hint} \
-                                     Please run task-verifier for task {id} and close on my behalf if approved.\"",
-                                id = req.id,
-                                dispatch_id = dispatch.id,
-                                owner = dispatch.owner_agent_id,
-                                deadline = dispatch.deadline_at,
-                            )
+                            gate_text::worker_dispatch_gate(&gate_text::WorkerDispatchGate {
+                                task_id: &req.id,
+                                dispatch_id: &dispatch.id,
+                                owner: &dispatch.owner_agent_id,
+                                deadline: &dispatch.deadline_at.to_string(),
+                                context: &format!("{bound_head}{superseded_verdict}"),
+                                handoff_queued: dispatch_handoff_queued,
+                                coord: &coord,
+                                close_reason_hint: &close_reason_hint,
+                            })
                         } else if supervisor_is_assignee {
                             // cas-7998: the supervisor self-verifies in their
                             // own harness, so the direct verification alias
@@ -10692,36 +10702,13 @@ impl CasCore {
                             close_reason_section.as_str(),
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate supervisor verification tool.
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Ask supervisor to run verification \
-                                         (task-verifier or direct {sup_ver}) \
-                                         and close task {} on your behalf.",
-                                    req.id
-                                )
+                                gate_text::WORKER_CLOSE_OWNERSHIP.to_string()
                             } else {
                                 String::new()
                             },
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate coordination tool.
-                                let coord = format!(
-                                    "{}coordination",
-                                    crate::mcp::tools::core::guidance::caller_prefix()
-                                );
-                                let sup_ver = format!(
-                                    "{}verification",
-                                    crate::mcp::tools::core::guidance::supervisor_prefix()
-                                );
-                                format!(
-                                    "Suggested message: {coord} action=message \
-                                         target=supervisor summary=\"verification requested\" message=\"Please verify task {id} \
-                                         (task-verifier or direct {sup_ver}) \
-                                         and close it if approved.\"",
-                                    id = req.id
-                                )
+                                String::new()
                             } else {
                                 format!(
                                     "After verification passes, retry {caller_task} action=close id={}.",
@@ -13338,11 +13325,31 @@ impl CasCore {
             )
         })?;
 
+        // cas-cff4: tell the assignee, and report what was actually sent.
+        let assignee = task.assignee.as_deref().unwrap_or("unassigned");
+        let notice = task_store
+            .get(&task.id)
+            .map_err(|error| format!("task re-read failed: {error}"))
+            .and_then(|reopened| {
+                super::supervisor_push::queue_request_changes_notice(
+                    &self.cas_root,
+                    &reopened,
+                    req.reason.trim(),
+                    &outcome.branch_handling,
+                )
+            });
+        let notice = match notice {
+            Ok(prompt_id) => format!("Assignee {assignee} notified (prompt {prompt_id})."),
+            Err(reason) => format!(
+                "Assignee {assignee} NOT notified: {reason}. Message the worker yourself."
+            ),
+        };
+
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
             task.id,
             task.title,
-            task.assignee.as_deref().unwrap_or("unassigned"),
+            assignee,
             outcome.branch_handling,
             req.reason.trim(),
         )))
@@ -14577,7 +14584,7 @@ fn enrich_merge_required_with_conflict_check(
              `{worker_prefix}task action=start id={task_id}` (now permitted from \
              `awaiting_merge`) to inspect from inside their worker worktree, \
              rebase the factory branch onto the current integration target tip, \
-             push, and re-park it with merge_request=true before re-closing.",
+             push, and close again to re-park it.",
             conflict_paths.join(", ")
         )
     } else if let Some(error) = check_error {
@@ -14589,8 +14596,7 @@ fn enrich_merge_required_with_conflict_check(
              park as reopen-eligible. The assigned worker can \
              `{worker_prefix}task action=start id={task_id}` to inspect from inside \
              the worker worktree, rebase the factory branch onto the current \
-             integration target tip, push, and re-park it with \
-             merge_request=true before re-closing."
+             integration target tip, push, and close again to re-park it."
         )
     } else {
         message
@@ -17432,10 +17438,9 @@ fn run_factory_branch_merge_gate_for_delivery(
              1. {drain}\n\
              {epic_push_state_step}\
              {durable_step}\
-             4. If a merge is still needed, ask your supervisor to merge \
+             4. Close again with {retry} to park it, then ask your supervisor to merge \
              {factory_branch} into {parent_branch}: {merge_request}. The supervisor \
-             merges with `{merge}` on the epic branch.\n\
-             5. Once merged, retry {retry}.\n\n\
+             merges with `{merge}`; the merge verdict closes the task.\n\n\
              {exits}"
         )
     } else if local_merge {
@@ -17448,8 +17453,8 @@ fn run_factory_branch_merge_gate_for_delivery(
              supervisor merges your local branch):\n\
              1. {drain}\n\
              2. Commit everything on {factory_branch}; leave it local.\n\
-             3. Ask your supervisor to merge it into {parent_branch}: {merge_request}.\n\
-             4. Once merged, retry {retry}.\n\n\
+             3. Close again with {retry} to park it, then ask your supervisor to merge it \
+             into {parent_branch}: {merge_request}. The merge verdict closes the task.\n\n\
              {exits}"
         )
     } else {
@@ -19741,6 +19746,50 @@ pub(crate) fn resolve_task_commit_receipt_sha(
     }
 
     Ok(full_commit)
+}
+
+/// cas-4b22: the timed-out dispatch a shipped override close may pass. It
+/// needs a merged PR or merge-queue run on record, a commit_receipt that is the
+/// task's own anchor or recorded merge commit and is contained in
+/// origin/<target>, and a reason naming the exact timed-out dispatch.
+fn shipped_timeout_waiver(
+    cas_root: &std::path::Path,
+    task: &Task,
+    receipt: Option<&str>,
+    reason: Option<&str>,
+) -> Option<String> {
+    let (receipt, reason) = (receipt?.trim(), reason?);
+    let shipped = &task.deliverables;
+    if shipped.delivery_pr_merged_at.is_none()
+        && shipped.delivery_pr_merge_commit.is_none()
+        && shipped.green_merge_commit.is_none()
+    {
+        return None;
+    }
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_root, &task.id).ok()??;
+    let timed_out = match dispatch.state {
+        cas_types::VerificationDispatchState::TimedOut => true,
+        cas_types::VerificationDispatchState::Pending
+        | cas_types::VerificationDispatchState::Claimed => dispatch.deadline_at <= chrono::Utc::now(),
+        _ => false,
+    };
+    if !timed_out || !reason.contains(&dispatch.id) || !is_safe_git_refname(receipt) {
+        return None;
+    }
+    let (repo, target) = crate::qa_batch::task_context(cas_root, task).ok()?;
+    let receipt = crate::qa_batch::commit(&repo, receipt)?;
+    // Only this task's own delivery or recorded merge proves it shipped.
+    let own = [
+        shipped.factory_branch_anchor.as_deref(),
+        shipped.delivery_pr_merge_commit.as_deref(),
+        shipped.green_merge_commit.as_deref(),
+        shipped.merge_commit.as_deref(),
+    ];
+    if !own.into_iter().flatten().any(|rev| crate::qa_batch::commit(&repo, rev).as_deref() == Some(receipt.as_str())) {
+        return None;
+    }
+    let origin = crate::qa_batch::commit(&repo, &format!("origin/{target}"))?;
+    (crate::qa_batch::ancestor(&repo, &receipt, &origin) == Some(true)).then_some(dispatch.id)
 }
 
 /// A squash may replace the source commit's identity, but must preserve its
@@ -30329,6 +30378,147 @@ esac
             "{}",
             closed.notes
         );
+    }
+
+    /// cas-4b22 (GH #1513): a delivery already shipped by a merged PR closes
+    /// through one supervisor override with its merge SHA. A blocker whose
+    /// own delivery is on its target no longer holds the close, and the
+    /// timed-out verifier dispatch passes only when the reason names it.
+    #[tokio::test]
+    async fn shipped_override_close_passes_shipped_blocker_and_named_timeout_cas_4b22() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+            open_worktree_store,
+        };
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let blocker_anchor = rev_parse_local(p, "HEAD");
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-4b22-fixture\"\n\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("brisk-otter-4b22");
+        git(p, &["worktree", "add", "-q", "-b", "factory/brisk-otter-4b22", wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join("delivery.rs"), "// cas-4b22 delivery\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "fix(cas-4b22-a): delivery"]);
+        let receipt = rev_parse_local(&wt, "HEAD");
+        git(p, &["merge", "-q", "--ff-only", "factory/brisk-otter-4b22"]);
+        git(p, &["update-ref", "refs/remotes/origin/main", &receipt]);
+
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let worktree_store = open_worktree_store(&cas_dir).unwrap();
+        worktree_store.init().unwrap();
+        worktree_store
+            .add(&Worktree::new("wt-4b22".into(), "factory/brisk-otter-4b22".into(), "main".into(), wt.clone()))
+            .unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-4b22-supervisor";
+        agents
+            .register(&Agent::new_with_role(actor.into(), "supervisor".into(), AgentRole::Supervisor))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+
+        let target = WorkTarget { repo_selector: "project:cas-4b22-fixture".into(), target_branch: "main".into() };
+        let mut blocker = worker_task("idle-heron-4b22");
+        blocker.id = "cas-4b22-blocker".into();
+        blocker.status = TaskStatus::AwaitingMerge;
+        blocker.deliverables.factory_branch_anchor = Some(blocker_anchor);
+        blocker.deliverables.work_target = Some(target.clone());
+        store.add(&blocker).unwrap();
+        // Merged, closed and reopened for rework: only history names the old tip.
+        let mut reopened = worker_task("idle-heron-4b22");
+        reopened.id = "cas-4b22-reopened".into();
+        reopened.status = TaskStatus::Open;
+        reopened.deliverables.historical_factory_branch_anchors = vec![blocker.deliverables.factory_branch_anchor.clone().unwrap()];
+        reopened.deliverables.work_target = blocker.deliverables.work_target.clone();
+        store.add(&reopened).unwrap();
+        let mut task = worker_task("brisk-otter-4b22");
+        task.id = "cas-4b22-a".into();
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some("wt-4b22".into());
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.delivery_pr_number = Some(1513);
+        task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now());
+        task.deliverables.work_target = Some(target);
+        store.add(&task).unwrap();
+        for to in [&blocker.id, &reopened.id] {
+            store
+                .add_dependency(&Dependency::new(task.id.clone(), to.clone(), DependencyType::Blocks))
+                .unwrap();
+        }
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &cas_dir, &task.id, "task-verifier", actor,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::hours(1), false,
+        )
+        .unwrap();
+        cas_store::timeout_verification_dispatch(&cas_dir, &task.id, chrono::Utc::now() + chrono::Duration::hours(2))
+            .unwrap()
+            .unwrap();
+        let close = |reason: String, commit_receipt: &str| {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "close", "id": task.id, "supervisor_override": true,
+                "reason": reason, "commit_receipt": commit_receipt,
+            }))
+            .unwrap();
+            let service = &service;
+            async move {
+                let response = service.task(Parameters(request)).await.unwrap();
+                let text = response.content.into_iter().filter_map(|content| match content.raw {
+                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                    _ => None,
+                }).collect::<Vec<_>>().join("\n");
+                (response.is_error == Some(true), text)
+            }
+        };
+
+        let named = format!("shipped by PR 1513; verifier dispatch {} timed out", dispatch.id);
+        let (refused, text) = close(named.clone(), &receipt).await;
+        assert!(refused, "{text}");
+        assert!(text.contains("blocking dependencies are still open: cas-4b22-reopened."), "a reopened blocker holds: {text}");
+        store.remove_dependency(&task.id, &reopened.id).unwrap();
+
+        // Another task's commit on origin/main is not this task's shipped receipt.
+        let foreign = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        let (refused, text) = close(named.clone(), &foreign).await;
+        assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
+
+        let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
+        assert!(refused, "{text}");
+        assert!(text.contains("VERIFICATION TIMED OUT") && text.contains("Already shipped"), "{text}");
+        assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
+        assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+
+        let (refused, text) = close(named, &receipt).await;
+        assert!(!refused, "{text}");
+        let closed = store.get(&task.id).unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed, "{text}");
+        assert!(closed.notes.contains("Blocker cas-4b22-blocker already shipped"), "{}", closed.notes);
+        assert!(closed.notes.contains(&format!("passed timed-out verification dispatch {}", dispatch.id)), "{}", closed.notes);
     }
 
     /// cas-f01b (GH #1068): the gabber-studio cas-cfd8 sequence through the

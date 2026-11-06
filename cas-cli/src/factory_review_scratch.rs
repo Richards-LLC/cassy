@@ -506,7 +506,42 @@ pub(crate) fn seed_target_from_worker(cas: &Path, checkout: &Path) -> Result<()>
     Ok(())
 }
 
-fn eligible(cas: &Path, record: &Owner) -> Result<()> {
+/// cas-49163: a checkout is reclaimable once its task or dispatch is done, or
+/// once a newer checkout for the same task supersedes it. Tasks wait in
+/// awaiting_merge for hours, and each re-walk of a new head used to keep every
+/// earlier full checkout and target (25 GB for one task) until the task closed.
+fn eligible(cas: &Path, directory: &Path, record: &Owner) -> Result<()> {
+    if superseded(cas, directory, record) {
+        if let Some(id) = &record.dispatch_id {
+            let dispatch = cas_store::get_verification_dispatch(cas, id)?;
+            ensure!(
+                !matches!(
+                    dispatch.state,
+                    cas_types::VerificationDispatchState::Pending
+                        | cas_types::VerificationDispatchState::Claimed
+                ),
+                "dispatch still active"
+            );
+        }
+        return Ok(());
+    }
+    finished(cas, record)
+}
+
+/// Another checkout of the same task was used more recently. Equal stamps
+/// supersede neither, so the newest checkout per task is always retained.
+fn superseded(cas: &Path, directory: &Path, record: &Owner) -> bool {
+    let used = |owner: &Owner| owner.last_used_at.unwrap_or(owner.created_at);
+    directory.parent().is_some_and(|task| {
+        entries(task)
+            .into_iter()
+            .filter(|sibling| sibling.as_path() != directory)
+            .filter_map(|sibling| owner(cas, &sibling).ok())
+            .any(|sibling| used(&sibling) > used(record))
+    })
+}
+
+fn finished(cas: &Path, record: &Owner) -> Result<()> {
     let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
     let finished = match &record.dispatch_id {
         Some(id) => {
@@ -522,7 +557,12 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
             );
             true
         }
-        None => false,
+        // cas-49163: candidate walks carry no dispatch id. A verdict recorded
+        // after the walk's last use frees it while the task awaits merge; a
+        // pending or claimed dispatch still keeps it (checked below).
+        None => cas_store::get_latest_verification_dispatch(cas, &task.id)?
+            .and_then(|dispatch| dispatch.resolved_at)
+            .is_some_and(|at| at >= record.last_used_at.unwrap_or(record.created_at)),
     };
     ensure!(
         task.is_terminal() || finished,
@@ -801,7 +841,7 @@ fn reclaim(
     let clean = mode == ReclaimMode::Collect;
     let lock = lease(directory, false)?;
     let record = owner(cas, directory)?;
-    eligible(cas, &record)?;
+    eligible(cas, directory, &record)?;
     ensure!(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "live or unverifiable review output"
@@ -857,7 +897,7 @@ fn reclaim(
         );
     }
     // Recheck state and process evidence after inventory, before touching Git.
-    eligible(cas, &owner(cas, directory)?)?;
+    eligible(cas, directory, &owner(cas, directory)?)?;
     ensure!(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "review output became live"
@@ -888,7 +928,7 @@ fn reclaim(
         fs::rename(&target, queue.join("target"))?;
         // Check after rename as well: process descriptors now resolve through
         // trash. Restore when possible if a user appeared during the handoff.
-        if eligible(cas, &owner(cas, directory)?).is_err()
+        if eligible(cas, directory, &owner(cas, directory)?).is_err()
             || crate::factory_target_cache::review_output_in_use(directory, &lock)
         {
             let _ = fs::rename(queue.join("target"), &target);
@@ -1014,7 +1054,7 @@ fn candidates(cas: &Path, task_id: Option<&str>) -> Vec<PathBuf> {
         })
         .filter(|directory| {
             owner(cas, directory)
-                .and_then(|record| eligible(cas, &record))
+                .and_then(|record| eligible(cas, directory, &record))
                 .is_ok()
         })
         .take(MAX_RECLAIMS_PER_PASS)

@@ -70,12 +70,12 @@ follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs).
 
 ## Batch QA
 
-`qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
-A batch park defers evidence and opens no per-task round. Capture visual
-before/after evidence while building. The supervisor owns the release's one
-epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`;
-deferred deliveries close after that receipt, so "waiting for batch receipt" is
-a pending obligation. Explicit `qa_request` reviews remain available.
+In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
+`per_task` is the explicit opt-in. A batch park opens no per-task round. Capture
+visual before/after evidence while building. The supervisor owns the release's one
+epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
+In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane
 

@@ -398,6 +398,18 @@ impl Candidate {
         }
     }
 
+    /// A late child may finish only the exact still-current reviewed candidate.
+    pub(crate) fn validate_late_verdict(&self, root: &Path, task: &Task) -> Result<(), String> {
+        self.validate(root, task)?;
+        let target = review_target(&self.repository, &self.target_branch)?;
+        if self.tree_on(&target)? != self.tree {
+            return Err(
+                "late verifier candidate tree changed; review the current candidate".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Independently reviewed siblings cannot widen this delivery's approval.
     fn tree_on(&self, target: &str) -> Result<String, String> {
         // cas-4af9: the approval covers (source tip, candidate tree). A target

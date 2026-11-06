@@ -25,6 +25,7 @@ const DROP_NOTE: &str = "Train drop:";
 const REENQUEUED: &str = "re-enqueued PR #";
 
 /// The train branch of a release-train epic.
+// TODO(cas-1896): use task::release_train::is_release_train once it lands on the epic.
 pub(crate) fn train_lane(epic: &Task) -> Option<&str> {
     (epic.task_type == TaskType::Epic && epic.labels.iter().any(|l| l == RELEASE_TRAIN_LABEL))
         .then(|| epic.effective_epic_branch())
@@ -157,6 +158,8 @@ pub(crate) async fn drop_children(
     if reason.is_empty() {
         bail!("train drop requires a nonempty --reason naming the failure");
     }
+    let mut seen = BTreeSet::new();
+    let task_ids: Vec<&String> = task_ids.iter().filter(|id| seen.insert(id.as_str())).collect();
     if task_ids.is_empty() {
         bail!("train drop requires at least one task");
     }
@@ -166,7 +169,7 @@ pub(crate) async fn drop_children(
     let tasks = core.open_task_store().map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let mut children = Vec::new();
     let mut epic: Option<Task> = None;
-    for task_id in task_ids {
+    for task_id in &task_ids {
         let task = tasks.get(task_id)?;
         let parent = tasks
             .get_parent_epic(task_id)?
@@ -181,7 +184,7 @@ pub(crate) async fn drop_children(
     let train = train_lane(&epic)
         .with_context(|| format!("{} is not a release-train epic", epic.id))?
         .to_string();
-    let listed = task_ids.join(", ");
+    let listed = task_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", ");
 
     // Rule-176(5): the drop that re-enqueued the train was its one repair cycle.
     if epic.notes.lines().any(|line| line.contains(DROP_NOTE) && line.contains(REENQUEUED)) {
@@ -228,7 +231,14 @@ pub(crate) async fn drop_children(
         })
         .collect();
     let tip = crate::worktree::GitOperations::new(root.clone())
-        .revert_merges_via_temp_worktree(&train, &plan)?
+        .revert_merges_via_temp_worktree(&train, &plan)
+        .map_err(|error| {
+            let error = error.to_string();
+            match merges.iter().find(|(_, _, merge)| error.contains(merge.as_str())) {
+                Some((_, task, _)) => anyhow::anyhow!("dropping {}: {error}", task.id),
+                None => anyhow::anyhow!(error),
+            }
+        })?
         .context("the revert produced no commit")?;
     if git(&root, &["remote", "get-url", "origin"]).is_ok() {
         git(&root, &["push", "-q", "origin", &format!("{tip}:refs/heads/{train}")])

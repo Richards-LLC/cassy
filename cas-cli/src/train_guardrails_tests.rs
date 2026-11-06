@@ -108,13 +108,14 @@ async fn batch_drop_reverts_the_bad_children_once_and_a_conflict_changes_nothing
     let queue = FakeQueue::default();
     let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
 
-    let error = drop_children(&core, &ids(&["cas-b"]), "merge_group: suite failed", &queue).await.unwrap_err();
+    let error = drop_children(&core, &ids(&["cas-a", "cas-b"]), "merge_group: suite failed", &queue).await.unwrap_err();
     let error = format!("{error:#}");
+    assert!(error.contains("dropping cas-b: ") && !error.contains("dropping cas-a"), "names the task: {error}");
     assert!(error.contains("conflicts in cas-b.txt") && error.contains("Nothing changed"), "{error}");
     assert_eq!(run(repo, &["rev-parse", TRAIN]), before);
     assert!(queue.0.lock().unwrap().is_empty());
 
-    let receipt = drop_children(&core, &ids(&["cas-b", "cas-c"]), "merge_group: suite failed", &queue).await.unwrap();
+    let receipt = drop_children(&core, &ids(&["cas-b", "cas-c", "cas-b"]), "merge_group: suite failed", &queue).await.unwrap();
 
     let files = run(repo, &["ls-tree", "--name-only", TRAIN]);
     assert!(files.contains("cas-a.txt") && !files.contains("cas-b.txt") && !files.contains("cas-c.txt"), "{files}");

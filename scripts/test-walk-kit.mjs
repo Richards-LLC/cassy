@@ -1,5 +1,6 @@
 // Shared walk contracts: visible outcomes, measured replies and deduplicated evidence.
 import test from 'node:test';
+import * as walkKit from '../cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -128,4 +129,36 @@ test('ledger writes versioned live rows, merges one defect and refuses unsupport
   assert.match(question.verdict, /^NOT EXERCISED: spec question/);
   assert.ok(fs.readFileSync(file, 'utf8').split('\n').filter(line => /^\| (W1|PASS|TIMEOUT|UNCITED) \|/.test(line))
     .every(line => line.includes(`kit:${WALK_KIT_VERSION}`)));
+});
+
+// One barrier reproduces the serial 1440 -> 390 -> SMS lane failure.
+test('multi-surface walks start independently with isolated ledgers, profiles and personas', async t => {
+  const root = directory(t), started = [], disposed = [];
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const run = walkKit.runSurfaceLanes({
+    surfaces: [{ channel: 'web', width: 1440 }, { channel: 'web', width: 390 }, { channel: 'sms' }],
+    outputDir: path.join(root, 'evidence'), profileRoot: path.join(root, 'scratch'),
+    createPersona: async lane => ({ id: `persona-${lane.id}` }),
+    disposePersona: async persona => { disposed.push(persona.id); },
+    run: async lane => { started.push(lane); await barrier; return lane.id; },
+  });
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(started.map(lane => lane.id).sort(), ['sms', 'web-1440', 'web-390']);
+    for (const field of ['ledgerPath', 'browserProfileDir'])
+      assert.equal(new Set(started.map(lane => lane[field])).size, 3, field);
+    assert.equal(new Set(started.map(lane => lane.persona.id)).size, 3);
+  } finally { release(); }
+  assert.deepEqual((await run).sort(), ['sms', 'web-1440', 'web-390']);
+  assert.equal(disposed.length, 3);
+  assert.ok(started.every(lane => !fs.existsSync(lane.browserProfileDir)));
+  let entered = false;
+  await assert.rejects(walkKit.runSurfaceLanes({
+    surfaces: [{ channel: 'web', width: 390 }, { channel: 'sms' }],
+    outputDir: path.join(root, 'evidence'), profileRoot: path.join(root, 'scratch'),
+    createPersona: async () => ({ id: 'shared-login' }), disposePersona: async () => {},
+    run: async () => { entered = true; },
+  }), /distinct persona/);
+  assert.equal(entered, false, 'shared login must be refused before any surface starts');
 });

@@ -451,7 +451,6 @@ async fn builtin_docs_rebind_rust_receipts_at_park_cas_23b1() {
         std::fs::write(f.worker_path.join(doc), "worker instructions v2\n").unwrap();
         std::fs::write(f.worker_path.join(history), "{\"updated\":true}\n").unwrap();
         if rust_edit {
-            std::fs::write(f.worker_path.join("crates/widget/src/embedded.md"), "other asset\n").unwrap();
             std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
         }
         git(&f.worker_path, &["add", "."]);

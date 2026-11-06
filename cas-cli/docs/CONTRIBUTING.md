@@ -2130,6 +2130,11 @@ so a refused push leaves the branch and checkout available for the PR route.
 A missing/moved PR identity or head never enables auto-merge; retry the same
 merge request after correcting the cause.
 
+## Advisory merge-queue health
+
+See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
+for setup, doctor and release-preflight diagnostics and manual repair.
+
 ## Build, assembly and CI policy
 
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).

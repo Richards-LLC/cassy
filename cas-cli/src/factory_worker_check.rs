@@ -2141,6 +2141,16 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+    // Worker and verifier children keep temporary HOMEs beside their private
+    // build output, where retirement GC already discards them without copying.
+    let temporary = target_dir.join("tmp");
+    std::fs::create_dir_all(&temporary).context("create capped build temporary directory")?;
+    if temporary.canonicalize()?.parent() != Some(target_dir.canonicalize()?.as_path()) {
+        bail!("Capped build temporary directory escapes its private target");
+    }
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(key, &temporary);
+    }
     // Bootstrap/admission keep their inherited identity and credentials. Only
     // the final Cargo/test child receives this fixed isolation profile.
     if let Some(directory) = isolated_test_env {

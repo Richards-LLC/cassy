@@ -3289,6 +3289,13 @@ The value must be an absolute path. Once it is set, each project gets its own
   leases, parking and retirement all resolve this same path. Sources stay in
   the checkout, and the main checkout and lane previews keep their in-tree
   `target/`.
+- Capped worker and verifier Cargo children set `TMPDIR`, `TMP` and `TEMP` to
+  their private target's `tmp/` directory. Test temporary HOMEs and binary
+  copies therefore use the scratch drive when configured, rather than the
+  host's potentially memory-backed `/tmp`. Without a scratch root they use
+  the checkout's private `target/tmp/`. Retirement GC removes these files
+  with the owned target without copying them into durable evidence; verifier
+  target reclamation removes them too. The caller's environment stays intact.
 - Published baselines live in `<scratch_root>/<project-key>/build-cache`.
   `scripts/refresh-worker-build-cache.sh` reads the key through `cas config get`
   and prints `Worker build-cache root:`, and the release host update reads that

@@ -1378,6 +1378,71 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
 
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
+async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(repo, &["merge", "-q", "--ff-only", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("nocode-worker-session").unwrap();
+    worker.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&worker).unwrap();
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let id = "cas-d4d8";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+
+    // A hold and target merge happen without any delivery from this task.
+    let original = f.task(id).deliverables.factory_branch_start.unwrap();
+    let mut held = f.task(id);
+    held.status = TaskStatus::Open;
+    f.put(&held);
+    std::fs::write(repo.join("integrated.rs"), "pub fn integrated() {}\n").unwrap();
+    git(repo, &["add", "integrated.rs"]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): integrated sibling delivery"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let target = git(repo, &["rev-parse", "HEAD"]);
+    assert_ne!(original.base_sha, target);
+    let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id, "full":true})).await;
+    assert!(restarted.contains("REUSED FACTORY BRANCH RESET"), "{restarted}");
+    assert_eq!(git(&worker_path, &["rev-parse", "HEAD"]), target);
+
+    let request = serde_json::json!({
+        "action":"close", "id":id, "no_delivery":true,
+        "reason":"Read-only diagnosis completed without delivery",
+    });
+    let pending = call(&f.worker, request.clone()).await;
+    assert!(pending.contains("VERIFICATION REQUIRED"), "{pending}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+    let mut verdict = cas_types::Verification::approved(
+        "ver-reset-no-delivery".into(), id.into(), "Read-only diagnosis approved".into(),
+    );
+    verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("nocode-supervisor-session".into());
+    verdict.issuer_agent_id = verdict.agent_id.clone();
+    verdict.dispatch_id = Some(dispatch.id.clone());
+    use cas_store::VerificationStore;
+    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+    ).unwrap();
+    let closed = call(&f.worker, request).await;
+    assert_closed_without_lane(&f, id, &closed);
+    assert_eq!(f.task(id).deliverables.factory_branch_start.unwrap().base_sha, target);
+    assert!(dispatch.repository.unwrap().anchor_commits.is_empty());
+}
+
+/// Diagnostics expose the immutable source through the real task dispatcher.
+#[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env, "main");

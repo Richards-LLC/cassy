@@ -142,6 +142,17 @@ async fn control_reply(output: &mut (impl tokio::io::AsyncWrite + Unpin), reply:
     Ok(())
 }
 
+fn startup_diagnostic(error: &anyhow::Error) -> String {
+    let mut diagnostic = crate::cli::human_error_message(error);
+    if let Some(suggestion) = error.downcast_ref::<crate::error::CasError>()
+        .and_then(crate::error::CasError::suggestion)
+    {
+        diagnostic.push_str("\nSuggestion:\n");
+        diagnostic.push_str(suggestion);
+    }
+    diagnostic
+}
+
 pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     let mut control = control_socket(fd)?;
     let front_pid = std::os::unix::process::parent_id();
@@ -150,7 +161,7 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     if !crate::store::detect::cas_store_present(&root) {
         let error = anyhow::anyhow!("no initialized Cassy store; run cas init first");
         if !standby {
-            control_reply(&mut control, &json!({"error":format!("{error:#}")})).await?;
+            control_reply(&mut control, &json!({"error":startup_diagnostic(&error)})).await?;
         }
         return Err(error);
     }
@@ -166,7 +177,7 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
         let (service, running_daemon) = match super::runtime::prepare_service(root.clone()).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                control_reply(&mut control, &json!({"error":format!("{error:#}")})).await?;
+                control_reply(&mut control, &json!({"error":startup_diagnostic(&error)})).await?;
                 return Err(error);
             }
         };

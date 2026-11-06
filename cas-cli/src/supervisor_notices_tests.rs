@@ -237,6 +237,7 @@ fn release_and_binary_skew_notices_wake_once() {
     for _ in 0..2 { crate::train_ci::notify(&root, &epic, &state).unwrap(); }
     let rows = open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
     assert_eq!(rows.len(), 4, "retrying an occurrence must not repeat its wake");
+    // pin: train_ci_red is the action-envelope kind consumed by the supervisor.
     let red = rows.iter().find(|row| row.prompt.contains("train_ci_red")).unwrap();
     assert!(red.prompt.contains("fixture::regression") && red.prompt.contains("tested-merge") && red.prompt.contains("cas-fix"));
     for row in rows {

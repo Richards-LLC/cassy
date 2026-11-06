@@ -2455,7 +2455,7 @@ mod tests {
                     panic!("expected a contended file for {holder_session:?}");
                 };
                 let note = collision_note(path, &holder);
-                assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
+                assert!(notify_worker_of_holder(&root, "reader", reader_name, Some("session-a"), path, &holder));
                 let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
                 // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");

@@ -245,6 +245,15 @@ pub(crate) fn claim_with(
     let is_local = |id: &str| {
         id != agent_id && agents.as_ref().is_some_and(|store| store.get(id).is_ok())
     };
+    // A reset changes the harness id, not the worker/task that owns the edit.
+    let same_owner = |other: &str| {
+        load(cas_root, other).leases.get(&id)
+            .is_some_and(|entry| entry.task_id.as_deref() == Some(task_id))
+            && agents.as_ref().and_then(|store| store.get(other).ok()).map(|agent| agent.name)
+                .or_else(|| super::peer_claims::retired_local_agents(cas_root).get(other)
+                    .map(|agent| agent.name.clone()))
+                .is_some_and(|name| name.eq_ignore_ascii_case(agent_name))
+    };
     let answer = claims.acquire_within(
         &id,
         ClaimKind::File,
@@ -256,6 +265,7 @@ pub(crate) fn claim_with(
     );
     let (lease, record) = match answer {
         Acquire::Claimed => (FileLease::Mine, Some(true)),
+        Acquire::LocalHolder(other) if same_owner(&other) => (FileLease::Mine, Some(true)),
         Acquire::LocalHolder(other) => (
             FileLease::HeldBy(local_holder(&other).unwrap_or(FileHolder::UnknownSession(other))),
             None,

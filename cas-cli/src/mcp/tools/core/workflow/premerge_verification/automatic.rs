@@ -323,6 +323,7 @@ mod tests {
 
     #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
+        let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let bin = env.home().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -368,7 +369,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
 
         // Registry login probes use the CLI on PATH. Isolate that PATH in a
         // child test process, never mutate the library test process's PATH.
-        if std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_none() {
+        if !child {
             let path =
                 std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
             let module = module_path!().split_once("::").unwrap().1;

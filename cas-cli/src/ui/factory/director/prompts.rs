@@ -1109,20 +1109,10 @@ fn merge_alert_action_line(factory_branch: &str, target: &str, push_required: bo
     if push_required {
         return format!(
             "2. Push required: the local {target_label} already contains {factory_label}, \
-             but origin does not. Push {target_label} to origin; do not repeat the local merge."
+             but origin does not; step 3 publishes it, so do not repeat the local merge."
         );
     }
-    // The checkout context is a ref too, even when only named in prose.
-    let [merge, _switch] = match crate::worktree::GitOperations::git_remedies([
-        &["merge", "--no-ff", factory_branch], &["switch", target],
-    ]) {
-        Ok(commands) => commands,
-        Err(refusal) => return refusal,
-    };
-    format!(
-        "2. Merge {factory_label} into {target_label} (FF preferred; else \
-         `{merge}` on {target_label})"
-    )
+    format!("2. Merge {factory_label} into {target_label} with step 3.")
 }
 
 /// Build the released signal from the original tip and live target/task state.
@@ -1570,12 +1560,12 @@ fn merge_required_idle_prompt_text(
          Next action:\n\
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
-         3. Push {target} if remote tracking applies\n\
+         3. Run `{supervisor_prefix}factory action=worktree_merge id={worker} task_id={}`; it publishes {target}. `factory action=worktree_merge` is the only worker merge path.\n\
          4. The merge verdict closes or reopens the task; wait for its result.\n\
          5. Then clear context / hand the worker their next task if more work is ready\n\
          Live task state: {show}\n\
          This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
-        task.task_id, task.task_title, task.task_status
+        task.task_id, task.task_title, task.task_status, task.task_id
     )
 }
 
@@ -2324,6 +2314,19 @@ pub fn generate_prompt_at(
     }
 }
 
+/// cas-5597: the built supervisor merge relay, read by the instruction parity test.
+#[cfg(test)]
+pub(crate) fn merge_relay_for_parity() -> String {
+    let task = ActiveLeaseSummary {
+        task_id: "cas-0000".to_string(),
+        task_title: "Parity".to_string(),
+        task_status: TaskStatus::AwaitingMerge,
+        close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+        pending_qa: None,
+    };
+    merge_required_idle_prompt_text("parity-worker", &task, &tests::make_data(0), "mcp__cas__", None)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, TaskSummary};
@@ -2339,7 +2342,7 @@ mod tests {
         Path::new("/nonexistent/cas-6eab")
     }
 
-    fn make_data(ready_count: usize) -> DirectorData {
+    pub(super) fn make_data(ready_count: usize) -> DirectorData {
         let ready_tasks: Vec<TaskSummary> = (0..ready_count)
             .map(|i| TaskSummary {
                 id: format!("task-{i}"),
@@ -3742,7 +3745,7 @@ mod tests {
         data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
         let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
-            epic.contains("git merge --no-ff factory/wise-badger-5"),
+            epic.contains("factory action=worktree_merge id=wise-badger-5 task_id=cas-8d38"),
             "{epic}"
         );
         assert!(!epic.contains("gh pr create"), "{epic}");
@@ -3791,7 +3794,7 @@ mod tests {
             merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None)
         };
         assert!(
-            bundled.contains("git merge --no-ff factory/wise-badger-5")
+            bundled.contains("factory action=worktree_merge id=wise-badger-5")
                 && !bundled.contains("gh pr create"),
             "a bundled lane merges into its epic branch, with no per-task PR: {bundled}"
         );
@@ -3933,7 +3936,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("git merge --no-ff factory/recipe-be` on epic/dosha-recipes-cas-4c77"),
+            text.contains("worktree_merge id=recipe-be task_id=cas-8eff`; it publishes epic/dosha-recipes-cas-4c77"),
             "{text}"
         );
         assert!(!text.contains("WAITING ON INDEPENDENT QA"), "{text}");
@@ -4018,16 +4021,16 @@ mod tests {
         );
         assert!(
             prompt.text.contains(
-                "git merge --no-ff 'factory/recipe{a,b}!e'"
+                "cas__factory action=worktree_merge id=recipe{a,b}!e task_id=cas-8eff"
             ),
-            "epic-target relay must retain its epic branch merge command: {}",
+            "epic-target relay must name only the worktree_merge path: {}",
             prompt.text
         );
         assert!(
             prompt.text.contains(
-                "Push epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77 if remote tracking applies"
-            ),
-            "epic-target relay must retain its epic branch push instruction: {}",
+                "it publishes epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77"
+            ) && !prompt.text.contains("git merge"),
+            "epic-target relay must publish through worktree_merge, never a raw merge: {}",
             prompt.text
         );
         assert!(
@@ -4049,11 +4052,7 @@ mod tests {
         );
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("git merge --no-ff 'factory/recipe{a,b}!e'")
-                || prompt
-                    .text
-                    .to_lowercase()
-                    .contains("merge factory/recipe{a,b}!e"),
+            prompt.text.contains("worktree_merge id=recipe{a,b}!e"),
             "must include merge next action: {}",
             prompt.text
         );

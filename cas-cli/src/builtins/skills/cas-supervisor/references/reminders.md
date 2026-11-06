@@ -6,7 +6,7 @@ Reminders are a safety net for work that may go quiet, not polling, acknowledgem
 
 | Situation | First action | Reminder? |
 |---|---|---|
-| Worker reports `MERGE REQUIRED` | Merge now; run the verifier on any dispatch Cassy opens | No; cancel any phase reminder after |
+| Worker reports `MERGE REQUIRED` | Merge now; run the verifier on any pre-merge dispatch Cassy opens (PASS publishes and closes). In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. | No; cancel any phase reminder after |
 | Parked merge refused only for pending CI | Let Cassy's armed exact-SHA retry finish | No; act only on its notice |
 | Other CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
 | Long release, publication or detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice |
@@ -17,7 +17,7 @@ One active reminder per task or phase. Cancel it when the phase completes or sta
 
 ## API contract
 
-Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Time checkpoints pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal. Keep the returned ID; the tool refuses polling-shaped timers and names the event form to use. A task-filtered deadline reached while the task is still live sends one owner notice. A delay suits a real deadline, an admission retry or a plain time backstop; the daemon's progress watchdog wakes you after 45 minutes with no movement.
+Every reminder has exactly one trigger, `remind_delay_secs` or `remind_event`. Time checkpoints pass `remind_ttl_secs` covering the phase. A task-filtered `task_completed` or `task_blocked` wait without TTL lasts until the task is terminal. Keep the returned ID; the tool refuses polling-shaped timers and names the event form to use. A task-filtered deadline reached while the task is still live sends one owner notice. A delay suits a real deadline, an admission retry, a post-release invariant run or a plain time backstop; the daemon's progress watchdog wakes you after 45 minutes with no movement.
 
 ```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
@@ -57,9 +57,9 @@ coordination action=remind remind_event=ci_completed \
 
 ## Role patterns
 
-- **Supervisors:** after dispatch, end the turn. On the signal, inspect the official receipt once and advance the work.
+- **Supervisors:** after dispatch, end the turn. An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt. On the signal, inspect the official receipt once and advance the work.
 - **Workers:** record a detached command's log and next action in a progress note and use its background-task notice. A capped build-admission refusal may use one timer to retry at its admission time. A context handoff is commit, push, task note and supervisor message.
 
 ## Peer release updates
 
-Untyped peer mail is an ask and wakes the peer; use `kind=receipt` or `wake=false` only for true FYIs. Send a peer merge or close update that unblocks their release as `kind=status`, never `kind=receipt`. Use `kind=ask` or `blocker=true` when you need a decision. Treat `EPIC READY: all children closed` as an action: inspect the epic and advance its release.
+Peer message kinds: [reference](reference.md#message-delivery-and-wake-authority). Send a peer merge or close update that unblocks their release as `kind=status`, never `kind=receipt`. Use `kind=ask` or `blocker=true` when you need a decision. Treat `EPIC READY: all children closed` as an action: inspect the epic and advance its release.

@@ -52,7 +52,7 @@ Score each task while breaking down the EPIC:
 1. **Tag at breakdown:** tasks default to standard; tag deviations with `labels="tier:light"`, `"tier:taste"` or `"tier:heavy"` and note non-obvious rationale in `design`.
 2. **Spawn the mix:** one `lane=<lane>` spawn, or complete explicit recipe, per lane the ready backlog needs.
 3. **Escalate on failure or judgment:** after repeated rejection, move deliberately to a lane with the needed capability. Judge the output, not the price: use cheap lanes for drafts and pay for what ships.
-4. **De-escalate the tail:** when only light tasks remain, shut down idle heavy workers.
+4. **De-escalate the tail:** shut down only workers on a heavier lane than the remaining work needs; let the light lane sweep the tail.
 
 Explicit spawn parameters beat `.cas/config.toml` `[factory.defaults]` and `[[factory.workers]]` for that spawn only.
 

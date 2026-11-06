@@ -238,10 +238,97 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
     )
 }
 
+/// cas-5597: the one answer to "who closes a worker's task", shared by every
+/// worker-facing refusal; the parity test pins it against the skill, launch
+/// contract and assignment text.
+pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
+
+/// cas-5597: a successful park answers the worker as done. It keeps the
+/// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
+/// remediation meant for genuine refusals, and keeps any conflict finding.
+pub(crate) fn parked_reply(merge_required: &str, tip: Option<&str>, branch: Option<&str>, target: &str) -> String {
+    // Other parked outcomes (e.g. DELIVERY CONTENT DROPPED) keep their own text.
+    if !super::gate_preflight::is_merge_handoff(merge_required) {
+        return merge_required.to_string();
+    }
+    let conflict = ["\n\n⚠️ This branch has a genuine", "\n\n⚠️ Cassy could not determine"]
+        .iter()
+        .find_map(|marker| merge_required.find(marker))
+        .map_or("", |at| &merge_required[at..]);
+    format!(
+        "⚠️ MERGE REQUIRED: PARKED {} on {} for {target}; awaiting merge verdict; nothing more to do.\n\n\
+         {WORKER_CLOSE_OWNERSHIP} {PARK_SIGNAL}{conflict}",
+        tip.unwrap_or("the pushed tip"),
+        branch.unwrap_or("the factory branch"),
+    )
+}
+
+/// A factory worker's close parked on a verification dispatch (cas-8725).
+pub(crate) struct WorkerDispatchGate<'a> {
+    pub task_id: &'a str,
+    pub dispatch_id: &'a str,
+    pub owner: &'a str,
+    pub deadline: &'a str,
+    /// Bound head and superseded-verdict sentences, already formatted.
+    pub context: &'a str,
+    /// Whether Cassy queued the supervisor handoff itself.
+    pub handoff_queued: bool,
+    pub coord: &'a str,
+    pub close_reason_hint: &'a str,
+}
+
+pub(crate) fn worker_dispatch_gate(gate: &WorkerDispatchGate<'_>) -> String {
+    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, coord, close_reason_hint } = gate;
+    // cas-8725: when CAS queued the handoff itself, say so — a worker told to
+    // "forward this" sends a second, free-text copy that cannot wake anyone.
+    // cas-5597: either way the verdict closes the task; nobody closes for you.
+    let handoff = if *handoff_queued {
+        format!("Cassy has already delivered this dispatch to the supervisor; its verdict closes the task, so send no {coord} message for it.")
+    } else {
+        format!(
+            "Cassy could not deliver this dispatch; send one blocker: {coord} action=message \
+             target=supervisor task_id={id} blocker=true summary=\"Verification dispatch {dispatch_id}\" \
+             message=\"Task {id} waits on verification dispatch {dispatch_id}.{close_reason_hint}\""
+        )
+    };
+    format!(
+        "Factory worker verification gate: task {id} close is pending \
+         dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
+         {context}{handoff}\n\n{WORKER_CLOSE_OWNERSHIP}"
+    )
+}
+
+/// A worker's close that found another requester's dispatch already pending.
+pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &str, deadline: &str, conflict: &str) -> String {
+    format!(
+        "Task {task_id} close is pending existing dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. {conflict} That dispatch's verdict closes the task. {WORKER_CLOSE_OWNERSHIP}"
+    )
+}
+
+/// `task action=start` on a clean parked delivery.
+pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
+    format!(
+        "Cannot start a task that is awaiting merge. The worker work is \
+         already complete; wait for the supervisor to merge the factory branch; \
+         the merge verdict closes the task. If review fails — the supervisor \
+         declines the delivery, or requires an amendment after merging — \
+         they must first run \
+         `{tool_prefix}task action=request_changes id={task_id} reason=\"state what remains and what must be corrected or reverted\"`; \
+         a worker cannot self-reject or start a clean parked delivery. When \
+         the parked tip genuinely conflicts with the current target (a \
+         merge-queue conflict dequeue or a moved target), its assigned worker \
+         can start task {task_id} to resolve it; Cassy measures the local target and \
+         origin/<target>, so `git fetch origin <target>` first if that ref is stale."
+    )
+}
+
+/// cas-5597: the one completion signal a worker sends (or does not).
+pub(crate) const PARK_SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
+
 /// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
 pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
     format!(
-        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. Close is retried after that; the worker has nothing to do."
+        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing."
     )
 }
 

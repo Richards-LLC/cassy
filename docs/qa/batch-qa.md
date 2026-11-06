@@ -18,14 +18,13 @@ waiver ends that per-task obligation; deferred batch evidence is still owed.
 Once per release, at the frozen tip after the fix-diff re-review, the supervisor
 builds a candidate, walks the combined batch matrix and records the reviewed
 revision.
-After the published ledger and `verification action=batch_receipt` cover the
-listed delivery anchors, close those deliveries. Until that receipt exists,
+In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. Until that receipt exists,
 a deferred delivery reports "waiting for batch receipt".
 
 While building, implementers capture before/after evidence at 390 and 1440
-pixels for visual changes. After merging the batch to its configured staging
-target and deploying that exact commit, a non-implementer walks every change
-and writes one ledger citing that evidence. Include only tasks that passed;
+pixels for visual changes. A non-implementer walks the frozen-tip candidate (or
+deployed staging where one exists), capped per release, and writes one ledger
+citing that evidence; uncovered changes are `NOT EXERCISED`. Include only tasks that passed;
 failed or unreviewed tasks remain open.
 
 Publish the ledger using `artifact action=publish task_id=<batch-task-or-epic>
@@ -50,8 +49,7 @@ A release verdict uses the same action with `verification_type=release`: one
 review of the assembled tip, whose published report names every delivery. It rides
 task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
 owned by release review, its exact-anchor coverage also satisfies deferred
-batch debt. It does not replace general QA evidence, Tier 2 probes or a
-dedicated review. A verdict recorded after an expired dispatch supersedes
+batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
 that old wait; live or newer dispatches and rejected verdicts retain authority.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
@@ -77,7 +75,7 @@ Use the verification MCP tool:
 {
   "action": "batch_receipt",
   "task_ids": ["cas-a123", "cas-b456", "cas-c789"],
-  "staging_sha": "<full 40-hex deployed staging commit>",
+  "staging_sha": "<full 40-hex reviewed commit>",
   "ledger_artifact_id": "art-1234abcd",
   "ledger_path": "/absolute/path/STAGING-LEDGER.md",
   "ledger_author": "qa-reviewer-name"

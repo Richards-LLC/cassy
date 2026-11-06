@@ -700,6 +700,14 @@ fn excerpt(text: &str, max: usize) -> String {
 /// here)" was false: the hook expanded the body and the Teams copy then
 /// rendered it again.
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
+    pointer_wake_payload_at(source, notification_id, chrono::Utc::now())
+}
+
+pub(crate) fn pointer_wake_payload_at(
+    source: &str,
+    notification_id: Option<i64>,
+    _observed_at: chrono::DateTime<chrono::Utc>,
+) -> String {
     match notification_id {
         Some(id) => format!(
             "CAS wake: message {id} from {source}. CAS shows its body once, in an \

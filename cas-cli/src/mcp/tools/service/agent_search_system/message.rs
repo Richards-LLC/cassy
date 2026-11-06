@@ -486,6 +486,60 @@ mod viktor_provenance_tests {
         }
     }
 
+    /// cas-06eb: an old reminder, wake or peer row needs the clock at render,
+    /// not its enqueue time or an inferred elapsed number of turns.
+    #[test]
+    fn delayed_messages_and_wakes_show_the_host_clock_cas_06eb() {
+        const TEST: &str = "mcp::tools::service::agent_search_system::message::viktor_provenance_tests::delayed_messages_and_wakes_show_the_host_clock_cas_06eb";
+        const CHILD: &str = "CAS_CLOCK_TEST_CHILD";
+        let Ok(zone) = std::env::var(CHILD) else {
+            for zone in ["America/New_York", "UTC"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, zone)
+                    .env("TZ", zone)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{zone}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), TEST);
+            }
+            return;
+        };
+        let cases = if zone == "America/New_York" {
+            vec![
+                ("2026-11-06T11:36:00Z", "6:36 AM ET"),
+                ("2026-07-06T10:36:00Z", "6:36 AM ET"),
+                ("2026-11-06T17:00:00Z", "12:00 PM ET"),
+                ("2026-11-07T05:00:00Z", "12:00 AM ET"),
+                ("2026-11-01T05:30:00Z", "1:30 AM ET"),
+                ("2026-11-01T06:30:00Z", "1:30 AM ET"),
+            ]
+        } else {
+            vec![("2026-11-06T11:36:00Z", "11:36 AM UTC")]
+        };
+        for (instant, expected) in cases {
+            let now = chrono::DateTime::parse_from_rfc3339(instant).unwrap().with_timezone(&chrono::Utc);
+            let mut row = commander_row(Some(cas_store::QueueOrigin::PairedDevice { device_id: "dev".into() }));
+            row.created_at = now - chrono::Duration::minutes(5);
+            for source in ["commander:Daniel@iphone-15", "supervisor", "director", "reminder", "viktor", "peer"] {
+                row.source = source.into();
+                let rendered = queued_message_provenance_at(&row, now);
+                assert!(rendered.contains("300s first]"), "identity/age/delivery lost: {rendered}");
+                assert!(rendered.ends_with(&format!("[{expected}]")), "{source}: {rendered}");
+            }
+            row.processed_at = Some(now);
+            let replay = queued_message_provenance_at(&row, now);
+            assert!(replay.contains("300s replay]"), "{replay}");
+            assert!(replay.ends_with(&format!("[{expected}]")), "{replay}");
+            for id in [Some(row.id), None] {
+                let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload_at("supervisor", id, now);
+                assert!(wake.ends_with(&format!("[{expected}]")), "{wake}");
+                assert_eq!(wake.lines().count(), 1);
+            }
+        }
+    }
+
     /// cas-7f81: a hub-stamped paired device renders as the operator class —
     /// the one header the skills treat as user authority.
     #[test]

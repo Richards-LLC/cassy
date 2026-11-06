@@ -996,6 +996,7 @@ mod pre_initialize_guard;
 mod prompts;
 mod resources;
 mod runtime;
+mod front;
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};

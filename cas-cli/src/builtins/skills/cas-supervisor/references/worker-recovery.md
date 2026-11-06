@@ -30,7 +30,7 @@ The supervisor TUI is not ground truth. The usual false positive is a worker mid
    |---|---|
    | `alive` | Wait. |
    | `wedged` (crash signature, process up) | `cas factory kill <worker>`, then respawn. |
-   | `starved` (process up, transcript cold) | Wait 2 minutes, then classify again. |
+   | `starved` (process up, transcript cold) | Wait on an event reminder, never a timed poll. Classify again on the next `worker_idle` or task event. |
    | `dead` (process gone, corroborated) | No kill needed; `task action=reset id=<task-id>` or `cas factory kill`. |
    | `unverified` (signals contradict) | **Do not treat as dead.** Run `cas factory debug <worker>` and inspect the worktree; do not kill or reset the lease. |
    | `approval-hang` | `cas factory approve <worker>` or `cas factory deny <worker> --reason "<why>"`. |
@@ -65,7 +65,7 @@ Cap it at two retries per task, then escalate. Before reassigning a dead worker'
 
 ### Silent Worker
 
-No messages, notes, commits or heartbeat; the task stays `in_progress`. Run `factory action=worker_status`, then the triage above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup, and tell the replacement what landed.
+No messages, notes, commits or heartbeat; the task stays `in_progress`. Run `factory action=worker_status`, then the triage above. Salvage committed work with `factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup.
 
 ### Injected but Unwoken Worker
 
@@ -91,7 +91,7 @@ On `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED` or `SPAWN IN FLIGHT FOR`,
 `worker_status` prints a `context:` band per worker once it has answered at least once. At `approaching`, remind the worker to commit WIP. At `near-limit`, act now:
 
 1. `coordination action=message target=<worker> summary="Context near limit — commit now" message="Commit any in-progress work now, then report what you committed."`
-2. Watch `factory action=worker_activity` for the commit, or check `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`.
+2. Wait for the commit on a `task_*` or `worker_idle` event reminder, or check `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`.
 3. Once work is committed, `HANDOFF.md` written and the worker idle, run `factory action=recycle_worker target=<worker>`; it keeps the name, recipe and worktree. `RECYCLE RECOMMENDED` names the same command for an idle Codex worker.
 
 ### Garbage Output (Context Exhaustion)
@@ -105,4 +105,4 @@ Output degrading into mixed-language or pseudo-word text, sometimes followed by 
 
 ### Resource-Contention Worker Crashes
 
-Several workers wedging together in the crash-screen state while the host's 5-minute load exceeds its CPU count is scheduler starvation from parallel `cargo` builds, not memory pressure. Factory mode caps each worker's `CARGO_BUILD_JOBS` and runs it under `nice`; the spawn receipt shows both. Tune `[factory] cargo_build_jobs` (default `auto`) and `nice_cargo` in `.cas/config.toml`: lower the job cap when running more workers than the host has cores for. If workers still wedge under the caps, spawn fewer workers.
+Several workers wedging together in the crash-screen state while the host's 5-minute load exceeds its CPU count is scheduler starvation from parallel `cargo` builds, not memory pressure. Factory mode caps each worker's `CARGO_BUILD_JOBS` and runs it under `nice`; the spawn receipt shows both. Tune `[factory] worker_build_jobs` (default `auto`) and `nice_cargo` in `.cas/config.toml`: lower the job cap when running more workers than the host has cores for. If workers still wedge under the caps, spawn fewer workers.

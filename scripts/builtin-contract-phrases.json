@@ -197,7 +197,7 @@
           "reason": "Retain the load-bearing policy term from worker return contract fields and runtime close call."
         },
         {
-          "text": "status: <in_progress|ready|blocked|partial>",
+          "text": "status: <in_progress|blocked|partial>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
         },
         {
@@ -205,7 +205,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
         },
         {
-          "text": "ci: <run id + result | not started>",
+          "text": "pushed: <sha | not pushed>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
         },
         {
@@ -213,7 +213,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
         },
         {
-          "text": "deferred: <one line or none>",
+          "text": "blocker: <cause or none>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
         },
         {
@@ -950,7 +950,7 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
         {
-          "text": "30 minutes",
+          "text": "qa.pass_timeout_mins",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
         },
         {

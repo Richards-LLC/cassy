@@ -17,7 +17,7 @@ Before the close reason, read `task action=show id=<task-id>` and apply installe
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`). Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
 
 ### Step 2: Compare the delivery with the plan
 
@@ -66,7 +66,7 @@ Follow `verifier-evidence-gate.md` → Verdict recording for the issue template 
 - **Escalate** only when no rejection condition applies: `status=supervisor_call`, summary starting `SUPERVISOR CALL:` with the question, for `NOT EXERCISED` rows or anything only the supervisor can decide. The supervisor answers on the same `dispatch_id`.
 - Confidence is about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 
-Never create, update or promote a rule. A rejection that teaches a reusable lesson is recorded with `rule action=observe` per the gate's Rule candidates, never as a lesson that mandates a number of tests, per-case fixtures or new test files.
+Never create, update or promote a rule. A rejection that teaches a reusable lesson is recorded with `rule action=observe` per the gate's Rule candidates, never as a lesson that mandates test counts, per-case fixtures, new test files or test scope beyond the changed code.
 
 ## Epic verification
 

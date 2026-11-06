@@ -6,12 +6,12 @@ metadata:
 # Close Gate — Delivery
 
 Read at delivery. Task start lists what close will check; a refused park lists
-every failed gate and what it parsed. Fix them all, then retry once.
+every failed gate and what it parsed. Fix them all silently, then retry once.
 
 ## Commit and push
 
-Commit scoped work; push once before parking and once per review round, unless
-`delivery_mode=local_merge`.
+Commit scoped work. Push at park, at checkpoint or stand-down, and once per
+review round; never otherwise (`delivery_mode=local_merge` never pushes).
 <!-- cas-src:begin -->
 The pre-push hook runs `scripts/fast-rows-pre-push.sh`
 when present.
@@ -41,32 +41,35 @@ disk; escalate unexplained writes instead of closing over them.
 
 For `depth=light`, deliver the minimal working outcome with honest evidence.
 Otherwise map every criterion to executed proof or a named proof owner using
-`verify-before-claim`, trace affected consumers and registrations, and name
-unexecuted obligations and their assembly owner.
+`verify-before-claim`, trace affected consumers and registrations, and consume
+the receipts from [discipline.md](discipline.md). Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 
 ## Ledger preflight
 
-`cas qa ledger init --task <id>` prints the path and keeps existing evidence.
+When task start's close checks list a Ledger or `Adversarial probe` line, run
+`cas qa ledger init --task <id>`; it prints the path and keeps existing evidence.
 Fill it from the real walk, then fix every `cas qa ledger check <path> --task <id>`
 diagnostic. A structural PASS does not judge captures.
 
 ## Merge and freshness
 
-Close requires the delivered work on the named target. On MERGE REQUIRED:
+A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothing more to do`.
+Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
+The park relay is the completion signal; send merge_request=true only for local_merge.
+A dispatched verifier reviews the candidate before publication; PASS publishes
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
    unread supervisor messages and re-read the task before corrective edits.
 2. Capture `git rev-parse factory/<name>` (or your per-task branch) and check
    `git merge-base --is-ancestor <delivered-tip> <target-tip>`; if it already
    landed, await the verdict rather than amend stale state.
-3. For `delivery_mode=local_merge`, keep the local commit and request the merge
-   with branch and SHA. Otherwise push, then send `merge_request=true` with
-   target and SHA. The verifier reviews the candidate before publication; PASS
-   publishes and closes, FAIL holds only that delivery. A Tier 1 delivery in
-   `qa.mode=batch` waits for the release verdict; you have nothing to do. Do not
-   re-close or block on it; follow [recovery.md](recovery.md#while-the-merge-is-pending).
-4. For a protected target, follow its PR flow. Ask for an epic merge rather than
-   `gh pr create --base epic/...`; the supervisor owns the merge venue.
+3. For `delivery_mode=local_merge`, keep the local commit and send
+   `merge_request=true` with branch and SHA; push only with explicit supervisor
+   authorization. Otherwise push and retry close once. While a merge is pending,
+   follow [recovery.md](recovery.md#while-the-merge-is-pending).
+4. Never open or merge a PR yourself (`gh pr create`); the supervisor owns the merge venue.
 
 `commit_receipt=<sha>` names this task's delivered commit when squash or
 cherry-pick changed its identity; `completion_receipt=<json>` delivers an
@@ -76,7 +79,7 @@ one. Never set `status=closed` or invent a verification record to bypass close.
 
 ## Upkeep refusals at park
 
-Close checks that the delivery kept the journey registry, `.claude/CODEMAP.md`
+At park, close checks that the delivery kept the journey registry, `.claude/CODEMAP.md`
 and `docs/PRODUCT_OVERVIEW.md` true for the paths it changed. Fix a refusal in
 this branch. When the change truly needs no upkeep, record the gate's token from
 the [escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
@@ -99,7 +102,8 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 
 ## Conditional evidence
 
-- Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
+- In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
+- In qa.mode=per_task only: demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking and cite its commit-bound bundle or real-build ledger, run on an
   exact-tip candidate from `factory action=candidate_request`. Terminal paths
   also need `cas-cli-craft`'s `terminal-qa: PASS`. Docs/test/CI-only deliveries
@@ -107,12 +111,12 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
-- Risk: read task `risk` and `proof_targets`. Name the supervisor's
-  `ASSEMBLY_PROOF` for full Rust execution. Non-Rust platform risk needs a
+- Risk: read task `risk` and `proof_targets`. Full Rust execution is
+  the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
   A `risk=concurrency` non-Rust target needs one `note_type=loaded_proof` line;
-  its refusal prints the parsed and missing fields and an example. Worker Rust
-  checks still defer loaded execution to assembly.
+  its refusal prints the parsed and missing fields and an example. Rust
+  targets need no loaded proof.
 - Spike: record the decision and evidence.
 - Epic: every child's delivered work must reach the parent before epic close.
 
@@ -145,12 +149,8 @@ Record evidence for each changed surface:
 ## Close
 
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
-criterion evidence, the linked plan section and its metric receipt, safety facts
-and deferred proof ownership. A missed plan metric is never non-blocking.
+criterion evidence, the plan section and its metric receipt when the brief links one,
+and safety facts. A missed plan metric is never non-blocking.
 
-Workers close their own tasks. When close returns VERIFICATION REQUIRED naming a
-dispatch, forward it once to the supervisor with the delivery SHA, set
-`status=blocked`, record exactly this one-line blocker note, wait, and retry
-close after the verdict:
-`Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
-A note with other text or extra lines is a real blocker and wakes the supervisor.
+When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
+verdict closes the task; follow [Verification-required close](recovery.md#verification-required-close).

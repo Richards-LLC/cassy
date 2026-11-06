@@ -1435,6 +1435,7 @@ impl EmbeddedDaemon {
                 _ = event_retention_interval.tick() => {
                     if owns_socket.load(Ordering::SeqCst) {
                         self.run_event_retention_cycle().await;
+                        self.run_target_cache_idle_reclaim().await;
                     }
                 }
 
@@ -1761,6 +1762,23 @@ impl EmbeddedDaemon {
     }
 
     /// One bounded telemetry-retention pass on a blocking thread (cas-e193).
+    /// cas-49163: reclaim idle worker targets and resolved review walks on
+    /// the canonical daemon's retention tick, before disk pressure refuses
+    /// build admission. Skips quietly while another cleanup holds the GC lock.
+    async fn run_target_cache_idle_reclaim(&self) {
+        let cas_root = self.config.cas_root.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::factory_target_cache::reclaim_idle(&cas_root)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(Err(error)) => tracing::warn!(%error, "idle target cache reclaim failed"),
+            Err(error) => tracing::warn!(%error, "idle target cache reclaim join error"),
+        }
+    }
+
     async fn run_event_retention_cycle(&self) {
         let cas_root = self.config.cas_root.clone();
         let outcome = tokio::task::spawn_blocking(move || {

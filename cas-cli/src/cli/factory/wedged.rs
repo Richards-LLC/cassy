@@ -1622,6 +1622,9 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         if ticks_per_second <= 0 {
             return BackgroundProcessState::Unavailable;
         }
+        let root_agent = std::fs::read(format!("/proc/{root_pid}/cmdline"))
+            .ok()
+            .and_then(|raw| agent_name_from_cmdline(&raw));
         let mut queue = VecDeque::from([root_pid]);
         let mut visited = HashSet::from([root_pid]);
         let mut processes = Vec::new();
@@ -1648,7 +1651,9 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                 let age_secs =
                     (uptime_secs - start_ticks as f64 / ticks_per_second as f64).max(0.0) as u64;
                 let command = process_command_name(child);
-                if !is_cas_sidecar(&command, child) {
+                let harness = std::fs::read(format!("/proc/{child}/cmdline"))
+                    .is_ok_and(|raw| is_root_harness(root_pid, parent, root_agent.as_deref(), &raw));
+                if !harness && !is_cas_sidecar(&command, child) {
                     processes.push(BackgroundProcess { command, age_secs });
                 }
             }
@@ -1661,6 +1666,8 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
             return BackgroundProcessState::Unavailable;
         };
+        let root_agent = macos_process_cmdline(root_pid)
+            .and_then(|raw| agent_name_from_cmdline(&raw));
         let mut queue = VecDeque::from([root_pid]);
         let mut visited = HashSet::from([root_pid]);
         let mut processes = Vec::new();
@@ -1694,10 +1701,10 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                             .map(str::to_owned)
                     })
                     .unwrap_or_else(|| "<command unavailable>".to_string());
-                if !raw
-                    .as_deref()
-                    .is_some_and(|raw| is_known_sidecar_commandline(&command, raw))
-                {
+                if !raw.as_deref().is_some_and(|raw| {
+                    is_root_harness(root_pid, parent, root_agent.as_deref(), raw)
+                        || is_known_sidecar_commandline(&command, raw)
+                }) {
                     processes.push(BackgroundProcess {
                         command,
                         age_secs: now.as_secs().saturating_sub(start_micros / 1_000_000),
@@ -1873,6 +1880,20 @@ fn process_command_name(pid: u32) -> String {
                 .map(|name| name.trim().to_owned())
         })
         .unwrap_or_else(|| "<command unavailable>".to_string())
+}
+
+/// A sandbox wrapper can be the matched root. Only its direct harness child
+/// shares that exemption; deeper jobs still count even with identical argv.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_root_harness(root_pid: u32, parent_pid: u32, root_agent: Option<&str>, raw: &[u8]) -> bool {
+    if parent_pid != root_pid {
+        return false;
+    }
+    let executable = raw.split(|byte| *byte == 0).next()
+        .and_then(|arg| std::str::from_utf8(arg).ok())
+        .and_then(|arg| Path::new(arg).file_name()?.to_str());
+    matches!(executable, Some("claude" | "codex" | "grok" | "opencode"))
+        && root_agent.is_some_and(|root| agent_name_from_cmdline(raw).as_deref() == Some(root))
 }
 
 /// Persistent MCP/harness sidecars are inherited by every worker; treating
@@ -4054,6 +4075,43 @@ mod tests {
             let observed = background_processes_for(harness.0.id());
             assert!(matches!(observed, BackgroundProcessState::Available(_)), "{observed:?}");
             assert_eq!(has_active_work(false, &observed), active, "{expected}: {observed:?}");
+        }
+    }
+
+    /// cas-cff4: a sandbox wrapper (bwrap) carries the worker's argv, so it is
+    /// the matched root and the harness is its child. An idle harness is not
+    /// its own background job; counting it hid every stall of such a worker.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sandboxed_harness_is_not_its_own_background_job_cas_cff4() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+
+        struct Sandbox(Child);
+        impl Drop for Sandbox {
+            fn drop(&mut self) {
+                drop(self.0.stdin.take());
+                let _ = self.0.wait();
+            }
+        }
+        // The job deliberately carries the same flag as the harness. Identity
+        // alone cannot exempt a real job, either beside or below the harness.
+        for (program, active) in [
+            (r#"exec -a claude /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, false),
+            (r#"exec -a cargo /bin/bash --noprofile --norc -c 'printf "ready\n"; read -r _' fixture --agent-name sandboxed-worker"#, true),
+            (r#"exec -a claude /bin/bash --noprofile --norc -c '(exec -a claude /bin/bash --noprofile --norc -c '\''printf "ready\n"; read -r _'\'' fixture --agent-name sandboxed-worker) <&0 & wait "$!"' fixture --agent-name sandboxed-worker"#, true),
+        ] {
+            let mut sandbox = Sandbox(Command::new("/bin/bash")
+                .arg0("bwrap")
+                .args(["--noprofile", "--norc", "-c", &format!("({program}) <&0 & wait \"$!\""),
+                    "fixture", "--agent-name", "sandboxed-worker"])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+            let mut line = String::new();
+            BufReader::new(sandbox.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "ready");
+            let observed = background_processes_for(sandbox.0.id());
+            assert!(matches!(observed, BackgroundProcessState::Available(_)), "{observed:?}");
+            assert_eq!(has_active_work(false, &observed), active, "{program}: {observed:?}");
         }
     }
 

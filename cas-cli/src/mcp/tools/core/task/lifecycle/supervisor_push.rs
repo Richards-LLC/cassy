@@ -565,6 +565,38 @@ pub(crate) fn queue_source_fix_reopen_notice(
     })
 }
 
+/// cas-cff4: wake the assignee once per supervisor `request_changes`, with the
+/// decision and branch handling. `Err` names why no worker was told, so the
+/// supervisor's output never implies a handoff that did not happen.
+pub(crate) fn queue_request_changes_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    decision: &str,
+    branch_handling: &str,
+) -> Result<i64, String> {
+    if task.assignee.is_none() {
+        return Err("the task has no assignee".to_string());
+    }
+    let worker_name = match auto_unblock_worker_target(cas_root, task)? {
+        AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
+        AutoUnblockWorkerTarget::Skipped(reason) => return Err(reason),
+    };
+    enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
+        (
+            format!(
+                "supervisor-request-changes:{}:{}:worker:{worker_name}",
+                task.id,
+                task.updated_at.to_rfc3339()
+            ),
+            format!(
+                "Task {} is Open again: the supervisor requested changes.\nDecision: {decision}\nBranch handling: {branch_handling}\nStart task {} again, add corrective commits, then push and close as usual.",
+                task.id, task.id
+            ),
+            format!("Changes requested: {}", task.id),
+        )
+    })
+}
+
 /// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
 /// worker hold that was not waiting on the verification.
 pub(crate) fn queue_cassy_close_over_hold_receipt(

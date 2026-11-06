@@ -12639,6 +12639,7 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 /// The supervisor closes through ordinary gates, with no source commit.
 #[tokio::test]
 async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
+    for wait_status in [TaskStatus::InProgress, TaskStatus::Blocked] {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, _core) = setup_cas(&mut test_env);
     let repo = temp.path();
@@ -12702,7 +12703,7 @@ async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
 
     // The worker records the documented verification wait.
     let mut waiting = tasks.get(&task.id).unwrap();
-    waiting.status = TaskStatus::Blocked;
+    waiting.status = wait_status;
     waiting.notes.push_str(&format!(
         "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
         dispatch.requested_at.format("%Y-%m-%d %H:%M"),
@@ -12710,21 +12711,20 @@ async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
     ));
     tasks.update(&waiting).unwrap();
 
+    let approval = || VerificationAddRequest {
+        task_id: task.id.clone(),
+        status: "approved".into(),
+        summary: "Artifact reviewed; no-code delivery approved".into(),
+        confidence: Some(0.9),
+        issues: None,
+        files_reviewed: None,
+        duration_ms: None,
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: Some(dispatch.id.clone()),
+    };
     let approved = extract_text(
-        supervisor_core
-            .cas_verification_add(Parameters(VerificationAddRequest {
-                task_id: task.id.clone(),
-                status: "approved".into(),
-                summary: "Artifact reviewed; no-code delivery approved".into(),
-                confidence: Some(0.9),
-                issues: None,
-                files_reviewed: None,
-                duration_ms: None,
-                verification_type: None,
-                verifier_capability: None,
-                dispatch_id: Some(dispatch.id.clone()),
-            }))
-            .await
+        supervisor_core.cas_verification_add(Parameters(approval())).await
             .expect("supervisor approves the exact dispatch"),
     );
     assert!(approved.contains("Supervisor close recovery queued"), "{approved}");
@@ -12737,6 +12737,15 @@ async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
     assert!(retry.prompt.contains("task action=close id=cas-7fc3-wait"), "{}", retry.prompt);
     assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id)), "{rows:?}");
 
+    let repeated = extract_text(
+        supervisor_core.cas_verification_add(Parameters(approval())).await
+            .expect("replaying the exact verdict repairs recovery"),
+    );
+    assert!(repeated.contains("idempotent"), "{repeated}");
+    assert_eq!(cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap().len(), rows.len());
+    assert_eq!(tasks.get(&task.id).unwrap().status, wait_status,
+        "approval must not bypass ordinary close");
+
     let closed = extract_text(
         supervisor_core
             .cas_task_close(Parameters(close_request(&task.id, reason)))
@@ -12746,6 +12755,7 @@ async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
     assert!(closed.contains("Closed task:"), "{closed}");
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
     assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
+    }
 }
 
 /// Existing no-code ledgers bypass the runtime QA gate, but malformed evidence

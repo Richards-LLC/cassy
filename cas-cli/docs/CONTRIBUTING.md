@@ -1140,6 +1140,16 @@ Verifier improvements stay in the verdict; verifiers never file or request tasks
 
 `task action=create` records finding provenance and derives priority from severity × reach. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, carries the `from-finding` label and a note recording origin, `repro` and `affected`. Missing runtime evidence is retained as theoretical backlog instead of refusing intake. Main reach requires a project-declared main journey and durable nonempty reproduction evidence; caller labels alone cannot attest it. A P0/P1 bug that an operator or supervisor observed directly need not infer an origin from finding-like text, and `finding_origin=none` declares that such text is not a finding; reviewers cannot use it. `qa_record` also retains theoretical pre-existing findings as backlog follow-ups with their triage axes. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
 
+After an exact task dispatch is approved, Cassy closes eligible merged deliveries
+through the ordinary close gates. Remaining close recovery, including no-code
+worker deliveries, belongs to that dispatch's supervisor; a durable recovery
+notice names the task and exact dispatch once. The supervisor runs `task
+action=close` after resolving any independent hold, without `supervisor_override`.
+Workers never retry close after approval, including when an older runtime queues
+such a retry. Replaying the same supervisor verdict repairs the recovery notice
+without adding another verdict. Changed repository proof still invalidates the
+approval and requires a fresh dispatch.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside

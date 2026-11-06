@@ -23,8 +23,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    `cas qa ledger check <path> --task <id>`. Follow [close-gate.md](references/close-gate.md) and
    [verify-before-claim](../verify-before-claim/SKILL.md), then close with
    `task action=close reason="PASS <sha>: <proof>"`.
-3. If close returns VERIFICATION REQUIRED naming a dispatch, its verdict closes the
-   task; follow [Verification-required close](references/recovery.md#verification-required-close).
+3. If close returns VERIFICATION REQUIRED naming a dispatch, Cassy closes a merged
+   delivery on its verdict; any remaining close recovery belongs to the supervisor.
+   Never retry close after that verdict; follow [Verification-required close](references/recovery.md#verification-required-close).
 4. A park reads `PARKED … awaiting merge verdict; nothing more to do`.
    The park relay is the completion signal; send merge_request=true only for local_merge.
    The verdict wakes you once. Don't re-close or block on it. For a MERGE REQUIRED

@@ -152,5 +152,6 @@ Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, the plan section and its metric receipt when the brief links one,
 and safety facts. A missed plan metric is never non-blocking.
 
-When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
-verdict closes the task; follow [Verification-required close](recovery.md#verification-required-close).
+When close returns VERIFICATION REQUIRED naming a dispatch, Cassy closes a merged
+delivery on its verdict. The supervisor owns any remaining close recovery,
+including no-code deliveries; workers never retry close after approval. Follow [Verification-required close](recovery.md#verification-required-close).

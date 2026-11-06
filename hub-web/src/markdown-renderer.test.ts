@@ -334,4 +334,5 @@ it("renders only artifact and artifacts-directory images, and falls back to the 
   expect(root.querySelector("img")?.getAttribute("loading")).toBe("lazy");
   expect(root.textContent).toContain("![Refused](/etc/shadow.png)");
   expect(root.textContent).toContain("![Phone](cas-1/after/phone.png)");
+  expect(plainTextMarkdown("Ready.\n\n![Desktop after](cas-1/after/desktop.png)")).toBe("Ready. Desktop after");
 });

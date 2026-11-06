@@ -217,6 +217,14 @@ function inlinePlainText(source: string): string {
       const close = source.indexOf("`", index + 1);
       if (close > index + 1) { output += source.slice(index + 1, close); index = close + 1; continue; }
     }
+    // An inline image reads as its alt text in previews.
+    if (source[index] === "!" && source[index + 1] === "[") {
+      const labelEnd = source.indexOf("](", index + 2);
+      const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
+      if (labelEnd >= index + 2 && urlEnd > labelEnd + 2 && imageReference(source.slice(labelEnd + 2, urlEnd))) {
+        output += source.slice(index + 2, labelEnd).trim() || "Image"; index = urlEnd + 1; continue;
+      }
+    }
     if (source[index] === "[") {
       const labelEnd = source.indexOf("](", index + 1);
       const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);

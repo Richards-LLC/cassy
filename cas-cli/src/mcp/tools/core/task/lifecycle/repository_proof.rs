@@ -359,7 +359,13 @@ fn head_is_ahead_of_integration_base(
     if parent_branch.starts_with('-') {
         return false;
     }
-    let Ok(base) = git_output(worktree_root, &["merge-base", parent_branch, head]) else {
+    // Use the same target selection as repository proofs: start may have
+    // reset HEAD to origin while the local target remains behind. Preserve
+    // directly resolvable revision inputs when no named target is found.
+    let target = resolve_target_branch_ref(worktree_root, parent_branch)
+        .map(|(_, target_head)| target_head)
+        .unwrap_or_else(|_| parent_branch.to_string());
+    let Ok(base) = git_output(worktree_root, &["merge-base", &target, head]) else {
         return false;
     };
     let base = String::from_utf8_lossy(&base).trim().to_string();

@@ -168,34 +168,13 @@ pub(crate) fn read(
                     | crate::mcp::tools::service::worker_liveness::Liveness::AwaitingFirstPrompt)
             })
     }));
-    if let Some(hint) = split_hint(
-        &unfinished,
-        idle.map(|worker| worker.name.as_str()),
-        focus.as_deref(),
-    ) {
-        report.advisories.push(hint);
+    if let ([task], Some(idle)) = (scoped.as_slice(), idle) {
+        report.advisories.push(Advisory {
+            key: format!("qa-split:{}:{}", task.id, idle.name),
+            text: format!("QA critical path: only {} remains; {} is idle. Consider splitting independent surfaces or cases onto that worker with separate personas, profiles and ledgers; keep dependent steps together.", task.id, idle.name),
+        });
     }
     Ok(report)
-}
-
-fn split_hint(
-    tasks: &[&cas_factory::TaskSummary],
-    idle: Option<&str>,
-    focus: Option<&str>,
-) -> Option<Advisory> {
-    let focus = focus?;
-    let scoped: Vec<_> = tasks
-        .iter()
-        .filter(|task| task.epic.as_deref() == Some(focus))
-        .collect();
-    let [task] = scoped.as_slice() else {
-        return None;
-    };
-    let idle = idle?;
-    (task.status == TaskStatus::InProgress).then(|| Advisory {
-        key: format!("qa-split:{}:{idle}", task.id),
-        text: format!("QA critical path: only {} remains; {idle} is idle. Consider splitting independent surfaces or cases onto that worker with separate personas, profiles and ledgers; keep dependent steps together.", task.id),
-    })
 }
 
 // Bounded, task-owned discovery only. Do not follow symlinks or external_ref.

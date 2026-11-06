@@ -164,6 +164,12 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         if (width === 390) await busiest.click();
         await expect(page.locator("#epic-tab-panel")).toContainText("Build the epic strip");
         await expect(page.locator("#epic-tab-panel")).toContainText("Building");
+        if (width === 1280) {
+          const thread = (await page.locator(".conversation-reading.thread").boundingBox())!;
+          const monogram = (await page.locator(".conversation-reading.thread .empty .mono").boundingBox())!;
+          expect(monogram.y).toBeGreaterThanOrEqual(thread.y);
+          expect(monogram.y + monogram.height).toBeLessThanOrEqual(thread.y + thread.height);
+        }
         if (process.env.EPIC_TABS_QA) {
           mkdirSync(process.env.EPIC_TABS_QA, { recursive: true });
           const html = await page.evaluate(async () => {

@@ -3644,3 +3644,6 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .epic-status-notice { margin: var(--space-2) var(--space-3); color: var(--ink-mid); font-size: var(--fs-xs); }
 /* Team already has the detailed staffing view; the epic strip stays visible. */
 .conversation-main.team-open .epic-tabs > .epic-tab-panel { display: none; }
+/* Empty-thread content fits the smaller reading region below the epic ledger. */
+.epic-tabs ~ .conversation-pane-slot .thread .empty { padding: var(--space-4); gap: var(--space-2); }
+.epic-tabs ~ .conversation-pane-slot .thread .empty .mono { width: var(--space-12); height: var(--space-12); font-size: var(--fs-lg); }

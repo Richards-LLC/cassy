@@ -15,7 +15,7 @@ session moving, and if not, what do I do.
 
 ## Render at 80 columns
 
-```
+```text
 ✓ active · cas-src-lively-panther-31 · 2 agents · 98 ready · 11 in progress
 ────────────────────────────────────────────────────────────────────────────────
 Project   ~/work/cas-src
@@ -37,7 +37,7 @@ golden-koala-58    active  cas-1111      3s ago
    inside the band the TUI's chip contrast guard allows), on a dark one `#50c878` (8:1).
    The alternative verdicts are `⚠ idle 14 min` and `⚠ no agents`, each with a remedy line.
 2. **Rows** — labels are bold words in a fixed column, values start at cell 11. Compare the
-   old right-aligned `        Pending prompts: 0`, which makes the eye hunt for the colon.
+   old right-aligned `Pending prompts: 0`, which makes the eye hunt for the colon.
 3. **Ledger** — the `last seen` column is right-aligned so a `2h ago` outlier sits visibly apart
    from `12s ago`; the agent name column is the only one that truncates, with `…`, and the
    receipt names `--full`.

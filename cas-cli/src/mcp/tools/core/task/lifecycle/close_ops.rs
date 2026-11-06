@@ -39537,7 +39537,7 @@ mod epic_status_gate_tests {
 
     #[test]
     fn epic_status_budget_guard_labels_unchecked_children() {
-        let dir = init_epic_repo(&[("alpha", 1)]);
+        let dir = init_epic_repo(&[("alpha", 0)]);
         let subtasks = vec![
             child("cas-c1", TaskStatus::Closed, Some("alpha")),
             child("cas-c2", TaskStatus::Closed, Some("missing")),
@@ -39560,17 +39560,18 @@ mod epic_status_gate_tests {
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
 
-        // A failed retained-worktree scan can leave no entries, just like an
-        // exhausted branch-collection budget. Neither proves all work landed.
-        let mut collection = collection;
-        for (budget_exhausted, inventory_partial) in [(true, false), (false, true), (false, false)] {
-            collection.budget_exhausted = budget_exhausted;
+        // A retained-worktree scan can fail even when the child branch read
+        // succeeded. Unknown local work must suppress that branch's all-clear.
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks[..1], "main", dir.path(), EpicStatusOptions::default(),
+        );
+        for inventory_partial in [true, false] {
             let report = render_epic_status_collection(
                 "cas-epic", "main", &collection, &[], &[], inventory_partial,
             );
             assert_eq!(
                 report.contains("All child factory branches are merged"),
-                !budget_exhausted && !inventory_partial,
+                !inventory_partial,
                 "unknown inventory must not claim all-clear: {report}",
             );
         }

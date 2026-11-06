@@ -467,7 +467,7 @@ mod tests {
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
-        for case in ["disabled", "assigned", "batch"] {
+        for case in ["revalidation-error", "disabled", "assigned", "batch", "interrupted-cancel"] {
             server.reset().await;
             let project = env.home().join(case);
             std::fs::create_dir_all(&project).unwrap();
@@ -481,11 +481,28 @@ mod tests {
                     config.set("factory.auto_route_builds", "false").unwrap();
                     config.save(&root).unwrap();
                 }
-                "assigned" => {
+                "assigned" | "interrupted-cancel" => {
                     let tasks = crate::store::open_task_store(&root).unwrap();
                     let mut task = tasks.get("cas-retry").unwrap();
                     task.assignee = Some("local-worker".into());
                     tasks.update(&task).unwrap();
+                    if case == "interrupted-cancel" {
+                        crate::cloud::peer_mailbox::cancel_build_route(&root, &sender.id, &format!("build-route:{REPO}:cas-retry")).unwrap();
+                    }
+                }
+                "revalidation-error" => {
+                    let send_root = root.clone();
+                    assert!(tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::send_raw(
+                        &send_root, "local-sup", "best", "ordinary peer retry", None, None, "best@best",
+                    )).await.unwrap().is_err());
+                    conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0 WHERE id=2", []).unwrap();
+                    // Keep the route JSON valid/selectable, but make its typed
+                    // payload unreadable; the unrelated send behind it is due.
+                    conn.execute("UPDATE peer_message_outbox SET payload=json_remove(payload,'$.project_id') WHERE id=1", []).unwrap();
+                    server.reset().await;
+                    Mock::given(method("POST")).and(path("/api/peer-messages"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"ordinary-sent", "status":"queued"})))
+                        .mount(&server).await;
                 }
                 _ => {
                     crate::store::open_spawn_queue_store(&root).unwrap().enqueue_spawn_with_task_queue(
@@ -496,8 +513,17 @@ mod tests {
             let runtime = crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "local").unwrap();
             tokio::task::spawn_blocking(move || runtime.tick_blocking()).await.unwrap();
             let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
+            if case == "revalidation-error" {
+                let ordinary = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:2").unwrap().unwrap();
+                assert!(ordinary.contains(": sent"), "one bad route must not block ordinary peer retries: {ordinary}");
+                assert!(status.contains("retrying") && status.contains("attempts: 1"), "bad route must remain pending: {status}");
+                assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages").count(), 1);
+                continue;
+            }
             assert!(status.contains("abandoned"), "{case}: cancel eagerly without another spawn or due retry: {status}");
-            assert!(crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap().notes.contains(EXPIRED_MARKER), "{case}");
+            let notes = crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap().notes;
+            assert!(notes.contains(EXPIRED_MARKER), "{case}");
+            if case == "interrupted-cancel" { assert!(notes.contains("cause=staffed_locally"), "{notes}"); }
             assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages").count(), 1, "{case}: no obsolete retry may send");
         }
     }

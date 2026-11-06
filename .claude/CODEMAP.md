@@ -67,6 +67,7 @@
 
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
+- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
@@ -98,6 +99,11 @@
 - `cas-cli/src/supervisor_message_wakes.rs` - typed wake limits and ask/answer/blocker exemptions; runtime queue selection rechecks declined wakes.
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
+
+## GitHub health
+
+- `cas-cli/src/github_repo.rs` - explicit origin binding and bounded, report-only default-branch queue health shared by setup/doctor; one query reads canonical identity and applicable active rules.
+- `scripts/github-queue-health.graphql`, `scripts/github_queue_health.py` - shared embedded query and advisory release preflight; warns on drift/unavailable access without writing settings or failing release.
 
 ## MCP, storage and delivery gates
 

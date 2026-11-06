@@ -901,6 +901,10 @@ pub struct FactoryConfig {
     /// Rolling report window for the epic design-review trigger.
     #[serde(default = "default_design_review_window_hours")]
     pub design_review_window_hours: u32,
+    /// cas-dcc9: hours after a release train's first child merge before the
+    /// supervisor gets one "train ready to cut" notice regardless of work in flight.
+    #[serde(default = "default_release_train_max_age_hours")]
+    pub release_train_max_age_hours: u32,
 
     /// Seconds to collect directed supervisor messages into one submitted turn.
     #[serde(default = "default_supervisor_message_debounce_secs")]
@@ -1241,6 +1245,7 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
 
 fn default_design_review_bug_threshold() -> u32 { 5 }
 fn default_design_review_window_hours() -> u32 { 48 }
+fn default_release_train_max_age_hours() -> u32 { 3 }
 
 fn default_supervisor_message_debounce_secs() -> u64 { 20 }
 
@@ -1325,6 +1330,7 @@ impl Default for FactoryConfig {
             commander_mirror_enabled: true,
             design_review_bug_threshold: default_design_review_bug_threshold(),
             design_review_window_hours: default_design_review_window_hours(),
+            release_train_max_age_hours: default_release_train_max_age_hours(),
             write_roots: Vec::new(),
             supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
             supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),

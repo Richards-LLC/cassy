@@ -27,6 +27,16 @@ impl Drop for HandlerPermit {
 }
 
 impl Switchable {
+    fn standby(root: std::path::PathBuf) -> Self {
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let passive = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let passive = CasService::new(core);
+        Self { passive, active: Arc::new(OnceLock::new()), handlers: Arc::new(AtomicUsize::new(0)),
+            idle: Arc::new(tokio::sync::Notify::new()) }
+    }
+
     fn permit(&self) -> HandlerPermit {
         self.handlers.fetch_add(1, Ordering::AcqRel);
         HandlerPermit(self.clone())
@@ -98,14 +108,20 @@ fn control_socket(fd: i32) -> Result<tokio::net::UnixStream> {
     }
     // Refuse a nested harness pretending to be the front. The existing
     // fingerprinted factory-owner guard still validates the resolved harness.
-    let output = crate::bounded_process::run_command(
-        std::process::Command::new("ps").args(["-p", &parent.to_string(), "-o", "comm=", "-o", "args="]),
-        crate::bounded_process::Deadline::after(std::time::Duration::from_millis(500)),
-        std::time::Duration::from_millis(500),
-    ).map_err(|error| anyhow::anyhow!("cannot verify owning front: {error:?}"))?;
-    let command = String::from_utf8_lossy(&output.stdout);
-    let executable = command.split_whitespace().next().context("owning front executable is unavailable")?;
-    if std::path::Path::new(executable).file_name() != std::env::current_exe()?.file_name()
+    let deadline = crate::bounded_process::Deadline::after(std::time::Duration::from_millis(500));
+    let probe = |field: &str| -> Result<String> {
+        let output = crate::bounded_process::run_command(
+            std::process::Command::new("ps").args(["-p", &parent.to_string(), "-o", field]),
+            deadline, std::time::Duration::from_millis(500),
+        ).map_err(|error| anyhow::anyhow!("cannot verify owning front: {error:?}"))?;
+        if !output.status.success() { bail!("owning front process is unavailable") }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    // BSD ps truncates comm to 15 columns when another field follows it,
+    // even with -ww. Query each field separately; keep paths with spaces.
+    let executable = probe("comm=")?;
+    let command = probe("args=")?;
+    if std::path::Path::new(&executable).file_name() != std::env::current_exe()?.file_name()
         || !command.split_whitespace().any(|arg| arg == "serve")
         || command.split_whitespace().any(|arg| arg == "--backend") {
         bail!("private MCP backend parent is not a stable cas serve front");
@@ -124,13 +140,7 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     if standby && crate::migration::check_migrations(&root)?.has_pending() {
         bail!("candidate requires schema migrations; reconnect after an explicit migration instead");
     }
-    let core = CasCore::with_daemon(root.clone(), None, None);
-    #[cfg(feature = "mcp-proxy")]
-    let passive = CasService::new(core, None);
-    #[cfg(not(feature = "mcp-proxy"))]
-    let passive = CasService::new(core);
-    let switchable = Switchable { passive, active: Arc::new(OnceLock::new()),
-        handlers: Arc::new(AtomicUsize::new(0)), idle: Arc::new(tokio::sync::Notify::new()) };
+    let switchable = Switchable::standby(root.clone());
     let input = super::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
     let server = switchable.clone().serve((input, tokio::io::stdout())).await?;
     let cancel = server.cancellation_token();
@@ -198,4 +208,26 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn standby_negotiates_real_rmcp_without_opening_a_store_cas_81c4() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent-cas-root");
+        let standby = Switchable::standby(root.clone());
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            standby.serve(server_io).await.unwrap().waiting().await.unwrap();
+        });
+        let client = ().serve(client_io).await.unwrap();
+        let tools = client.list_tools(None).await.unwrap();
+        assert!(!tools.tools.is_empty());
+        assert!(!root.exists(), "standby handshake/tools must not create a store or register an agent");
+        client.cancel().await.unwrap();
+        server.await.unwrap();
+    }
 }

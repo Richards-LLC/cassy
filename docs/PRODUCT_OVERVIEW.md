@@ -6,6 +6,7 @@
 
 Cassy is a local-first multi-agent coding factory and persistent context system for developers working in Git repositories.
 The `cas` binary runs a supervisor with isolated workers; `cas serve` gives coding agents durable project context through MCP.
+On Unix, new `cas serve` connections keep a stable stdio front while compatible installed backends change. A candidate negotiates privately before the front drains both request directions and partial messages; failed startup, changed protocol/capabilities/tool schemas or a drain timeout keep the current backend serving. Deferred reasons are logged. Serving reports distinguish the backend version from the front version; existing connections started before this transport need one normal harness reconnect to adopt it.
 Tasks, memories, rules, skills and repository knowledge live in one local store; Cloud sync, the machine hub and the Commander browser app are optional.
 Every delivery is checked before it merges: tests, the journeys a change touches, documentation upkeep and, after release, a live post-release check.
 

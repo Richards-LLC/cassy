@@ -170,13 +170,14 @@ where
             result = async { preparing.as_mut().unwrap().await }, if preparing.is_some() => {
                 preparing.take();
                 match result {
-                    Ok(Ok(candidate)) if serving.compatible(&candidate) => {
+                    Ok(Ok(candidate)) if serving.incompatibility(&candidate).is_none() => {
                         prepared = Some((candidate, Instant::now() + DRAIN_TIMEOUT));
                         let _ = events.send(Event::Prepared).await;
                     }
                     Ok(Ok(mut candidate)) => {
+                        let reason = serving.incompatibility(&candidate).unwrap();
                         candidate.stop().await;
-                        let _ = events.send(Event::Deferred("candidate protocol, capabilities or tool schema differs".into())).await;
+                        let _ = events.send(Event::Deferred(reason)).await;
                     }
                     result => {
                         let reason = match result {
@@ -246,6 +247,9 @@ impl Pending {
         if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
             let id = serde_json::to_string(id)?;
             if message.get("method").is_some() {
+                if requests.len() >= 4096 || requests.iter().map(String::len).sum::<usize>() + id.len() > FRAME_LIMIT {
+                    bail!("MCP pending request identities exceed bounded front capacity");
+                }
                 if !requests.insert(id) { bail!("duplicate pending MCP request identity") }
             } else { responses.remove(&id); }
         }
@@ -312,17 +316,30 @@ impl Connection {
             if serde_json::to_vec(&tools)?.len() > FRAME_LIMIT { bail!("backend tool catalog exceeds front buffer") }
             cursor = page["nextCursor"].as_str().map(str::to_owned);
             let Some(next) = cursor.as_ref() else { break };
+            if seen.len() >= 1024 || seen.iter().map(String::len).sum::<usize>() + next.len() > FRAME_LIMIT {
+                bail!("backend tools/list pagination exceeds front capacity");
+            }
             if !seen.insert(next.clone()) { bail!("backend repeats tools/list pagination cursor") }
         }
         tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         Ok(tools)
     }
 
-    fn compatible(&self, candidate: &Self) -> bool {
-        self.info["protocolVersion"] == candidate.info["protocolVersion"]
-            && self.info["capabilities"] == candidate.info["capabilities"]
-            && self.info["serverInfo"]["name"] == candidate.info["serverInfo"]["name"]
-            && self.tools == candidate.tools
+    fn incompatibility(&self, candidate: &Self) -> Option<String> {
+        if self.info["protocolVersion"] != candidate.info["protocolVersion"] {
+            return Some(format!("candidate protocolVersion {} differs from negotiated {}",
+                candidate.info["protocolVersion"], self.info["protocolVersion"]));
+        }
+        if self.info["capabilities"] != candidate.info["capabilities"] {
+            return Some("candidate capabilities differ from the initialized session".into());
+        }
+        if self.info["serverInfo"]["name"] != candidate.info["serverInfo"]["name"] {
+            return Some("candidate server identity differs from the initialized session".into());
+        }
+        if self.tools != candidate.tools {
+            return Some("candidate tools/list schema differs from the initialized session".into());
+        }
+        None
     }
 
     async fn control(&mut self, action: &str) -> Result<()> {
@@ -415,6 +432,7 @@ pub(super) fn reported_state(root: &std::path::Path, front_pid: u32) -> Option<S
 pub(crate) fn serving_state(root: &std::path::Path, front_pid: u32) -> Option<ServingState> {
     let state = reported_state(root, front_pid)?;
     (crate::agent_id::get_parent_of_pid(front_pid) == Some(state.harness_pid)
+        && crate::agent_id::get_parent_of_pid(state.backend_pid) == Some(front_pid)
         && crate::mcp::daemon::pid_matches_fingerprint(front_pid, state.front_starttime)
         && crate::mcp::daemon::pid_matches_fingerprint(state.backend_pid, state.backend_starttime))
         .then_some(state)

@@ -135,9 +135,9 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
 #[tokio::test]
 async fn failed_candidate_keeps_initialized_connection_serving_cas_81c4() {
     for (version, fails, reason) in [("broken", true, "candidate failed startup"),
-        ("protocol", false, "protocol, capabilities or tool schema"),
-        ("capabilities", false, "protocol, capabilities or tool schema"),
-        ("schema", false, "protocol, capabilities or tool schema")] {
+        ("protocol", false, "protocolVersion"),
+        ("capabilities", false, "capabilities differ"),
+        ("schema", false, "tools/list schema differs")] {
         let mut f = Fixture::new().await;
         f.update(version, fails).await;
         assert!(matches!(f.event().await, Event::Deferred(actual) if actual.contains(reason)));

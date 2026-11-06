@@ -439,6 +439,32 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_front_reports_backend_version_and_rejects_reused_pid_cas_81c4() {
+        let (_dir, root, mut worker, child) = fixture();
+        let front = std::process::id();
+        let harness = crate::agent_id::get_parent_of_pid(front).unwrap();
+        worker.pid = Some(harness);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, harness);
+        open_agent_store(&root).unwrap().update(&worker).unwrap();
+        let path = root.join("mcp-fronts").join(format!("{front}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut report = serde_json::json!({"front_pid":front, "harness_pid":harness,
+            "backend_pid":child.0.id(), "front_version":"9.99.1", "backend_version":"9.99.7",
+            "deferred":null,
+            "front_starttime":crate::mcp::daemon::read_pid_starttime(front).unwrap(),
+            "backend_starttime":crate::mcp::daemon::read_pid_starttime(child.0.id()).unwrap()});
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.7", Utc::now()).unwrap();
+        assert!(snapshot.servers.iter().any(|server| server.pid == child.0.id()
+            && server.version.as_deref() == Some("9.99.7") && !server.older), "{snapshot:?}");
+        report["front_starttime"] = serde_json::json!(u64::MAX);
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let stale = snapshot_with_installed(&root, "9.99.7", Utc::now()).unwrap();
+        assert!(stale.servers.iter().all(|server| server.version.as_deref() != Some("9.99.7")),
+            "a recycled front must not lend its committed serving version: {stale:?}");
+    }
+
+    #[test]
     fn worker_status_flags_live_old_mcp_against_installed_binary() {
         let (_dir, root, worker, child) = fixture();
         assert!(

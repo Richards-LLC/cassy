@@ -37,10 +37,8 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    row, walked from entry to goal with its `evidence_required` read-back, under the journey id and a
    verdict `qa_record` accepts ([journey rows](references/journeys.md#journey-rows)); score the
    experience. Upkeep refusals and their escape tokens are in the
-   [escape vocabulary](references/journeys.md#escape-vocabulary). Multi-surface walks use
-   `runSurfaceLanes` from the project's pinned kit: bounded parallel jobs, separate ledgers,
-   browser profiles and personas per channel/viewport, never a serial 1440→390→SMS replay
-   ([kit](references/verify-harness.md), [maintenance](references/maintain.md)).
+   [escape vocabulary](references/journeys.md#escape-vocabulary). Multi-surface walks use `runSurfaceLanes` from the project's pinned kit: bounded parallel jobs, separate ledgers,
+   browser profiles and personas per channel/viewport, never a serial 1440→390→SMS replay ([kit](references/verify-harness.md), [maintenance](references/maintain.md)).
 4. Run `cas qa ledger init --task <id>` and edit the printed project-scoped
    ledger ([evidence guidance](references/evidence-ledger.md)). Drive every cell against the real
    build: Playwright CLI by default (MCP for long exploratory walks); use project/`cas-playwright-debug` 1.64 recording and healer guards for rendered web/hub surfaces,

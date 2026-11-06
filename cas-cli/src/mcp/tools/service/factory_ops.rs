@@ -1008,7 +1008,15 @@ fn shutdown_worker_snapshot(
             WorkerClonePathResolve::Ready(path) => {
                 let (state, unsafe_worktree) =
                     shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
-                let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
+                // Non-isolated workers share the project checkout; teardown
+                // only removes manager-owned worker worktrees.
+                let verdict = if cas_root.parent().is_some_and(|project| {
+                    project.canonicalize().ok() == path.canonicalize().ok()
+                }) {
+                    format!("worktree {} kept (shared checkout)", path.display())
+                } else {
+                    shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty())
+                };
                 (state, verdict, unsafe_worktree)
             }
             WorkerClonePathResolve::NotOnDisk { candidate, .. } => (

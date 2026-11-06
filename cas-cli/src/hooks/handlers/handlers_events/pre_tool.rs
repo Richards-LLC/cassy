@@ -3570,6 +3570,10 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         }
         match quote {
             Some(active) if ch == active => quote = None,
+            Some('"') if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == '"') => {
+                // An escaped double quote is word data, not the end of its quote context.
+                word.push(chars.next().unwrap().1);
+            }
             Some('"') if ch == '\\'
                 && chars.peek().is_some_and(|(_, next)| matches!(next, '`' | '\\')) =>
             {

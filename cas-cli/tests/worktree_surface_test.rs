@@ -3805,6 +3805,13 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let held = service.factory(Parameters(request.clone())).await
         .expect_err("required verification now precedes the merge");
     assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
+    assert!(
+        held.message.contains("spawn")
+            && held.message.contains("task-verifier")
+            && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
+        "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",
+        held.message
+    );
     let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
     let verdict = service.verification(Parameters(verification_req(serde_json::json!({
         "action": "add", "task_id": task_id, "dispatch_id": prepared.id,

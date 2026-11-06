@@ -53,10 +53,9 @@ alongside the caller-visible success/failure rather than private choreography.
 
 ## Inject time and randomness without replacing behavior
 
-Hub-web exposes randomness in `backoffDelay(attempt, random)` and time in
-`elapsedSeconds(snapshot, now)` in `hub-web/src/connection-state.ts`. Pass explicit
-values so the real calculation runs without monkey-patching `Math.random` or
-waiting for wall time:
+Expose randomness in `backoffDelay(attempt, random)` and time in
+`elapsedSeconds(snapshot, now)`. Pass explicit values to the real calculation
+instead of patching `Math.random` or waiting:
 
 ```typescript
 import { expect, it } from "vitest";

@@ -17,7 +17,9 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
    evidence agent against the assembled build and record its agent ID. This is
    evidence collection, not a close verdict: give it its own prompt with this
    procedure, not the sealed task-verifier close dispatch.
-4. Give the agent `cas-qa-craft` and the ledger context, with one combined
+4. Split each channel/viewport into an independent sub-lane or use the pinned kit's
+   `runSurfaceLanes` jobs; give each its own persona, browser profile and ledger.
+   Give the agent `cas-qa-craft` and the ledger context, with one combined
    matrix time-boxed by `qa.pass_timeout_mins` in place of its per-task
    defaults. Row 1 is the combined demo happy path; map every child demo to
    explicit actions in that row or another cell. Across the matrix: at least
@@ -34,7 +36,7 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
    `Epic flow walk` with tip, child coverage, ledger path, counts and label
    split. Stop registered QA servers. A complete pass may still hold FAIL or
    NOT EXERCISED; completion is not approval.
-7. Once the `batch_receipt` exists and the queue has landed the epic, call `task action=close id=<epic-id>`
+7. Once the `batch_receipt` exists and the epic is integrated, call `task action=close id=<epic-id>`
    as the registered epic owner. With verification enabled, close returns the
    pending dispatch ID and bound head; ownership and assembly proof do not
    replace an epic verdict. Use that dispatch for the sealed task-verifier

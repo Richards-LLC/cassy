@@ -3,7 +3,7 @@
 //!
 //! The gabber supervisor asked prowl to review PR #4249, then merged the PR
 //! to staging without the answer; the review later found two money P1s. The
-//! ask and incoming peer messages are already recorded locally, so
+//! ask is already recorded in the peer outbox and answers are matched there, so
 //! no new gate object is needed: `worktree_merge` and a supervisor's raw
 //! `gh pr merge` are refused while the merging supervisor has an unanswered
 //! explicit ask to a peer that names the task or PR being merged.
@@ -121,9 +121,13 @@ pub(crate) fn merge_refusal(
             continue;
         }
         let note_task = task_for_override(cas_root, ask, subject);
+        let answer_state = match ask.unlinked_answer.as_deref() {
+            Some(id) => format!("peer answer {id} arrived but is not linked to this ask"),
+            None => "no answer is linked to this ask".to_string(),
+        };
         return Some(format!(
-            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and no reply has arrived. \
-             Wait for the answer, or override visibly: \
+            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and {answer_state}. \
+             Wait for an answer that identifies this ask, or override visibly: \
              `task action=notes id={note_task} note_type=decision notes=\"{OVERRIDE_MARKER} {}: <reason>\"`, \
              then retry the merge (the operator is told).",
             ask.recipient,
@@ -287,6 +291,104 @@ mod tests {
         merge_refusal(root, sender, "cosmic-shark-29", None, &MergeSubject { pr: Some(pr), ..Default::default() })
     }
 
+    #[tokio::test]
+    async fn unlinked_peer_answer_releases_the_worktree_merge_gate_cas_7435() {
+        let (_env, _temp, root, conn) = fixture();
+        crate::store::open_task_store(&root).unwrap()
+            .add(&cas_types::Task::new("cas-7435".into(), "peer boundary".into())).unwrap();
+        let supervisor = cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "cosmic-shark-29".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        sent_ask(&conn, "ask-7435", "Please relay the file boundary for cas-7435 before merging.");
+        let before = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the unanswered ask must hold the real MCP merge path");
+        assert!(before.message.contains("UNANSWERED PEER ASK"), "{before}");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["peer:lively-cheetah-57@prowl", "cosmic-shark-29",
+                "<cas-peer-message v=\"1\" id=\"answer-7435\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"cassy\" kind=\"answer\"/>\nRelayed the file boundary."],
+        ).unwrap();
+        let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the missing source remains subject to normal merge guards");
+        assert!(!after.message.contains("UNANSWERED PEER ASK"), "arrived answer must release the ask: {after}");
+    }
+
+    #[test]
+    fn peer_answers_match_only_their_unambiguous_question_cas_7435() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        for case in ["single", "named", "explicit", "linked-successor", "ambiguous", "wrong-peer", "wrong-target",
+            "wrong-reference", "stale", "receipt", "status", "untyped", "prefix",
+            "ambiguous-then-explicit", "duplicate", "queued", "wrong-source"]
+        {
+            let (_env, _temp, root, conn) = fixture();
+            sent_ask(&conn, "ask-7435", "Please review PR #4249.");
+            let two_asks = matches!(case, "named" | "explicit" | "linked-successor" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
+            if two_asks {
+                sent_ask(&conn, "ask-74350", "Please review PR #4250.");
+            }
+            conn.execute("UPDATE peer_message_outbox SET payload=json_set(payload, '$.recipient_agent_id', 'peer-agent'), created_at=strftime('%s','now')-10", []).unwrap();
+            if case == "queued" {
+                conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL, state='pending'", []).unwrap();
+            }
+            let mut reply = PeerEnvelope {
+                id: "reply-7435".into(), sender_name: "lively-cheetah-57".into(),
+                sender_agent_id: "peer-agent".into(), machine: "prowl".into(),
+                session: None, repo: "cassy".into(), in_reply_to: None,
+                kind: Some(PeerMessageKind::Answer), scope: PeerScope::Project,
+            };
+            match case {
+                "explicit" => reply.in_reply_to = Some("ask-7435".into()),
+                "linked-successor" => {
+                    // Explicit Cloud reply links survive supervisor succession.
+                    reply.in_reply_to = Some("ask-7435".into());
+                    reply.sender_agent_id = "successor-peer".into();
+                    reply.sender_name = "successor-supervisor".into();
+                }
+                "wrong-reference" => reply.in_reply_to = Some("unrelated-ask".into()),
+                "wrong-peer" => reply.sender_agent_id = "different-peer".into(),
+                "receipt" => reply.kind = Some(PeerMessageKind::Receipt),
+                "status" => reply.kind = Some(PeerMessageKind::Status),
+                "untyped" => reply.kind = None,
+                _ => {}
+            }
+            let insert = |reply: &PeerEnvelope, body: &str| {
+                // pin: The peer queue source is a protocol identity; a conflicting source cannot authorize an answer.
+                let source = if case == "wrong-source" { "peer:someone-else@prowl".into() }
+                    else { format!("peer:{}@{}", reply.sender_name, reply.machine) };
+                let target = if case == "wrong-target" { "another-supervisor" } else { "cosmic-shark-29" };
+                conn.execute("INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![source, target, format!("{}\n{body}", render_envelope(reply))]).unwrap();
+            };
+            insert(&reply, match case {
+                "named" => "Reviewed ask-7435; approved.",
+                "prefix" | "duplicate" => "Reviewed ask-74350; approved.",
+                _ => "Relayed the boundary; approved.",
+            });
+            if case == "stale" {
+                conn.execute("UPDATE prompt_queue SET created_at=datetime('now','-60 seconds')", []).unwrap();
+            }
+            if case == "ambiguous-then-explicit" {
+                reply.id = "explicit-second-answer".into();
+                reply.in_reply_to = Some("ask-74350".into());
+                insert(&reply, "Second question approved.");
+            } else if case == "duplicate" {
+                insert(&reply, "A duplicate delivery cannot answer the remaining question.");
+            }
+            let refusal = pr_merge(&root, "sup-soundwave", 4249);
+            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit" | "linked-successor"), "{case}: {refusal:?}");
+            if matches!(case, "ambiguous" | "ambiguous-then-explicit" | "wrong-reference" | "queued") {
+                assert!(refusal.as_deref().unwrap().contains("reply-7435"), "{case}: {refusal:?}");
+            }
+            if two_asks {
+                let other_answered = matches!(case, "prefix" | "ambiguous-then-explicit" | "duplicate");
+                assert_eq!(pr_merge(&root, "sup-soundwave", 4250).is_none(), other_answered, "other ask in {case}");
+            }
+        }
+    }
+
     /// Verifiers ver-37f17bf1f171 and ver-aaa79541a589: any way an ask writes
     /// the PR number holds that PR; a different number does not.
     #[test]
@@ -323,17 +425,17 @@ mod tests {
         }
     }
 
-    /// The peer may answer in a new message, or decide the split instead of
-    /// replying to the context note that accompanied its proposal.
+    /// A typed answer can resolve the sole open question without a reply link;
+    /// untyped follow-ups, status, receipts and split decisions keep its hold.
     #[test]
-    fn a_later_message_from_the_same_peer_clears_an_ask_cas_5ec1() {
+    fn only_a_correlated_answer_from_the_same_peer_clears_an_ask_cas_5ec1() {
         use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
         let cases = [
-            (None, "p", "cosmic-shark-29", "now", false),
+            (None, "p", "cosmic-shark-29", "now", true),
             (Some(PeerMessageKind::Answer), "p", "cosmic-shark-29", "now", false),
-            (Some(PeerMessageKind::Status), "p", "cosmic-shark-29", "now", false),
-            (Some(PeerMessageKind::Receipt), "p", "cosmic-shark-29", "now", false),
-            (Some(PeerMessageKind::EpicSplitDecided), "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::Status), "p", "cosmic-shark-29", "now", true),
+            (Some(PeerMessageKind::Receipt), "p", "cosmic-shark-29", "now", true),
+            (Some(PeerMessageKind::EpicSplitDecided), "p", "cosmic-shark-29", "now", true),
             (None, "other-peer", "cosmic-shark-29", "now", true),
             (None, "p", "other-supervisor", "now", true),
             (None, "p", "cosmic-shark-29", "-2 minutes", true),

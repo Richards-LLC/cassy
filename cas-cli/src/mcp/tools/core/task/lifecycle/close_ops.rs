@@ -100,20 +100,48 @@ fn request_close_verification_dispatch(
     owner_id: &str,
     boundary: &cas_types::VerificationProofBoundary,
     supervisor_recovery: bool,
+    no_delivery_intent: Option<(&str, Option<&str>)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
-    match cas_store::create_verification_dispatch_bound(
-        cas_root,
-        task_id,
-        requester_id,
-        owner_id,
-        boundary,
-        chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-        supervisor_recovery,
-    ) {
-        Ok(dispatch) => Ok(CloseVerificationDispatch::Requested(dispatch)),
-        Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => {
-            Ok(CloseVerificationDispatch::AlreadyActive(*dispatch))
+    let persist = || -> cas_store::Result<CloseVerificationDispatch> {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
+        cas_store::shared_db::install_busy_handler(&conn)?;
+        let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
+        let (dispatch, already_active) = match cas_store::create_verification_dispatch_bound_with_conn(
+            &tx, task_id, requester_id, owner_id, boundary,
+            chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+            supervisor_recovery,
+        ) {
+            Ok(dispatch) => (dispatch, false),
+            Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => (*dispatch, true),
+            Err(error) => return Err(error),
+        };
+        // An existing cycle keeps its requester, owner and proof immutable.
+        // Matching proof may still acquire this assignee's close declaration.
+        let matching_proof = dispatch.owner_agent_id == owner_id
+            && dispatch.receipt_id == boundary.receipt_id
+            && dispatch.delivery_transaction_id == boundary.delivery_transaction_id
+            && dispatch.repository == boundary.repository;
+        if let Some((reason, expected_assignee)) = no_delivery_intent.filter(|_| matching_proof) {
+            let (encoded, assignee): (String, Option<String>) = tx.query_row(
+                "SELECT deliverables, assignee FROM tasks WHERE id = ?1",
+                [task_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if assignee.as_deref() != expected_assignee {
+                return Err(cas_store::StoreError::Other("Assignment changed before no-delivery dispatch; close intent was not saved".into()));
+            }
+            let mut deliverables: cas_types::TaskDeliverables = serde_json::from_str(&encoded)?;
+            deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
+                dispatch_id: dispatch.id.clone(), reason: reason.to_string(), assignee,
+            });
+            tx.execute("UPDATE tasks SET deliverables = ?1 WHERE id = ?2",
+                rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
         }
+        tx.commit()?;
+        Ok(if already_active { CloseVerificationDispatch::AlreadyActive(dispatch) }
+            else { CloseVerificationDispatch::Requested(dispatch) })
+    };
+    match persist() {
+        Ok(outcome) => Ok(outcome),
         Err(error) => Err(McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to persist verification dispatch: {error}")),
@@ -134,6 +162,10 @@ mod verification_dispatch_tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = Task::new("cas-racing-close".into(), "No delivery".into());
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
         let boundary = cas_types::VerificationProofBoundary::task();
         let original = cas_store::create_verification_dispatch_bound(
             &root,
@@ -169,6 +201,9 @@ mod verification_dispatch_tests {
                 ("supervisor", "other-owner", &boundary),
                 ("supervisor", "supervisor", &different_boundary),
             ] {
+                let mut current = tasks.get(&task.id).unwrap();
+                current.deliverables.no_delivery_close_intent = None;
+                tasks.update(&current).unwrap();
                 let outcome = request_close_verification_dispatch(
                     &root,
                     &original.task_id,
@@ -176,6 +211,7 @@ mod verification_dispatch_tests {
                     owner,
                     requested,
                     false,
+                    Some(("Measured no source delivery", Some("worker"))),
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
                 match outcome {
@@ -183,6 +219,14 @@ mod verification_dispatch_tests {
                     other => panic!(
                         "must return the exact active dispatch without reusing its authority: {other:?}"
                     ),
+                }
+                let intent = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent;
+                if requester == "worker" {
+                    let saved = intent.expect("matching active proof must retain the worker's no-delivery declaration");
+                    assert_eq!(saved.dispatch_id, original.id);
+                    assert_eq!(saved.assignee.as_deref(), Some("worker"));
+                } else {
+                    assert!(intent.is_none(), "different owner/proof must not acquire close intent");
                 }
                 assert_eq!(
                     cas_store::get_latest_verification_dispatch(&root, &original.task_id)
@@ -6663,6 +6707,9 @@ impl CasCore {
             && rebased_delivery_has_same_patches(
                 repo_path, recorded, &candidate, &rebase_target, &task.id,
             );
+        // Target-only merge containers remain this delivery even after its
+        // worker starts a successor. A new authored commit still needs a park.
+        let target_sync = target_sync_only_advance(repo_path, task, &candidate, &rebase_target);
         // Prediction and persistence share the same ownership fences. A
         // proven identical rebase preserves a handed-off delivery; changed
         // continuations still require exclusive ownership.
@@ -6673,7 +6720,7 @@ impl CasCore {
                         .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
                 })
         };
-        if !unchanged_rebase && task_store.list(Some(TaskStatus::InProgress)).ok()?
+        if !unchanged_rebase && !target_sync && task_store.list(Some(TaskStatus::InProgress)).ok()?
             .iter().any(same_worker)
         {
             return None;
@@ -6684,7 +6731,7 @@ impl CasCore {
         }) {
             return None;
         }
-        if unchanged_rebase {
+        if unchanged_rebase || target_sync {
             return Some(candidate);
         }
         // A recovery merge makes the old anchor reachable again as a side
@@ -9393,7 +9440,13 @@ impl CasCore {
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, anchor.as_deref(),
                         ).or_else(|| task.deliverables.factory_branch_anchor.clone())
-                    } else { parking.deliverables.factory_branch_anchor.clone().or(anchor.clone()) };
+                    } else {
+                        // Predict the same handoff/anchor decision that the
+                        // guarded park will persist, including branch changes.
+                        let mut delivery = parking.deliverables.clone();
+                        delivery.record_park(measured_branch.as_deref(), anchor.as_deref(), task.assignee.as_deref());
+                        delivery.factory_branch_anchor
+                    };
                     if tip_is_pushed && let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
                         for boundary in req.commit_receipt.as_deref().into_iter()
                             .chain(park_anchor.as_deref())
@@ -10520,6 +10573,7 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
+                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {
@@ -11736,6 +11790,7 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
+        task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
         task.updated_at = now;
@@ -13107,6 +13162,7 @@ impl CasCore {
                 )
             })?;
         let clear_blocked_hold = old_status == TaskStatus::Blocked;
+        task.deliverables.no_delivery_close_intent = None;
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed
@@ -25268,6 +25324,83 @@ fn no_other_open_anchor_between(
     })
 }
 
+/// A parked delivery can import its target without acquiring new task work.
+/// Require the anchor on the first-parent chain and every later commit to be
+/// a merge whose other parents are already reachable on the declared target.
+/// This graph-only check also admits conflict-resolution content in those
+/// merges; the pre-merge review covers that content.
+pub(crate) fn target_sync_only_advance(
+    repo: &std::path::Path,
+    task: &Task,
+    tip: &str,
+    target: &str,
+) -> bool {
+    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+        return false;
+    };
+    if [anchor, tip, target].iter().any(|reference| !is_safe_git_refname(reference)) {
+        return false;
+    }
+    let (Some(anchor), Some(tip), Some(target)) = (
+        resolve_branch_sha(repo, anchor), resolve_branch_sha(repo, tip), resolve_branch_sha(repo, target),
+    ) else {
+        return false;
+    };
+    let lane = task.deliverables.parked_branch.clone().or_else(|| {
+        task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+    });
+    if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+        && lane.as_deref().and_then(|branch| {
+            resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}"))
+        }).as_deref() != Some(tip.as_str())
+    {
+        return false;
+    }
+    let Ok(history) = git_stdout_lines(repo, &[
+        "rev-list", "--first-parent", "--parents", &format!("{anchor}..{tip}"), "--",
+    ]) else {
+        return false;
+    };
+    let commits: Vec<_> = history.iter().map(|line| line.split_whitespace().collect::<Vec<_>>()).collect();
+    commits.last().is_some_and(|last| last.get(1) == Some(&anchor.as_str()))
+        && commits.iter().all(|commit| {
+            commit.len() >= 3
+                && commit.iter().skip(2).all(|parent| git_commit_is_ancestor(repo, parent, &target))
+        })
+}
+
+/// Regeneration provenance names the task that introduced the generator,
+/// not the task delivering these outputs. Only its canonical subject, body
+/// and output paths may cross the foreign-task message fence.
+fn generated_delivery_continuation(
+    repo: &std::path::Path,
+    commit: &str,
+    parent: &str,
+    message: &str,
+) -> bool {
+    let (tag, outputs): (&str, &[&str]) = match message.trim().lines().next() {
+        Some("build(builtins): regenerate reference-history from merged history") => (
+            "cas-fb11",
+            &[REFERENCE_HISTORY_LEDGER, "cas-cli/src/builtins/codex/agents/task-verifier.toml", ".codex/agents/task-verifier.toml"],
+        ),
+        Some("build(hub-web): regenerate dist from merged sources") => ("cas-0c988", &[]),
+        _ => return false,
+    };
+    let provenance = message.lines().any(|line| {
+        line.strip_prefix("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging ")
+            .and_then(|line| line.strip_suffix(&format!(" ({tag}).")))
+            .is_some_and(|reference| reference == "HEAD"
+                || ((9..=64).contains(&reference.len())
+                    && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && git_commit_is_ancestor(repo, reference, parent)))
+    });
+    provenance && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", parent, commit, "--"])
+        .is_ok_and(|paths| !paths.is_empty() && paths.iter().all(|path| {
+            if tag == "cas-0c988" { path.starts_with("hub-web/dist/") }
+            else { outputs.contains(&path.as_str()) }
+        }))
+}
+
 /// cas-9668: an epic sync imports sibling commits without transferring the
 /// task's delivery identity. Each side parent must belong to the declared
 /// target or released trunk to bypass the foreign-task check; direct commits
@@ -25376,7 +25509,8 @@ fn parked_anchor_advance_with_upstream_is_attributable(
             || (parents.len() == 1
                 && (!message_claims_other_task(message, Some(task_id))
                     || (message.starts_with(REFERENCE_HISTORY_REGEN_SUBJECT)
-                        && is_reference_history_regeneration(repo_path, commit)))))
+                        && is_reference_history_regeneration(repo_path, commit))
+                    || generated_delivery_continuation(repo_path, commit, parents[0], message))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })

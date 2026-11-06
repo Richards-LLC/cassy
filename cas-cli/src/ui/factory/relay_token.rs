@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn cas_ca22_relay_token_is_private_random_and_compared_exactly() {
         let home = tempfile::tempdir().unwrap();
-        let hub_root = home.path().join(".cas/hub");
+        let hub_root = home.path().canonicalize().unwrap().join(".cas/hub");
         let first = mint(&hub_root, "factory-1").unwrap();
         assert_eq!(first.len(), 64, "256 random bits, hex");
         assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));

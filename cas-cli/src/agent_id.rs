@@ -9,6 +9,18 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+#[cfg(unix)]
+static MCP_FRONT_HARNESS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Only the backend's validated private parent socket establishes this value.
+/// Request fields and inherited environment never override process ownership.
+#[cfg(unix)]
+pub(crate) fn bind_mcp_front_harness(pid: u32) -> anyhow::Result<()> {
+    if pid <= 1 || MCP_FRONT_HARNESS.set(pid).is_err() {
+        anyhow::bail!("invalid or already bound MCP front harness");
+    }
+    Ok(())
+}
 #[allow(unused_imports)]
 use tracing::{debug, info, warn};
 
@@ -35,7 +47,7 @@ pub fn compute_machine_hash() -> String {
 /// combined with machine hash for uniqueness.
 #[cfg(unix)]
 pub fn compute_agent_id() -> String {
-    let ppid = std::os::unix::process::parent_id();
+    let ppid = get_cc_pid_for_mcp();
     let machine_hash = compute_machine_hash();
     format!("cc-{ppid}-{machine_hash}")
 }
@@ -131,7 +143,7 @@ pub fn compute_agent_id() -> String {
 pub fn detect_parent_agent_id(cas_root: &Path) -> Option<String> {
     #[cfg(unix)]
     {
-        let ppid = std::os::unix::process::parent_id();
+        let ppid = get_cc_pid_for_mcp();
         let grandparent_pid = get_parent_of_pid(ppid)?;
 
         // Check if grandparent has registered agent
@@ -154,7 +166,7 @@ pub fn detect_parent_agent_id(cas_root: &Path) -> Option<String> {
 pub fn register_agent_pid_mapping(cas_root: &Path, agent_id: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        let ppid = std::os::unix::process::parent_id();
+        let ppid = get_cc_pid_for_mcp();
         let mapping_dir = cas_root.join("agents_by_cc_pid");
         std::fs::create_dir_all(&mapping_dir)?;
         std::fs::write(mapping_dir.join(ppid.to_string()), agent_id)?;
@@ -166,7 +178,7 @@ pub fn register_agent_pid_mapping(cas_root: &Path, agent_id: &str) -> std::io::R
 pub fn cleanup_agent_pid_mapping(cas_root: &Path) {
     #[cfg(unix)]
     {
-        let ppid = std::os::unix::process::parent_id();
+        let ppid = get_cc_pid_for_mcp();
         let _ = std::fs::remove_file(cas_root.join(format!("agents_by_cc_pid/{ppid}")));
     }
 }
@@ -190,7 +202,7 @@ pub fn read_session_for_mcp(cas_root: &Path) -> std::io::Result<String> {
     use crate::mcp::socket::{DaemonEvent, DaemonResponse, send_event};
 
     #[cfg(unix)]
-    let cc_pid = std::os::unix::process::parent_id();
+    let cc_pid = get_cc_pid_for_mcp();
     #[cfg(not(unix))]
     let cc_pid = std::process::id();
 
@@ -229,7 +241,7 @@ pub fn read_session_for_mcp(cas_root: &Path) -> std::io::Result<String> {
 /// Get the Claude Code PID (PPID in MCP context, our PID in hook context)
 #[cfg(unix)]
 pub fn get_cc_pid_for_mcp() -> u32 {
-    std::os::unix::process::parent_id()
+    MCP_FRONT_HARNESS.get().copied().unwrap_or_else(std::os::unix::process::parent_id)
 }
 
 #[cfg(not(unix))]

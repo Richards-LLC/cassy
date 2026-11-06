@@ -111,7 +111,7 @@ pub use sort::{
 };
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{
-    MergeCiAdmission,
+    MergeCiAdmission, NoDeliveryCloseIntent,
     AuthorizedMergeSource, DeliveryMode, EpicBranchOrigin, FactoryBranchStart, IntegrationBatchEvidence, EvidenceOnlyEvidence, NegativeResultEvidence, PreCloseHookEvidence, Priority,
     TASK_EXECUTION_STATE_MAX_BYTES, SourceClaimOverride, SplitTakeoverAuthorization, Task, TaskAnsweredBlocker, TaskBlockedHold, TaskDeliverables, TaskDepth, TaskDoor, TaskRisk,
     TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget, merge_task_execution_state_patch,

@@ -823,6 +823,13 @@ impl CloudCoordinator {
             .map(|locks| locks.iter().map(lock_info_to_lease).collect())
     }
 
+    /// Authorization-sensitive callers accept only explicitly active wire locks.
+    pub(crate) fn list_active_locks(&self) -> Result<Vec<TaskLease>, CasError> {
+        self.list_lock_records().map(|locks| locks.iter()
+            .filter(|lock| lock.status == "active")
+            .map(lock_info_to_lease).collect())
+    }
+
     fn list_lock_records(&self) -> Result<Vec<LockInfo>, CasError> {
         let url = format!("{}/api/agents/locks", self.config.endpoint);
 

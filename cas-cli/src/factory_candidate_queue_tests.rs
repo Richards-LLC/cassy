@@ -366,6 +366,12 @@ async fn refused_requests_name_why_and_queue_nothing() {
 
 #[test]
 fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
+    if !cfg!(target_os = "linux") {
+        let reason = sandbox_problem(std::env::consts::OS, "bwrap", Path::new("true")).unwrap();
+        assert!(reason.contains("Linux bubblewrap"), "{reason}");
+        eprintln!("SKIP real sandbox probe: {reason}");
+        return;
+    }
     assert_eq!(
         sandbox_problem("linux", "bwrap", Path::new("true")).is_none(),
         namespaces_available()

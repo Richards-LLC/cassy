@@ -723,6 +723,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/walk-kit.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/walk-kit.mjs"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/scripts/model-boundary.py",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/model-boundary.py"),
     },
@@ -1467,6 +1471,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/walk-kit.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/walk-kit.mjs"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/scripts/model-boundary.py",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/model-boundary.py"),
     },
@@ -2204,6 +2212,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
         content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/walk-kit.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/walk-kit.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/scripts/model-boundary.py",
@@ -4894,10 +4906,10 @@ mod tests {
         std::fs::write(cas_src.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::write(cas_src.join("cas-cli/src/builtins.rs"), "").unwrap();
         let cas_src_only = [
-            "merge queue", "cas_lane_slim", "fast rows", "fast-row", "contributing", "journey-eval",
-            "assembly-proof", "release.sh --hotfix", "hub-web/dist", "hub_e2e_port",
+            "merge queue", "merge-queue", "the queue", "cas_lane_slim", "fast row", "fast-row", "contributing", "journey-eval",
+            "assembly-proof", "release.sh --hotfix", "hub-web/", "hub_e2e_port",
         ];
-        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
             let personal = temp.path().join("home").join(format!("{harness:?}"));
             let source = cas_src.join(format!(".{harness:?}"));
             sync_all_builtins_for_harness(harness, &personal).unwrap();
@@ -8748,6 +8760,11 @@ This is the body content."#;
         const VISUAL_QA: &str = include_str!("../../scripts/visual-qa.mjs");
         const TERMINAL_QA: &str = include_str!("../../scripts/terminal-qa.mjs");
         for (label, catalog) in wp10_catalogs() {
+            assert_eq!(
+                wp10_get(label, catalog, "skills/cas-qa-craft/scripts/walk-kit.mjs"),
+                include_str!("builtins/skills/cas-qa-craft/scripts/walk-kit.mjs"),
+                "{label} must install the shared versioned walk kit"
+            );
             assert_eq!(
                 wp10_get(label, catalog, "skills/cas-ui-craft/scripts/visual-qa.mjs"),
                 VISUAL_QA,

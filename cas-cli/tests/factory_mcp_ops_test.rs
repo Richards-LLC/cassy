@@ -6583,6 +6583,84 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
 }
 
 #[tokio::test]
+async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
+    use sha2::{Digest, Sha256};
+
+    let env = FactoryTestEnv::new();
+    let base = env.cas_root.join("candidate-artifacts");
+    let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
+    std::fs::write(env.cas_root.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n", base.display().to_string(),
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let binary = b"recorded candidate binary";
+    let hash = format!("{:x}", Sha256::digest(binary));
+    let ledger = format!("Candidate: candidate/cas; --version: cas 9.99.0\nSHA-256: {hash}\n");
+    let store = env.task_store();
+    for (id, status, age, recorded) in [
+        ("cas-c001", TaskStatus::Closed, Some(49), true),
+        ("cas-c002", TaskStatus::Open, Some(49), true),
+        ("cas-c003", TaskStatus::Closed, Some(47), true),
+        ("cas-c004", TaskStatus::Closed, None, true),
+        ("cas-c005", TaskStatus::Closed, Some(49), false),
+        ("cas-c006", TaskStatus::Closed, Some(49), true),
+    ] {
+        let mut task = Task::new(id.into(), "candidate owner".into());
+        task.status = status;
+        task.closed_at = age.map(|hours| now - chrono::Duration::hours(hours));
+        store.add(&task).unwrap();
+        let dir = root.join(id);
+        std::fs::create_dir_all(dir.join("candidate")).unwrap();
+        std::fs::write(dir.join("candidate/cas"), binary).unwrap();
+        std::fs::write(dir.join("LEDGER.md"), if recorded { &ledger } else { "No binary identity" }).unwrap();
+        std::fs::write(dir.join("build.log"), "build completed").unwrap();
+        std::fs::write(dir.join("candidate/SHA256SUMS"), format!("{hash}  cas\n")).unwrap();
+    }
+    // Same name with different bytes is not the binary the ledger recorded.
+    std::fs::create_dir_all(root.join("cas-c001/other")).unwrap();
+    std::fs::write(root.join("cas-c001/other/cas"), "unrecorded binary").unwrap();
+    std::fs::write(root.join("cas-c006/LEDGER.md"), format!("SHA-256: {hash}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        let external = base.join("outside-project");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("cas"), binary).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("cas-c001/linked-candidate")).unwrap();
+    }
+
+    let mut request = factory_req("gc_cleanup");
+    request.full = Some(true);
+    request.force = Some(true);
+    request.dry_run = Some(false);
+    // Existing process/cache cleanup must not opt in to candidate deletion.
+    env.service.factory_request(Parameters(request.clone())).await.unwrap();
+    assert!(root.join("cas-c001/candidate/cas").is_file());
+    request.artifacts = Some(true);
+    request.dry_run = Some(true);
+    env.service.factory_request(Parameters(request.clone())).await.unwrap();
+    assert!(root.join("cas-c001/candidate/cas").is_file());
+    request.dry_run = Some(false);
+    let result = env.service.factory_request(Parameters(request)).await.unwrap();
+    let text = get_text(&result);
+    assert!(!root.join("cas-c001/candidate/cas").exists(),
+        "cas-82f8: recorded candidate of a task closed over 48h must be reclaimed: {text}");
+    assert!(text.contains(&format!("Candidate binaries: removed_files=1 reclaimed_bytes={}", binary.len())), "{text}");
+    // pin: binary reclamation must preserve the original ledger bytes.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/LEDGER.md")).unwrap(), ledger);
+    // pin: build logs remain durable evidence after binary reclamation.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/build.log")).unwrap(), "build completed");
+    // pin: the original binary checksum record must survive reclamation.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/candidate/SHA256SUMS")).unwrap(), format!("{hash}  cas\n"));
+    for id in ["cas-c002", "cas-c003", "cas-c004", "cas-c005", "cas-c006"] {
+        assert_eq!(std::fs::read(root.join(id).join("candidate/cas")).unwrap(), binary,
+            "open/recent/unknown-date/unrecorded candidate must stay: {id}");
+    }
+    assert!(root.join("cas-c001/other/cas").is_file());
+    #[cfg(unix)]
+    assert_eq!(std::fs::read(base.join("outside-project/cas")).unwrap(), binary);
+}
+
+#[tokio::test]
 async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248() {
     let env = FactoryTestEnv::new();
     let base = env.cas_root.join("durable-artifacts");
@@ -12327,6 +12405,11 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         "reason": reason,
     }))
     .unwrap();
+    // cas-4c92: queued work bound by session ID is still Open, not active
+    // work holding this dirty lane against an audited supervisor assignment.
+    let mut queued = Task::new("cas-4c92-queued".into(), "Queued worker task".into());
+    queued.assignee = Some(registered_worker.id.clone());
+    tasks.add(&queued).unwrap();
     let response = env
         .service
         .task(Parameters(request))

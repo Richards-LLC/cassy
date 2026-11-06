@@ -1709,6 +1709,21 @@ fn restore_unreviewed_protected_merge(
     }
 }
 
+/// A refused landing owns only the local merge made by this attempt.
+fn restore_refused_landing(
+    operations: &crate::worktree::GitOperations,
+    target: &str,
+    base: Option<&str>,
+    attempted: Option<&str>,
+    refusal: String,
+) -> String {
+    let (Some(base), Some(attempted)) = (base, attempted) else { return refusal };
+    match super::premerge_verification::restore_unpublished_merge(operations, target, base, attempted) {
+        Ok(()) => format!("{refusal}. Unpublished local merge restored to {base}."),
+        Err(error) => format!("{refusal}. Local rollback declined: {error}. Inspect the target before retrying."),
+    }
+}
+
 fn delivery_observation_failure_message(
     worktree_id: &str,
     task_id: &str,
@@ -2257,24 +2272,24 @@ impl CasCore {
         let Some(tip) = git.resolve_commit(source) else {
             return original;
         };
-        // A descendant is new work (including a local target-sync merge),
-        // not the same-patch rewritten delivery supported by cas-e833.
-        if git.is_ancestor(anchor, &tip) {
-            return original;
-        }
         let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
         } else {
             crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(repo, parent_branch)
         };
-        if !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
-            repo, anchor, &tip, &target, &task.id,
-        ) {
+        let unchanged = if git.is_ancestor(anchor, &tip) {
+            crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(repo, task, &tip, &target)
+        } else {
+            crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+                repo, anchor, &tip, &target, &task.id,
+            )
+        };
+        if !unchanged {
             return original;
         }
         self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip))
-            .map_err(|error| format!("Cannot rebind rebased delivery anchor: {error}"))?;
-        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload rebased delivery anchor: {error}"))?;
+            .map_err(|error| format!("Cannot advance parked delivery anchor: {error}"))?;
+        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload parked delivery anchor: {error}"))?;
         let Some(anchor) = rebound.deliverables.factory_branch_anchor.as_deref() else {
             return original;
         };
@@ -4100,11 +4115,16 @@ impl CasCore {
             let target = crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(
                 manager.repo_root(), parent_branch,
             );
-            if git.is_ancestor(recorded_anchor, &pushed_tip)
-                || !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+            let unchanged = if git.is_ancestor(recorded_anchor, &pushed_tip) {
+                crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(
+                    manager.repo_root(), task, &pushed_tip, &target,
+                )
+            } else {
+                crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
                     manager.repo_root(), recorded_anchor, &pushed_tip, &target, &task.id,
                 )
-            {
+            };
+            if !unchanged {
                 return Err(refuse(format!(
                     "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,
                 )));
@@ -4112,9 +4132,9 @@ impl CasCore {
             let store = self.open_task_store()?;
             self.advance_awaiting_merge_anchor(
                 store.as_ref(), task, manager.repo_root(), parent_branch, Some(&pushed_tip),
-            ).map_err(|error| refuse(format!("cannot rebind rebased delivery anchor: {error}")))?;
+            ).map_err(|error| refuse(format!("cannot advance parked delivery anchor: {error}")))?;
             let rebound = store.get(&task.id)
-                .map_err(|error| refuse(format!("cannot reload rebased delivery anchor: {error}")))?;
+                .map_err(|error| refuse(format!("cannot reload parked delivery anchor: {error}")))?;
             if rebound.deliverables.factory_branch_anchor.as_deref() != Some(pushed_tip.as_str()) {
                 return Err(refuse(format!(
                     "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,
@@ -5965,7 +5985,9 @@ impl CasCore {
                 });
             if reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
                 approval.verify_landing(&target_tip)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                        manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
+                    )))?;
             }
             let push_outcome = if let Some((_, published)) = reconciled_publication.as_ref() {
                 crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha: published.clone() }
@@ -6135,7 +6157,9 @@ impl CasCore {
             let landed = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
             approval.verify_landing(&landed)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                    manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
+                )))?;
             Some(landed)
         } else { None };
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
@@ -8672,6 +8696,68 @@ mod cas_7ce6_parked_merge_source_tests {
         task.deliverables.parked_branch = Some("factory/w".into());
         task.deliverables.factory_branch_anchor = Some(anchor);
         (repo, task, tip)
+    }
+
+    #[test]
+    fn target_sync_merge_advances_parked_anchor_without_reclose_cas_e5af() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for shape in ["target-sync", "worker-on-next-task", "new-task-commit", "foreign-parent", "anchor-on-side", "unpushed"] {
+            let (repo, anchor) = stacked_lane();
+            let path = repo.path();
+            git(path, &["remote", "add", "origin", "unused-fixture-origin"]);
+            git(path, &["checkout", "-q", "main"]);
+            commit(path, "target-update");
+            git(path, &["update-ref", "refs/remotes/origin/main", "main"]);
+            if shape == "foreign-parent" {
+                git(path, &["checkout", "-qb", "foreign"]);
+                commit(path, "unmerged-foreign-work");
+            }
+            if shape == "anchor-on-side" {
+                git(path, &["checkout", "-qb", "integration", "main"]);
+                git(path, &["merge", "--no-ff", "-m", "integration merge", "factory/w"]);
+                git(path, &["branch", "-f", "factory/w", "HEAD"]);
+            } else {
+                git(path, &["checkout", "-q", "factory/w"]);
+                if shape == "new-task-commit" {
+                    commit(path, "fix(cas-park): new task-authored correction");
+                }
+                let target = if shape == "foreign-parent" { "foreign" } else { "main" };
+                git(path, &["merge", "--no-ff", "-m", "merge epic into parked delivery", target]);
+            }
+            let tip = git(path, &["rev-parse", "factory/w"]);
+            git(path, &["update-ref", "refs/remotes/origin/factory/w",
+                if shape == "unpushed" { &anchor } else { &tip }]);
+            let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("w".into());
+            task.deliverables.parked_branch = Some("factory/w".into());
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let mut next = cas_types::Task::new("cas-next".into(), "worker's next task".into());
+            next.status = cas_types::TaskStatus::InProgress;
+            next.assignee = task.assignee.clone();
+            let tasks = if shape == "worker-on-next-task" { vec![task.clone(), next.clone()] } else { vec![task.clone()] };
+            let store = crate::store::mock::MockTaskStore::with_tasks(tasks);
+            let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
+            let target_before = git(path, &["rev-parse", "main"]);
+            let result = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task);
+            let saved = store.get(&task.id).unwrap();
+            if matches!(shape, "target-sync" | "worker-on-next-task") {
+                assert_eq!(result, Ok(None), "{shape}");
+                assert_eq!(saved.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{shape}");
+                assert!(saved.notes.contains(&anchor) && saved.notes.contains(&tip), "audit: {}", saved.notes);
+                assert_eq!(core.parked_merge_source_for_task(&store, path, "factory/w", "main", &saved), Ok(None));
+                assert_eq!(store.get(&task.id).unwrap().notes, saved.notes, "retry is idempotent");
+                if shape == "worker-on-next-task" {
+                    assert_eq!(store.get(&next.id).unwrap().status, next.status);
+                }
+            } else {
+                let refusal = result.expect_err(shape);
+                assert!(refusal.contains("PARKED DELIVERY SOURCE MOVED"), "{shape}: {refusal}");
+                assert_eq!(serde_json::to_value(&saved).unwrap(), serde_json::to_value(&task).unwrap(), "{shape}");
+            }
+            assert_eq!(git(path, &["rev-parse", "main"]), target_before, "source validation never merges");
+        }
     }
 
     #[test]

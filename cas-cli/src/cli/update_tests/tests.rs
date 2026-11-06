@@ -2942,23 +2942,23 @@ fn managed_commit_names_local_only_pr_next_step_cas_3b812() {
 }
 
 #[test]
-fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
+fn managed_sync_commits_on_named_branches_cas_10ad() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let home = env.home().to_path_buf();
     let mut failures = Vec::new();
     for (branch, can_commit) in [
-        ("main", false),
-        ("staging", false),
-        ("production", false),
-        ("release/base", false),
-        ("epic/shared", false),
+        ("main", true),
+        ("staging", true),
+        ("production", true),
+        ("release/base", true),
+        ("epic/shared", true),
         ("repair/managed", true),
         ("detached", false),
         ("repair/config-unreadable", false),
-        ("release/shared-state", false),
-        ("repair/unknown-default", false),
+        ("release/shared-state", true),
+        ("repair/unknown-default", true),
     ] {
         let project = cas_6718_drifted_project(&home.join(branch));
         let root = if branch == "release/shared-state" {
@@ -3015,6 +3015,10 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         if (after != before) != can_commit || report.commit.is_some() != can_commit {
             failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
         }
+        if can_commit {
+            assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty(), "{branch}");
+            assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{before}..HEAD")]).trim(), "1");
+        }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
         if !can_commit && report.commit.is_none() {
             assert_eq!(report.outcome, "staged", "{branch}");
@@ -3034,6 +3038,12 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
             assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
         }
         assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
+        if branch == "detached" {
+            cas_6718_git(&project, &["checkout", "-qB", "main"]);
+            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+            assert_eq!(report.outcome, "committed", "rerun must clear pure sync staging");
+            assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

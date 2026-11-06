@@ -716,6 +716,10 @@ mod tests {
         assert!(content.is_ok());
         let text = content.unwrap();
         assert!(text.contains("Hello on row"));
+        let mut restored = Terminal::new(24, 80).unwrap();
+        restored.feed(&term.handoff_bytes().unwrap()).unwrap();
+        assert_eq!(restored.dump_screen_row(first_viewport_row).unwrap(), text);
+
     }
 
     #[test]

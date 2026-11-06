@@ -438,7 +438,11 @@ mod tests {
         let stats = resumed.close().await.unwrap();
         let reader = crate::RecordingReader::open(path).unwrap();
         let events: Vec<_> = reader.read_all_events().map(|event| event.unwrap()).collect();
-        assert_eq!(events.len(), 3);
+        let output: Vec<u8> = events.into_iter().flat_map(|event| match event {
+            RecordingEvent::Output { data, .. } => data,
+            _ => panic!("output-only recording changed event kind"),
+        }).collect();
+        assert_eq!(output, b"Hello, World!\nAfter exec");
         assert_eq!(stats.total_events, 3);
         assert!(stats.file_size > 0);
     }

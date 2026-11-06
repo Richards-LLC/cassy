@@ -438,6 +438,13 @@ async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
     }
     train.status = TaskStatus::Closed;
     tasks.update(&train).unwrap();
+    let cut_only = run_merge(&fixture).await;
+    assert!(cut_only.contains("RELEASE TRAIN OPEN") && cut_only.contains(&cut.id)
+        && cut_only.contains("cut and accepts no further merges")
+        && cut_only.contains("Wait for it to land or open the next train")
+        && !cut_only.contains("scripts/release.sh --hotfix"), "{cut_only}");
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
     cut.status = TaskStatus::Closed;
     tasks.update(&cut).unwrap();
     let merged = run_merge(&fixture).await;

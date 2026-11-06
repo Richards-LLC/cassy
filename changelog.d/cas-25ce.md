@@ -1,0 +1,3 @@
+### Changed — Factory
+
+- **Ejected deliveries go straight back to their worker** — When a merge-queue run fails and ejects a delivery PR, Cassy now returns the task Open to the same worker, with the failing job, step and failing tests as the change request, and wakes that worker. The supervisor no longer has to run request changes by hand. A task gets one such repair cycle, counted only for a failed run of its current delivery tip; a second such failure leaves it parked and pages the operator once. A red run GitHub still lists from before the repair, a run of an older head, a failure the merge-group entry ahead also had in the same job, and a dequeue without a failed run change nothing.

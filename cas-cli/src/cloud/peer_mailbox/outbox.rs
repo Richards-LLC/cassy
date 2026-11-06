@@ -328,10 +328,12 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
            AND (o.cloud_id IS NULL OR NOT EXISTS (
                 SELECT 1 FROM prompt_queue q
                 WHERE q.source LIKE 'peer:%'
-                  AND q.target = o.sender_name
-                  AND unixepoch(q.created_at) >= o.created_at
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))),
-                      ' from_agent=\"' || json_extract(o.payload, '$.recipient_agent_id') || '\"') > 0))
+                  AND (instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))),
+                           'in_reply_to=\"' || o.cloud_id || '\"') > 0
+                       OR (q.target = o.sender_name
+                           AND unixepoch(q.created_at) >= o.created_at
+                           AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))),
+                               ' from_agent=\"' || json_extract(o.payload, '$.recipient_agent_id') || '\"') > 0))))
          ORDER BY o.id",
     ) else {
         return Vec::new();

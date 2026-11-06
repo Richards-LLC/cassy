@@ -2098,7 +2098,8 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
         assert_eq!(copies.len(), 1, "one copy for {target}: {copies:?}");
         // pin: supervisor copies preserve the caller-authored peer payload.
         assert!(copies[0].prompt.contains("notice API uses stable train IDs"));
-        assert!(!parse_envelope(&copies[0].prompt).unwrap().wakes_idle(), "supervisor copy must be inbox-only");
+        let envelope = parse_envelope(&copies[0].prompt).unwrap();
+        assert!(!envelope.wakes_idle(), "supervisor copy must be inbox-only");
     }
     coordinate(&receiver, json!({"action":"message", "target":"worker-a@machine-alpha", "summary":"agreed", "message":"contract agreed", "kind":"answer", "in_reply_to":worker_rows[0].id})).await.unwrap();
     let aa = a.clone();

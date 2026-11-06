@@ -31,7 +31,13 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.
-2. Check out the train lane, then run `scripts/release.sh` with an installed
+2. Read the train CI receipt and complete log artifact; fix every red first.
+   The existing CI suite at the newest train tip replaces a local pre-cut full
+   run. A known red holds `train_merge`; any override is a visible decision for
+   that observed run and does not authorize a red cut. The command checks a
+   green receipt for the starting tip before version preparation, reusing it
+   on an unchanged prepared retry. The queue proves the version commit.
+   Check out the train lane, then run `scripts/release.sh` with an installed
    Cassy that has `release context`, `release track` and `release installed`
    (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
    train and integration branch, merges the base when behind, bumps versions,

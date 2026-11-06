@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  train-rust-red-feedback:
+    title: A red train tip wakes its owner once with complete evidence and holds ordered merges until green or an audited decision
+    tasks: [cas-f0a9]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   unread-supervisor-mail-succession:
     title: Gated Commander and Violet mail reaches the next project supervisor once after its recipient ends
     tasks: [cas-f575]

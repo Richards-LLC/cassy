@@ -229,8 +229,19 @@ fn release_and_binary_skew_notices_wake_once() {
             enqueue(&root, &Recipient::agent(&owner), kind, "release action due", "v9.99.2").unwrap();
         }
     }
+    let mut epic = cas_types::Task::new("cas-train".into(), "Train".into());
+    epic.epic_verification_owner = Some(owner.id.clone());
+    let state = serde_json::json!({"outcome":"FAIL", "head":"tested-merge", "run_id":"17", "run_attempt":1,
+        "introducing_merge":"tested-merge", "merge_range":[{"sha":"tested-merge", "tasks":["cas-fix"]}],
+        "failures":["fixture::regression"], "complete_log":"complete.zip", "artifact":"train-rust-suite", "run_url":"https://example.test/runs/17"});
+    for _ in 0..2 { crate::train_ci::notify(&root, &epic, &state).unwrap(); }
     let rows = open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
-    assert_eq!(rows.len(), 3, "retrying an occurrence must not repeat its wake");
+    assert_eq!(rows.len(), 4, "retrying an occurrence must not repeat its wake");
+    // pin: train_ci_red is the action-envelope kind consumed by the supervisor.
+    let red = rows.iter().find(|row| row.prompt.contains("train_ci_red")).unwrap();
+    for value in [&state["failures"][0], &state["head"], &state["merge_range"][0]["tasks"][0]] {
+        assert!(red.prompt.contains(value.as_str().unwrap()));
+    }
     for row in rows {
         assert_eq!(row.target, owner.name);
         assert_eq!(row.factory_session, owner.factory_session);

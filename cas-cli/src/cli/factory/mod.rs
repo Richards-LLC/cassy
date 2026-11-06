@@ -736,6 +736,11 @@ pub enum TrainCommand {
         epic: String,
         /// Explicit order; omit to select parked deliveries by updated time.
         tasks: Vec<String>,
+        /// Visibly accept this observed red CI run; never waives a later red.
+        #[arg(long, requires = "reason")]
+        supervisor_override: bool,
+        #[arg(long, requires = "supervisor_override")]
+        reason: Option<String>,
     },
     /// Revert children's merges off their release train in one batch, return
     /// each task to its worker and re-enqueue the train PR once. One repair
@@ -1326,10 +1331,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
                 Ok(())
             }
-            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks } } => {
+            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()))?;
+                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
                 else { println!("{receipt}"); }
                 Ok(())

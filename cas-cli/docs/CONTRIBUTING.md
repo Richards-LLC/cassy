@@ -2657,7 +2657,13 @@ fast rows once in `lane.yml`'s classification job, for both docs and code;
 non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
-Slim lanes omit broad Rust tests for factory pushes. Park reads, and never
+Slim lanes omit broad Rust tests for factory pushes. Release-train pushes reuse
+the existing queue archive and exhaustive Rust shards at the newest tip, with
+older runs cancelled. CI preserves complete native logs and a failure list in
+`train-rust-suite`; the existing daemon scan wakes the supervisor once on red.
+This replaces the supervisor's local pre-cut full run. The cut checks the green
+receipt for its starting tip before preparing the version-only commit, whose
+final proof belongs to the merge queue. Park reads, and never
 runs, a capped test PASS in every workspace crate whose sources or tests
 changed. A receipt in another crate does not count, and a missing test receipt
 is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
@@ -4341,7 +4347,11 @@ A registered supervisor can submit `factory action=train_merge id=<epic>` to
 merge that train's parked deliveries in updated-time order, or add
 `task_ids=["cas-first","cas-second"]` for an explicit order. The CLI parity is
 `cas factory train merge <epic> [task ...]`. Only exact parked anchors from the
-same train and factory session are admitted; queue options grant no CI override.
+same train and factory session are admitted. A known red train suite holds the
+queue, including a repair tip still pending. A registered supervisor can accept
+that observed run with `supervisor_override=true reason="<decision>"` (CLI:
+`--supervisor-override --reason "<decision>"`); Cassy records the decision on the
+train. The override never waives a later red or a delivery's own merge gates.
 
 The action records the queue and returns immediately. The existing factory
 daemon's CI scan resumes it through `worktree_merge`, reusing the current

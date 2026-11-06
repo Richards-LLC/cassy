@@ -132,7 +132,7 @@ fn introducing_merge(root: &Path, recorded: &str, source: &str) -> Result<String
 }
 
 /// The checkout holding a train's repository.
-fn train_repo_root(cas_root: &Path, epic: &Task) -> Result<PathBuf> {
+pub(crate) fn train_repo_root(cas_root: &Path, epic: &Task) -> Result<PathBuf> {
     Ok(match &epic.deliverables.work_target {
         Some(target) => {
             crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, target)

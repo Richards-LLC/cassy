@@ -73,6 +73,20 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(values['web-check-needed'],'true')
         self.assertEqual(values['bridge-check-needed'],'true')
 
+    def test_train_push_reuses_full_suite_even_with_slim_lanes(self):
+        jobs = self.ci()['jobs']
+        context = {'github.event_name': 'push', 'github.ref': 'refs/heads/epic/release-train-fixture',
+                   'vars.CAS_LANE_SLIM': 'true', 'needs.ci-diff.outputs.class': 'rust-touched',
+                   'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'true',
+                   'needs.fast-validation-runner-route.outputs.mode': 'hosted'}
+        for name in ['fast-validation-runner-route', 'fast-validation-main-push-dedupe',
+                     'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
+            self.assertTrue(self.gh_expr(jobs[name]['if'], context), name)
+        self.assertFalse(self.gh_expr(jobs['scoped-validation']['if'], context))
+        version_only = {**context, 'needs.ci-diff.outputs.class': 'version-bump'}
+        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
+            self.assertFalse(self.gh_expr(jobs[name]['if'], version_only), name)
+
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
 
@@ -231,12 +245,20 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 self.assertEqual(selected(preflight, consumer), expected_portable)
 
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
-        factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
-        factory_cancel = "${{ startsWith(github.ref, 'refs/heads/factory/') }}"
         def valid(workflow):
             concurrency = workflow.get('concurrency', {})
-            return (concurrency.get('group') == factory_group
-                    and concurrency.get('cancel-in-progress') == factory_cancel)
+            for event, ref, cancels in [('push', 'refs/heads/factory/fixture', True),
+                                        ('push', 'refs/heads/epic/release-train-fixture', True),
+                                        ('push', 'refs/heads/epic/ordinary', False),
+                                        ('push', 'refs/heads/main', False),
+                                        ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False)]:
+                values = [{'github.event_name': event, 'github.ref': ref, 'github.run_id': str(run)} for run in [1, 2]]
+                if any(self.gh_expr(concurrency.get('cancel-in-progress', 'false'), v) != cancels for v in values):
+                    return False
+                groups = [self.gh_value(concurrency.get('group', ''), v) for v in values]
+                if (groups[0] == groups[1]) != cancels:
+                    return False
+            return True
         workflow = self.ci()
         self.assertTrue(valid(workflow))
         for mutate in (
@@ -253,7 +275,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
     def gh_value(expression, context):
         """Evaluate a GitHub expression over a flat context mapping."""
         import re
+        if isinstance(expression, bool):
+            return expression
         body = expression.strip()
+        if body in ('true', 'false'):
+            return body == 'true'
         if body.startswith('${{') and body.endswith('}}'):
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
@@ -261,7 +287,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
-        return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads})
+        return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads,
+                           'format': lambda template, *args: template.format(*args)})
 
     @classmethod
     def gh_expr(cls, expression, context):
@@ -352,8 +379,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
 
     def test_suite_fanin_reuses_classification_without_source_checkout(self):
         job = self.ci()['jobs']['fast-validation-suite']
-        self.assertFalse(any(step.get('uses') for step in job['steps']))
-        report, assertion = job['steps']
+        for step in job['steps']:
+            if step.get('uses'):
+                self.assertFalse(self.gh_expr(step['if'], {'github.event_name':'merge_group', 'github.ref':'refs/heads/gh-readonly-queue/main/pr-1'}))
+        report = next(step for step in job['steps'] if 'DIFF_CLASS' in step.get('env', {}))
+        assertion = next(step for step in job['steps'] if 'SHARDS' in step.get('env', {}))
         for unaffected in ('true', 'false'):
             context = {'needs.ci-diff.outputs.rust-unaffected': unaffected,
                        'needs.ci-diff.outputs.class': 'hub-web-only'}

@@ -1376,7 +1376,8 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
     }
 }
 
-/// Diagnostics expose the immutable source through the real task dispatcher.
+/// A reset starts at the target tip, without inheriting target history as
+/// delivery evidence when the no-delivery verdict is consumed.
 #[tokio::test]
 async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
     let mut env = TestEnvGuard::temp_home();

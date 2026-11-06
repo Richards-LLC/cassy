@@ -128,6 +128,7 @@ class TrainReceipts(unittest.TestCase):
             (reports/'shard.json').write_text(json.dumps({'schema':1,'run_id':'101','run_attempt':1,
                 'branch':self.env['GITHUB_REF_NAME'],'head':producer,'shard':'1/3','status':0,'tests':1,'failures':[]}))
             (reports/'native.log').write_text('complete original output')
+            original_log=(reports/'native.log').read_bytes()
             saved=composite('save',slot,status)
             name=saved['artifact']
             shutil.copytree(self.repo/f'target/full-gate-job-{slot}',self.root/slot)
@@ -148,7 +149,7 @@ class TrainReceipts(unittest.TestCase):
         restored=json.loads((self.repo/'target/queue-flakes/reused/0/receipt.json').read_text())
         self.assertEqual((restored['run_id'],restored['observation_run_id']),('102','101'))
         self.assertEqual(json.loads((reports/'shard.json').read_text())['head'],self.env['GITHUB_SHA'])
-        self.assertEqual((reports/'native.log').read_text(),'complete original output')
+        self.assertEqual((reports/'native.log').read_bytes(),original_log)
         self.run_cli('job-save','--repo',self.repo,'--job','scripts','--job-name','scripts',
             '--inputs',inputs,'--status','success','--out',self.repo/'target/full-gate-job-scripts')
         exported=self.run_cli('job-export','--repo',self.repo,'--evidence',self.repo/'target/full-gate-job-scripts',

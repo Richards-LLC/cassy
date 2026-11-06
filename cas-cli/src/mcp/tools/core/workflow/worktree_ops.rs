@@ -4736,19 +4736,20 @@ impl CasCore {
             || target == integration || target == manager.git().detect_default_branch()
         {
             let tasks = self.open_task_store()?;
-            let mut trains = tasks.list(None).map_err(|error| Self::error(
+            // Train discovery tolerates store errors; this merge guard does not.
+            tasks.list(None).map_err(|error| Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Cannot check open release trains before worktree_merge: {error}"),
             ))?;
-            trains.sort_by_key(|task| task.created_at);
+            let trains = crate::mcp::tools::core::task::release_train::open_trains(
+                tasks.as_ref(), &integration,
+            );
             if let Some(train) = trains.iter().find(|task| {
-                crate::mcp::tools::core::task::release_train::is_release_train(task)
-                    && !task.is_terminal()
-                    && task.deliverables.work_target.as_ref().is_some_and(|target| {
-                        crate::mcp::tools::core::task::repo_context::repo_answers_to(
-                            &cwd, &target.repo_selector,
-                        )
-                    })
+                task.deliverables.work_target.as_ref().is_some_and(|target| {
+                    crate::mcp::tools::core::task::repo_context::repo_answers_to(
+                        &cwd, &target.repo_selector,
+                    )
+                })
             }) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
                     "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \

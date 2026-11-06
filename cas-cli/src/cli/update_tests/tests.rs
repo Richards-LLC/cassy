@@ -3045,12 +3045,13 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             settings["theme"] = serde_json::json!("staged-project-choice");
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
             cas_6718_git(&project, &["add", ".claude/settings.json"]);
-            let index = cas_6718_git(&project, &["show", ":.claude/settings.json"]);
+            let index: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
             let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
             assert_eq!(report.outcome, "staged", "project settings are never a managed commit");
             assert!(report.commit_warning.unwrap().contains("staged"));
             assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
-            assert_eq!(cas_6718_git(&project, &["show", ":.claude/settings.json"]), index);
+            let actual: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
+            assert_eq!(actual, index);
         }
         if branch == "detached" {
             cas_6718_git(&project, &["checkout", "-qB", "main"]);

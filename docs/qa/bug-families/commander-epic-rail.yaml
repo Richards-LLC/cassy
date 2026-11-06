@@ -1,0 +1,4 @@
+title: Commander's live epics must sit beside the conversation, scoped to the pane's project, with named cards and parked work folded
+tasks: [cas-0960]
+invariants: [HUB-J26-EPIC-TABS]
+journeys: [HUB-J26]

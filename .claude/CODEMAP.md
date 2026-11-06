@@ -131,7 +131,7 @@
 - `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 
-- `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `service/pattern_ops.rs`.
+- `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `service/pattern_ops.rs`. Candidate writes require two independent completed task/verdict citations before atomically recording a bundle.
 - `crates/cas-types/src/entry/behavior.rs`, `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` - temporal validity and stakeholder provenance migration.
 
 ## QA and Commander

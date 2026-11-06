@@ -1,10 +1,9 @@
 //! Verifier observations held as rule candidates (cas-f0a1).
 //!
-//! A verifier lesson from one verdict is not a rule. It is stored here, outside
-//! the `rules` table and the search index, so no agent context, search, recall
-//! or rule sync can surface it. Each similar observation adds an occurrence
-//! linked to its verdict; when a candidate is seen in enough different tasks,
-//! the supervisor and operator decide whether it becomes a rule.
+//! A single verdict cannot create a candidate. Complete bundles from independent
+//! tasks are stored outside `rules` and the search index, so no agent context,
+//! recall or rule sync can surface them. The supervisor and operator decide
+//! whether a repeatedly observed lesson becomes a rule.
 use crate::{Result, error::StoreError};
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};

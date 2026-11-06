@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-export const WALK_KIT_VERSION = '1.1.0';
+export const WALK_KIT_VERSION = '1.2.0';
 const SHA = /^[0-9a-f]{7,40}$/;
 const CITED = /\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b/;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));

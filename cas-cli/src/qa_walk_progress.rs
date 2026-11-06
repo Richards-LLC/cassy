@@ -39,12 +39,12 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
         .filter(|task| task.labels.iter().any(|label| matches!(label.as_str(), "qa" | "qa-pass" | "qa-walk")))
         .map(|task| task.id.clone()).collect();
     let workers: Vec<_> = data.agents.iter().filter(|summary| agents.iter().any(|agent|
-        agent.id == summary.id && agent.role == cas_types::AgentRole::Worker
+        agent.id == summary.id && agent.is_alive() && agent.role == cas_types::AgentRole::Worker
             && agent.visible_to_factory_session(Some(session)))).collect();
     let mut report = Report::default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let root = crate::config::project_factory_artifacts_root(cas_dir, &base);
-    for task in data.in_progress_tasks.iter().filter(|task| qa_ids.contains(&task.id)) {
+    for task in data.in_progress_tasks.iter().filter(|task| task.status == TaskStatus::InProgress && qa_ids.contains(&task.id)) {
         let Some(worker) = workers.iter().find(|agent| task.assignee.as_deref()
             .is_some_and(|id| id == agent.id || id == agent.name)) else { continue; };
         let dir = root.join(&task.id);
@@ -70,7 +70,16 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
     }
     let unfinished: Vec<_> = data.ready_tasks.iter().chain(&data.in_progress_tasks)
         .filter(|task| qa_ids.contains(&task.id) && task.status != TaskStatus::AwaitingMerge).collect();
-    let idle = held.as_ref().and_then(|held| workers.iter().find(|worker| {
+    let scoped: Vec<_> = unfinished.iter().copied().filter(|task|
+        focus.as_deref().is_some_and(|id| task.epic.as_deref() == Some(id))).collect();
+    let active_worker = match scoped.as_slice() {
+        [task] if task.status == TaskStatus::InProgress => workers.iter().find(|worker|
+            task.assignee.as_deref().is_some_and(|id| id == worker.id || id == worker.name)),
+        _ => None,
+    };
+    let idle = held.as_ref().filter(|held| active_worker.is_some_and(|worker|
+        !held.contains(&worker.name) && !held.contains(&worker.id)))
+        .and_then(|held| workers.iter().find(|worker| {
         !held.contains(&worker.name) && !held.contains(&worker.id)
             && worker.pending_messages == 0 && !worker.qa_reviewer_between_rounds
             && worker.current_task.is_none() && worker.active_lease.is_none()
@@ -106,6 +115,7 @@ fn ledgers(root: &Path) -> Vec<PathBuf> {
             let Ok(kind) = entry.file_type() else { continue; };
             if kind.is_symlink() { continue; }
             let path = entry.path();
+            if path.canonicalize().ok().is_none_or(|path| !path.starts_with(root)) { continue; }
             if kind.is_dir() && depth < 3 { pending.push((path, depth + 1)); }
             else if kind.is_file() && entry.file_name().to_string_lossy().eq_ignore_ascii_case("LEDGER.md") { found.push(path); }
         }

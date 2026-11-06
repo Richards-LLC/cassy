@@ -1076,6 +1076,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     );
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
+        ("factory.focus_mode", " visible chunks first ", "visible chunks first"),
         ("factory.slot_id", " second-supervisor ", "second-supervisor"),
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
@@ -1195,7 +1196,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
 
     // Optional keys clear back to unset with an empty value.
-    for key in ["factory.epic_base_branch", "factory.slot_id"] {
+    for key in ["factory.epic_base_branch", "factory.slot_id", "factory.focus_mode"] {
         config.set(key, "").unwrap();
         assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
     }
@@ -1237,6 +1238,7 @@ fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
         artifacts_root: Some("/mnt/factory-artifacts".into()),
         scratch_root: Some("/mnt/rewind/cas".into()),
         epic_base_branch: Some("main".into()),
+        focus_mode: Some("visible chunks first".into()),
         write_roots: vec!["/mnt/operator-approved".into()],
         release_command: Some("scripts/release.sh".into()),
         ..FactoryConfig::default()

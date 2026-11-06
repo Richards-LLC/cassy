@@ -26,7 +26,7 @@ struct PendingRestart { killed_at: Instant, exited: bool }
 /// Replace the pane this long after the kill even if no exit was reported: a
 /// descendant holding the PTY open must not leave the factory without a supervisor.
 const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
-/// PTY silence required before a command is typed. Codex hides its busy text
+/// Fallback PTY silence when native turn completion is unavailable. Codex hides its busy text
 /// while it streams a reply, so an idle-looking screen alone is insufficient;
 /// Codex's own turn markers are the busy signal, this is a second guard.
 const COMMAND_SETTLE: Duration = Duration::from_secs(2);
@@ -166,15 +166,19 @@ fn screen(pane: &cas_mux::Pane) -> String {
 /// A startup grace or a quiet PTY is insufficient: require a known empty native
 /// prompt and refuse the harness's busy indicator or an existing modal.
 fn idle_prompt(text: &str) -> bool {
+    command_prompt(text, false)
+}
+
+fn command_prompt(text: &str, native_idle: bool) -> bool {
     let lower = text.to_lowercase();
-    !lower.contains("esc to interrupt") && !lower.contains("select model")
+    (native_idle || !lower.contains("esc to interrupt")) && !lower.contains("select model")
         && !lower.contains("select a model") && !lower.contains("select effort")
         && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
-        && !text.lines().any(|line| {
+        && (native_idle || !text.lines().any(|line| {
             let line = line.trim_start();
             line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '·', '*'])
                 && (line.contains('…') || line.contains("..."))
-        })
+        }))
         && text.lines().rev().take(12).any(|line| {
             let line = line.trim();
             matches!(line, "❯" | "›") || line.starts_with("❯ Try \"")
@@ -330,8 +334,12 @@ fn codex_turn_open(path: &std::path::Path) -> Option<bool> {
 /// repaints the footer. A newer user turn keeps Finish queued (cas-88ca).
 fn command_turn_idle(root: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<bool> {
     let path = supervisor_transcript(root, session, supervisor, cli)?;
-    if cli == cas_mux::SupervisorCli::Codex { return codex_turn_open(&path).map(|open| !open); }
-    let turns = crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
+    native_turn_idle(&path, cli)
+}
+
+fn native_turn_idle(path: &std::path::Path, cli: cas_mux::SupervisorCli) -> Option<bool> {
+    if cli == cas_mux::SupervisorCli::Codex { return codex_turn_open(path).map(|open| !open); }
+    let turns = crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli);
     if turns.completion.is_some() { Some(true) }
     else if turns.wake.is_some() { Some(false) }
     else { None }
@@ -394,7 +402,7 @@ impl FactoryDaemon {
             .and_then(|job| futures_util::FutureExt::now_or_never(job)).and_then(Result::ok).flatten();
         let Some(pane) = self.app.mux.supervisor() else { return };
         if idle != Some(true) || pane.has_exited() || !pane.ready_for_injection()
-            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !idle_prompt(&screen(pane)) { return; }
+            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !command_prompt(&screen(pane), true) { return; }
         let before = screen(pane);
         let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
         let write = pane.inject_prompt_tracked(Command::Finish.mapping(pane.harness()).expect("queued supported Finish"));
@@ -420,31 +428,28 @@ impl FactoryDaemon {
             && self.pane_silent_since.get(pane.id()).is_some_and(|since| since.elapsed() >= COMMAND_SETTLE)
     }
     async fn wait_for_command_prompt(&mut self) -> anyhow::Result<()> {
-        let rollout = if self.app.mux.supervisor().is_some_and(|pane| pane.harness() == cas_mux::SupervisorCli::Codex) {
-            let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-            let path = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cas_mux::SupervisorCli::Codex)).await.ok().flatten();
-            if path.is_none() { tracing::warn!("Codex supervisor rollout unavailable; command readiness falls back to output settle"); }
-            path
-        } else { None };
+        let cli = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?.harness();
+        let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
+        let transcript = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cli)).await.ok().flatten();
         let progress = super::loop_watchdog::LoopProgress::new();
         loop {
             // This handler owns the daemon loop while it waits. Drain through
             // the normal exchange so fresh output resets silence, and retain
             // its buffering, client delivery and process-exit observations.
             self.exchange_terminal(&progress).await;
-            if let Some(path) = rollout.clone() {
-                let open = tokio::task::spawn_blocking(move || codex_turn_open(&path)).await.ok().flatten();
-                anyhow::ensure!(open != Some(true), "The supervisor is busy: its Codex turn has not ended. Wait until its turn ends.");
-            }
+            let native_idle = if let Some(path) = transcript.clone() {
+                tokio::task::spawn_blocking(move || native_turn_idle(&path, cli)).await.ok().flatten()
+            } else { None };
+            anyhow::ensure!(native_idle != Some(false), "The supervisor is busy: its native turn has not ended. Wait until its turn ends.");
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
-                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&screen(pane)),
+                && !self.app.mux.pane_inject_busy(pane.id()) && command_prompt(&screen(pane), native_idle == Some(true)),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let bytes = pane.bytes_received();
             if self.last_pane_output_bytes.insert(pane.id().to_owned(), bytes) != Some(bytes) || !self.pane_silent_since.contains_key(pane.id()) {
                 self.pane_silent_since.insert(pane.id().to_owned(), Instant::now());
             }
-            if self.output_settled(pane) { return Ok(()); }
+            if native_idle == Some(true) || self.output_settled(pane) { return Ok(()); }
             let remaining = COMMAND_SETTLE.saturating_sub(self.pane_silent_since.get(pane.id()).map_or(Duration::ZERO, Instant::elapsed));
             tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
         }
@@ -735,7 +740,7 @@ mod tests {
             if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
             let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
                 command: "/bin/sh".into(),
-                args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
+                args: vec!["-c".into(), "stty raw -echo; printf '\\033cPrevious turn: ✢ Working… esc to interrupt\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
                     "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
                 cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
             }).unwrap();
@@ -746,11 +751,20 @@ mod tests {
                 loop {
                     let pane = daemon.app.mux.get_mut(&name).unwrap();
                     pane.drain_output();
-                    if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
+                    if pane.dump_row(19).unwrap().trim() == "❯" && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
             if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
+            if mode == "idle" {
+                // cas-99e7: /exit and /mcp share this admission path. Old
+                // spinner text and shell repaint cannot contradict native end.
+                tokio::time::timeout(COMMAND_SETTLE_WAIT, daemon.wait_for_command_prompt())
+                    .await.expect("native idle admits the first request")
+                    .expect("completed Claude turn must admit commands despite old busy text");
+            } else {
+                assert!(daemon.wait_for_command_prompt().await.is_err(), "busy or unknown native state cannot override the busy screen");
+            }
             let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
             let receipt = daemon.dispatch_supervisor_command(
                 Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),

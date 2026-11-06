@@ -7,6 +7,134 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-06
+
+### Fixed — Release input audit
+
+- **Declared epic deliveries stay in release scope** — Preparation checks late
+  code on explicitly declared constituent branches and requires a reason for
+  each excluded delivery. The audit lists included task IDs, including main
+  deliveries, and saves the inventory in the release context.
+
+### Fixed — Factory
+
+- **Honor required release imports** — A supervisor can pin required release or sibling imports with `merge_source=<full commit SHA>` in an existing change-request reason. Close preserves that upstream provenance while keeping later unapproved commits and unrelated work fenced. Quoted markers in QA/verifier findings or queue-ejection details grant no authority and cannot block rejection routing.
+- **Keep a queued release train frozen** — Release tracking marks the train cut before publication under the merge target lock. New tasks open or join the next train, and merges into the frozen lane stay refused after landing and closure. A failed cut-marker write stops publication with a retry command; unavailable reminders remain advisory. Max-age notices now tell supervisors to retarget unfinished deliveries explicitly.
+- **Offer batch QA once per uncovered set** — Moving main no longer repeats the same receipt offer. A changed set produces a new offer using the current published tip.
+- **Prompt merge and close receipts** — Keep synchronous Git and store work off MCP response threads, answer immediately after a checked publication or task disposition commits, and retain slow follow-up outcomes and phase timings in task notes without changing delivery gates.
+- **Active capped runs avoid false stall nudges** — The director recognizes live registered commands for the worker's current task after their launch tool returns. Finished commands restore ordinary stall detection, and completion still reaches the worker once.
+- **Hand GitHub sources to a peer** — A source's supervisor can use `factory action=release_claim` with its GitHub URL before a handoff. The old heartbeat stops renewing that source, and the receiver can assign the task without an override.
+- **Peer asks hold only their related merges** — Untyped peer messages no longer create merge holds. A later message from the same peer clears an explicit ask even without a reply ID, including split decisions and review verdicts; unrelated task merges remain available.
+- **Keep delivery alerts on their owning machine** — PR-lane failures, merged-delivery timeouts and worker merge wakes use the worker's registered factory session. A daemon stays quiet about foreign workers and leaves their merge receipts retryable for the owning machine.
+- **Large worktree inventories stay readable** — Bounded Git commands drain stdout and stderr while they run, preserving their deadline. Partial inventories no longer claim that all child work is merged.
+- **Worker work remains visible after supervisor exit** — The terminal and session-end receipt now retain each worker's tasks, dirty and unpushed work and stop outcome. Confirmed stopped workers release unfinished task bindings for recovery instead of leaving them assigned to an unregistered worker.
+- **Keep capped test temporary files on worker scratch** — Worker and verifier
+  Cargo runs now place temporary files and fixture HOMEs in their private
+  target's `tmp/` directory, which existing target GC reclaims. Large binary
+  fixtures no longer inherit a memory-backed system temporary directory.
+- **Keep main on the release train** — While a release train is open, direct main/trunk worktree merges are refused even with `allow_trunk`; the refusal names the train and the existing `scripts/release.sh --hotfix` command for a one-item hotfix train.
+- **Park the pushed merge tip** — Closing after a worker merges its target now binds the delivery, test receipts and QA to the pushed merge commit without an explicit commit receipt. Task ownership and sibling-work checks still apply.
+- **Leave room for Unix sockets in capped test runs** — Worker and verifier
+  temporary files now use short private scratch directories instead of deep
+  target paths. Retirement and verifier GC validate checkout ownership before
+  reclaiming them; socket-only candidate fixtures use the short socket helper.
+- **Merged delivery recovery** — A merged delivery without reusable pre-merge approval now asks its supervisor to reconcile the candidate and promotion. Approved deliveries keep their worker close receipt, and release-verdict waits stay quiet.
+
+### Fixed — CI
+
+- **Keep known flakes out of release queue checks** — Quarantined six tracked flaky tests through the existing issue labels, with exact test identities retained in queue receipts. The verifier duration test now compares the JSON ledger measurement at integer-millisecond precision instead of requiring exact floating-point equality.
+
+### Added — Factory
+
+- **Automatic candidate reviews** — The daemon starts the existing task verifier when it opens a pre-merge dispatch. Approval continues the merge with a quiet receipt; findings, questions and review failures reach the supervisor without another hand launch.
+- **Ordered train merges** — Supervisors can queue a train's parked deliveries once with `factory action=train_merge id=<epic>` and an optional ordered `task_ids` list. The queue retains its position through candidate review and CI, reuses unchanged patch approvals, returns conflicting files to the affected worker, and holds single merges into that train until it finishes.
+- **Fix visible failures first** — Finding priority now follows severity × reach on project-declared main journeys. Code-read findings enter the backlog, staffing warns when visible failures are unowned, and operator focus follows worker and reviewer briefs.
+
+### Added — Commander
+
+- **Live epic tabs** — See epics from paired machines above the conversation, with merge totals, live worker dots and a task ledger. The busiest epic leads until you choose another; phone tabs open a task sheet.
+- **Reload Cassy from the supervisor card** — Older Claude MCP sessions show a direct Reload Cassy button, with the same action always in Session actions. Typed `/mcp` uses the existing command and version receipt; other harnesses name the Claude Code requirement.
+
+### Fixed — QA
+
+- **Release sweep verdicts** — Paid and account routes are graded on server read-back. A harness-only failure with matching state and no visible product defect records a product pass and a harness defect without holding promotion; missing evidence remains owed, and native runner failures stay intact.
+
+### Fixed — QA evidence
+
+- **Ledger scaffolds name the worker's build** — `cas qa ledger init` records the task's source branch tip even when the primary checkout has another HEAD. Missing recorded sources fail before creating evidence; journey selection still uses the target repository.
+
+### Fixed — Release train
+
+- **Delayed queue failures still trigger repair** — A failed queue run listed
+  after its exit notice now returns the parked task for its repair cycle
+  without duplicating the delivered relay.
+- **Latency receipts query recent queue history** — Queue attempt lookups start
+  at the first child commit's date, with a one-week fallback when that context
+  is missing, instead of paging through the repository's entire run history.
+
+### Fixed — Factory recovery
+
+- **Retained worker work is visible after shutdown** — Supervisor startup and factory GC reports name retired worker checkouts with unpublished commits or dirty files, their task, HEAD, counts and recovery action. Epic status keeps later local work visible even when an older delivery was squash merged.
+
+### Fixed — Peer review
+
+- **PR-only asks hold factory merges** — An unanswered peer ask naming a delivery's
+  PR now holds its worktree merge and protected-PR auto-merge. An answer releases
+  the hold; status notes retain their existing non-blocking behavior.
+
+### Fixed — Commander
+
+- **Idle Claude commands use native turn completion** — Exit and Reload Cassy
+  no longer reject an idle supervisor because old busy text or background output
+  remains on screen. Local command transcript entries appear as compact receipts
+  and no longer mark a completed model turn as running.
+- **Keep ordinary words readable** — Mirrored replies preserve words such as disk-limit, risk-label and ask-me while still redacting long key-shaped SK credentials.
+- **Keep phone conversations compact** — Show the card's Reload Cassy shortcut only when needed, keep session actions in the existing header menu, and preserve Tab navigation between conversations.
+- **Peer replay leaves other conversations' controls alone** — Catalog refreshes triggered by retained peer events no longer reload status for every unchanged conversation. New and revived sessions still load status, and health heartbeats keep live phases fresh.
+- **Commands stay beside their entry point** — The header slash button opens a nearby dropdown. Command status can be dismissed without cancelling pending work, and accepted retries clear earlier busy refusals.
+
+### Fixed — Shared file notices
+
+- **Resumed workers do not collide with themselves** — File-edit notices
+  recognize the same worker and task across context resets, including retired
+  registrations, while retaining warnings for distinct owners.
+
+### Fixed — Delivery verification
+
+- **Conflicting merges retire stale approvals** — When a changed target prevents
+  a reviewed merge candidate from being rebuilt, the prior approval is
+  invalidated before the merge error is returned.
+- **Retired workers keep required enforcement review** — A supervisor closing a
+  merged Tier two delivery opens its own verifier dispatch when the assignee is
+  gone. Only an explicit supervisor override skips review, with a durable audit.
+
+### Fixed — Updates
+
+- **Managed conflicts stay local to their file** — Updates recognize Cassy's prior generated settings, preserve real conflicting files and their staged content, and continue refreshing unrelated settings and skills. The summary and SessionStart report preserved paths without claiming the whole sync stopped.
+
+### Fixed — Task delivery
+
+- **Proof follows post-merge generated history** — Closing a delivery after a
+  target merge and its required reference-history refresh checks the final
+  pushed tip, while preserving attribution checks for ordinary source edits.
+
+### Fixed — Developer checks
+
+- **Assertion diagnostics pass test-shape lint** — Rust assertion failure messages
+  no longer count as exact-text pins; literal assertion operands remain checked.
+
+### Fixed — Factory push diagnostics
+
+- **Push refusals show the source of the failure** — Fast checks print the full
+  comparison branch and up to twenty diagnostic lines per failed check, so a
+  refusal includes the offending file and line beside its repair instructions.
+
+### Fixed — Release train guidance
+
+- **Trunk refusals name an accepting train** — Merge guidance prefers a fresh
+  train over an older cut train. When only a cut train remains, trunk stays
+  protected and guidance says to wait for landing or open the next train.
+
 ## [4.1.0] - 2026-11-06
 
 ### Fixed — Factory pushes

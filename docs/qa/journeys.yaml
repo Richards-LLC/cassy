@@ -3,6 +3,7 @@
 # Header policy is authoritative; local qa.registry.enforce is fallback only.
 # A delivery uses the stricter policy at base and head.
 version: 1
+main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26]
 updated: '2026-10-26'
 selection: legacy_catalog
 enforce: enforce
@@ -15,6 +16,31 @@ bug_families:
     title: Gated Commander and Violet mail reaches the next project supervisor once after its recipient ends
     tasks: [cas-f575]
     invariants: [HUB-J5-UNREAD-SUCCESSION]
+    journeys: [HUB-J5]
+  peer-replay-catalog-control-fanout:
+    title: A peer replay catalog refresh does not invalidate an unchanged selected session's controls
+    tasks: [cas-c4b7]
+    invariants: [HUB-J12-PEER-REPLAY-CONTROLS]
+    journeys: [HUB-J12]
+  native-claude-command-receipts:
+    title: Completed Claude turns accept commands while local command transcript receipts remain compact
+    tasks: [cas-99e7]
+    invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
+    journeys: [HUB-J27]
+  card-reload-and-command-follow-through:
+    title: Reload Cassy is visible on skewed supervisor cards; header commands open beside their button and stale busy receipts resolve or dismiss
+    tasks: [cas-fd9ff]
+    invariants: [HUB-J27-CARD-RELOAD]
+    journeys: [HUB-J27]
+  registered-run-director-stall:
+    title: Live registered capped runs suppress director stall nudges and completion restores ordinary stall detection
+    tasks: [cas-54f2]
+    invariants: [HUB-J26-REGISTERED-RUN-STALL]
+    journeys: [HUB-J26]
+  peer-ask-merge-scope:
+    title: Only explicit asks hold related merges and later messages from that peer clear them
+    tasks: [cas-5ec1]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
     journeys: [HUB-J5]
   sandboxed-harness-stall-detection:
     title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
@@ -83,7 +109,7 @@ bug_families:
     journeys: [HUB-J11, HUB-J12]
   peer-answer-and-timer-wakes:
     title: Untyped peer messages and peer replies wake the idle supervisor and deadlines and work retries remain valid timers
-    tasks: [cas-e4c7, cas-7dd1d]
+    tasks: [cas-e4c7, cas-7dd1d, cas-88a3]
     invariants: [HUB-J5-NO-ACTION-WAKES]
     journeys: [HUB-J5]
   native-background-wait-bound:
@@ -258,9 +284,17 @@ invariants:
     statement: An unchanged catalog refresh retains the focused project machine button and its keyboard focus ring.
     check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
     bug: {task: cas-2e1c}
+  HUB-J27-CARD-RELOAD:
+    statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, pending dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
+    check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
+    bug: {task: cas-fd9ff}
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
+  HUB-J27-NATIVE-IDLE-COMMANDS:
+    statement: An empty Claude prompt after native turn completion accepts Exit and Reload Cassy on the first request despite old busy prose or background repaint; local command receipts never start a model turn or appear as raw XML in the thread or preview.
+    check: Run the cas-99e7 HUB-J27 part and conversations Vitest case, the supervisor command runtime tests and latest Claude turn observation regression. Verify active turns, drafts and modals still refuse; retain actual PTY admission and one semantic command frame per request.
+    bug: {task: cas-99e7}
   HUB-J27-ALLOWLIST:
     statement: A command requires authenticated control and an active lease; arbitrary strings, foreign references, busy prompts and operator drafts cannot inject input.
     check: Run hub::server::supervisor_commands_require_control_confirmation_and_private_audited_receipts and the supervisor_commands runtime module; verify the closed wire enum and guarded actual PTY bytes, including stale native chooser recovery.
@@ -272,6 +306,10 @@ invariants:
     statement: An authenticated ended session settles its already-submitted Exit even after reconnect, without a not-sent claim or replay; genuine refusals and unrelated commands or sessions stay separate.
     check: Run supervisor-commands.test.ts with rejection, timeout, late-status and session-isolation cases, then the HUB-J27 error-before-ended-catalog stage at desktop and 390px. Batch QA verifies real Claude and Codex Exit against authenticated ended receipts with at least 120 seconds of failure observation allowance.
     bug: {task: cas-7f2a}
+  HUB-J27-EXIT-WORKER-RECOVERY:
+    statement: Supervisor exit retains and prints each worker's unfinished task, dirty and unpushed counts and observed stop outcome; confirmed stopped workers have unfinished task bindings released, and the receipt keeps the observed exit reason.
+    check: Run supervisor_exit_reports_and_releases_unfinished_worker_cas_affc through the native pane-exit event, actual worker PTY teardown, client stream and durable receipt. Batch QA confirms native Exit retains those worker states on a disposable session; the browser double alone cannot prove worker shutdown.
+    bug: {task: cas-affc}
   HUB-J27-REFUSAL-ROW:
     statement: Refusals of one command share one conversation row that names the reason and the attempts, the row clears once that command is accepted, a command error raises no Attention event, and an error after the daemon's receipt stays uncertain rather than refused.
     check: Run the refused-row case in supervisor-commands.test.ts and the command-error case in attention.test.ts, then on a disposable real harness resend /usage during a turn and read one row with the attempt count and no new Attention event.
@@ -373,6 +411,10 @@ invariants:
     statement: Unread Commander and daemon-stamped Violet messages survive supervisor exit with their content and routing intact; a same-name replacement in a new session can read each once, while live recipients and received or unrelated mail stay protected.
     check: Run supervisor_handoff_tests::gated_operator_and_violet_messages_survive_supervisor_exit through SessionEnd, SessionStart and normal inbox polling, plus violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims for the alias liveness and receipt guards.
     bug: {task: cas-f575}
+  HUB-J5-SECRET-SHAPES:
+    statement: Mirrored replies preserve disk-limit, risk-label, ask-me and task-id verbatim while long key-shaped SK credentials remain redacted.
+    check: Run message_display::inner_tests::sk_token_redacted_without_mangling_words_cas_c1ff and the MessageDisplay hook tests; on the batch candidate compare those ordinary words and a synthetic key in the native reply with Commander history.
+    bug: {task: cas-c1ff}
   FACTORY-DELIVERY-CI-RANGE:
     statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
@@ -382,8 +424,8 @@ invariants:
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
-    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes without creating a merge hold (cas-5ec1) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run peer_ask_gate::tests for explicit asks, later same-peer messages and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
     statement: Automatic about-to-merge notices stay in the peer inbox as receipts without waking the idle supervisor.
@@ -457,6 +499,10 @@ invariants:
     statement: While offline, both held-message and composer copy disclose the finite two-minute automatic-send window; expired words remain available with Edit and Retry and never send on a later reconnect without a new click.
     check: Run the original-deadline reheld-send case in network-switch.journey.ts, then hold a real native-hub message through the wall-clock timeout on desktop and phone; read heldAt and error state back from the journal and verify no expired text enters prompt_queue when the hub returns.
     bug: {task: cas-1c0e}
+  HUB-J12-PEER-REPLAY-CONTROLS:
+    statement: Retained peer events and their catalog refresh leave unchanged sessions' controls alone. New or revived destinations get status, health heartbeats still refresh status, and the selected session's own events still refresh status and lease.
+    check: Run the HUB-J12 peer clean exit and retained replay part at one and four workers; retain zero selected control reads before the heartbeat, bounded status-only heartbeat reads, and both controls on the selected session's own event.
+    bug: {task: cas-c4b7}
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -634,6 +680,10 @@ invariants:
     statement: A native background launch keeps its worker busy within the configured stall window and afterward while user-work descendants are CPU busy; a missing completion becomes Stalled when those jobs are quiet even if harness timers use CPU, while a matching completion returns the worker to Waiting.
     check: Run worker_liveness::tests (including process_evidence_busy_background_child_and_grandchild_keep_executing and process_evidence_silent_background_child_ignores_harness_cpu); compare Team worker liveness to native worker_status for busy children/grandchildren and quiet children under a ticking harness past the stall window on the release candidate.
     bug: {task: cas-185e}
+  HUB-J26-REGISTERED-RUN-STALL:
+    statement: A live worker/task/session-matched registered capped run suppresses direct director stall nudges after its launch tool returns, regardless of instantaneous CPU use; completion reaches its worker once, and a finished run cannot hide a subsequent stall.
+    check: Run stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers through the real director health probe; on the release candidate compare the direct worker-stall feed before and after a registered capped producer finishes. Quiet unregistered native jobs retain HUB-J26-BACKGROUND-BOUND behavior.
+    bug: {task: cas-54f2}
   HUB-J26-WORKER-BRIEF-PRIVATE:
     statement: Worker task text is delivered through a private file inside the worker worktree, so OpenCode external_directory denial permits reading it, never through process argv; unrelated process-name cleanup cannot match workers by words in their assignment. Initial and resumed workers receive the same brief and teardown removes it.
     check: Run cas-pty pty::tests::copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt; inspect live PTY argv with ps and the child-scoped pgrep full-command matcher, verify the path is inside the worktree plus exact brief bytes, mode 0600 and removal after teardown. Claude and Codex cover initial and resumed selectors; Grok and OpenCode cover initial launch.
@@ -642,6 +692,9 @@ invariants:
     statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
     check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
     bug: {task: cas-a147}
+  HUB-J26-EPIC-TABS:
+    statement: Every running session's live epics are visible above the conversation across paired machines, with authoritative merged/total and live worker dots; the busiest opens by default and an explicit selection survives updates until epic closure. Phone tabs scroll and open a task sheet with focus return.
+    check: Run the HUB-J26 epic tabs across machines cases in team.journey.ts at desktop and phone; compare both machines' status snapshots, switch to the peer epic, observe a merge event and inspect keyboard, forced colors and overflow.
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -1089,6 +1142,7 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - cas-cli/src/hooks/handlers/handlers_events/message_display.rs
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts
   - hub-web/src/conversation-view.ts
@@ -1140,6 +1194,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
@@ -1659,6 +1714,7 @@ journeys:
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
   - HUB-J12-CATALOG-FOOTER
+  - HUB-J12-PEER-REPLAY-CONTROLS
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
@@ -2565,6 +2621,7 @@ journeys:
   - Read Team with forced colors and reduced motion
   owner_groups: [commander_runtime]
   owners:
+  - hub-web/src/epic-tabs.ts
   - hub-web/src/team-view.ts
   - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
@@ -2580,7 +2637,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.
@@ -2596,7 +2653,8 @@ journeys:
     trigger: Open a paired Claude or Codex conversation at desktop or 390 px.
   steps:
   - Type a slash, filter the curated palette, and run Usage by keyboard.
-  - In Claude, run /mcp as Reload Cassy and read the replacement server PID and version; other harnesses refuse it by name.
+  - In Claude, reload from a skewed supervisor card or type /mcp; read the replacement server PID and version. Session actions retains reload; other harnesses name Claude Code.
+  - Open the header command dropdown beside its button; dismiss terminal receipts without replaying commands.
   - Read submission separately from an observed native outcome without repeating a mutation.
   - Finish waits for the active turn, then its reply reaches the conversation
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
@@ -2614,7 +2672,7 @@ journeys:
   - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN]
+  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

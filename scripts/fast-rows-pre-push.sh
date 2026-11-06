@@ -86,7 +86,7 @@ PY
         fi
         base="${base:-origin/main}"
     fi
-    printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "${base:0:12}" >&2
+    printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "$base" >&2
     # The gate's guardian removes its scratch tree on exit. Keep each push
     # attempt's complete diagnostics outside that tree, even if the gate exits
     # before it can write a receipt. A later attempt must not overwrite it.
@@ -99,7 +99,14 @@ PY
         </dev/null >"$attempt_logs/gate.log" 2>&1
     if ! head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
         printf 'pre-push: fast-row logs: %s\n' "$attempt_logs" >&2
-        grep -E '^(FAIL |FIX |RELEASE GATE FAILED)' "$attempt_logs/gate.log" >&2 \
+        # Keep up to 20 diagnostic lines per failed row beside its FIX.
+        awk '
+            /^FAIL / { failed = 1; count = 0; found = 1; print; next }
+            /^(PASS|SKIP) / { failed = 0 }
+            /^(FIX |RELEASE GATE FAILED)/ { found = 1; print; next }
+            failed && /^  \|/ && count++ < 20 { print }
+            END { exit !found }
+        ' "$attempt_logs/gate.log" >&2 \
             || tail -n 20 "$attempt_logs/gate.log" >&2
         printf 'pre-push: refused: fast rows failed on %s. Apply each FIX, commit, push again. Override (logged): CAS_SKIP_FAST_ROWS=<reason> git push\n' \
             "${local_sha:0:12}" >&2

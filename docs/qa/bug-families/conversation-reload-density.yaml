@@ -1,0 +1,4 @@
+title: Per-session reload controls must not add empty action rows or Tab stops to the conversation list
+tasks: [cas-c442]
+invariants: [HUB-J27-CARD-RELOAD, HUB-J16-GOAL, HUB-J14-GOAL]
+journeys: [HUB-J14, HUB-J16, HUB-J27]

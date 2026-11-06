@@ -2141,6 +2141,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+    // A separate short namespace leaves room for Unix socket fixture names.
+    let temporary = crate::factory_scratch::prepare_test_tmp(&cas_root, &repo)?;
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(key, &temporary);
+    }
     // Bootstrap/admission keep their inherited identity and credentials. Only
     // the final Cargo/test child receives this fixed isolation profile.
     if let Some(directory) = isolated_test_env {
@@ -3248,31 +3253,110 @@ printf '%s\n' "$@" > target/cargo-args"#);
     #[cfg(unix)]
     #[test]
     fn scratch_root_worker_check_builds_into_relocated_target() {
+        const PROBE: &str = "CAS_CFA7_TEMP_PROBE";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let expected = PathBuf::from(expected);
+            let actual = std::env::temp_dir();
+            assert!(actual.starts_with(expected.join("t")), "native temporary HOME must use short scratch: {actual:?}");
+            for key in ["TMPDIR", "TMP", "TEMP"] {
+                assert_eq!(std::env::var_os(key).as_deref(), Some(actual.as_os_str()), "{key}");
+            }
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&actual).unwrap().permissions().mode() & 0o777, 0o700);
+            let _socket = std::os::unix::net::UnixListener::bind(actual.join("native-probe.sock")).unwrap();
+            for name in ["mcp::socket::tests::create_listener_refuses_a_live_socket",
+                "mcp::socket::tests::create_listener_reclaims_a_stale_socket_file",
+                "hub::idle_sync::tests::store_with_a_live_serve_is_skipped",
+                "factory_candidate_queue::tests::hung_build_kills_detached_children_releases_locks_and_reports_timeout"] {
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name, "--nocapture"]).env_remove(PROBE).output().unwrap();
+                // pin: libtest's count proves the named subprocess really ran.
+                assert!(result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                    "{name} under {actual:?}: {result:?}");
+            }
+            let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap();
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("observed-tmp"), actual.as_os_str().as_encoded_bytes()).unwrap();
+            // Replay an abandoned temporary HOME without copying a multi-GB binary.
+            let temporary = tempfile::tempdir().unwrap().keep();
+            assert!(temporary.starts_with(&actual));
+            std::fs::write(temporary.join("temporary-home-binary"), b"fixture").unwrap();
+            return;
+        }
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join(".cas");
+        let base = dir.path().canonicalize().unwrap();
+        let project = base.join("project");
+        fixture_commit(&project);
+        std::fs::write(project.join(".gitignore"), ".cas/\ntarget/\n").unwrap();
+        fixture_commit_as(&project, "ignore factory state");
+        let root = crate::store::init_cas_dir(&project).unwrap();
         let repo = root.join("worktrees/worker");
-        fixture_commit(&repo);
-        let scratch = dir.path().join("rewind");
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        git(&project, &["worktree", "add", "-qb", "factory/worker", repo.to_str().unwrap()]).unwrap();
+        let head = fixture_head(&repo);
+        git(&project, &["remote", "add", "origin", project.to_str().unwrap()]).unwrap();
+        git(&project, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
+        let scratch = base.join("rewind");
         std::fs::write(
             root.join("config.toml"),
-            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+            format!("[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n", scratch.display().to_string(), base.join("artifacts").display().to_string()),
         )
         .unwrap();
+        let ambient = base.join("ambient-temp");
+        std::fs::create_dir_all(&ambient).unwrap();
+        for key in ["TMPDIR", "TMP", "TEMP"] { env.set(key, &ambient); }
         let expected = scratch
             .join(cas_types::factory_scratch::project_key(&root))
             .join("targets/worker");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, &format!(
-            "[ \"$CARGO_TARGET_DIR\" = {:?} ] || exit 4\n[ -f \"$CARGO_TARGET_DIR/{}\" ] || exit 5\necho run >> \"$CARGO_TARGET_DIR/runs\"",
+            r#"if [ "$1" = check ]; then
+    [ "$CARGO_TARGET_DIR" = {:?} ] || exit 4
+    [ -f "$CARGO_TARGET_DIR/{}" ] || exit 5
+    echo run >> "$CARGO_TARGET_DIR/runs"
+else
+    export {PROBE}={:?}
+    {:?} --exact factory_worker_check::tests::scratch_root_worker_check_builds_into_relocated_target --nocapture || exit 6
+    printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
+fi"#,
             expected.display().to_string(),
             crate::factory_target_cache::owner::MARKER,
+            scratch.display().to_string(),
+            std::env::current_exe().unwrap().display().to_string(),
         ));
         execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo).unwrap();
         assert_eq!(std::fs::read_to_string(expected.join("runs")).unwrap(), "run\n");
         assert!(!repo.join("target/debug").exists());
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        let worker_tmp = PathBuf::from(std::fs::read_to_string(expected.join("observed-tmp")).unwrap());
+        assert!(worker_tmp.starts_with(scratch.join("t")));
+        crate::store::open_task_store(&root).unwrap()
+            .add(&crate::types::Task::new("cas-temp-proof".into(), "temp proof".into())).unwrap();
+        execute_verifier_at(&root, "cas-temp-proof", None, &head, &args, &project, &cargo, None).unwrap();
+        let review = scratch.join(cas_types::factory_scratch::project_key(&root))
+            .join("verify/cas-temp-proof").join(format!("walk-{head}/repo/target/observed-tmp"));
+        let review_tmp = PathBuf::from(std::fs::read_to_string(review).unwrap());
+        assert!(review_tmp.starts_with(scratch.join("t")), "verifier uses managed short scratch too");
+        assert_ne!(review_tmp, worker_tmp, "reviewer and worker temporaries stay isolated");
+        let mut retired = crate::types::Agent::new("retired".into(), "worker".into());
+        retired.metadata.insert("clone_path".into(), repo.to_str().unwrap().into());
+        let marker = worker_tmp.join(".cas-owner.json");
+        let owner = std::fs::read(&marker).unwrap();
+        std::fs::write(&marker, b"{}").unwrap();
+        assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).is_err());
+        assert!(worker_tmp.exists() && expected.exists(), "foreign ownership retains both roots");
+        std::fs::write(&marker, owner).unwrap();
+        assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).unwrap());
+        assert!(!expected.exists(), "GC reclaims retired target");
+        assert!(!worker_tmp.exists(), "GC reclaims short temporary HOME");
+        assert!(review_tmp.exists(), "another lane's temporaries remain intact");
+        assert!(repo.join(".git").is_file(), "retirement retains worker source");
+        assert_eq!(std::env::var_os("TMPDIR").unwrap(), ambient.as_os_str(), "parent environment stays unchanged");
     }
 
     #[cfg(unix)]

@@ -1539,6 +1539,18 @@ pub(crate) fn run_worker_health_probe(
     let Some(cas_root) = cas_root else {
         return WorkerHealthReport::verdict(request, true);
     };
+    // Detached capped producers can outlive their launch tool call and the
+    // transcript's freshness window. Share delivery-idle's PID/session fence.
+    if crate::factory_worker_runs::snapshot(
+        cas_root,
+        &request.worker,
+        Some(&request.task),
+        request.requested_at,
+    )
+    .is_ok_and(|run| run.running)
+    {
+        return WorkerHealthReport::verdict(request, false);
+    }
     let Ok(resolved) = wedged::resolve_worker(cas_root, &request.worker) else {
         return WorkerHealthReport::verdict(request, true);
     };

@@ -6,7 +6,7 @@ export interface NavigationMachine { id: string; label: string; online?: boolean
 type Filter = "all" | "needs-you" | `machine:${string}`;
 type Open = (row: ConversationRow, event?: MouseEvent) => void;
 type End = (row: ConversationRow) => Promise<void>;
-interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean }
+interface Options { machines?: readonly NavigationMachine[]; searchActive?: boolean; reload?: (row: ConversationRow) => void }
 interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElement; chips: HTMLElement; chipMarkup?: string; summary: HTMLElement; body: HTMLElement; rows: ConversationList }
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
@@ -183,7 +183,7 @@ export class ProjectNavigation {
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
       const nested = sorted.map((row) => ({ ...row, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
-      card.rows.render(card.body, nested, open, end);
+      card.rows.render(card.body, nested, open, end, options.reload);
       ordered.push(card.node);
     }
     if (!ordered.length && rows.length) {

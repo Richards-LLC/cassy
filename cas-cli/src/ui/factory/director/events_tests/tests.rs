@@ -3801,12 +3801,15 @@ fn stall_confirmation_real_resolution_failure_keeps_checkpoint_fallback() {
 
 #[test]
 fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
     let root = tempfile::tempdir().unwrap();
     let account = tempfile::tempdir().unwrap();
     let rollout = account.path().join("sessions/2026/10/15/rollout-stall-real.jsonl");
     std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     let now = chrono::Utc::now();
     let mut worker = Agent::new_with_role("real-codex-session".into(), "real-stall-poller".into(), AgentRole::Worker);
+    worker.machine_id = Some(Agent::get_or_generate_machine_id());
+    worker.factory_session = Some("registered-stall-run".into());
     worker.metadata.insert("worker_cli".into(), "codex".into());
     worker.metadata.insert("worker_account_dir".into(), account.path().to_str().unwrap().into());
     worker.metadata.insert("clone_path".into(), root.path().to_str().unwrap().into());
@@ -3829,16 +3832,39 @@ fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_reco
     let result = serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"open","output":"done"}});
     std::fs::write(&rollout, format!("{meta}\n{call}\n{result}\n")).unwrap();
     std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
+    // cas-54f2: reproduce a detached capped producer that outlives the
+    // five-minute stall window after its launch tool call has returned.
+    let tasks = crate::store::open_task_store_local(root.path()).unwrap();
+    let mut task = Task::new("cas-real".into(), "Registered test build".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(worker.id.clone());
+    tasks.add(&task).unwrap();
+    let log = root.path().join("capped-run.log");
+    std::fs::write(&log, "").unwrap();
+    let run = crate::factory_worker_runs::register(root.path(), root.path(), &log, now).unwrap().unwrap();
+    crate::factory_worker_runs::bind(root.path(), &run, std::process::id()).unwrap();
     let later = now + chrono::Duration::seconds(301);
     data.agents[0].last_heartbeat = Some(later);
-    assert!(detector.detect_changes_at(&data, None, tick + Duration::from_secs(301), later).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
+    assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(301), later).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })),
+        "a registered capped run is still working after the five-minute window");
+    crate::factory_worker_runs::finish(root.path(), &run, 1, later).unwrap();
+    crate::factory_worker_runs::finish(root.path(), &run, 1, later).unwrap();
+    let queue = crate::store::open_prompt_queue_store(root.path()).unwrap();
+    let notices = queue.peek_all(10).unwrap();
+    assert_eq!(notices.len(), 1, "the completed run reaches its worker exactly once");
+    assert_eq!(notices[0].target, worker.name);
+    assert_eq!(crate::factory_worker_runs::snapshot(root.path(), &worker.name, Some(&task.id), later).unwrap().completion.unwrap().exit_code, Some(1));
+    let finished = now + chrono::Duration::seconds(601);
+    data.agents[0].last_heartbeat = Some(finished);
+    assert!(detector.detect_changes_at(&data, None, tick + Duration::from_secs(601), finished).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })),
+        "a finished registered run cannot mask a quiet worker indefinitely");
     let reopened = serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"reopened","name":"shell","arguments":"{}"}});
     std::fs::write(&rollout, format!("{meta}\n{call}\n{result}\n{reopened}\n")).unwrap();
     std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
-    let at = later + chrono::Duration::seconds(1);
+    let at = finished + chrono::Duration::seconds(1);
     data.agents[0].last_heartbeat = Some(at);
-    assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(302), at).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
-    assert_eq!(detector.stall_probe_count, 3, "a transcript write invalidates the cached cold verdict immediately");
+    assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(602), at).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+    assert_eq!(detector.stall_probe_count, 4, "a transcript write invalidates the cached cold verdict immediately");
 }
 
 #[test]

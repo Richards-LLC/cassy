@@ -1815,6 +1815,7 @@ impl CasCore {
             format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
         };
 
+        crate::finding_triage::apply(&self.cas_root, &mut task);
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -1863,6 +1864,9 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
+        let triage_notice = if task.assignee.is_some() {
+            crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
+        } else { String::new() };
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
@@ -1983,7 +1987,7 @@ impl CasCore {
                                 assignee_receipt,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
-                                assignment_warning,
+                                assignment_warning + &triage_notice,
                             )));
                         }
                     };
@@ -1991,7 +1995,13 @@ impl CasCore {
                     // checkout sitting on the PREVIOUS epic branch must not
                     // silently strand that epic's commits — base from it, or
                     // say plainly what was left out.
-                    let base_choice = git_ops.resolve_epic_base(&resolved.branch_ref);
+                    // A fresh release train starts at integration even when
+                    // the caller is still on the frozen train's checkout.
+                    let base_choice = if super::release_train::is_release_train(&task) {
+                        crate::worktree::git::EpicBaseChoice::plain(&resolved.branch_ref)
+                    } else {
+                        git_ops.resolve_epic_base(&resolved.branch_ref)
+                    };
                     let base_ref = base_choice.base_ref.clone();
                     let base_sha = if base_choice.used_head {
                         git_ops.ref_sha(&base_ref).unwrap_or_default()
@@ -2230,6 +2240,8 @@ impl CasCore {
                 data: None,
             })?
         };
+
+        for task in &mut tasks { crate::finding_triage::apply(&self.cas_root, task); }
 
         let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {

@@ -902,6 +902,11 @@ fn reclaim(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "review output became live"
     );
+    let temporary = crate::factory_scratch::test_tmp_dir(cas, &checkout);
+    ensure!(!temporary.exists()
+        || !crate::factory_target_cache::review_output_in_use(&temporary, &lock),
+        "live or unverifiable review temporary files");
+    if clean { crate::factory_scratch::reclaim_test_tmp(cas, &checkout)?; }
     let queued = trash(cas, directory)?;
     if mode == ReclaimMode::Stage {
         // A retry never overwrites an earlier interrupted handoff. The

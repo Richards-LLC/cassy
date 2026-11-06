@@ -18,9 +18,11 @@ pub(crate) struct Receipt {
     /// note, a parked anchor) sets `commit` but never this, so an early
     /// answer can only ever describe the mutation the caller asked for.
     pub terminal: OnceLock<std::time::Instant>,
+    pub outcome: OnceLock<String>,
     /// cas-3937 review: the outcome of the work after a merge's commit (its
     /// task close), for the note recorded once that work finishes.
     pub followup: std::sync::Mutex<Option<String>>,
+    phases: std::sync::Mutex<Vec<(&'static str, std::time::Instant, Option<std::time::Duration>)>>,
 }
 
 tokio::task_local! { static CURRENT: Arc<Receipt>; }
@@ -33,7 +35,9 @@ impl Receipt {
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
+            outcome: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
+            phases: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -119,14 +123,18 @@ pub(crate) fn task_committed(id: &str) {
 /// reports COMMITTED, and lets the dispatch answer once post-commit work
 /// overruns its grace instead of holding the response hostage.
 pub(crate) fn task_terminal_committed(id: &str) {
+    task_disposition_committed(id, &format!("task `{id}` write committed"));
+}
+
+/// A checked park is the worker close request's committed disposition. It
+/// awaits a merge; it must never be described as a completed task close.
+pub(crate) fn task_disposition_committed(id: &str, outcome: &str) {
     task_committed(id);
     if let Some(receipt) = current()
         && receipt.tool == "task"
-        && receipt
-            .task_id
-            .as_deref()
-            .is_none_or(|expected| expected == id)
+        && receipt.task_id.as_deref().is_none_or(|expected| expected == id)
     {
+        let _ = receipt.outcome.set(outcome.to_string());
         let _ = receipt.terminal.set(std::time::Instant::now());
     }
 }
@@ -185,7 +193,60 @@ pub(crate) fn merge_followup(outcome: &str) {
     }
 }
 
+/// Request-local elapsed phases. Nested phases are inclusive, not additive.
+pub(crate) struct Phase {
+    receipt: Option<Arc<Receipt>>,
+    name: &'static str,
+    started: std::time::Instant,
+    index: Option<usize>,
+}
+
+pub(crate) fn phase(name: &'static str) -> Phase {
+    let receipt = current();
+    let started = std::time::Instant::now();
+    let index = receipt.as_ref().and_then(|receipt| {
+        let mut phases = receipt.phases.lock().ok()?;
+        let index = phases.len();
+        phases.push((name, started, None));
+        Some(index)
+    });
+    Phase { receipt, name, started, index }
+}
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        if let Some(receipt) = &self.receipt {
+            let elapsed = self.started.elapsed();
+            if let Some(index) = self.index
+                && let Ok(mut phases) = receipt.phases.lock()
+            {
+                phases[index].2 = Some(elapsed);
+            }
+            tracing::info!(tool = receipt.tool, action = receipt.action,
+                phase = self.name, elapsed_ms = elapsed.as_millis() as u64,
+                "MCP mutation phase");
+        }
+    }
+}
+
 impl Receipt {
+    pub(crate) fn timings(&self) -> String {
+        let mut totals = std::collections::BTreeMap::new();
+        for name in ["merge-tree", "push", "close_gates", "dispatch", "notes"] {
+            totals.insert(name, (std::time::Duration::ZERO, false));
+        }
+        if let Ok(phases) = self.phases.lock() {
+            for (name, started, elapsed) in phases.iter() {
+                let entry = totals.entry(name).or_default();
+                entry.0 += elapsed.unwrap_or_else(|| started.elapsed());
+                entry.1 |= elapsed.is_none();
+            }
+        }
+        totals.into_iter().map(|(name, (elapsed, running))| format!(
+            "{name}={}ms{}", elapsed.as_millis(), if running { "+" } else { "" },
+        )).collect::<Vec<_>>().join(", ")
+    }
+
     pub(crate) fn action(&self) -> &str {
         &self.action
     }

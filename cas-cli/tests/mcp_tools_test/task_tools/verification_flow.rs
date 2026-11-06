@@ -1163,6 +1163,95 @@ async fn delivery_tier_decides_the_independent_verifier_cas_5207() {
     assert!(notes.contains("VERIFICATION TIER 1"), "{notes}");
 }
 
+#[tokio::test]
+async fn retired_tier_two_close_needs_supervisor_dispatch_unless_overridden_cas_e5e0() {
+    for identity in ["retired", "unknown", "unassigned", "inactive", "active"] {
+        for overridden in [false, true] {
+            let mut env = TestEnvGuard::temp_home();
+            let branch = "factory/tier-two-recovery";
+            let (temp, _worker, cas_dir, id, lane) = delivered_worktree_fixture(&mut env, branch).await;
+            let artifacts = TempDir::new().unwrap();
+            std::fs::write(cas_dir.join("config.toml"), format!(
+                "[verification]\nenabled=true\n[code_review]\nowner='worker'\n[qa]\nmode='batch'\n[factory]\nartifacts_root={:?}\n",
+                artifacts.path().display().to_string(),
+            )).unwrap();
+            let tip = merge_delivery_of(temp.path(), lane.path(), &cas_dir, &id,
+                ".github/workflows/guard.yml", branch);
+            let tasks = open_task_store(&cas_dir).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let worker_id = agents.get_lease(&id).unwrap().unwrap().agent_id;
+            let mut task = tasks.get(&id).unwrap();
+            task.status = TaskStatus::AwaitingMerge;
+            match identity {
+                "retired" => agents.unregister(&worker_id).unwrap(),
+                "unknown" | "unassigned" => {
+                    agents.release_lease_for_task(&id, "worker gone").unwrap();
+                    task.assignee = (identity == "unknown").then(|| "missing-worker".into());
+                }
+                "inactive" => {
+                    let mut worker = agents.get(&worker_id).unwrap();
+                    worker.status = cas::types::AgentStatus::Shutdown;
+                    agents.update(&worker).unwrap();
+                }
+                _ => {}
+            }
+            tasks.update(&task).unwrap();
+            let dir = cas::config::project_factory_artifacts_root(&cas_dir, artifacts.path()).join(&id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("LEDGER.md"), format!(
+                "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| P1 | Adversarial probe: retired worker | dispatch required | dispatch required | PASS | fixture | LEDGER.md | - |\n",
+                cas::qa_ledger::HEADER,
+            )).unwrap();
+            let supervisor_id = "tier-two-supervisor";
+            let supervisor = registered_supervisor(&cas_dir, supervisor_id).await;
+            let _guard = ScopedSupervisorEnv::new(&mut env);
+            if identity == "retired" && !overridden {
+                // An unavailable worker does not authorize unmerged code.
+                proof_boundary_git(temp.path(), &["reset", "--hard", "HEAD^1"]);
+                let mut request = close_request(&id, "unmerged enforcement delivery");
+                request.commit_receipt = Some(tip.clone());
+                let held = extract_text(supervisor.cas_task_close(Parameters(request)).await.unwrap());
+                assert_ne!(tasks.get(&id).unwrap().status, TaskStatus::Closed, "{held}");
+                assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap().is_none(), "{held}");
+                proof_boundary_git(temp.path(), &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+            }
+            let mut request = close_request(&id, "review the merged enforcement delivery");
+            // A plain close recovers the retired worker's recorded anchor.
+            request.commit_receipt = (identity != "retired").then_some(tip);
+            request.supervisor_override = overridden.then_some(true);
+            let text = extract_text(supervisor.cas_task_close(Parameters(request)).await.unwrap());
+            let task = tasks.get(&id).unwrap();
+            let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap();
+            let row = open_verification_store(&cas_dir).unwrap().get_latest_for_task(&id).unwrap();
+            if overridden {
+                assert_eq!(task.status, TaskStatus::Closed, "{identity}: {text}");
+                assert!(dispatch.is_none(), "{identity}: {text}");
+                let row = row.expect("explicit waiver must be durable");
+                assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
+                assert!(row.summary.contains("supervisor_override=true"), "{identity}: {}", row.summary);
+                assert!(text.contains("supervisor_override=true"), "{identity}: {text}");
+            } else if identity == "active" {
+                // pin: live factory work still requires approval before publication.
+                assert!(text.contains("PRE-MERGE APPROVAL MISSING"), "{text}");
+                assert!(dispatch.is_none());
+                assert_ne!(task.status, TaskStatus::Closed);
+            } else {
+                let dispatch = dispatch.unwrap_or_else(|| panic!("{identity} must dispatch: {text}"));
+                assert_ne!(task.status, TaskStatus::Closed, "{identity}: {text}");
+                assert!(task.pending_verification, "{identity}: {text}");
+                assert_eq!(dispatch.state, cas::types::VerificationDispatchState::Pending);
+                assert_eq!(dispatch.requester_agent_id, supervisor_id);
+                assert_eq!(dispatch.owner_agent_id, supervisor_id);
+                let proof = dispatch.repository.as_ref().expect("merged repository proof");
+                assert_eq!(proof.head_commit, head_of(temp.path()));
+                assert!(proof.anchor_commits.contains(task.deliverables.factory_branch_anchor.as_ref().unwrap()));
+                assert!(text.contains(&dispatch.id), "{identity}: {text}");
+                assert!(row.is_none_or(|row| row.status != cas::types::VerificationStatus::Skipped));
+            }
+        }
+    }
+}
+
 /// cas-ce5e: in release QA mode Tier 1 merged deliveries open no verifier and
 /// close on one verdict naming them, with no close call after it: one merged by
 /// `worktree_merge`, one merged outside it whose assignee was later cleared. A
@@ -2501,6 +2590,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         "category": "security",
         "code": raw_pat,
         "problem": raw_control,
+        "triage": {"reach":"main", "journey":"undeclared", "severity":"money", "repro":raw_pat},
         "suggestion": raw_password,
     }, {
         "file": "src/description.rs",
@@ -2546,6 +2636,8 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         Some(issued.capability.id.as_str())
     );
     assert_eq!(row.summary, "[REDACTED_SECRET]");
+    assert_eq!(row.issues[0].triage.reach, cas::types::FindingReach::Theoretical);
+    assert_eq!(row.issues[0].triage.repro.as_deref(), Some("[REDACTED_SECRET]"));
     assert_eq!(row.issues[0].file, "[REDACTED_PATH]");
     assert_eq!(row.issues[0].code, "[REDACTED_SECRET]");
     assert_eq!(row.issues[0].problem, "[REDACTED_CONTROL]");

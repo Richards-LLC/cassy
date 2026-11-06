@@ -1,4 +1,4 @@
-// Shared walk primitives, adapted from gabber's cas-6cd4 kit (f2ee44fb7).
+// Shared project-agnostic walk primitives.
 // Project adapters own authentication, selectors, build reads and cleanup.
 import fs from 'node:fs';
 import path from 'node:path';

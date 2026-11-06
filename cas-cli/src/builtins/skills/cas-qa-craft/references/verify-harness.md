@@ -6,7 +6,7 @@ Use one versioned harness per project, shared by every worker. Copy the shipped
 copy throughout the release. Every produced ledger row includes `kit:<version>`.
 Update that copy deliberately between releases; no separate drift check is needed.
 
-The kit adapts gabber's proven walk primitives without its authentication,
+The kit adapts proven project walk primitives without authentication,
 SQL, phone or host logic. Project adapters own those boundaries and cleanup.
 Keep secrets in memory and use the project's existing fixture tools.
 

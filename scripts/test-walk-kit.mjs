@@ -1,4 +1,4 @@
-// The shared walk contract, adapted from gabber's cas-6cd4 regressions.
+// Shared walk contracts: visible outcomes, measured replies and deduplicated evidence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

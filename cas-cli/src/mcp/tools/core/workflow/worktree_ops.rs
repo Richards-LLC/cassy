@@ -4717,6 +4717,42 @@ impl CasCore {
             &self.cas_root, &worktree.parent_branch,
         );
 
+        // Both stored and inferred worktrees pass here. An explicit trunk
+        // override cannot move main around an open train; the release script
+        // publishes the train through its normal PR/merge-queue path instead.
+        let target = worktree.parent_branch.strip_prefix("refs/heads/")
+            .unwrap_or(&worktree.parent_branch);
+        let target = target.strip_prefix("origin/").unwrap_or(target);
+        let integration = Config::configured_epic_base_branch(&cwd)
+            .unwrap_or_else(|| manager.git().detect_default_branch());
+        if matches!(target, "main" | "master" | "trunk")
+            || target == integration || target == manager.git().detect_default_branch()
+        {
+            let tasks = self.open_task_store()?;
+            let mut trains = tasks.list(None).map_err(|error| Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Cannot check open release trains before worktree_merge: {error}"),
+            ))?;
+            trains.sort_by_key(|task| task.created_at);
+            if let Some(train) = trains.iter().find(|task| {
+                crate::mcp::tools::core::task::release_train::is_release_train(task)
+                    && !task.is_terminal()
+                    && task.deliverables.work_target.as_ref().is_some_and(|target| {
+                        crate::mcp::tools::core::task::repo_context::repo_answers_to(
+                            &cwd, &target.repo_selector,
+                        )
+                    })
+            }) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \
+                     trunk while this train is open, including with allow_trunk=true. \
+                     Merge work into the train. For a one-item hotfix train, run \
+                     `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path.",
+                    train.id, train.effective_epic_branch().unwrap_or(&train.title),
+                )));
+            }
+        }
+
         // Bind this mutation to the task's declared work repository before
         // merge/reachability checks. A cleaned-up source is the sole
         // exception: immutable receipt and target ancestry are authenticated

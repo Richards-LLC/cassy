@@ -532,6 +532,17 @@ mod viktor_provenance_tests {
             let replay = queued_message_provenance_at(&row, now);
             assert!(replay.contains("300s replay]"), "{replay}");
             assert!(replay.ends_with(&format!("[{expected}]")), "{replay}");
+            use crate::cloud::peer_mailbox::{PeerEnvelope, PeerScope, render_envelope};
+            row.origin = Some(cas_store::QueueOrigin::Daemon);
+            row.prompt = render_envelope(&PeerEnvelope {
+                id: "pm_clock".into(), sender_name: "peer-supervisor".into(),
+                sender_agent_id: "remote".into(), machine: "soundwave".into(),
+                session: None, repo: "repo".into(), in_reply_to: None,
+                kind: None, scope: PeerScope::Project,
+            });
+            let peer = queued_message_provenance_at(&row, now);
+            assert!(peer.contains("peer-supervisor peer-supervisor@soundwave via-cloud 300s replay]"), "{peer}");
+            assert!(peer.ends_with(&format!("[{expected}]")), "{peer}");
             for id in [Some(row.id), None] {
                 let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload_at("supervisor", id, now);
                 assert!(wake.ends_with(&format!("[{expected}]")), "{wake}");

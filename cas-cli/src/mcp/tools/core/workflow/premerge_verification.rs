@@ -74,6 +74,8 @@ fn is_regenerated_output(path: &str) -> bool {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let _phase = (args.first() == Some(&"merge-tree"))
+        .then(|| crate::mcp::tools::service::mutation_receipt::phase("merge-tree"));
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -776,6 +778,7 @@ impl CasCore {
         task: &Task,
         dispatch: &VerificationDispatch,
     ) -> Result<(), McpError> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("dispatch");
         let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(fail)?;
         let location = dispatch.repository.as_ref().map(|proof| format!(
             "Review the disposable candidate at {} (head {}). PASS continues this merge; no worker close retry or second verifier is needed.",

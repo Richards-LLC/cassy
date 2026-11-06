@@ -7740,6 +7740,7 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
             .into_iter()
@@ -20431,6 +20432,7 @@ fn update_close_snapshot_preserving_notes(
 }
 
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("notes");
     if task.notes.contains(note) {
         return false;
     }

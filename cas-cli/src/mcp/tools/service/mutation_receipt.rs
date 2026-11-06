@@ -21,6 +21,7 @@ pub(crate) struct Receipt {
     /// cas-3937 review: the outcome of the work after a merge's commit (its
     /// task close), for the note recorded once that work finishes.
     pub followup: std::sync::Mutex<Option<String>>,
+    phases: std::sync::Mutex<std::collections::BTreeMap<&'static str, std::time::Duration>>,
 }
 
 tokio::task_local! { static CURRENT: Arc<Receipt>; }
@@ -34,6 +35,7 @@ impl Receipt {
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
+            phases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 }
@@ -185,7 +187,38 @@ pub(crate) fn merge_followup(outcome: &str) {
     }
 }
 
+/// Request-local elapsed phases. Nested phases are inclusive, not additive.
+pub(crate) struct Phase {
+    receipt: Option<Arc<Receipt>>,
+    name: &'static str,
+    started: std::time::Instant,
+}
+
+pub(crate) fn phase(name: &'static str) -> Phase {
+    Phase { receipt: current(), name, started: std::time::Instant::now() }
+}
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        if let Some(receipt) = &self.receipt {
+            let elapsed = self.started.elapsed();
+            if let Ok(mut phases) = receipt.phases.lock() {
+                *phases.entry(self.name).or_default() += elapsed;
+            }
+            tracing::info!(tool = receipt.tool, action = receipt.action,
+                phase = self.name, elapsed_ms = elapsed.as_millis() as u64,
+                "MCP mutation phase");
+        }
+    }
+}
+
 impl Receipt {
+    pub(crate) fn timings(&self) -> String {
+        self.phases.lock().map(|phases| phases.iter()
+            .map(|(name, elapsed)| format!("{name}={}ms", elapsed.as_millis()))
+            .collect::<Vec<_>>().join(", ")).unwrap_or_default()
+    }
+
     pub(crate) fn action(&self) -> &str {
         &self.action
     }

@@ -1085,6 +1085,7 @@ impl GitOperations {
     }
 
     pub fn publish_branch_to_origin(&self, branch: &str) -> TargetPushOutcome {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         self.publish_branch_to_origin_bounded(branch, PUSH_TIMEOUT)
     }
 

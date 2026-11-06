@@ -526,7 +526,15 @@ impl CasService {
                 }
                 log_post_commit(tool_name, &receipt, "returned");
                 match joined {
-                    Ok(result) => result,
+                    Ok(mut result) => {
+                        let timings = receipt.timings();
+                        if !timings.is_empty() && matches!(action, "worktree_merge" | "close")
+                            && let Ok(answer) = &mut result
+                        {
+                            answer.content.push(rmcp::model::Content::text(format!("Timing (inclusive): {timings}")));
+                        }
+                        result
+                    },
                     Err(error) => Err(rmcp::ErrorData {
                         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                         message: format!("Tool '{tool_name}' handler ended abnormally: {error}").into(),

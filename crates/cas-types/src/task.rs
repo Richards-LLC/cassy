@@ -620,6 +620,11 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_target: Option<WorkTarget>,
 
+    /// A supervisor explicitly corrected this target. Matching an epic's
+    /// default branch no longer makes this binding implicitly inherited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_target_pinned: bool,
+
     /// cas-3b42: a live supervisor cleared this no-code task's code target
     /// (`proof_scope_fix target_repo=""`). Only then is the task's work
     /// target absent by review rather than by default, so only commits that
@@ -750,6 +755,9 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_close_reason: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_delivery_close_intent: Option<NoDeliveryCloseIntent>,
+
     /// cas-eda0: target tip of the `worktree_merge` that landed this parked
     /// delivery. Admission is recorded separately; old records read as green.
     /// Its presence hands the close
@@ -759,6 +767,14 @@ pub struct TaskDeliverables {
     pub green_merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_ci_admission: Option<MergeCiAdmission>,
+}
+
+/// An explicit no-delivery close waiting on one exact verdict, not a sticky methodology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoDeliveryCloseIntent {
+    pub dispatch_id: String,
+    pub reason: String,
+    pub assignee: Option<String>,
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -782,6 +798,8 @@ struct TaskDeliverablesObject {
     integration_batch: Option<IntegrationBatchEvidence>,
     #[serde(default)]
     work_target: Option<WorkTarget>,
+    #[serde(default)]
+    work_target_pinned: bool,
     #[serde(default)]
     work_target_cleared: bool,
     #[serde(default)]
@@ -823,6 +841,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     parked_close_reason: Option<String>,
     #[serde(default)]
+    no_delivery_close_intent: Option<NoDeliveryCloseIntent>,
+    #[serde(default)]
     green_merge_commit: Option<String>,
     #[serde(default)]
     merge_ci_admission: Option<MergeCiAdmission>,
@@ -838,6 +858,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             source_claim_override: value.source_claim_override,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
+            work_target_pinned: value.work_target_pinned,
             work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -858,6 +879,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
             parked_close_reason: value.parked_close_reason,
+            no_delivery_close_intent: value.no_delivery_close_intent,
             green_merge_commit: value.green_merge_commit,
             merge_ci_admission: value.merge_ci_admission,
         }
@@ -1248,6 +1270,7 @@ impl TaskDeliverables {
         self.epic_branch_origin.is_none()
             && self.split_takeover.is_none()
             && self.work_target.is_none()
+            && !self.work_target_pinned
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
             && self.evidence_only.is_none()
@@ -1780,6 +1803,14 @@ mod tests {
         assert!(deliverables.phase_outcome.is_none());
         assert!(deliverables.model_eval.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+        assert!(deliverables.no_delivery_close_intent.is_none());
+        let intent = serde_json::json!({"dispatch_id":"dispatch-1", "reason":"Measured no delivery", "assignee":"worker"});
+        for payload in [serde_json::json!({"no_delivery_close_intent":intent}),
+                        serde_json::Value::String(serde_json::json!({"no_delivery_close_intent":intent}).to_string())] {
+            let parsed: TaskDeliverables = serde_json::from_value(payload).unwrap();
+            assert_eq!(parsed.no_delivery_close_intent.as_ref().unwrap().dispatch_id, "dispatch-1");
+            assert_eq!(serde_json::to_value(parsed).unwrap()["no_delivery_close_intent"], intent);
+        }
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
         let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"artifact":null});
         let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"model_eval":eval})).unwrap();
@@ -1859,6 +1890,7 @@ mod tests {
             branch: "factory/worker".into(),
             base_sha: "b".repeat(40),
         });
+        task.deliverables.work_target_pinned = true;
         assert!(
             !task.deliverables.is_empty(),
             "start evidence alone must persist"
@@ -1877,6 +1909,7 @@ mod tests {
             "a".repeat(40)
         );
         let decoded: Task = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.deliverables.work_target_pinned);
         assert_eq!(
             decoded.deliverables.historical_factory_branch_anchors,
             vec!["a".repeat(40)]
@@ -1888,6 +1921,7 @@ mod tests {
         );
         assert_eq!(decoded.deliverables.authorized_merge_sources, task.deliverables.authorized_merge_sources);
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.work_target_pinned);
         assert!(legacy.historical_factory_branch_anchors.is_empty());
         assert!(legacy.factory_branch_start.is_none());
         assert!(legacy.authorized_merge_sources.is_empty());

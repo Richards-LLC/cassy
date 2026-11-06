@@ -15,7 +15,7 @@ project, the target is the current project.
 ## 2. Resolve its DESIGN.md
 
 Use the nearest `DESIGN.md` to the surface: the app root for UI in one package
-(for example `hub-web/DESIGN.md`), otherwise the repo root. A delivery profile
+(for example `web/DESIGN.md`), otherwise the repo root. A delivery profile
 such as `docs/sow/DELIVERY.md` may name the file instead, and so may the
 `project_<slug>_designmd` memory pointer. Follow its `inherits:` key when it
 names another `DESIGN.md`. Take the revision with

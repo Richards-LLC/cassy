@@ -43,7 +43,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
       await page.screenshot({ path: `${captures}/unavailable-390-${colorScheme}.png` });
     }
     await page.unroute(chunk);
-    await page.reload(); await openConversation(page, "cas-src");
+    // Reload restores the selected turn; its first image is the readiness boundary.
+    await page.reload();
     await expect(first.locator("img")).toBeVisible();
   });
   const dialog = page.getByRole("dialog", { name: "Image viewer" });

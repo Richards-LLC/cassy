@@ -1222,7 +1222,9 @@ async fn cas_cfe6_start_repairs_or_honestly_reports_a_failed_claim_renewal() {
             }
             _ => {
                 let started = result.expect("unavailable Cloud still permits a local lease");
-                assert!(started.to_lowercase().contains("unreachable"), "{started}");
+                // Brief starts may defer advisories to their durable START CONTEXT.
+                let advisories = open_task_store(&restart.cas_dir).unwrap().get(task).unwrap().notes;
+                assert!(advisories.to_lowercase().contains("unreachable"), "{started}\n{advisories}");
                 assert!(local.is_some());
                 let renews = cloud
                     .state
@@ -1494,9 +1496,11 @@ async fn in_progress_elsewhere_names_the_remote_assignee() {
     task.status = TaskStatus::InProgress;
     task.assignee = Some("echo-sup".into());
     open_task_store(&bravo.cas_dir).unwrap().add(&task).unwrap();
-    let started = start(&bravo.core, "cas-p009", true).await.unwrap_or_else(|e| e);
-    assert!(started.contains("echo-sup"), "{started}");
-    assert!(started.to_lowercase().contains("another machine"), "{started}");
+    let started = start(&bravo.core, "cas-p009", true).await.expect("force permits the start");
+    // The warning survives the brief response budget in the saved start context.
+    let advisories = open_task_store(&bravo.cas_dir).unwrap().get("cas-p009").unwrap().notes;
+    assert!(advisories.contains("echo-sup"), "{started}\n{advisories}");
+    assert!(advisories.to_lowercase().contains("another machine"), "{started}\n{advisories}");
 }
 
 /// A stopped, unregistered holder is recovered after its renewal goes stale;

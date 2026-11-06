@@ -229,31 +229,34 @@ mod tests {
             cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per uncovered set");
-        // Replay two main advances without accidentally publishing the control delivery.
-        git(&["checkout", "-q", "-b", "main-moves", &live]);
-        let mut newest = live.clone();
-        for name in ["move-one.md", "move-two.md"] {
-            newest = anchor(name);
-            git(&["update-ref", "refs/remotes/origin/main", &newest]);
-            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "unchanged set stays quiet when main moves");
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        // cas-8863: unrelated integrations move the target, not its live task set.
+        let mut target_tip = live.clone();
+        for name in ["unrelated-one", "unrelated-two"] {
+            git(&["checkout", "-qb", name, &target_tip]);
+            anchor(&format!("{name}.md"));
+            git(&["checkout", "-q", "--detach", &target_tip]);
+            git(&["merge", "--no-ff", "-qm", name, name]);
+            target_tip = git(&["rev-parse", "HEAD"]);
+            git(&["update-ref", "refs/remotes/origin/main", &target_tip]);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
         }
-        // A newly uncovered delivery changes the set and gets a fresh current-tip offer.
+        // A delivery parked later at the already-noticed tip still gets its own offer.
         let mut late = Task::new("cas-late".into(), "late".into());
         late.status = cas_types::TaskStatus::AwaitingMerge;
         late.deliverables.factory_branch_anchor = Some(base.clone());
         tasks.add(&late).unwrap();
         cas_store::defer_qa_batch_evidence(&cas, "cas-late", &base).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "changed set is offered only once");
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(
-            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late,cas-live] staging_sha={newest}"))),
+            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late,cas-live] staging_sha={target_tip}"))),
             "{:?}",
             rows.iter().map(|row| &row.payload).collect::<Vec<_>>()
         );
-        let payload = &rows.iter().find(|row| !row.payload.contains("cas-late")).unwrap().payload;
+        let payload = &rows.iter().find(|row| row.payload.contains(&format!("task_ids=[cas-live] staging_sha={live}"))).unwrap().payload;
         assert!(
             payload.contains(&format!("verification action=batch_receipt task_ids=[cas-live] staging_sha={live}")),
             "{payload}"
@@ -909,8 +912,9 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
     let offered = cas_root.join("post-release").join("batch-offers");
     let mut sent = 0;
     for ((target, tip), mut ids) in live {
-        // The actionable set is unchanged by a main advance or database row order.
         ids.sort_unstable();
+        ids.dedup();
+        // cas-8863: the target tip is payload evidence, not offer identity.
         let occurrence = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&target, &ids))?));
         let marker = offered.join(&occurrence);
         if marker.is_file() {

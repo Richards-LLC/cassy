@@ -1052,7 +1052,15 @@ fn shutdown_worker_snapshot(
             WorkerClonePathResolve::Ready(path) => {
                 let (state, unsafe_worktree) =
                     shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
-                let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
+                // Non-isolated workers share the project checkout; teardown
+                // only removes manager-owned worker worktrees.
+                let verdict = if cas_root.parent().is_some_and(|project| {
+                    project.canonicalize().ok() == path.canonicalize().ok()
+                }) {
+                    format!("worktree {} kept (shared checkout)", path.display())
+                } else {
+                    shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty())
+                };
                 (state, verdict, unsafe_worktree, Some(path))
             }
             WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
@@ -1706,7 +1714,17 @@ fn recommend_spawn_accounts(
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
-        if let Some(recommended) = selection.recommended {
+        let recommended = selection.recommended.or_else(|| {
+            if provider != crate::accounts::Provider::Codex { return None }
+            // Missing usage is not a failed login. Only use this fallback after
+            // the shared policy has excluded disabled, stale and duplicate homes,
+            // and no account with known capacity was recommended (cas-2ece).
+            selection.excluded.iter().find(|(_, reason)| reason == "usage unknown")
+                .map(|(account, reason)| crate::account_selection::Recommendation {
+                    account, reason: reason.clone(),
+                })
+        });
+        if let Some(recommended) = recommended {
             for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
@@ -4680,9 +4698,12 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let qa_progress = crate::qa_walk_progress::read(&self.inner.cas_root, factory_session.as_deref(), chrono::Utc::now())
+            .map(|report| report.render()).unwrap_or_else(|error| format!("QA output unavailable: {error}"));
         let mut binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
+        if !qa_progress.is_empty() { binary_versions.push_str(&format!("\n{qa_progress}")); }
         match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {
             Ok(queues) => for worker in store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))? {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
@@ -8279,6 +8300,12 @@ impl CasService {
                 )
                 .map_err(|error| error.to_string())
             });
+        let candidate_cleanup = tasks
+            .as_ref()
+            .map_err(|error| error.clone())
+            .and_then(|tasks| factory_candidate_binary_cleanup(
+                &artifact_root, tasks, artifact_authorized, chrono::Utc::now(),
+            ).map_err(|error| error.to_string()));
         // Artifact deletion is separate from process/cache cleanup. Unknown
         // close dates or reference evidence must preserve durable receipts.
         let eligible = if artifact_authorized {
@@ -8321,6 +8348,12 @@ impl CasService {
         );
         output.push('\n');
         output.push_str(&artifact_cleanup.render());
+        match candidate_cleanup {
+            Ok((files, bytes)) => output.push_str(&format!(
+                "\nCandidate binaries: removed_files={files} reclaimed_bytes={bytes} (closed >=48h; ledger hash and version recorded; artifacts=true force=true dry_run=false required)\n"
+            )),
+            Err(error) => output.push_str(&format!("\nCandidate binary cleanup incomplete: {error}\n")),
+        }
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
         if crate::task_simulators::supported() {
@@ -9247,6 +9280,72 @@ fn factory_trace_cleanup(
                     removed.0 += 1;
                     removed.1 += bytes;
                 }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Candidate executables are regenerable; their ledger and identity records
+/// retain the proof. This sweep is separate from whole-directory retention.
+fn factory_candidate_binary_cleanup(
+    root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    authorized: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(usize, u64)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut removed = (0, 0);
+    if !authorized {
+        return Ok(removed);
+    }
+    let eligible = tasks.iter().filter(|task| {
+        task.status == cas_types::TaskStatus::Closed
+            && task.closed_at.is_some_and(|closed| closed <= now - chrono::Duration::hours(48))
+    }).map(|task| task.id.clone()).collect();
+    let inventory = factory_artifact_inventory(root.to_path_buf(), &eligible);
+    if let Some(error) = inventory.error {
+        return Err(std::io::Error::other(error));
+    }
+    let hash_pattern = regex::Regex::new(r"(?i)\b[0-9a-f]{64}\b").unwrap();
+    let version_pattern = regex::Regex::new(r"\bcas [0-9]+\.[0-9]+\.[0-9]+\b").unwrap();
+    for path in inventory.closed {
+        let mut hashes = std::collections::BTreeSet::new();
+        let mut binaries = Vec::new();
+        for entry in walkdir::WalkDir::new(path).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.file_name() == "LEDGER.md" {
+                let ledger = std::fs::read_to_string(entry.path())?;
+                if version_pattern.is_match(&ledger) {
+                    hashes.extend(hash_pattern.find_iter(&ledger).map(|hash| hash.as_str().to_ascii_lowercase()));
+                }
+            } else if entry.file_name() == "cas" {
+                binaries.push(entry.into_path());
+            }
+        }
+        if hashes.is_empty() {
+            continue;
+        }
+        for binary in binaries {
+            let mut file = std::fs::File::open(&binary)?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0; 64 * 1024];
+            let mut bytes = 0;
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 { break; }
+                hash.update(&buffer[..count]);
+                bytes += count as u64;
+            }
+            if hashes.contains(&format!("{:x}", hash.finalize())) {
+                std::fs::remove_file(&binary)?;
+                removed.0 += 1;
+                removed.1 += bytes;
             }
         }
     }
@@ -13744,75 +13843,28 @@ mod spawn_lifecycle_tests {
             !error.contains(logged_out.to_str().unwrap()),
             "logged-out home must not be offered: {error}"
         );
-        // The merged account policy runs before this refusal. These fixture
-        // accounts have no usage evidence, so it must leave the worker
-        // unresolved rather than silently choosing the logged-in home.
+        // cas-2ece: a transiently missing usage report must not send the
+        // spawn back to the logged-out default when one home is logged in.
+        let default = env.home().join(".codex");
+        std::fs::create_dir_all(&default).unwrap();
         let mut unresolved = vec![spec.clone()];
         let selection_notice = recommend_spawn_accounts(
             &mut unresolved,
-            false, // The explicit cli=codex request below carries no lane.
+            false, // Direct Codex spawn without a lane or explicit account.
             &Default::default(),
             chrono::Utc::now(),
             |provider| crate::account_registry::collect_for(provider, env.home(), false),
         );
-        assert!(unresolved[0].config_dir.is_none(), "{selection_notice}");
-        assert!(selection_notice.contains("no eligible account"), "{selection_notice}");
-        // The real direct-spawn entry must reach this refusal before the
-        // legacy strict fallback can replace it with a default-home error.
-        env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        let project = env.home().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let cas_root = crate::store::init_cas_dir(&project).unwrap();
-        let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        let tasks = core.open_task_store().unwrap();
-        tasks.init().unwrap();
-        let mut epic =
-            cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
-        epic.task_type = cas_types::TaskType::Epic;
-        tasks.add(&epic).unwrap();
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core, None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core);
-        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
-            "action": "spawn_workers", "count": 1, "cli": "codex"
-        }))
-        .unwrap();
-        let direct_error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(service.factory_spawn_workers_in(
-                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"),
-                request,
-            ))
-            .expect_err("direct spawn must refuse the unselected account");
-        // pin: the refusal must retain the account policy's actual selection cause.
-        assert!(direct_error.message.contains("no eligible account"), "{direct_error}");
-        assert!(direct_error.message.contains("missing"), "the missing default home must not be reported as a logged-out selected account: {direct_error}");
-        for detail in ["config_dir", logged_in.to_str().unwrap()] {
-            assert!(
-                direct_error.message.contains(detail),
-                "missing {detail:?}: {direct_error}"
-            );
-        }
-        use cas_store::SpawnQueueStore;
-        assert!(
-            crate::store::open_spawn_queue_store(&cas_root)
-                .unwrap()
-                .peek(10)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(unresolved[0].config_dir.as_deref(), logged_in.to_str(), "{selection_notice}");
+        assert!(selection_notice.contains("usage unknown"), "{selection_notice}");
+        preflight_account_auth(&unresolved)
+            .expect("the recommended logged-in home passes spawn auth despite unknown usage");
         spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
         preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
         spec.requester_config_dir = spec.config_dir.take();
         preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
-        assert!(!env.home().join(".codex").exists());
         // An implicit default is already the worker's launch target; accepting
         // its authenticated login never chooses a different registered account.
-        let default = env.home().join(".codex");
-        std::fs::create_dir_all(&default).unwrap();
         let logged_out = preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect_err("an existing logged-out default must be distinguished from a missing directory");
         // pin: filesystem absence and affirmative login-status refusal are distinct user remedies.
@@ -14825,6 +14877,19 @@ mod tests {
         owner.metadata.insert("clone_path".into(), integration.display().to_string());
         store.register(&owner).unwrap();
         assert!(live_target_cache_worktrees(store.as_ref(), &root).contains(&integration));
+    }
+
+    #[test]
+    fn shutdown_preview_keeps_nonisolated_main_checkout_gh_1468() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(repo.path()).status().unwrap().success());
+        let mut worker = worker_named("shared-worker", "shared-worker-id");
+        worker.metadata.insert("clone_path".into(), repo.path().display().to_string());
+        let snapshot = shutdown_worker_snapshot(&repo.path().join(".cas"), &worker, &[], false, None);
+        let preview = snapshot.render();
+        assert!(preview.contains("kept (shared checkout)"), "{preview}");
+        assert!(!preview.contains("will be removed"), "{preview}");
     }
 
     #[test]

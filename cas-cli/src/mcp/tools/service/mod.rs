@@ -17,6 +17,7 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use std::borrow::Cow;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::Content;
@@ -143,6 +144,43 @@ pub struct CasService {
     factory_context:
         std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
     message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// A tool future may outlive its response; backend retirement waits for it.
+    pub(crate) tool_work: Arc<ToolWork>,
+}
+
+/// Nonblocking accounting: an abandoned idle request must never stop tools
+/// from starting after the front's independent switch timeout.
+#[derive(Default)]
+pub(crate) struct ToolWork {
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+pub(crate) struct ToolWorkPermit(Arc<ToolWork>);
+
+impl Drop for ToolWorkPermit {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+impl ToolWork {
+    pub(crate) fn permit(self: &Arc<Self>) -> ToolWorkPermit {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        ToolWorkPermit(self.clone())
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let changed = self.idle.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 { return; }
+            changed.await;
+        }
+    }
 }
 
 impl CasService {
@@ -157,6 +195,7 @@ impl CasService {
             tool_router: Self::tool_router(),
             factory_context: Default::default(),
             message_sweep_lock: Default::default(),
+            tool_work: Default::default(),
         }
     }
 

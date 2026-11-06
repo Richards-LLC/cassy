@@ -34,6 +34,20 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Worker contracts across machines
+
+`coordination action=message target=<worker>@<machine>` can carry an advisory
+contract between live workers of the same account and repository holding active
+claims under a common epic. Send and receive both validate Cloud identity and
+claims against synced task ancestry. Missing evidence fails closed; there is no
+worker succession redirect or cross-project worker route. Receive records quiet,
+idempotent copies for both supervisors before acknowledging the original mail.
+Only untyped, ask, answer and receipt intent is allowed; urgency, blocker/merge
+escalation and supervisor action kinds remain unavailable. Explicit `wake=false`
+stays quiet. Replies bind to a peer message delivered to that worker and recheck
+the current scope. This uses the existing MCP coordination dispatch; the factory
+message CLI retains its local queue behavior.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
@@ -161,6 +175,11 @@ source SHA after reviewing its intent. Dirty/uncommitted worker files still
 require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
+
+Agent-facing message provenance and pointer wakes stamp the current render time
+in the host's local timezone (`TZ` when set), in twelve-hour form with a zone
+(for example `6:36 AM ET`). Queue age and first/replay provenance remain separate.
+Supervisor clock times and ETAs require a clock read or measured start that turn.
 
 `cas factory message --session <name> --project-dir <project>` uses the
 destination session's store and queue session, even from another factory's
@@ -1535,6 +1554,15 @@ creation and cleanup. Cassy does not migrate existing caches or restart servers.
 
 ## Testing
 
+New QA ledgers use `schema: 2`. Graded runtime expectations cite a spec
+`path:line`; PASS observations include captured `visible:`, `terminal:` or
+`http:` output. Database-only PASSes and uncited verdicts are refused by the
+shared CLI/close/verifier parser. Schema 1 receipts remain valid; fixture
+labels remain weaker evidence. The shipped `cas-qa-craft/scripts/walk-kit.mjs`
+is copied and pinned once per project under `scripts/qa/`, with project adapters
+for selectors, actual served builds and cleanup. Every generated row identifies
+the kit version. Run its regressions with `node --test scripts/test-walk-kit.mjs`.
+
 ### Duplicate-task warnings
 
 Task creation excludes common planning words and prose such as `NOT` and
@@ -2361,8 +2389,12 @@ key only while the peer is live, its heartbeat and sample remain fresh, and the
 route is less than 15 minutes old. Otherwise an expired note restores local
 admission; history still prevents routing onward. Unsent retry entries are
 cancelled when a route expires. A peer receiving a task with a route note staffs
-it locally or waits; it never routes it onward. A failed send retains the route for recovery and
-withholds local dispatch. `cas config set factory.auto_route_builds false`
+it locally or waits; it never routes it onward. A failed send retains the route for recovery;
+after three failed attempts (or a permanent refusal), the route expires with
+`cause=send_failed` and restores local admission. Mailbox duty rechecks routing
+config and local staffing before retries, cancelling obsolete asks even before
+their scheduled retry time. Ordinary peer messages retain their retry policy.
+`cas config set factory.auto_route_builds false`
 disables new automatic routes and releases existing routes to local admission.
 A forced local spawn also releases its prior automatic route.
 The peer supervisor still owns staffing and local admission; an ask grants no
@@ -3243,6 +3275,13 @@ keys, legacy bare task directories and shared builds, and flags `DerivedData`
 and `target` build outputs stored as evidence. These sibling roots remain
 review-only even when artifact deletion is enabled for the current project.
 
+With `artifacts=true force=true dry_run=false`, GC also removes regular candidate
+files named `cas` after their task has been closed for at least 48 hours, when
+their actual SHA-256 matches a hash recorded in that task's `LEDGER.md` alongside
+a recorded `cas` version. It keeps the ledger, logs and checksum records, reports
+removed files and reclaimed bytes, and never follows symlinks. Open tasks, missing
+close dates and unrecorded or mismatched binary identities preserve the binary.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),
@@ -3740,6 +3779,11 @@ is not parked for merge. A valid integrated `commit_receipt` proves delivery
 even after a suffixed promotion branch was deleted and the canonical task
 branch never existed. If that receipt is invalid, close reports its validation
 reason before parking; `merged_into` does not override the declared work target.
+An attributable first park binds the validated pushed branch HEAD, including target
+freshness merges and canonical regeneration commits restricted to their known
+generated outputs. A generator's provenance task ID is not delivery ownership.
+Stacked deliveries retain their prior attributed boundary; the supervisor merge
+still refuses a source that differs from its immutable parked tip.
 After rebasing a parked delivery, push the rewritten tip and re-run close with
 checks for that exact tip before requesting its merge. Close preserves the full
 parked patch set, allows attributable corrections while the worker exclusively
@@ -3760,7 +3804,7 @@ anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 An undeclared helper that never delivered code may instead close with
 `no_delivery=true reason="<completed helper outcome>"`. This declaration is
-required on every attempt and audited with the registered caller, repository,
+required on every worker attempt and audited with the registered caller, repository,
 target SHA and measured refs. Cassy requires readable Git and task attribution,
 no recorded delivery or binding QA round, and no task commits or unmerged work
 on any local/origin candidate lane or closing HEAD. Empty diffs alone grant no
@@ -3769,6 +3813,12 @@ preserving verification and uncommitted-work checks; it sets no methodology,
 external reference or delivery anchor. It cannot be combined with other close
 receipts, dispositions or overrides. The unified MCP and per-action close
 requests expose this flag; there is no separate CLI task-close command.
+When verification is required, Cassy saves the explicit no-delivery reason and
+assignee atomically with the exact dispatch. Approval resumes that close through
+the ordinary absence and proof gates, lifting only that dispatch's verification
+wait. Independent holds stay blocked, and no worker close retry is queued.
+A reopen retires the saved intent; identical supervisor verdict replay after
+closure acknowledges history without closing or notifying again.
 A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.

@@ -1,15 +1,13 @@
 # Evidence ledger
 
-Create the task ledger with `cas qa ledger init --task <id>`. It prints the
-project-scoped path, includes predicted live journeys, and preserves existing
-evidence. No-code deliveries start with route exclusions; live routes start
-unexercised. Edit the scaffold as you walk.
+`cas qa ledger init --task <id>` preserves existing evidence and scaffolds schema 2:
+no-code exclusions, live journeys unexercised. Keep its eight columns and counts.
+In schema 2, graded runtime expectations cite `path:line`; PASS observations begin
+`visible:`, `terminal:` or `http:` with captured output. Database read-back only
+corroborates. Uncited expectations are spec questions. Legacy schema 1 stays valid.
 
-Run `cas qa ledger check <path> --task <id>` before close or review. The CLI,
-close gate and verifier share one parser for fields, counts, labels, breadth,
-defect ownership and readable PASS captures. Repair each line/row diagnostic.
-The executable owns the grammar; use its scaffold instead of a copied table.
-A passing check proves structure and readability, not the expected user outcome.
+Run `cas qa ledger check <path> --task <id>` before close/review. CLI, close and
+verifier share diagnostics. A structural PASS never proves the visible outcome.
 
 Name the build revision, scope, surface and budget. For a served app, record
 backend and frontend SHAs at walk start and end, including mixed builds
@@ -17,6 +15,17 @@ backend and frontend SHAs at walk start and end, including mixed builds
 describe what happened. Label evidence by how it was obtained; source reading
 and fixtures do not prove the real build. Telemetry findings cite saved sweep
 stdout and include all six parsed fields in the observed result.
+
+Run independent channel/viewport surfaces as separate walk-kit jobs with their
+own ledger, browser profile and test persona. `createLedger.record()` publishes
+`progress_at` for every result, including another observation of one defect;
+`write()` preserves that time. The existing factory refresh and `worker_status`
+flag flat QA output at `factory.stall_threshold_secs`, independently of native
+execution liveness. Legacy ledgers without this field report progress unknown.
+With one unfinished QA lane in the focused epic and an eligible idle worker,
+the director suggests splitting independent surfaces or cases. Held workers,
+pending messages, existing assignments and unresolved reviewer handoffs exclude
+a worker; dependent steps remain together. No additional poller is started.
 
 A `real-build` row that drives a compiled binary needs a binary of the build
 revision, and the header names it: path, `--version` output and SHA-256. Three

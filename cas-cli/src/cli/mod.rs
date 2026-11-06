@@ -304,7 +304,7 @@ pub enum Commands {
     Hub(HubArgs),
 
     /// Run the CAS MCP server
-    Serve,
+    Serve(ServeArgs),
 
     /// Run diagnostics
     Doctor(DoctorArgs),
@@ -552,7 +552,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Sync(_)
         | Commands::RetrievalParity(_) => AuthRequirement::NotRequired,
 
-        Commands::Serve => AuthRequirement::NotRequired,
+        Commands::Serve(_) => AuthRequirement::NotRequired,
 
         // Local unlink only removes the project link file and is useful when
         // taking a project offline; remote purge remains auth-gated.
@@ -859,7 +859,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Default(_) => "default".to_string(),
         Commands::Bridge(_) => "bridge".to_string(),
         Commands::Hub(_) => "hub".to_string(),
-        Commands::Serve => "serve".to_string(),
+        Commands::Serve(_) => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Viktor(_) => "viktor".to_string(),
         Commands::Violet(_) => "violet".to_string(),
@@ -1002,7 +1002,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Default(args) => provider_default::execute(args),
         Commands::Bridge(args) => bridge::execute(args, cli),
         Commands::Hub(args) => hub::execute(args, cli),
-        Commands::Serve => serve_execute(),
+        Commands::Serve(args) => serve_execute(args),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Violet(args) => violet_cmd::execute(args, cli, cas_root),
@@ -1067,7 +1067,18 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
-fn serve_execute() -> anyhow::Result<()> {
+#[derive(Debug, clap::Args, Default)]
+pub struct ServeArgs {
+    #[arg(long, hide = true)]
+    backend: bool,
+    #[arg(long, hide = true, requires = "backend")]
+    control_fd: Option<i32>,
+    #[arg(long, hide = true, requires = "backend")]
+    standby: bool,
+}
+
+fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
+    use anyhow::Context as _;
     // Long-lived: a proxy client that vanishes mid-write on the MCP socket
     // must not kill the server every harness session depends on (cas-5918).
     // Without the harness, stdout writes now fail with EPIPE and the service
@@ -1078,8 +1089,13 @@ fn serve_execute() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(crate::mcp::run_server());
-    if result.is_err() {
+    let result = if args.backend {
+        #[cfg(unix)]
+        { runtime.block_on(crate::mcp::run_backend(args.control_fd.context("private backend requires --control-fd")?, args.standby)) }
+        #[cfg(not(unix))]
+        { anyhow::bail!("private MCP backends require Unix control sockets") }
+    } else { runtime.block_on(crate::mcp::run_server()) };
+    if result.is_err() || args.backend {
         // cas-1895: the pre-initialize guard (cas-2a49) reads stdin from the
         // first moment of startup. Tokio's stdin is a blocking read that
         // cannot be cancelled, and dropping the runtime waits for it, so a

@@ -24,6 +24,84 @@ async fn r1_approved_verdict_leaves_close_retry_with_worker() {
     r1_verification_wait_wakes("verdict").await;
 }
 
+#[test]
+fn recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7() {
+    use crate::mcp::tools::core::task::{block_hold, lifecycle::supervisor_push::{
+        is_lifecycle_wake_source, reconcile_blocked_task_alert,
+    }};
+    use cas_types::{Agent, AgentRole, Dependency, DependencyType, Task, TaskStatus};
+    // One state-transition table: only a recorded wait from this hold owns the
+    // deadline; all its blockers must finish, including when an answer exists.
+    for (case, edge_type, seconds, second_blocker, answered, terminal) in [
+        ("recorded", DependencyType::Blocks, 1, false, false, TaskStatus::Closed),
+        ("answered", DependencyType::Blocks, 1, false, true, TaskStatus::Closed),
+        ("multiple", DependencyType::Blocks, 1, true, false, TaskStatus::Closed),
+        ("cancelled", DependencyType::Blocks, 1, false, false, TaskStatus::Cancelled),
+        ("older edge", DependencyType::Blocks, -1, false, false, TaskStatus::Closed),
+        ("related", DependencyType::Related, 1, false, false, TaskStatus::Closed),
+    ] {
+        let fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        let root = fixture.app.cas_dir().to_path_buf();
+        let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&lead).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = tasks.get("cas-9efb-test").unwrap();
+        let start = chrono::Utc::now();
+        task.status = TaskStatus::Blocked;
+        tasks.update(&task).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Wait for the main-sync prerequisite", "who": "merge-w", "when": start
+        }})).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        reconcile_blocked_task_alert(&root, &task.id, start).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), 1, "{case}: initial blocker reaches the supervisor");
+        let mut dependency = Task::new("cas-f8c7-dep".into(), "main sync in flight".into());
+        dependency.status = TaskStatus::InProgress;
+        tasks.add(&dependency).unwrap();
+        let mut edge = Dependency::new(task.id.clone(), dependency.id.clone(), edge_type);
+        edge.created_at = start + chrono::Duration::seconds(seconds);
+        tasks.add_dependency(&edge).unwrap();
+        let mut other = Task::new("cas-f8c7-other".into(), "another prerequisite".into());
+        if second_blocker {
+            tasks.add(&other).unwrap();
+            // Even an older, still-open blocker must finish before the wake.
+            let mut older = Dependency::new(task.id.clone(), other.id.clone(), DependencyType::Blocks);
+            older.created_at = start - chrono::Duration::seconds(1);
+            tasks.add_dependency(&older).unwrap();
+        }
+        if answered {
+            block_hold::record_supervisor_answer(&root, &lead, &agents.get("merge-w").unwrap(), Some(&task.id), 42).unwrap();
+        }
+        let owns_wait = edge_type == DependencyType::Blocks && seconds >= 0;
+        for minutes in [10, 20] {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(queue.peek_all(20).unwrap().len(), if owns_wait { 1 } else { 2 },
+                "{case}: only a new blocking edge owns the next wake");
+        }
+        dependency.status = terminal;
+        tasks.update(&dependency).unwrap();
+        if second_blocker {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(25)).unwrap();
+            assert_eq!(queue.peek_all(20).unwrap().len(), 1, "{case}: one unresolved blocker still owns the wait");
+            other.status = TaskStatus::Closed;
+            tasks.update(&other).unwrap();
+        }
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(30)).unwrap();
+        }
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.len(), 2, "{case}: exactly one follow-up");
+        if owns_wait {
+            let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id)
+                && row.prompt.contains(&terminal.to_string())).unwrap();
+            assert!(is_lifecycle_wake_source(&completed.source), "{case}");
+            assert!(!block_hold::answered_blocker_alert(&root, completed), "{case}: a linked answer cannot withdraw completion at delivery");
+        }
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked, "{case}: preserve the explicit hold");
+    }
+}
+
 #[tokio::test]
 async fn r1_expired_dispatch_wakes_supervisor_once() {
     for release in ["deadline", "close-timeout", "sweep-before-close-timeout"] {

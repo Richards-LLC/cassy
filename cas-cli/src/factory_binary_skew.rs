@@ -166,20 +166,27 @@ pub(crate) fn snapshot_with_installed(
         if !fresh {
             continue;
         }
-        let Some(parent_pid) = epoch_live_parent(pid, &epoch.started_at) else {
+        let Some(mut parent_pid) = epoch_live_parent(pid, &epoch.started_at) else {
             continue;
         };
+        let version = if let Some(state) = crate::mcp::serving_state(cas_root, parent_pid) {
+            // A prepared candidate may already have a daemon epoch. Only the
+            // front's confirmed serving child is user-visible version proof.
+            if state.backend_pid != pid { continue; }
+            parent_pid = state.harness_pid;
+            Some(state.backend_version)
+        } else { epoch.version };
         if !seen_server_pid.insert(pid) {
             continue;
         }
         by_agent_pid
             .entry(pid)
             .or_default()
-            .push((pid, epoch.version.clone()));
+            .push((pid, version.clone()));
         by_agent_pid
             .entry(parent_pid)
             .or_default()
-            .push((pid, epoch.version));
+            .push((pid, version));
     }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
@@ -190,7 +197,9 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let matches = by_agent_pid.get(&pid).cloned().unwrap_or_default();
+        let matches = by_agent_pid.get(&pid)
+            .or_else(|| agent.ppid.and_then(|parent| by_agent_pid.get(&parent)))
+            .cloned().unwrap_or_default();
         if matches.is_empty() {
             servers.push(ServerVersion {
                 name: agent.name,
@@ -445,6 +454,32 @@ mod tests {
         store.register(&worker).unwrap();
         assert_ne!(worker.pid, Some(child.0.id()));
         (dir, root, worker, child)
+    }
+
+    #[test]
+    fn confirmed_front_reports_backend_version_and_rejects_reused_pid_cas_81c4() {
+        let (_dir, root, mut worker, child) = fixture();
+        let front = std::process::id();
+        let harness = crate::agent_id::get_parent_of_pid(front).unwrap();
+        worker.pid = Some(harness);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, harness);
+        open_agent_store(&root).unwrap().update(&worker).unwrap();
+        let path = root.join("mcp-fronts").join(format!("{front}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut report = serde_json::json!({"front_pid":front, "harness_pid":harness,
+            "backend_pid":child.0.id(), "front_version":"9.99.1", "backend_version":"9.99.7",
+            "deferred":null,
+            "front_starttime":crate::mcp::daemon::read_pid_starttime(front).unwrap(),
+            "backend_starttime":crate::mcp::daemon::read_pid_starttime(child.0.id()).unwrap()});
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.7", Utc::now()).unwrap();
+        assert!(snapshot.servers.iter().any(|server| server.pid == child.0.id()
+            && server.version.as_deref() == Some("9.99.7") && !server.older), "{snapshot:?}");
+        report["front_starttime"] = serde_json::json!(u64::MAX);
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let stale = snapshot_with_installed(&root, "9.99.7", Utc::now()).unwrap();
+        assert!(stale.servers.iter().all(|server| server.version.as_deref() != Some("9.99.7")),
+            "a recycled front must not lend its committed serving version: {stale:?}");
     }
 
     #[test]

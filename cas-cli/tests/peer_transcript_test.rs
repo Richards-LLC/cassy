@@ -150,6 +150,7 @@ async fn own_account_peer_transcript_is_bounded_redacted_and_daemon_served_cas_0
     assert_eq!(sent.len(), 1, "foreign/invalid requests must not send");
     assert_eq!(sent[0]["scope"], "user");
     let body = sent[0]["body"].as_str().unwrap();
+    assert!(body.starts_with("<cas-peer-intent kind=\"quiet\"/>\n"));
     let incoming = |id: &str, scope: &str| {
         json!({
             "id":id, "project_id":"github.com/acme/local", "recipient_agent_id":"remote",

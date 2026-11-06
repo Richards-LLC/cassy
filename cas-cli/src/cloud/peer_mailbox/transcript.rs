@@ -82,6 +82,8 @@ pub fn request(
         "{TAG}{}",
         serde_json::to_string(&query).map_err(|_| "cannot encode query")?
     );
+    // A daemon predating this protocol must not wake its model for the query.
+    let body = super::attach_message_intent(&body, Some("quiet"), false)?;
     let sent = super::send_to_user_peer(
         root,
         sender,
@@ -197,7 +199,8 @@ pub(super) fn serve(
     recipient: &Agent,
     message: &ClaimedPeerMessage,
 ) -> Result<Option<PeerAckOutcome>, String> {
-    let Some(raw) = message.body.strip_prefix(TAG) else {
+    let (_, body) = super::split_message_intent(&message.body);
+    let Some(raw) = body.strip_prefix(TAG) else {
         return Ok(None);
     };
     if message.scope != PeerScope::User {

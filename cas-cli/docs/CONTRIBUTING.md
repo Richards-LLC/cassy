@@ -168,6 +168,8 @@ peer=<name@machine> session_id=current message="<regex>" limit=2`, or
 `session_id` / `--session-id` also accepts a known local supervisor session
 ID on that peer. The response returns through `coordination action=inbox_poll`
 with the Cloud request ID; queued does not mean the transcript was read yet.
+The receiving daemon must support this query; its request is quiet even on
+older daemons.
 
 Only supervisors of the caller's own Cloud account are addressable. The peer
 factory daemon handles the query without waking its supervisor or invoking a

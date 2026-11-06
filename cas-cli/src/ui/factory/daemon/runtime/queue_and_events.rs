@@ -14198,7 +14198,7 @@ mod tests {
                 42,
                 Some(7),
                 "once",
-                None
+                None, super::super::lifecycle::MergeQueueExit::default()
             ),
             super::super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
         ));

@@ -52,6 +52,21 @@ pub(crate) fn failing_job(transport: &dyn CiTransport, run_id: Option<u64>) -> O
     Some(named)
 }
 
+/// cas-25ce: the group entry this run was built on failed the same job, so
+/// the failure may be a group-mate's and must not spend this task's repair
+/// cycle. Lookup errors count as unproven (false).
+pub(crate) fn ahead_failed_same_job(
+    transport: &dyn CiTransport,
+    run_id: Option<u64>,
+    ahead_run_id: Option<u64>,
+) -> bool {
+    let (Some(run_id), Some(ahead_run_id)) = (run_id, ahead_run_id) else {
+        return false;
+    };
+    let job = |run| transport.failed_job_detail(run).ok().flatten().map(|job| job.name);
+    job(run_id).is_some_and(|own| job(ahead_run_id).as_deref() == Some(own.as_str()))
+}
+
 #[cfg(test)]
 #[path = "merge_queue_ejection_tests.rs"]
 mod tests;

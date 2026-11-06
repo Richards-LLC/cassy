@@ -6729,7 +6729,7 @@ async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_wind
     ].into_iter().collect();
     let pair = |origin: &str, preview: bool, scopes: std::collections::BTreeSet<Scope>| {
         let signing = SigningKey::random(&mut OsRng);
-        let invitation = if preview { auth.mint_preview_pairing(origin, until, now) } else { auth.mint_pairing(origin, scopes.clone(), now) }.unwrap();
+        let invitation = if preview { auth.mint_preview_pairing(origin, Some("cas-93d1"), until, now) } else { auth.mint_pairing(origin, scopes.clone(), now) }.unwrap();
         let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", origin, scopes);
         exchange.public_key_jwk = public_jwk(&signing);
         auth.exchange_pairing(exchange, now).map(|credential| (signing, credential))
@@ -6772,4 +6772,7 @@ async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_wind
     let refresh = sign_dpop(&preview_key, &preview_device.credential, "POST", "/v1/auth/refresh", after, "refresh-after-preview");
     assert!(auth.refresh_device_credential(&format!("DPoP {}", preview_device.credential), &refresh, preview, "POST", "/v1/auth/refresh", after).is_err());
     assert!(authenticate(&live_key, &live_device, "https://controller.example", "live-after").is_ok());
+    // Commander links the parked task to the preview only while it runs.
+    assert_eq!(auth.live_previews(now).unwrap().iter().map(|window| (window.origin.as_str(), window.task.as_deref())).collect::<Vec<_>>(), [(preview, Some("cas-93d1"))]);
+    assert!(auth.live_previews(after).unwrap().is_empty());
 }

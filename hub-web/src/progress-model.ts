@@ -100,6 +100,23 @@ export function taskGroups(tasks: readonly ProgressTask[], epics: readonly Relea
 }
 
 
+/** A running `cas hub preview` window, as /v1/machine announces it (cas-93d1). */
+export interface PreviewWindow { origin: string; task?: string; until: string }
+
+/**
+ * The candidate Commander a parked task's row links to: a running preview
+ * window named for that task, on a loopback http origin other than this page's.
+ */
+export function deliveryPreview(task: ProgressTask, previews: readonly PreviewWindow[] | undefined, now: number, pageOrigin: string): string | undefined {
+  if (task.delivery_state === "merged" || statusLabel(task.status) !== "Awaiting merge") return undefined;
+  const window = previews?.find(item => item.task === task.id && Date.parse(item.until) > now && item.origin !== pageOrigin);
+  if (!window) return undefined;
+  try {
+    const url = new URL(window.origin);
+    return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.origin === window.origin ? `${url.origin}/` : undefined;
+  } catch { return undefined; }
+}
+
 /** The rail and Team use the same lifecycle/liveness precedence. */
 export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[]): string {
   const agent = worker.agent;

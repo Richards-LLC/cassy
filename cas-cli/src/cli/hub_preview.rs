@@ -31,6 +31,14 @@ pub struct HubPreviewArgs {
     /// Hub address the pairing link prefills (defaults as for `cas hub pair`)
     #[arg(long)]
     pub hub_url: Option<String>,
+    /// The parked task this build delivers; Commander links its row here
+    #[arg(long, value_parser = task_id)]
+    pub task: Option<String>,
+}
+
+fn task_id(value: &str) -> std::result::Result<String, String> {
+    let valid = (1..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    valid.then(|| value.to_owned()).ok_or_else(|| "a task id is 1–64 letters, digits, '-', '_' or '.'".into())
 }
 
 /// The candidate file a request path names, or None. Only `/`, `/index.html`
@@ -119,9 +127,9 @@ pub(super) fn preview(args: &HubPreviewArgs, cli: &Cli) -> Result<()> {
         machine_label: Some(super::hub_reverse_pairing::machine_display_label()),
     };
     let store = super::hub::auth_store()?;
-    let invitation = store.mint_preview_pairing(&origin, until, now)?.with_prefill(prefill);
+    let invitation = store.mint_preview_pairing(&origin, args.task.as_deref(), until, now)?.with_prefill(prefill);
     if cli.json {
-        println!("{}", serde_json::json!({ "origin": origin, "url": invitation.url, "until": until, "dist": dist }));
+        println!("{}", serde_json::json!({ "origin": origin, "url": invitation.url, "until": until, "dist": dist, "task": args.task }));
     } else {
         println!("Previewing {} at {origin}/ until {} (read-only)", dist.display(), until.with_timezone(&chrono::Local).format("%-I:%M %p"));
         println!("Pair this preview once, then open it:\n{}", invitation.url);

@@ -638,6 +638,19 @@ struct PersistedState {
     account_challenges: Vec<account::AccountChallenge>,
     #[serde(default)]
     account_bindings: Vec<account::AccountBinding>,
+    /// cas-93d1: running `cas hub preview` windows, announced on /v1/machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<PreviewWindow>,
+}
+
+/// cas-93d1: a running `cas hub preview`: the loopback origin serving the
+/// candidate build, the parked task it shows, and when it ends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWindow {
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub until: DateTime<Utc>,
 }
 
 // Keep the empty legacy keys readable by an older CLI during a hub upgrade;
@@ -982,6 +995,7 @@ impl AuthStore {
     pub fn mint_preview_pairing(
         &self,
         controller_origin: &str,
+        task: Option<&str>,
         until: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<PairingInvitation> {
@@ -991,8 +1005,16 @@ impl AuthStore {
         let record = state.pairings.last_mut().context("preview invitation missing")?;
         record.preview_until = Some(until);
         record.expires_at = record.expires_at.min(until);
+        state.previews.retain(|window| window.origin != controller_origin && window.until > now);
+        state.previews.push(PreviewWindow { origin: controller_origin.into(), task: task.map(str::to_owned), until });
         self.persist(&state)?;
         Ok(invitation)
+    }
+
+    /// The preview windows still open at `now`, for Commander's
+    /// "Preview this delivery" link.
+    pub fn live_previews(&self, now: DateTime<Utc>) -> Result<Vec<PreviewWindow>> {
+        Ok(self.read_lock()?.previews.iter().filter(|window| window.until > now).cloned().collect())
     }
 
     /// End a preview now: revoke every device and invitation for its origin.
@@ -1002,6 +1024,7 @@ impl AuthStore {
             device.revoked_at.get_or_insert(now);
         }
         state.pairings.retain(|record| record.preview_until.is_none() || record.controller_origin != controller_origin);
+        state.previews.retain(|window| window.origin != controller_origin);
         self.persist(&state)
     }
 

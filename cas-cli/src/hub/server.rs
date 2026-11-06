@@ -679,6 +679,9 @@ struct MachineResponse {
     transport: super::MachineTransport,
     cloud_devices: Vec<super::CloudDeviceSuggestion>,
     default_supervisor_cli: String,
+    /// cas-93d1: running `cas hub preview` windows, for "Preview this delivery".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<super::PreviewWindow>,
 }
 
 async fn machine<R: SessionReadModel>(
@@ -724,6 +727,11 @@ async fn machine<R: SessionReadModel>(
                     .map(|llm| llm.harness_for_role("supervisor").to_owned())
             })
             .unwrap_or_else(|| "claude".into()),
+            previews: state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.live_previews(chrono::Utc::now()).ok())
+                .unwrap_or_default(),
         })
         .into_response(),
         &headers,

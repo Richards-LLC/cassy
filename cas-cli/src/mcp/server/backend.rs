@@ -47,7 +47,11 @@ impl Switchable {
             let changed = self.idle.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.handlers.load(Ordering::Acquire) == 0 { return; }
+            if self.handlers.load(Ordering::Acquire) == 0 {
+                let service = self.active.get().unwrap_or(&self.passive);
+                let _tool_work = service.tool_work.write().await;
+                if self.handlers.load(Ordering::Acquire) == 0 { return; }
+            }
             changed.await;
         }
     }

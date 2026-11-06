@@ -143,6 +143,8 @@ pub struct CasService {
     factory_context:
         std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
     message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// A tool future may outlive its response; backend retirement waits for it.
+    pub(crate) tool_work: std::sync::Arc<tokio::sync::RwLock<()>>,
 }
 
 impl CasService {
@@ -157,6 +159,7 @@ impl CasService {
             tool_router: Self::tool_router(),
             factory_context: Default::default(),
             message_sweep_lock: Default::default(),
+            tool_work: Default::default(),
         }
     }
 

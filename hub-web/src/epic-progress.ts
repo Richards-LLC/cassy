@@ -87,7 +87,7 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
   }
   const line = element(document, "span", "live-epic-line");
   const split = element(document, "span", "live-epic-split", epic.counts ? splitText(epic.counts) : activityText(epic));
-  if (epic.counts && epic.blocked) split.append(" · ", element(document, "span", "live-epic-blocked", `${epic.blocked} blocked`));
+  if (epic.counts && epic.blocked) split.append(" ", element(document, "span", "live-epic-blocked", `· ${epic.blocked} blocked`));
   line.append(split);
   if (epic.workers.length) {
     const dots = element(document, "span", "live-epic-dots");

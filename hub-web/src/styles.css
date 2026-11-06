@@ -3611,7 +3611,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 /* Live epics in Tasks & progress (cas-9b99): a three-line row grid (title and
    ratio, split bar, split and worker dots) on the card rhythm. Only blocked
    uses the critical tone; counts are tabular mono so updates never shift. */
-.live-epics { margin: 0 0 var(--space-3); }
+.live-epics { margin: 0 0 var(--space-3); padding-bottom: var(--space-4); border-bottom: var(--line-width) solid var(--line-subtle); }
 .live-epic-list { display: grid; gap: var(--space-1); margin: var(--space-1) 0 0; padding: 0; list-style: none; }
 .live-epic { min-width: 0; border-radius: var(--radius-card); background: var(--bg-raised); box-shadow: inset 0 0 0 var(--line-width) var(--line-subtle); }
 .live-epic.is-blocked { box-shadow: inset var(--state-rule-width) 0 0 var(--state-crit), inset 0 0 0 var(--line-width) var(--line-subtle); }
@@ -3624,16 +3624,17 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .live-epic-toggle > .split-bar { grid-column: 1 / -1; }
 .live-epic-line { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
 .live-epic-split { color: var(--ink-mid); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.live-epic-blocked { color: var(--state-crit); font-weight: var(--weight-semibold); }
+.live-epic-blocked { color: var(--state-crit); font-weight: var(--weight-semibold); white-space: nowrap; }
 .live-epic-dots { display: flex; flex: none; flex-wrap: wrap; justify-content: end; gap: var(--space-1); max-width: 10ch; }
 .live-epic-dot { width: var(--space-2); height: var(--space-2); box-sizing: border-box; border-radius: var(--radius-pill); background: var(--state-ok); border: var(--line-width) solid var(--state-ok); }
 .live-epic-dot.is-waiting { background: transparent; }
+.live-epic-tasks[hidden] { display: none; }
 .live-epic-tasks { display: grid; gap: var(--space-3); padding: 0 var(--space-3) var(--space-3); }
 .live-epic.is-opening > .live-epic-tasks { animation: live-epic-open var(--attention-motion-duration) var(--motion-easing) 1; }
 @keyframes live-epic-open { from { opacity: 0; transform: translateY(calc(-1 * var(--space-1))); } }
 .live-epic-group { display: grid; gap: var(--space-1); min-width: 0; }
 .live-epic-group-label { margin: 0; color: var(--ink-mid); font-size: var(--fs-xs); font-weight: var(--weight-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.live-epic-merged > summary { display: flex; align-items: center; min-height: var(--rail-item-min); cursor: pointer; }
+.live-epic-merged > summary { display: flex; align-items: center; padding-block: var(--space-1); cursor: pointer; }
 .live-epic-merged > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-card); }
 .live-epic-merged-note { margin: 0; font-size: var(--fs-meta); }
 .live-epic-task-list { display: grid; margin: 0; padding: 0; list-style: none; }
@@ -3659,7 +3660,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .release-split, .release-activity { margin: var(--space-2) 0 0; font-size: var(--fs-meta); color: var(--ink-mid); font-variant-numeric: tabular-nums; }
 .team-panel .release-split, .team-panel .release-activity, .team-panel .release-progress .split-bar { grid-column: 1 / -1; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .live-epic-toggle { min-height: var(--rail-item-min); }
+  .live-epic-merged > summary { min-height: var(--rail-item-min); padding-block: 0; }
   .live-epic-chip { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {

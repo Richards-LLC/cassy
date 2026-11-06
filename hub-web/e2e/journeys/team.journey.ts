@@ -221,9 +221,10 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       });
       await journey.stage("Open the peer epic in place and watch a merge update its split", async () => {
         const peer = epics.getByRole("button", { name: /Follow-ups/ });
+        const tasks = page.locator(`#${await peer.getAttribute("aria-controls")}`);
+        await expect(tasks).toBeHidden();
         await peer.focus(); await page.keyboard.press("Enter");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
-        const tasks = page.locator(`#${await peer.getAttribute("aria-controls")}`);
         await expect(tasks).toContainText("Follow up on the release");
         await expect(tasks).not.toContainText("follow-1");
         await expect(tasks.locator(".live-epic-task-machine")).toHaveText("prowl");

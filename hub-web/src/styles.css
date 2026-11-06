@@ -3532,9 +3532,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-command-palette[hidden] { display: none; }
 .supervisor-command-dropdown { position: fixed; inset: auto; width: min(26rem, calc(100vw - var(--space-4))); }
 .conversation-reload { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-xs); }
-.conversation-reload button, .conversation-reload summary { min-height: var(--rail-item-min); padding: var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--color-action); font: inherit; cursor: pointer; }
-.conversation-reload details { min-width: 0; }
-.conversation-reload details button { margin-top: var(--space-1); }
+.conversation-reload[hidden] { display: none; }
+.conversation-reload button { min-height: var(--rail-item-min); padding: var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--color-action); font: inherit; cursor: pointer; }
 .conversation-reload p { margin: 0; overflow-wrap: anywhere; }
 .conversation-reload-receipt { flex-basis: 100%; }
 .conversation-reload button:disabled { color: var(--ink-mid); cursor: default; }

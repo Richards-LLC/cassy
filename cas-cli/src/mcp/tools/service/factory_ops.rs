@@ -1008,7 +1008,15 @@ fn shutdown_worker_snapshot(
             WorkerClonePathResolve::Ready(path) => {
                 let (state, unsafe_worktree) =
                     shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
-                let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
+                // Non-isolated workers share the project checkout; teardown
+                // only removes manager-owned worker worktrees.
+                let verdict = if cas_root.parent().is_some_and(|project| {
+                    project.canonicalize().ok() == path.canonicalize().ok()
+                }) {
+                    format!("worktree {} kept (shared checkout)", path.display())
+                } else {
+                    shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty())
+                };
                 (state, verdict, unsafe_worktree)
             }
             WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
@@ -14507,6 +14515,19 @@ mod tests {
         owner.metadata.insert("clone_path".into(), integration.display().to_string());
         store.register(&owner).unwrap();
         assert!(live_target_cache_worktrees(store.as_ref(), &root).contains(&integration));
+    }
+
+    #[test]
+    fn shutdown_preview_keeps_nonisolated_main_checkout_gh_1468() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(repo.path()).status().unwrap().success());
+        let mut worker = worker_named("shared-worker", "shared-worker-id");
+        worker.metadata.insert("clone_path".into(), repo.path().display().to_string());
+        let snapshot = shutdown_worker_snapshot(&repo.path().join(".cas"), &worker, &[], false, None);
+        let preview = snapshot.render();
+        assert!(preview.contains("kept (shared checkout)"), "{preview}");
+        assert!(!preview.contains("will be removed"), "{preview}");
     }
 
     #[test]

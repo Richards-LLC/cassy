@@ -71,11 +71,11 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
             _ if latest.as_ref().is_some_and(|v| v.status == VerificationStatus::Approved) => "recorded approval; close gates need rechecking",
             _ => "close gates pending",
         };
-        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
+        rows.push(format!("- {}: anchor {} is in {}; hold: {hold}; review path: {review}; next: task action=close id={} commit_receipt={anchor} reason=\"Recover integrated delivery\"\n", task.id, anchor, target, task.id));
     }
     if rows.is_empty() && skipped.is_empty() { return Ok(String::new()) }
     Ok(format!(
-        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Adopt each row and run its close action to recheck the current hold. Supply the exact verdict/receipt or dedicated review requested by close; Tier 2 still needs its own verifier and adversarial probe.\n{}",
+        "Integrated deliveries to adopt/close ({}):\nThese project deliveries have passed the read-only merge/content guard. Close still checks branch attribution, upkeep, ledger format and evidence, QA and verification; legacy receipts may need repair. Adopt only rows you own and use the immutable commit_receipt below to recheck those gates. Tier 2 still needs its own verifier and adversarial probe.\n{}",
         rows.len(), rows.concat() + &if skipped.is_empty() { String::new() } else {
             format!("Skipped recovery rows ({}):\n{}", skipped.len(), skipped.concat())
         }

@@ -296,6 +296,112 @@ fn claim(f: &Fixture, id: &str) {
         .unwrap();
 }
 
+fn issue_delivery(f: &Fixture, id: &str, target: &str) -> (PathBuf, String) {
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, target]);
+    let mut task = assigned(id, TaskType::Bug, target);
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: lane.clone(),
+        base_sha: git(&checkout, &["rev-parse", "HEAD"]),
+    });
+    f.put(&task);
+    claim(f, id);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+    agents.update(&agent).unwrap();
+    (checkout, lane)
+}
+
+#[tokio::test]
+async fn own_contextual_task_mention_can_park_gh1496() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-eddf";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n// collection exemption\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-eddf): own delivery"]);
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["commit", "-qam", "chore: leave cas-3094 typed collection exemptions to epic owner"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Own delivery ready",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+    assert!(!response.contains("foreign commit"), "{response}");
+}
+
+#[tokio::test]
+async fn integrated_squash_receipt_survives_large_source_history_gh1454() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-5a43";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    for _ in 0..201 {
+        git(&checkout, &["commit", "-q", "--allow-empty", "-m", "inherited history"]);
+    }
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-5a43): own delivery"]);
+    let anchor = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--squash", &lane]);
+    git(repo, &["commit", "-qm", "fix(cas-5a43): integrated squash"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let mut task = f.task(id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(lane);
+    task.deliverables.factory_branch_anchor = Some(anchor);
+    f.put(&task);
+    let response = call(&f.supervisor, serde_json::json!({
+        "action": "close", "id": id, "reason": "Recover integrated squash",
+        "commit_receipt": receipt,
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
+}
+
+#[tokio::test]
+async fn explicit_staging_scope_fix_survives_epic_child_close_gh1452() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "staging");
+    let repo = f.dir.path();
+    git(repo, &["branch", "epic/child-target", "staging"]);
+    git(repo, &["push", "-q", "origin", "epic/child-target"]);
+    let id = "cas-ea89";
+    let (checkout, lane) = issue_delivery(&f, id, "epic/child-target");
+    let mut epic = assigned("cas-cca7", TaskType::Epic, "staging");
+    epic.assignee = None;
+    epic.branch = Some("epic/child-target".into());
+    f.put(&epic);
+    open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+        id.into(), epic.id, DependencyType::ParentChild,
+    )).unwrap();
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-ea89): own delivery"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    git(repo, &["checkout", "-q", "staging"]);
+    git(repo, &["merge", "-q", "--squash", &lane]);
+    git(repo, &["commit", "-qm", "fix(cas-ea89): integrated squash"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "staging"]);
+    let updated = call(&f.supervisor, serde_json::json!({
+        "action": "update", "id": id, "proof_scope_fix": true,
+        "target_branch": "staging", "reason": "Delivery intentionally integrated into staging",
+    })).await;
+    assert!(updated.contains("staging"), "{updated}");
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Delivery integrated into chosen target",
+        "commit_receipt": receipt,
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
+}
+
 /// The task closed on its proof and nothing of the lane was attributed to it.
 fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
     let task = f.task(id);
@@ -1374,6 +1480,77 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}: {response}");
         assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
     }
+}
+
+/// A reset starts at the target tip, without inheriting target history as
+/// delivery evidence when the no-delivery verdict is consumed.
+#[tokio::test]
+async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(repo, &["merge", "-q", "--ff-only", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("nocode-worker-session").unwrap();
+    worker.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&worker).unwrap();
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let id = "cas-d4d8";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+
+    // A hold and target merge happen without any delivery from this task.
+    let original = f.task(id).deliverables.factory_branch_start.unwrap();
+    let mut held = f.task(id);
+    held.status = TaskStatus::Open;
+    f.put(&held);
+    std::fs::write(repo.join("integrated.rs"), "pub fn integrated() {}\n").unwrap();
+    git(repo, &["add", "integrated.rs"]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): integrated sibling delivery"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let target = git(repo, &["rev-parse", "HEAD"]);
+    assert_ne!(original.base_sha, target);
+    // The incident's target checkout lagged origin. Start resets the lane to
+    // origin/main, while dispatch must not treat that integrated tip as work.
+    git(repo, &["reset", "--hard", &original.base_sha]);
+    assert_eq!(git(repo, &["rev-parse", "main"]), original.base_sha);
+    assert_eq!(git(repo, &["rev-parse", "origin/main"]), target);
+    let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id, "full":true})).await;
+    assert!(restarted.contains("REUSED FACTORY BRANCH RESET"), "{restarted}");
+    assert_eq!(git(&worker_path, &["rev-parse", "HEAD"]), target);
+
+    let request = serde_json::json!({
+        "action":"close", "id":id, "no_delivery":true,
+        "reason":"Read-only diagnosis completed without delivery",
+    });
+    let pending = call(&f.worker, request.clone()).await;
+    assert!(pending.contains("VERIFICATION REQUIRED"), "{pending}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+    let mut verdict = cas_types::Verification::approved(
+        "ver-reset-no-delivery".into(), id.into(), "Read-only diagnosis approved".into(),
+    );
+    verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("nocode-supervisor-session".into());
+    verdict.issuer_agent_id = verdict.agent_id.clone();
+    verdict.dispatch_id = Some(dispatch.id.clone());
+    use cas_store::VerificationStore;
+    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+    ).unwrap();
+    let closed = call(&f.worker, request).await;
+    assert_closed_without_lane(&f, id, &closed);
+    assert_eq!(f.task(id).deliverables.factory_branch_start.unwrap().base_sha, target);
+    assert!(dispatch.repository.unwrap().anchor_commits.is_empty());
 }
 
 /// Diagnostics expose the immutable source through the real task dispatcher.

@@ -6639,6 +6639,9 @@ impl CasCore {
             && rebased_delivery_has_same_patches(
                 repo_path, recorded, &candidate, &rebase_target, &task.id,
             );
+        // Target-only merge containers remain this delivery even after its
+        // worker starts a successor. A new authored commit still needs a park.
+        let target_sync = target_sync_only_advance(repo_path, task, &candidate, &rebase_target);
         // Prediction and persistence share the same ownership fences. A
         // proven identical rebase preserves a handed-off delivery; changed
         // continuations still require exclusive ownership.
@@ -6649,7 +6652,7 @@ impl CasCore {
                         .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
                 })
         };
-        if !unchanged_rebase && task_store.list(Some(TaskStatus::InProgress)).ok()?
+        if !unchanged_rebase && !target_sync && task_store.list(Some(TaskStatus::InProgress)).ok()?
             .iter().any(same_worker)
         {
             return None;
@@ -6660,7 +6663,7 @@ impl CasCore {
         }) {
             return None;
         }
-        if unchanged_rebase {
+        if unchanged_rebase || target_sync {
             return Some(candidate);
         }
         // A recovery merge makes the old anchor reachable again as a side
@@ -25093,6 +25096,49 @@ fn no_other_open_anchor_between(
                     })
         })
     })
+}
+
+/// A parked delivery can import its target without acquiring new task work.
+/// Require the anchor on the first-parent chain and every later commit to be
+/// a merge whose other parents are already reachable on the declared target.
+pub(crate) fn target_sync_only_advance(
+    repo: &std::path::Path,
+    task: &Task,
+    tip: &str,
+    target: &str,
+) -> bool {
+    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+        return false;
+    };
+    if [anchor, tip, target].iter().any(|reference| !is_safe_git_refname(reference)) {
+        return false;
+    }
+    let (Some(anchor), Some(tip), Some(target)) = (
+        resolve_branch_sha(repo, anchor), resolve_branch_sha(repo, tip), resolve_branch_sha(repo, target),
+    ) else {
+        return false;
+    };
+    let lane = task.deliverables.parked_branch.clone().or_else(|| {
+        task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+    });
+    if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+        && lane.as_deref().and_then(|branch| {
+            resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}"))
+        }).as_deref() != Some(tip.as_str())
+    {
+        return false;
+    }
+    let Ok(history) = git_stdout_lines(repo, &[
+        "rev-list", "--first-parent", "--parents", &format!("{anchor}..{tip}"), "--",
+    ]) else {
+        return false;
+    };
+    let commits: Vec<_> = history.iter().map(|line| line.split_whitespace().collect::<Vec<_>>()).collect();
+    commits.last().is_some_and(|last| last.get(1) == Some(&anchor.as_str()))
+        && commits.iter().all(|commit| {
+            commit.len() >= 3
+                && commit.iter().skip(2).all(|parent| git_commit_is_ancestor(repo, parent, &target))
+        })
 }
 
 /// cas-9668: an epic sync imports sibling commits without transferring the

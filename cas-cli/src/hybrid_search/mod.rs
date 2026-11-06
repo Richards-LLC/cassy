@@ -394,6 +394,23 @@ mod tests {
     }
 
     #[test]
+    fn natural_language_apostrophes_in_task_search_gh_1534() {
+        let index = SearchIndex::in_memory().unwrap();
+        let task = Task {
+            id: "cas-apostrophe".into(),
+            title: "viral idea narrates request back you're looking for idea echo".into(),
+            ..Default::default()
+        };
+        index.index_task(&task).unwrap();
+        for query in [task.title.as_str(), "you're", "title:\"you're looking\"", "'looking for' AND echo"] {
+            let results = index.search_unified(&SearchOptions {
+                query: query.into(), doc_types: vec![DocType::Task], ..Default::default()
+            }).unwrap_or_else(|error| panic!("{query:?}: {error}"));
+            assert!(results.iter().any(|result| result.id == task.id), "{query:?}");
+        }
+    }
+
+    #[test]
     fn unified_search_keeps_registered_fields_strict() {
         let index = SearchIndex::in_memory().unwrap();
         let entry = create_test_entry("001", "a searchable entry");

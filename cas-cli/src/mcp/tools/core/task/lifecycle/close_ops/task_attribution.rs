@@ -223,14 +223,19 @@ pub(super) fn recover_stale_start_for_integrated_receipt(
     let Some(target) = task.deliverables.work_target.as_ref() else {
         return false;
     };
+    let started = started_delivery(repo, task);
+    let oversized = started.as_ref().is_err_and(|reason| {
+        reason.contains("start-to-delivery range exceeds 200 commits")
+    });
     if target != &start.work_target
         || task.assignee.as_deref() != Some(start.assignee.as_str())
         || !crate::mcp::tools::core::task::repo_context::repo_answers_to(repo, &target.repo_selector)
         || !is_safe_git_refname(&start.branch)
         || !matches!(start.base_sha.len(), 40 | 64)
         || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || start.branch == crate::factory_isolation::worker_task_branch(&start.assignee, &task.id)
-        || started_delivery(repo, task).is_ok()
+        || (start.branch == crate::factory_isolation::worker_task_branch(&start.assignee, &task.id)
+            && !oversized)
+        || started.is_ok()
     {
         return false;
     }
@@ -243,6 +248,15 @@ pub(super) fn recover_stale_start_for_integrated_receipt(
     }
     let own_tip = worker_task_branch_ref(repo, &start.assignee, &task.id)
         .and_then(|branch| resolve_branch_sha(repo, &branch));
+    // A large source graph is irrelevant only after proving this exact
+    // delivery's tree landed as a squash. A rewritten base still refuses.
+    if oversized && !own_tip.as_deref().is_some_and(|tip| {
+        git_commit_is_ancestor(repo, &start.base_sha, tip)
+            && task.deliverables.factory_branch_anchor.as_deref() == Some(tip)
+            && target_reachable_squash_of(repo, tip, &receipt, &target.target_branch)
+    }) {
+        return false;
+    }
     if own_tip.as_deref() != Some(receipt.as_str())
         && !commit_is_task_attributable(repo, &receipt, &identity)
     {
@@ -256,7 +270,7 @@ pub(super) fn recover_stale_start_for_integrated_receipt(
         return false;
     }
     let audit = format!(
-        "[{}] DECISION: integrated commit_receipt {receipt} resolved task {} after a lane switch. \
+        "[{}] DECISION: integrated commit_receipt {receipt} resolved task {} after delivery validation. \
          Retired stale start boundary {} at {}; no branch ref was moved. All normal close gates remain required.",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"), task.id, start.branch, start.base_sha,
     );
@@ -287,11 +301,17 @@ fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool
 /// cas-940f base on this").
 fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     let subject = message.trim().lines().next().unwrap_or("");
+    // Conventional task scopes/prefixes and trailing task annotations claim
+    // ownership; a task named in explanatory prose after ':' is context.
+    let prefix = subject.split_once(':').map_or(subject, |(prefix, _)| prefix);
+    let annotation = subject.rsplit_once('(')
+        .and_then(|(_, suffix)| suffix.strip_suffix(')')).unwrap_or("");
     !identity
         .task_id
         .as_deref()
         .is_some_and(|id| message_references_task(subject, id))
-        && references_foreign_task(subject, identity)
+        && (references_foreign_task(prefix, identity)
+            || references_foreign_task(annotation, identity))
 }
 
 /// GH #1151: whether `commit` is another task's work under the subject rule

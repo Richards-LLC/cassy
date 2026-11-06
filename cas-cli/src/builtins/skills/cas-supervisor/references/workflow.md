@@ -354,7 +354,7 @@ end-of-lane, once the worker is done with that worktree.
    ```
 
    The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
-4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself. A Tier 1 delivery in `qa.mode=batch` then waits for the release verdict with no dispatch. Any other delivery opens the verification dispatch at the merge commit: run the verifier on it and send the worker nothing. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
+4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself. A Tier 1 delivery in `qa.mode=batch` then waits for the release verdict with no dispatch. Any other delivery opens the verification dispatch at the merge commit: run the verifier on it and send the worker nothing. When `worktree_merge` returns `PRE-MERGE VERIFICATION`, use your Task/Agent tool to spawn `subagent_type="task-verifier"` with `prompt="Verify task <task-id>"` for that exact dispatch. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
 
 If the merge is rejected on review rather than landed, the sanctioned exit from

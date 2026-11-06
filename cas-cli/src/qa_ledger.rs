@@ -89,6 +89,7 @@ pub struct Diagnostic {
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
     pub ok: bool,
+    pub schema_version: u32,
     pub rows: Vec<Row>,
     pub counts: BTreeMap<String, usize>,
     pub labels: BTreeMap<String, usize>,
@@ -154,7 +155,10 @@ fn cells(line: &str) -> Vec<String> {
 
 /// Parse without filesystem I/O. Journey coverage consumes these same typed rows.
 pub fn parse(body: &str, min_rows: usize) -> Report {
-    let mut report = Report::default();
+    let mut report = Report { schema_version: 1, ..Report::default() };
+    let mut declared_schema = false;
+    let cited = regex::Regex::new(r"\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b").unwrap();
+    let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
     let mut header = false;
     let mut matrix = false;
     let mut fence: Option<char> = None;
@@ -177,7 +181,18 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
         if fence.is_some() {
             continue;
         }
+        if header && line.starts_with("schema:") {
+            report.error(n, None, "schema", "ledger_schema", "schema header appears after the matrix", "put schema: 2 before the evidence matrix");
+        }
         if !header {
+            if let Some(version) = line.strip_prefix("schema:") {
+                if declared_schema || !matches!(version.trim(), "1" | "2") {
+                    report.error(n, None, "schema", "ledger_schema", "duplicate or unsupported ledger schema", "use one schema: 2 header for new walks; retain schema 1 for existing receipts");
+                } else {
+                    report.schema_version = version.trim().parse().unwrap();
+                }
+                declared_schema = true;
+            }
             if let Some(labels) = line.strip_prefix("labels:") {
                 label_header = Some((n, labels.into()));
             }
@@ -289,6 +304,16 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
                 "source-inferred cannot prove PASS",
                 "capture the real outcome or mark NOT EXERCISED",
             );
+        }
+        // Schema 1 receipts stay valid during an in-flight release. Fixtures
+        // remain weaker evidence, never a substitute for a live user-path walk.
+        if report.schema_version == 2 && c[5] != "fixture" {
+            if matches!(verdict, Verdict::Pass | Verdict::Fail) && !cited.is_match(&c[2]) {
+                report.error(n, Some(id), "expected", "expectation_source", "graded expectation has no cited source line", "cite a spec path:line in expected; an uncited expectation is a spec question, not FAIL");
+            }
+            if verdict == Verdict::Pass && !user_outcome.is_match(&c[3]) {
+                report.error(n, Some(id), "observed", "visible_outcome", "PASS has no user-observable outcome; database-only evidence cannot prove a user path", "record visible:, terminal: or http: output backed by the capture; put database read-back after it");
+            }
         }
         if verdict == Verdict::Fail
             && !(c[7].starts_with("cas-")
@@ -520,7 +545,7 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
     };
     let clean = |s: &str| s.replace(['\n', '\r'], " ").replace('|', "\\|");
     let mut out = format!(
-        "# QA evidence: {}\n\nbuild: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "# QA evidence: {}\n\nschema: 2\nbuild: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
         task.id,
         clean(revision),
         clean(&task.title),
@@ -536,7 +561,7 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
         HEADER
     );
     for (id, name) in rows {
-        out.push_str(&format!("| {} | {} | Describe the expected outcome | {} | {verdict} | source-inferred | - | - |\n", clean(&id), clean(&name), if no_code { "No runtime route; review the delivery artifact" } else { "Not run; capture against the named build" }));
+        out.push_str(&format!("| {} | {} | Describe the expected outcome [source: path:line] | {} | {verdict} | source-inferred | - | - |\n", clean(&id), clean(&name), if no_code { "No runtime route; review the delivery artifact" } else { "Not run; capture against the named build" }));
     }
     out.push_str("\n## Constants vs expectation\n\n| constant | location | visible contract | predictable? | defect task |\n| --- | --- | --- | --- | --- |\n\n## Contradictions\n\n| terminal state | surface | visible claim | conflicting surface | defect task |\n| --- | --- | --- | --- | --- |\n\n## Honesty\n\nRecord unavailable devices, automation artifacts and unrun conditions here.\n");
     out
@@ -545,6 +570,34 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_verdicts_require_cited_visible_evidence_cas_3d6d() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LEDGER.md");
+        std::fs::write(dir.path().join("capture.txt"), "captured user result").unwrap();
+        for (schema, expected, observed, verdict, diagnostic) in [
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "database: row saved; credits charged", "PASS", Some("visible_outcome")),
+            ("schema: 2", "Invented Make It Mine offer", "visible: offer shown", "FAIL", Some("expectation_source")),
+            ("schema: 2", "Revised hook", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
+            ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
+            ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
+            ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),
+            ("", "Legacy expectation", "database: row saved", "PASS", None),
+        ] {
+            let pass = usize::from(verdict == "PASS");
+            let body = format!("{schema}\ncells=1; PASS={pass}; FAIL={}; NOT EXERCISED=0\nlabels: real-build=1\n{HEADER}\n| M01 | revise | {expected} | {observed} | {verdict} | real-build | capture.txt | cas-fixture |\n", 1 - pass);
+            std::fs::write(&path, body).unwrap();
+            let report = crate::cli::qa_ledger::check(&path, None);
+            match diagnostic {
+                Some(code) => assert!(report.diagnostics.iter().any(|d| d.code == code), "{observed}: {}", report.refusal()),
+                None => assert!(report.ok, "{}", report.refusal()),
+            }
+        }
+    }
 
     #[test]
     fn scaffold_round_trip_preserves_honest_rows_and_task_policy() {
@@ -606,6 +659,7 @@ mod tests {
             ),
             (base.replace("capture.txt", "../outside.txt"), "capture"),
             (base.replace("capture.txt", "missing.txt"), "capture"),
+            (format!("{base}schema: 2\n"), "ledger_schema"),
         ] {
             std::fs::write(&path, body).unwrap();
             let report = check(&path, 1);

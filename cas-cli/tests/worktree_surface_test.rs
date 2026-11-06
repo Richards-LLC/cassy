@@ -3055,6 +3055,8 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         ("factory/peer-worker-cas-0700", false, false),
         ("factory/peer-worker-cas-c28b6df4a2b653af", false, true),
         ("factory/peer-worker-cas-c28b6df4a2b653af-r10", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r11", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r12", false, false),
     ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -3153,7 +3155,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
-        if branch.ends_with("-r10") {
+        if branch.ends_with("-r10") || branch.ends_with("-r11") || branch.ends_with("-r12") {
             // The receiver saw the first parked tip before the worker rebased
             // its pushed task branch onto a newer target commit.
             run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")], &repo.root);
@@ -3165,13 +3167,32 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             run_git(&["push", "origin", "epic/peer"], &repo.root);
             run_git(&["switch", "main"], &repo.root);
             run_git(&["fetch", "origin", "epic/peer"], &peer);
-            run_git(&["rebase", "origin/epic/peer"], &peer);
+            if branch.ends_with("-r10") {
+                run_git(&["rebase", "origin/epic/peer"], &peer);
+            } else {
+                run_git(&["merge", "--no-ff", "-m", "merge epic into parked delivery", "origin/epic/peer"], &peer);
+                if branch.ends_with("-r12") {
+                    std::fs::write(peer.join("new-task.rs"), "pub fn unreviewed() {}\n").unwrap();
+                    run_git(&["add", "new-task.rs"], &peer);
+                    run_git(&["commit", "-m", "fix: new task-authored work after park"], &peer);
+                }
+            }
             let rebased_tip = git_stdout(&peer, &["rev-parse", "HEAD"]);
             assert_ne!(rebased_tip, anchor);
             run_git(&["push", "--force-with-lease", "origin", branch], &peer);
             env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+            if branch.ends_with("-r12") {
+                let target_before_refusal = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+                let refusal = svc.factory(Parameters(request)).await
+                    .expect_err("new authored work after a target sync still needs a park");
+                assert!(refusal.message.contains("does not match task"), "{refusal}");
+                assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
+                assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), target_before_refusal);
+                env.set_current_dir(&fixture_cwd);
+                continue;
+            }
             let merged = svc.factory(Parameters(request)).await
-                .expect("a reviewed same-patch rebase must merge from the pushed tip");
+                .expect("an unchanged delivery must merge from its pushed rebase or target-sync tip");
             assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
             assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(rebased_tip.as_str()));
             let landed = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
@@ -3805,6 +3826,13 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let held = service.factory(Parameters(request.clone())).await
         .expect_err("required verification now precedes the merge");
     assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
+    assert!(
+        held.message.contains("spawn")
+            && held.message.contains("task-verifier")
+            && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
+        "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",
+        held.message
+    );
     let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
     let verdict = service.verification(Parameters(verification_req(serde_json::json!({
         "action": "add", "task_id": task_id, "dispatch_id": prepared.id,

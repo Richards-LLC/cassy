@@ -34,7 +34,7 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
    `Epic flow walk` with tip, child coverage, ledger path, counts and label
    split. Stop registered QA servers. A complete pass may still hold FAIL or
    NOT EXERCISED; completion is not approval.
-7. Once the `batch_receipt` exists and the queue has landed the epic, call `task action=close id=<epic-id>`
+7. Once the `batch_receipt` exists and the epic is integrated, call `task action=close id=<epic-id>`
    as the registered epic owner. With verification enabled, close returns the
    pending dispatch ID and bound head; ownership and assembly proof do not
    replace an epic verdict. Use that dispatch for the sealed task-verifier

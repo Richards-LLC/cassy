@@ -18,7 +18,7 @@ Group tasks that touch the same files into one lane; the worker count is the num
 
 **Spawn threshold for review findings.** Leave a verifier's non-blocking improvements and warnings in the verdict. File a follow-up only for reproduced, observable wrong behaviour that affects someone today; `task action=create` refuses a follow-up from a finding without `repro` and `affected`. A worker may fix a nit in its own lane before merge; a nit never reopens a merged task. At release prep, `cas qa polish --epic <id>` lists warnings by file: batch them into one polish task or drop them.
 
-**Verification tiers.** Close records the tier. Tier 0 (docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys only) gets no independent verifier and walks no journeys. Tier 1 in `qa.mode=batch` shares one release verdict, recorded with `verification action=batch_receipt verification_type=release`; `qa.mode=per_task`, the `force-verifier` label or an unmeasurable diff gets its own verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, merge-queue and close-gate code) always gets its own verifier plus an `Adversarial probe:` ledger row.
+**Verification tiers.** Close records the tier. Tier 0 (docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys only) gets no independent verifier and walks no journeys. Tier 1 in `qa.mode=batch` shares one release verdict, recorded with `verification action=batch_receipt verification_type=release`; `qa.mode=per_task`, the `force-verifier` label or an unmeasurable diff gets its own verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, integration and close-gate code) always gets its own verifier plus an `Adversarial probe:` ledger row.
 
 **Standalone follow-up work.** For one loose task after an epic closes, do not create a single-child epic. Create the task and spawn onto it; an open, unassigned `task_id` authorizes the spawn:
 
@@ -267,6 +267,6 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    factory action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    ```
 
-   With a queue, the queue landing is the merge to base; the local merge applies only without one. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
+   Queued landing integrates to base; merge locally only without it. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
 8. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
 9. Shut down the epic's workers by name once each has pushed and parked: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`.

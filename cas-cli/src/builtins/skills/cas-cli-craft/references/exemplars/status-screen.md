@@ -27,7 +27,7 @@ agent              status  task      last seen
 lively-panther-31  active  -            12s ago
 golden-koala-58    active  cas-1111      3s ago
 
---json for the queue peek and activity · --full for untruncated values
+--json for queue peek and activity · --full for untruncated values
 ```
 
 ## Annotations

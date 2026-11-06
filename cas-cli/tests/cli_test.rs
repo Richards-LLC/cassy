@@ -3441,8 +3441,8 @@ fn qa_ledger_init_check_and_no_overwrite() {
             if let Some(branch) = start_branch.filter(|branch| !branch.is_empty()) {
                 assert!(String::from_utf8_lossy(&output.stderr).contains(branch), "{suffix}: {output:?}");
             }
-            let paths = cas::config::resolved_factory_artifact_paths(&cas_root, Some(artifacts.to_str().unwrap()));
-            assert!(!paths.project_root.join(&sourced.id).exists());
+            let project_dir = cas::config::project_factory_artifacts_root(&cas_root, &artifacts);
+            assert!(!project_dir.join(&sourced.id).exists());
         }
     }
     assert_eq!(git(&["rev-parse", "HEAD"]), primary_head, "init leaves primary HEAD untouched");

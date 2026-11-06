@@ -833,6 +833,10 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
         let machine = Machine::new();
         machine.register("recipient", "recipient", AgentRole::Supervisor, "factory-a");
         machine.register("worker", "worker", AgentRole::Worker, "factory-a");
+        let agents = open_agent_store(&machine.cas).unwrap();
+        let mut worker = agents.get("worker").unwrap();
+        worker.machine_id = Some("box-a".into());
+        agents.update(&worker).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
         crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
             .save_to_cas_dir(&machine.cas).unwrap();
@@ -853,10 +857,6 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
             // exact message retained above must now reach the worker and both
             // supervisors before Cloud receives its delivered acknowledgement.
             server.reset().await;
-            let agents = open_agent_store(&machine.cas).unwrap();
-            let mut worker = agents.get("worker").unwrap();
-            worker.machine_id = Some("box-a".into());
-            agents.update(&worker).unwrap();
             let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
             let mut epic = crate::types::Task::new("cas-shared".into(), "Shared delivery".into());
             epic.task_type = crate::types::TaskType::Epic;

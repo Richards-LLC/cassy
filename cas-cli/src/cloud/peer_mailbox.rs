@@ -1414,13 +1414,13 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
-        // A transient directory failure leaves the claim unacknowledged for
-        // retry, just as failure to fetch authority before claiming did.
-        if recipient.role == AgentRole::Worker && directory.is_none() { continue; }
+        // Missing directory authority, including a temporarily absent local
+        // registration, leaves the claim unacknowledged for a later poll.
+        if recipient.role == AgentRole::Worker && directory.as_ref()
+            .is_none_or(|directory| !directory.matches_local(recipient)) { continue; }
         if recipient.role == AgentRole::Worker
             && (message.scope != PeerScope::Project || !same_repo
-                || directory.as_ref().is_none_or(|directory| !directory.matches_local(recipient)
-                    || directory.pair(&message.sender_agent_id, &recipient.id).is_err())
+                || directory.as_ref().is_none_or(|directory| directory.pair(&message.sender_agent_id, &recipient.id).is_err())
                 || !workers::allowed_intent(&message.body))
         {
             report.rejected += 1;

@@ -3851,6 +3851,8 @@ impl FactoryDaemon {
             &config.session_name,
             &config.factory_config.cwd,
         )?;
+        #[cfg(not(target_os = "linux"))]
+        super::super::reexec::pin_startup_image(&config.session_name)?;
         // Get initial terminal size (default for daemon without terminal)
         let (cols, rows) = (120, 40);
 
@@ -4484,6 +4486,11 @@ impl FactoryDaemon {
                     }
                     let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        // Consume CI before resuming the queue, so a known red
+                        // cannot admit another delivery in this pass.
+                        if let Err(error) = crate::train_ci::observe(&watch_cas_dir, &session_name) {
+                            tracing::warn!(%error, "train CI scan deferred");
+                        }
                         if let Err(error) = retry_runtime.block_on(
                             crate::mcp::tools::core::workflow::train_merge::resume_pending(&watch_cas_dir, &session_name)
                         ) {

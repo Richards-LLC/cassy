@@ -162,6 +162,9 @@ impl PeerMailboxRuntime {
                     ..Default::default()
                 },
             };
+            let local = agents.list(None).map_err(|error| error.to_string())?;
+            let owner = local.iter().find(|a| a.role == AgentRole::Supervisor
+                && a.factory_session.as_deref() == Some(self.factory_session.as_str()) && live_supervisor(a));
             let mut report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),
@@ -171,6 +174,7 @@ impl PeerMailboxRuntime {
                 &self.factory_session,
                 &self.consumer_id,
                 &history,
+                owner.map(|owner| (self.cas_dir.as_path(), owner.id.as_str())),
                 &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
                     use crate::mcp::tools::core::workflow::premerge_verification::{PeerReceiptIngested, ingest_peer_receipt};

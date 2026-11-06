@@ -32,20 +32,23 @@ defect. Never rerun QA or substitute the children's ledgers for the batch round.
    substitute for the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
-2. Run `cas qa ledger check <path> --task <id> --json` (the candidate
-   revision's command when the parser itself changed). It owns grammar, counts,
-   labels and breadth; a nonzero exit rejects the ledger: list each returned
-   line, row, field and message in the summary, record the rejection and stop.
-3. If the check passes, open every capture referenced by a `PASS` row with an
-   image-capable or terminal-capture reader. Judge the capture itself, not its
-   filename, ledger prose or source code: would a user performing that cell see
-   the stated `expected` outcome? If not, downgrade the row to `FAIL` in the
-   summary with the capture path and reason; never edit the worker's ledger.
+2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
+   and verifier share this parser. A nonzero exit rejects the ledger before
+   capture judgment. List each returned line, row ID, field and message in the
+   verification summary, record rejection, and stop. Use the candidate
+   revision's command when reviewing a change to the parser itself.
+3. Keep the JSON report. Schema 2 requires cited `path:line` expectations and
+   `visible:`, `terminal:` or `http:` outcomes; DB-only PASSes fail. Legacy receipts remain valid.
+
+4. Open every PASS capture and its cited source line. Judge the visible result
+   against that source: database rows, charges or a stored draft cannot prove what
+   the user sees. An unsupported expectation is a spec question. Record misleading
+   PASSes as FAIL with capture path and reason; never edit the worker's ledger.
    Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
    never as `PASS`.
-4. `NOT EXERCISED` rows are owed work, not failures. List every row's final
+5. `NOT EXERCISED` rows are owed work, not failures. List every row's final
    verdict, label and capture judgment with the shared-check result.
-5. Only then read the close reason. A capture-downgraded row or a ledger `FAIL`
+6. Only then read the close reason. A capture-downgraded row or a ledger `FAIL`
    is incomplete evidence whatever the close reason says.
 
 ### NOT EXERCISED rows: the supervisor decides
@@ -91,7 +94,7 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 
 ## Rule candidates
 
-On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.
+Only propose a rule candidate after at least two independent incidents from different tasks support the lesson. One verdict is not enough: retain that finding in the verdict and do not call `rule action=observe`. For a repeated lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>,<other-task-id>:<other-verification-id>"`, adding `id=<candidate-id>` for the same lesson. Cite completed verdicts belonging to those tasks; Cassy validates the links and records the bundle atomically before raising it to the supervisor and operator. Never create or promote the rule yourself.
 
 ## Code review procedure
 

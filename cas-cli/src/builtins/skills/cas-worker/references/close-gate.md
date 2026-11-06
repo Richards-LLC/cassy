@@ -57,7 +57,7 @@ A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothi
 Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 The park relay is the completion signal; send merge_request=true only for local_merge.
 A dispatched verifier reviews the candidate before publication; PASS publishes
-and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
 MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
@@ -111,8 +111,8 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
-- Risk: read task `risk` and `proof_targets`. Full Rust execution is
-  the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
+- Risk: read task `risk` and `proof_targets`. Full-suite evidence follows
+  the project's integration policy. Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
   A `risk=concurrency` non-Rust target needs one `note_type=loaded_proof` line;
   its refusal prints the parsed and missing fields and an example. Rust
@@ -152,5 +152,6 @@ Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, the plan section and its metric receipt when the brief links one,
 and safety facts. A missed plan metric is never non-blocking.
 
-When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
-verdict closes the task; follow [Verification-required close](recovery.md#verification-required-close).
+When close returns VERIFICATION REQUIRED naming a dispatch:
+Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+Follow [Verification-required close](recovery.md#verification-required-close).

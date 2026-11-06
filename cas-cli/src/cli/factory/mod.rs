@@ -14,6 +14,7 @@ mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
 mod queries;
+pub(crate) mod reexec;
 mod remote_attach;
 // cas-728b: pub(crate) (not private) so the director's stall-detection
 // confirmation step (ui/factory/director/events.rs) can call
@@ -735,6 +736,11 @@ pub enum TrainCommand {
         epic: String,
         /// Explicit order; omit to select parked deliveries by updated time.
         tasks: Vec<String>,
+        /// Visibly accept this observed red CI run; never waives a later red.
+        #[arg(long, requires = "reason")]
+        supervisor_override: bool,
+        #[arg(long, requires = "supervisor_override")]
+        reason: Option<String>,
     },
     /// Revert children's merges off their release train in one batch, return
     /// each task to its worker and re-enqueue the train PR once. One repair
@@ -751,6 +757,11 @@ pub enum TrainCommand {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Check whether this binary can adopt an inherited daemon manifest.
+    #[command(hide = true)]
+    HandoffCheck { #[arg(long)] schema: u32 },
+    /// Load the installed build without stopping panes or changing the daemon PID.
+    Reexec { #[arg(long)] session: Option<String> },
     /// Operator: resume an epic after reviewing its design against the plan.
     DesignReviewLift {
         epic: String,
@@ -1309,16 +1320,21 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 }
                 Ok(())
             }
+            FactoryCommands::HandoffCheck { schema } => {
+                println!("{}", crate::ui::factory::daemon::reexec::handoff_check(*schema)?);
+                Ok(())
+            }
+            FactoryCommands::Reexec { session } => reexec::execute(session.as_deref(), cli),
             FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
             FactoryCommands::CiWatchDryRun { minutes, session } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("ci-watch-dry-run requires a Cassy project"))?;
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
                 Ok(())
             }
-            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks } } => {
+            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()))?;
+                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
                 else { println!("{receipt}"); }
                 Ok(())

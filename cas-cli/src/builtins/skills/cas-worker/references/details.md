@@ -74,12 +74,22 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
 `per_task` is the explicit opt-in. A batch park opens no per-task round. Capture
 visual before/after evidence while building. The supervisor owns the release's one
 epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
-In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
 Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane
 
 `coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
-reaches only a registered worker in the same factory session, and Cassy copies
-it to that session's supervisor. Use it only for collision warnings; send status,
-blockers and handoffs to `target=supervisor`.
+reaches a registered worker in the same factory session, and Cassy copies it
+to that session's supervisor. Use this local lane only for collision warnings.
+
+For a shared API contract across machines, use `target=<worker-name>@<machine>`.
+Both workers must be live registrations of your account and repository with
+active task claims under the same epic. The receiving daemon rechecks scope;
+expired claims, stale workers and other accounts or epics are refused. Both
+supervisors receive quiet inbox copies when the message is delivered. Reply
+with the delivered notification's `in_reply_to`; retry/ack stays idempotent.
+This channel is advisory. Use only untyped messages, `kind=ask`, `answer` or
+`receipt`; `wake=false` remains quiet. Send status, blockers, handoffs and
+assignment decisions to `target=supervisor`. No urgency, merge escalation,
+broadcast or cross-project worker mail is authorized.

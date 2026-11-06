@@ -34,6 +34,20 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Worker contracts across machines
+
+`coordination action=message target=<worker>@<machine>` can carry an advisory
+contract between live workers of the same account and repository holding active
+claims under a common epic. Send and receive both validate Cloud identity and
+claims against synced task ancestry. Missing evidence fails closed; there is no
+worker succession redirect or cross-project worker route. Receive records quiet,
+idempotent copies for both supervisors before acknowledging the original mail.
+Only untyped, ask, answer and receipt intent is allowed; urgency, blocker/merge
+escalation and supervisor action kinds remain unavailable. Explicit `wake=false`
+stays quiet. Replies bind to a peer message delivered to that worker and recheck
+the current scope. This uses the existing MCP coordination dispatch; the factory
+message CLI retains its local queue behavior.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
@@ -162,6 +176,11 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+Agent-facing message provenance and pointer wakes stamp the current render time
+in the host's local timezone (`TZ` when set), in twelve-hour form with a zone
+(for example `6:36 AM ET`). Queue age and first/replay provenance remain separate.
+Supervisor clock times and ETAs require a clock read or measured start that turn.
+
 `cas factory message --session <name> --project-dir <project>` uses the
 destination session's store and queue session, even from another factory's
 shell with inherited `CAS_ROOT` and `CAS_FACTORY_SESSION`. Either selector
@@ -214,7 +233,10 @@ receipt. A train queue reservation retains control of that continuation.
 Rejection, a supervisor question, timeout or a failed review transport wakes
 the owning supervisor with findings; none grants a merge override. Review
 prompts, verdict output and harness diagnostics live under
-`.cas/verification-runs/<dispatch>/`. A manually claimed dispatch remains
+`.cas/verification-runs/<dispatch>/`. Automatic reviews use the existing
+account-aware launch resolver, including registered named profiles when the
+default home is logged out. Failed harness notices include up to eight stderr
+lines from the final 2 KiB and the full diagnostic log path. A manually claimed dispatch remains
 with its verifier. Non-daemon callers retain the existing manual handoff.
 
 A nontransactional task merge records a recovery intent before Git changes and
@@ -1140,6 +1162,16 @@ Verifier improvements stay in the verdict; verifiers never file or request tasks
 
 `task action=create` records finding provenance and derives priority from severity × reach. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, carries the `from-finding` label and a note recording origin, `repro` and `affected`. Missing runtime evidence is retained as theoretical backlog instead of refusing intake. Main reach requires a project-declared main journey and durable nonempty reproduction evidence; caller labels alone cannot attest it. A P0/P1 bug that an operator or supervisor observed directly need not infer an origin from finding-like text, and `finding_origin=none` declares that such text is not a finding; reviewers cannot use it. `qa_record` also retains theoretical pre-existing findings as backlog follow-ups with their triage axes. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
 
+After an exact task dispatch is approved, Cassy closes eligible merged deliveries
+through the ordinary close gates. Remaining close recovery, including no-code
+worker deliveries, belongs to that dispatch's supervisor; a durable recovery
+notice names the task and exact dispatch once. The supervisor runs `task
+action=close` after resolving any independent hold, without `supervisor_override`.
+Workers never retry close after approval, including when an older runtime queues
+such a retry. Replaying the same supervisor verdict repairs the recovery notice
+without adding another verdict. Changed repository proof still invalidates the
+approval and requires a fresh dispatch.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside
@@ -1531,6 +1563,15 @@ expansion or rewriting. The consuming tool determines platform support, cache
 creation and cleanup. Cassy does not migrate existing caches or restart servers.
 
 ## Testing
+
+New QA ledgers use `schema: 2`. Graded runtime expectations cite a spec
+`path:line`; PASS observations include captured `visible:`, `terminal:` or
+`http:` output. Database-only PASSes and uncited verdicts are refused by the
+shared CLI/close/verifier parser. Schema 1 receipts remain valid; fixture
+labels remain weaker evidence. The shipped `cas-qa-craft/scripts/walk-kit.mjs`
+is copied and pinned once per project under `scripts/qa/`, with project adapters
+for selectors, actual served builds and cleanup. Every generated row identifies
+the kit version. Run its regressions with `node --test scripts/test-walk-kit.mjs`.
 
 ### Duplicate-task warnings
 
@@ -2176,6 +2217,16 @@ merge request after correcting the cause.
 See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
 for setup, doctor and release-preflight diagnostics and manual repair.
 
+## Attach socket input diagnostics
+
+Attach `PaneInfo` snapshots report `input_bytes_received` (bytes accepted by
+that pane's input queue) and `input_bytes_written` (bytes physically written
+to its PTY master, including partial writes before a failure). Counts include
+harness input and terminal control replies; they do not establish that the
+child read the bytes. Older payloads decode with zero counts. A one-shot
+attach sender may close immediately after sending: outbound write failure
+must leave its inbound frames available for the daemon's input phase to drain.
+
 ## Build, assembly and CI policy
 
 While a release train is open in the target repository, `worktree_merge` refuses
@@ -2348,8 +2399,12 @@ key only while the peer is live, its heartbeat and sample remain fresh, and the
 route is less than 15 minutes old. Otherwise an expired note restores local
 admission; history still prevents routing onward. Unsent retry entries are
 cancelled when a route expires. A peer receiving a task with a route note staffs
-it locally or waits; it never routes it onward. A failed send retains the route for recovery and
-withholds local dispatch. `cas config set factory.auto_route_builds false`
+it locally or waits; it never routes it onward. A failed send retains the route for recovery;
+after three failed attempts (or a permanent refusal), the route expires with
+`cause=send_failed` and restores local admission. Mailbox duty rechecks routing
+config and local staffing before retries, cancelling obsolete asks even before
+their scheduled retry time. Ordinary peer messages retain their retry policy.
+`cas config set factory.auto_route_builds false`
 disables new automatic routes and releases existing routes to local admission.
 A forced local spawn also releases its prior automatic route.
 The peer supervisor still owns staffing and local admission; an ask grants no
@@ -2612,7 +2667,13 @@ fast rows once in `lane.yml`'s classification job, for both docs and code;
 non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
-Slim lanes omit broad Rust tests for factory pushes. Park reads, and never
+Slim lanes omit broad Rust tests for factory pushes. Release-train pushes reuse
+the existing queue archive and exhaustive Rust shards at the newest tip, with
+older runs cancelled. CI preserves complete native logs and a failure list in
+`train-rust-suite`; the existing daemon scan wakes the supervisor once on red.
+This replaces the supervisor's local pre-cut full run. The cut checks the green
+receipt for its starting tip before preparing the version-only commit, whose
+final proof belongs to the merge queue. Park reads, and never
 runs, a capped test PASS in every workspace crate whose sources or tests
 changed. A receipt in another crate does not count, and a missing test receipt
 is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
@@ -3230,6 +3291,13 @@ keys, legacy bare task directories and shared builds, and flags `DerivedData`
 and `target` build outputs stored as evidence. These sibling roots remain
 review-only even when artifact deletion is enabled for the current project.
 
+With `artifacts=true force=true dry_run=false`, GC also removes regular candidate
+files named `cas` after their task has been closed for at least 48 hours, when
+their actual SHA-256 matches a hash recorded in that task's `LEDGER.md` alongside
+a recorded `cas` version. It keeps the ledger, logs and checksum records, reports
+removed files and reclaimed bytes, and never follows symlinks. Open tasks, missing
+close dates and unrecorded or mismatched binary identities preserve the binary.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),
@@ -3458,6 +3526,23 @@ checks omissions. `cas rules refs <id> --json` lists tracked sites. See
 the optional stakeholder provenance seam.
 
 Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` can be promoted after its first verified occurrence. Only an operator-authorised write from the registered non-factory operator session files its idempotent encode chore, even while draft. Agent and supervisor writes create no encode chore and name the operator command (`rule action=update id=<id> tags="<current tags>"`); previous rule authority does not grant a later writer permission to file one. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+
+Unpromoted drafts expire from their creation time during the existing maintenance
+pass. `rules.draft_ttl_days` is a positive day count, default 30; set/get/list/reset
+use the ordinary config interface. Surfacing a draft does not renew its window.
+The versioned store retires eligible drafts and records their history under the
+same write lock, with `auto-retired: not promoted within 30 days` at the default
+window. Proven rules are excluded. Filesystem/cloud projections follow the
+existing rule-store wrapper, and cited sites get the existing retirement cleanup.
+Stores without lifecycle history refuse expiry rather than discard that history.
+
+A verifier's single verdict is not a rule candidate. `rule action=observe` needs
+at least two completed verdicts from different tasks in comma-separated
+`source_ids="<task>:<verdict>,<other-task>:<other-verdict>"`. Citations are checked
+against persisted verdicts before the complete bundle is recorded atomically;
+repeated verdicts on one task do not establish independent incidents. The
+supervisor and operator still decide whether to adopt a candidate as a rule.
+
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 
@@ -3710,6 +3795,11 @@ is not parked for merge. A valid integrated `commit_receipt` proves delivery
 even after a suffixed promotion branch was deleted and the canonical task
 branch never existed. If that receipt is invalid, close reports its validation
 reason before parking; `merged_into` does not override the declared work target.
+An attributable first park binds the validated pushed branch HEAD, including target
+freshness merges and canonical regeneration commits restricted to their known
+generated outputs. A generator's provenance task ID is not delivery ownership.
+Stacked deliveries retain their prior attributed boundary; the supervisor merge
+still refuses a source that differs from its immutable parked tip.
 After rebasing a parked delivery, push the rewritten tip and re-run close with
 checks for that exact tip before requesting its merge. Close preserves the full
 parked patch set, allows attributable corrections while the worker exclusively
@@ -3730,7 +3820,7 @@ anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 An undeclared helper that never delivered code may instead close with
 `no_delivery=true reason="<completed helper outcome>"`. This declaration is
-required on every attempt and audited with the registered caller, repository,
+required on every worker attempt and audited with the registered caller, repository,
 target SHA and measured refs. Cassy requires readable Git and task attribution,
 no recorded delivery or binding QA round, and no task commits or unmerged work
 on any local/origin candidate lane or closing HEAD. Empty diffs alone grant no
@@ -3739,6 +3829,12 @@ preserving verification and uncommitted-work checks; it sets no methodology,
 external reference or delivery anchor. It cannot be combined with other close
 receipts, dispositions or overrides. The unified MCP and per-action close
 requests expose this flag; there is no separate CLI task-close command.
+When verification is required, Cassy saves the explicit no-delivery reason and
+assignee atomically with the exact dispatch. Approval resumes that close through
+the ordinary absence and proof gates, lifting only that dispatch's verification
+wait. Independent holds stay blocked, and no worker close retry is queued.
+A reopen retires the saved intent; identical supervisor verdict replay after
+closure acknowledges history without closing or notifying again.
 A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
@@ -4261,7 +4357,11 @@ A registered supervisor can submit `factory action=train_merge id=<epic>` to
 merge that train's parked deliveries in updated-time order, or add
 `task_ids=["cas-first","cas-second"]` for an explicit order. The CLI parity is
 `cas factory train merge <epic> [task ...]`. Only exact parked anchors from the
-same train and factory session are admitted; queue options grant no CI override.
+same train and factory session are admitted. A known red train suite holds the
+queue, including a repair tip still pending. A registered supervisor can accept
+that observed run with `supervisor_override=true reason="<decision>"` (CLI:
+`--supervisor-override --reason "<decision>"`); Cassy records the decision on the
+train. The override never waives a later red or a delivery's own merge gates.
 
 The action records the queue and returns immediately. The existing factory
 daemon's CI scan resumes it through `worktree_merge`, reusing the current

@@ -672,7 +672,6 @@ impl CasCore {
                                 .ids_by_assignees_and_statuses(
                                     &[&worker.name, &worker.id],
                                     &[
-                                        TaskStatus::Open,
                                         TaskStatus::InProgress,
                                         TaskStatus::Blocked,
                                     ],
@@ -1259,6 +1258,7 @@ impl CasCore {
                 // cas-3b42: only this explicit clear makes a missing target
                 // a reviewed one (GH #1167); a new target ends it.
                 task.deliverables.work_target_cleared = corrected_target.is_none();
+                task.deliverables.work_target_pinned = corrected_target.is_some();
             }
             if proof_targets_fix {
                 task.proof_targets = effective_proof_targets.clone();

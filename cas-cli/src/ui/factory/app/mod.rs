@@ -37,6 +37,8 @@ pub(crate) mod delivery_evidence;
 mod assignment_evidence_tests;
 mod director_refresh;
 mod imports;
+#[cfg(unix)]
+pub(crate) mod handoff;
 mod init;
 mod merge_alert;
 #[cfg(test)]
@@ -1706,6 +1708,7 @@ impl FactoryApp {
         }
 
         let DeliveryInputs {
+            qa_progress,
             answered_blocked_workers,
             data: loaded_data,
             blocks_deps,
@@ -1857,6 +1860,13 @@ impl FactoryApp {
             }
         }
         for event in &delivery_events {
+            let refreshed_qa;
+            let event = if let DirectorEvent::QaWalkAttention { key, .. } = event {
+                let Some(advisory) = qa_progress.as_ref().and_then(|report|
+                    report.advisories.iter().find(|advisory| &advisory.key == key)) else { continue; };
+                refreshed_qa = DirectorEvent::QaWalkAttention { key: advisory.key.clone(), text: advisory.text.clone() };
+                &refreshed_qa
+            } else { event };
             if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = event
                 && active_ready_ids.contains(&task.task_id)
             { continue; }

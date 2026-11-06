@@ -165,6 +165,21 @@ def rust_assertion_diagnostics(source):
             j += 1
 
 
+def rust_runtime_inputs(source):
+    """Git command arguments and Result/Option expect messages are inputs,
+    not assertions about the returned text. Keep surrounding assertions in scope.
+    """
+    ts = tokens(source)
+    ps = pairs(ts)
+    for i, token in enumerate(ts[:-1]):
+        if token.string or ts[i + 1].value != '(' or i + 1 not in ps:
+            continue
+        if token.value == 'git' or (
+            token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
+        ):
+            yield ts[i + 1].end, ts[ps[i + 1]].start
+
+
 def lint_text_pins(source, path, ranges=None, changed_lines=None):
     """Find brittle prose pins in a conventional test file, independent of language."""
     if not is_test_file(path) and not ranges:
@@ -172,10 +187,13 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
     hits = []
     literals = list(text_literals(source, path))
     diagnostics = list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs' else []
+    inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
     for start, end, body in literals:
         if any(left <= start < right for left, right in diagnostics):
             continue
         if ranges and not any(left <= start < right for left, right in ranges):
+            continue
+        if any(left <= start < right for left, right in inputs):
             continue
         start_line = source.count('\n', 0, start) + 1
         end_line = source.count('\n', 0, end) + 1

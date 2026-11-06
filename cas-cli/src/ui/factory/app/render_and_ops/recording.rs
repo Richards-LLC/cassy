@@ -62,7 +62,8 @@ impl FactoryApp {
         };
 
         // Start recording on supervisor
-        if let Some(pane) = self.mux.get_mut(&self.supervisor_name) {
+        if let Some(pane) = self.mux.get_mut(&self.supervisor_name)
+            && !pane.is_recording() {
             if let Err(e) = pane.start_recording(&session_id, config.clone()).await {
                 tracing::error!("Failed to start recording for supervisor: {}", e);
             } else {
@@ -72,7 +73,8 @@ impl FactoryApp {
 
         // Start recording on workers
         for worker_name in &self.worker_names.clone() {
-            if let Some(pane) = self.mux.get_mut(worker_name) {
+            if let Some(pane) = self.mux.get_mut(worker_name)
+                && !pane.is_recording() {
                 if let Err(e) = pane.start_recording(&session_id, config.clone()).await {
                     tracing::error!(
                         "Failed to start recording for worker {}: {}",

@@ -17,6 +17,7 @@ mod rescue;
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 pub use rescue::RescuedWork;
 
+pub(crate) const MANAGED_SYNC_SUBJECT: &str = concat!("chore(cas): sync managed files to v", env!("CARGO_PKG_VERSION"));
 pub(crate) const MANAGED_RECONCILE_SUBJECT: &str = "chore(cassy): reconcile managed project files";
 
 pub(crate) struct ReconcileCommits {

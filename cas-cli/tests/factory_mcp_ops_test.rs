@@ -2434,7 +2434,8 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
     let registered = home.join(".codex-registered@example.com");
     std::fs::create_dir_all(&registered).expect("registered account directory");
-    std::fs::write(registered.join("auth.json"), "{}").expect("registered auth marker");
+    // Keep the named folder visible in remedies without supplying a usable
+    // login: an authenticated named account is now correctly auto-selected.
 
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
@@ -2450,7 +2451,9 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
         "no eligible account",
         "Pass config_dir",
         "project worker config_dir",
-        registered.to_str().unwrap(),
+        // Unusable accounts are listed by label with their rejection cause;
+        // only authenticated alternatives belong in the usable-home list.
+        "registered@example.com",
     ] {
         assert!(error.message.contains(detail), "missing {detail:?}: {error}");
     }
@@ -6580,6 +6583,84 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         legacy.join("historical-proof.txt").is_file(),
         "ambiguous legacy proof must never be cleaned by a project"
     );
+}
+
+#[tokio::test]
+async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
+    use sha2::{Digest, Sha256};
+
+    let env = FactoryTestEnv::new();
+    let base = env.cas_root.join("candidate-artifacts");
+    let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
+    std::fs::write(env.cas_root.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n", base.display().to_string(),
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let binary = b"recorded candidate binary";
+    let hash = format!("{:x}", Sha256::digest(binary));
+    let ledger = format!("Candidate: candidate/cas; --version: cas 9.99.0\nSHA-256: {hash}\n");
+    let store = env.task_store();
+    for (id, status, age, recorded) in [
+        ("cas-c001", TaskStatus::Closed, Some(49), true),
+        ("cas-c002", TaskStatus::Open, Some(49), true),
+        ("cas-c003", TaskStatus::Closed, Some(47), true),
+        ("cas-c004", TaskStatus::Closed, None, true),
+        ("cas-c005", TaskStatus::Closed, Some(49), false),
+        ("cas-c006", TaskStatus::Closed, Some(49), true),
+    ] {
+        let mut task = Task::new(id.into(), "candidate owner".into());
+        task.status = status;
+        task.closed_at = age.map(|hours| now - chrono::Duration::hours(hours));
+        store.add(&task).unwrap();
+        let dir = root.join(id);
+        std::fs::create_dir_all(dir.join("candidate")).unwrap();
+        std::fs::write(dir.join("candidate/cas"), binary).unwrap();
+        std::fs::write(dir.join("LEDGER.md"), if recorded { &ledger } else { "No binary identity" }).unwrap();
+        std::fs::write(dir.join("build.log"), "build completed").unwrap();
+        std::fs::write(dir.join("candidate/SHA256SUMS"), format!("{hash}  cas\n")).unwrap();
+    }
+    // Same name with different bytes is not the binary the ledger recorded.
+    std::fs::create_dir_all(root.join("cas-c001/other")).unwrap();
+    std::fs::write(root.join("cas-c001/other/cas"), "unrecorded binary").unwrap();
+    std::fs::write(root.join("cas-c006/LEDGER.md"), format!("SHA-256: {hash}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        let external = base.join("outside-project");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("cas"), binary).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("cas-c001/linked-candidate")).unwrap();
+    }
+
+    let mut request = factory_req("gc_cleanup");
+    request.full = Some(true);
+    request.force = Some(true);
+    request.dry_run = Some(false);
+    // Existing process/cache cleanup must not opt in to candidate deletion.
+    env.service.factory_request(Parameters(request.clone())).await.unwrap();
+    assert!(root.join("cas-c001/candidate/cas").is_file());
+    request.artifacts = Some(true);
+    request.dry_run = Some(true);
+    env.service.factory_request(Parameters(request.clone())).await.unwrap();
+    assert!(root.join("cas-c001/candidate/cas").is_file());
+    request.dry_run = Some(false);
+    let result = env.service.factory_request(Parameters(request)).await.unwrap();
+    let text = get_text(&result);
+    assert!(!root.join("cas-c001/candidate/cas").exists(),
+        "cas-82f8: recorded candidate of a task closed over 48h must be reclaimed: {text}");
+    assert!(text.contains(&format!("Candidate binaries: removed_files=1 reclaimed_bytes={}", binary.len())), "{text}");
+    // pin: binary reclamation must preserve the original ledger bytes.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/LEDGER.md")).unwrap(), ledger);
+    // pin: build logs remain durable evidence after binary reclamation.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/build.log")).unwrap(), "build completed");
+    // pin: the original binary checksum record must survive reclamation.
+    assert_eq!(std::fs::read_to_string(root.join("cas-c001/candidate/SHA256SUMS")).unwrap(), format!("{hash}  cas\n"));
+    for id in ["cas-c002", "cas-c003", "cas-c004", "cas-c005", "cas-c006"] {
+        assert_eq!(std::fs::read(root.join(id).join("candidate/cas")).unwrap(), binary,
+            "open/recent/unknown-date/unrecorded candidate must stay: {id}");
+    }
+    assert!(root.join("cas-c001/other/cas").is_file());
+    #[cfg(unix)]
+    assert_eq!(std::fs::read(base.join("outside-project/cas")).unwrap(), binary);
 }
 
 #[tokio::test]
@@ -10738,13 +10819,11 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         after.notes.contains("inside the worker worktree")
             && after
                 .notes
-                .to_lowercase()
-                .contains("rebase factory/swift-fox")
-            && after.notes.contains("current integration target tip")
-            && after.notes.contains("push")
-            && after.notes.contains("re-park")
-            && after.notes.contains("merge_request=true"),
-        "merge recovery must prescribe worktree-only rebase, push, and re-park: {}",
+                .contains("Merge the current integration target tip into")
+            && after.notes.contains("never rebase")
+            && after.notes.contains("push, then re-park")
+            && !after.notes.contains("merge_request=true"),
+        "merge recovery must preserve the anchor and use the push_branch park signal: {}",
         after.notes
     );
     assert!(
@@ -10942,6 +11021,7 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         let store = env.task_store();
         let mut task = store.get(&conflict_id).expect("task");
         task.deliverables.merge_conflicted = true;
+        task.deliverables.factory_branch_anchor = Some("parked-anchor".to_string());
         task.deliverables.parked_branch = Some("factory/brave-otter".to_string());
         store.update(&task).expect("update");
     }
@@ -10965,27 +11045,44 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         "a clean awaiting_merge must not be flagged as conflicted: {clean_text}"
     );
 
-    let conflict_show = env
-        .service
-        .inner
-        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                ..Default::default()
-            },
-            id: conflict_id.clone(),
-            with_deps: false,
-        }))
-        .await
-        .expect("show conflict");
-    let conflict_text = get_text(&conflict_show);
-    assert!(
-        conflict_text.to_uppercase().contains("MERGE CONFLICT"),
-        "a conflicted awaiting_merge must be visibly flagged in show: {conflict_text}"
-    );
-    assert!(
-        conflict_text.contains("factory/brave-otter"),
-        "parked branch should be surfaced in show: {conflict_text}"
-    );
+    for mode in [DeliveryMode::PushBranch, DeliveryMode::LocalMerge] {
+        let store = env.task_store();
+        let mut task = store.get(&conflict_id).expect("task");
+        task.delivery_mode = mode;
+        store.update(&task).expect("set delivery mode");
+        let conflict_show = env
+            .service
+            .inner
+            .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
+                id: conflict_id.clone(),
+                with_deps: false,
+            }))
+            .await
+            .expect("show conflict");
+        let text = get_text(&conflict_show);
+        assert!(text.contains("MERGE CONFLICT"), "{mode}: {text}");
+        assert!(text.contains("factory/brave-otter"), "{mode}: {text}");
+        // pin: anchored recovery must preserve history and route the completion signal by mode.
+        assert!(
+            text.contains("Merge the current integration target tip into"),
+            "{mode}: {text}"
+        );
+        assert!(text.contains("never rebase"), "{mode}: {text}");
+        assert!(text.contains("`task start`"), "{mode}: {text}");
+        assert_eq!(
+            text.contains("merge_request=true"),
+            mode == DeliveryMode::LocalMerge,
+            "{mode}: {text}"
+        );
+        match mode {
+            DeliveryMode::PushBranch => assert!(text.contains("push, then re-park"), "{text}"),
+            DeliveryMode::LocalMerge => assert!(text.contains("keep the branch local"), "{text}"),
+        }
+    }
 
     let list = env
         .service
@@ -12327,6 +12424,11 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         "reason": reason,
     }))
     .unwrap();
+    // cas-4c92: queued work bound by session ID is still Open, not active
+    // work holding this dirty lane against an audited supervisor assignment.
+    let mut queued = Task::new("cas-4c92-queued".into(), "Queued worker task".into());
+    queued.assignee = Some(registered_worker.id.clone());
+    tasks.add(&queued).unwrap();
     let response = env
         .service
         .task(Parameters(request))
@@ -13820,7 +13922,7 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
         .find(|line| line.starts_with(&format!("[cas #{spawn_id} spawn-boilerplate ")))
         .unwrap_or("");
     assert!(
-        spawn_provenance.ends_with("s first]"),
+        spawn_provenance.split("] [").next().unwrap_or("").ends_with("s first"),
         "the delayed spawn brief needs machine-readable one-line provenance: {text}"
     );
     let supervisor_provenance = text
@@ -13828,7 +13930,7 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
         .find(|line| line.starts_with("[cas #") && line.contains(" supervisor-authored "))
         .unwrap_or("");
     assert!(
-        supervisor_provenance.ends_with("s first]"),
+        supervisor_provenance.split("] [").next().unwrap_or("").ends_with("s first"),
         "the actual supervisor reply must retain one-line provenance: {text}"
     );
     assert!(

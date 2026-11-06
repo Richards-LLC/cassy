@@ -1872,6 +1872,27 @@ impl QueueJobs {
         taken
     }
 
+    /// Stop submitting from control, finish every already queued write, and
+    /// retain the original runtime so a refused exec can resume it unchanged.
+    pub(crate) async fn flush_for_reexec(&mut self, cas_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
+        self.settle_injects(cas_dir);
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.apply_completions();
+            let idle = match &self.exec {
+                Exec::Inline(done) => done.is_empty(),
+                Exec::Lanes(runtime) => [Lane::Read, Lane::Write, Lane::Blocking, Lane::External]
+                    .into_iter().all(|lane| {
+                        let stats = runtime.lane_stats(lane);
+                        stats.running.is_none() && stats.queued == 0
+                    }),
+            };
+            if idle { return Ok(()); }
+            anyhow::ensure!(Instant::now() < deadline, "Durable daemon jobs did not flush before reexec");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Close the lanes and wait up to `timeout` for queued critical work
     /// (stamps) to finish. Call before the StoreWorker drains (jobs.rs).
     pub(crate) fn drain_for_shutdown(&mut self, cas_dir: &Path, timeout: Duration) -> bool {

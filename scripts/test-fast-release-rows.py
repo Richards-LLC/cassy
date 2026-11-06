@@ -568,16 +568,28 @@ class FastRows(unittest.TestCase):
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
         command(self.repo, "git", "remote", "add", "origin", str(remote))
         self.copy_hook_installer()
+        self.write("scripts/example.py", "# baseline script\n")
+        self.write("scripts/test-example.py", "from pathlib import Path\n"
+                   "(Path(__file__).resolve().parents[1] / '.git/script-suite-ran').write_text('ran')\n")
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^10.0.0\n')
         self.commit()
+        fork = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^9.99.0\n')
         self.commit()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
         command(self.repo, "git", "checkout", "-qb", "factory/lane", "origin/epic/train")
         self.assertEqual(self.install_hooks().returncode, 0)
-        self.write("scripts/example.py", "# unrelated lane\n")
+        self.write("lane.txt", "branch change without scripts\n")
         self.commit()
+        # cas-3b04: the epic moves after the worker fork, touching a script the
+        # worker did not change. A two-tree diff would select its script suite.
+        command(self.repo, "git", "checkout", "-qb", "epic/train", fork)
+        self.write("scripts/example.py", "# later epic-only script change\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-q", "factory/lane")
         root = self.repo / ".cas"
         root.mkdir()
         with sqlite3.connect(root / "cas.db") as db:
@@ -588,9 +600,17 @@ class FastRows(unittest.TestCase):
             })))
         pushed = self.push()
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        ran = self.repo / ".git/script-suite-ran"
+        self.assertFalse(ran.exists(), pushed.stderr)
         _, path = self.receipt()
-        # pin: the fast-row receipt records the comparison ref actually used by the push.
-        self.assertIn("base=origin/epic/train ", path.read_text())
+        # pin: receipts name the actual comparison commit, while the hook log names its target ref.
+        self.assertIn(f"base={fork} ", path.read_text())
+        self.assertIn("(base origin/epic/train)", pushed.stderr)
+        self.write("scripts/example.py", "# this branch now changes the script\n")
+        self.commit()
+        pushed = self.push()
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertTrue(ran.exists(), pushed.stderr)
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"
@@ -770,7 +790,7 @@ class FastRows(unittest.TestCase):
                       (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
-                             "dev-top-level top-level punch exceeds 25 words")
+                             "[rule: punch_length]")
 
     def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
         path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"

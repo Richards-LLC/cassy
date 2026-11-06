@@ -400,17 +400,17 @@ pub(crate) fn queue_auto_unblock_worker_wake(
     })
 }
 
-/// GH #1036: the verdict is durable before this is called. Wake the owning
-/// worker once per approved dispatch so an early close retry cannot leave the
-/// task waiting forever. The ordinary prompt queue also wakes an idle pane.
-pub(crate) fn queue_approved_verification_close_retry(
+/// The exact verdict is durable before this is called. Any remaining ordinary
+/// close belongs to its supervisor, never to a worker forbidden to re-close.
+pub(crate) fn queue_approved_verification_close_recovery(
     cas_root: &Path,
     task: &cas_types::Task,
-    dispatch_id: &str,
-) -> Result<ApprovedCloseRetry, String> {
-    // cas-7fc3 (GH #1388): a worker waiting, Blocked, on exactly this
-    // dispatch is the documented verification wait. Its approval is what the
-    // worker waits for, so it gets the retry like an in-progress worker.
+    dispatch: &cas_types::VerificationDispatch,
+) -> Result<ApprovedCloseRecovery, String> {
+    let dispatch_id = &dispatch.id;
+    if dispatch.task_id != task.id {
+        return Err("close recovery dispatch belongs to another task".into());
+    }
     let eligible = match task.status {
         TaskStatus::InProgress | TaskStatus::AwaitingMerge => true,
         TaskStatus::Blocked => {
@@ -419,38 +419,48 @@ pub(crate) fn queue_approved_verification_close_retry(
         _ => false,
     };
     if !eligible {
-        return Ok(ApprovedCloseRetry::NotQueued(match task.status {
+        return Ok(ApprovedCloseRecovery::NotQueued(match task.status {
             TaskStatus::Blocked => format!(
-                "task {} is blocked by a hold other than the verification wait for {dispatch_id}; resolve that hold, then retry task close",
+                "task {} is blocked by a hold other than the verification wait for {dispatch_id}; the supervisor must resolve that hold before ordinary close",
                 task.id
             ),
             status => format!("task {} is {status}", task.id),
         }));
     }
-    let worker_name = match auto_unblock_worker_target(cas_root, task)? {
-        AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
-        AutoUnblockWorkerTarget::Skipped(reason) => return Ok(ApprovedCloseRetry::NotQueued(reason)),
-    };
-    let prompt_id = enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
-        (
-            format!("verification-approved-close:{dispatch_id}:worker:{worker_name}"),
-            format!(
-                "Verification approved for task {} (dispatch {dispatch_id}). Retry task close id={} now; the verdict is recorded.",
-                task.id, task.id
-            ),
-            format!("Verification approved: retry close {}", task.id),
-        )
-    })?;
-    Ok(ApprovedCloseRetry::Queued(prompt_id))
+    let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+    let rows = agents.list(None).map_err(|error| error.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+    let prefix = rows.iter().find(|agent| agent.id == recipient.id)
+        .and_then(crate::harness_policy::agent_tool_prefix).unwrap_or("");
+    let head = dispatch.repository.as_ref()
+        .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+        .unwrap_or_default();
+    let detail = format!(
+        "Verification approved for task {} (exact dispatch {dispatch_id}).{head} Supervisor recovery: inspect the live task and run {prefix}task action=close id={} through the ordinary gates, without supervisor_override. Resolve any independent hold first. {recovery}",
+        task.id, task.id,
+        recovery = super::close_ops::gate_text::SUPERVISOR_CLOSE_RECOVERY,
+    );
+    crate::supervisor_notices::enqueue(
+        cas_root, &recipient, "verification_close_recovery", &detail, dispatch_id,
+    ).map_err(|error| error.to_string())?;
+    Ok(ApprovedCloseRecovery::Queued)
 }
 
-/// cas-7fc3: the outcome of queueing a worker close retry after an approved
-/// verdict. `NotQueued` names the specific reason, never a generic
-/// "no live worker" when the worker is live but another gate holds.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ApprovedCloseRetry {
-    Queued(i64),
+pub(crate) enum ApprovedCloseRecovery {
+    Queued,
     NotQueued(String),
+}
+
+/// Completion of an explicit no-delivery close is quiet and dispatch-idempotent.
+pub(crate) fn queue_no_delivery_close_notice(
+    cas_root: &Path, task: &cas_types::Task, dispatch_id: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| (
+        format!("cassy-no-delivery-closed:{}:{dispatch_id}:worker:{worker_name}", task.id),
+        format!("{}Task {} is closed: its exact verdict approved your recorded no_delivery close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
+        format!("No-delivery close completed: {}", task.id),
+    ))
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
@@ -1244,7 +1254,7 @@ pub(crate) const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
 
 /// Exact verification waits have their own action path: the dispatch relay
 /// owns expiry (including close-persisted timeouts), and an approved verdict
-/// hands close back to the worker for a bounded grace period.
+/// hands remaining close recovery to its supervisor.
 /// Other verdicts, owners and independent holds retain the blocker alert.
 fn owned_verification_wait(
     root: &Path,
@@ -1275,7 +1285,7 @@ fn owned_verification_wait(
 /// Reconcile the director's blocked/liveness signals with the lifecycle
 /// outbox, never a direct prompt. The outbox is the durable episode memory:
 /// one initial receipt and at most one escalation for other blockers. Exact
-/// verification waits use their dispatch/worker action path instead. Runs on
+/// verification waits use their dispatch/supervisor recovery path instead. Runs on
 /// the daemon's store lane; `now` is injectable.
 pub(crate) fn reconcile_blocked_task_alert(
     root: &Path,
@@ -1319,15 +1329,20 @@ pub(crate) fn reconcile_blocked_task_alert(
     emit(false, None)?;
     if let Some(dispatch) = owned_verification_wait(root, task_id, &recipient.id) {
         // Keep the initial receipt quiet. Unresolved and timed-out dispatches
-        // share the expiry relay; approval gives the worker five minutes to
-        // retry before this episode's single deadline alert takes over.
+        // share the expiry relay; approval gives the supervisor five minutes to
+        // complete recovery before this episode's single deadline alert takes over.
         if dispatch.state == cas_types::VerificationDispatchState::Resolved
             && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
                 + chrono::Duration::minutes(5)
         {
-            emit(true, Some(
-                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
-            ))?;
+            let reason = if task.deliverables.no_delivery_close_intent.as_ref()
+                .is_some_and(|intent| intent.dispatch_id == dispatch.id)
+            {
+                "Verification was approved, but automatic no-delivery close is still held after five minutes; inspect the live assignment and holds, then finish its close."
+            } else {
+                "Verification was approved, but supervisor close recovery is still pending after five minutes; inspect the live task and finish its ordinary close. Do not ask the worker to retry."
+            };
+            emit(true, Some(reason))?;
         }
         if matches!(dispatch.state,
             cas_types::VerificationDispatchState::Pending
@@ -1339,6 +1354,14 @@ pub(crate) fn reconcile_blocked_task_alert(
             emit(true, Some(
                 "Verification is overdue beyond the expiry relay window; inspect the live task, re-dispatch verification and finish its close.",
             ))?;
+        }
+        return Ok(());
+    }
+    if let Some(dependencies) = super::super::block_hold::recorded_dependency_wait(tasks.as_ref(), task_id, start) {
+        if dependencies.iter().all(|dependency| matches!(dependency.status, TaskStatus::Closed | TaskStatus::Cancelled)) {
+            let resolved = dependencies.iter().map(|dependency| format!("{} {}", dependency.id, dependency.status))
+                .collect::<Vec<_>>().join(", ");
+            emit(true, Some(&format!("Dependencies resolved: {resolved}; restart the blocked task when its hold is cleared.")))?;
         }
         return Ok(());
     }
@@ -2237,140 +2260,100 @@ mod tests {
             .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
     }
 
-    #[test]
-    fn approved_verification_wakes_worker_once_to_retry_close_gh_1036() {
-        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wake")]);
+    #[tokio::test]
+    async fn approved_no_delivery_alert_explains_held_auto_close_cas_26d0() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-held"), ("CAS_AGENT_ROLE", "supervisor")]);
         let temp = TempDir::new().unwrap();
-        let agents = SqliteAgentStore::open(temp.path()).unwrap();
-        agents.init().unwrap();
-        let mut worker = agent_in_session(
-            "verdict-worker-id",
-            "verdict-worker",
-            AgentRole::Worker,
-            "sess-verdict-wake",
-        );
-        worker.status = AgentStatus::Idle;
-        agents.register(&worker).unwrap();
-
-        let mut task = Task::new("cas-verdict-wake".into(), "Approved close".into());
+        let root = temp.path();
+        let agents = crate::store::open_agent_store(root).unwrap();
+        for (id, role) in [("sup", AgentRole::Supervisor), ("worker", AgentRole::Worker)] {
+            agents.register(&agent_in_session(id, id, role, "sess-held")).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        let mut task = Task::new("cas-held-842d".into(), "Held no-delivery close".into());
         task.status = TaskStatus::InProgress;
-        task.assignee = Some("verdict-worker".into());
-        task.pending_verification = false; // verdict transaction already cleared it
-        let first = queue_approved_verification_close_retry(
-            temp.path(), &task, "vdispatch-approved-1",
-        ).unwrap();
-        let repeated = queue_approved_verification_close_retry(
-            temp.path(), &task, "vdispatch-approved-1",
-        ).unwrap();
-        assert_eq!(first, repeated);
-        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
-        queue.init().unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target, "verdict-worker");
-        assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wake now"));
-        assert!(!rows[0].urgent);
-
-        task.status = TaskStatus::Closed;
-        assert!(matches!(
-            queue_approved_verification_close_retry(temp.path(), &task, "vdispatch-approved-2")
-                .unwrap(),
-            ApprovedCloseRetry::NotQueued(_),
-        ));
-        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch(root, &task.id, "worker", "sup",
+            Utc::now() + chrono::Duration::minutes(10)).unwrap();
+        task.status = TaskStatus::Blocked;
+        task.pending_verification = true;
+        task.notes = format!("[{}] 🚫 BLOCKER {}", Utc::now().format("%Y-%m-%d %H:%M"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id));
+        task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
+            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()),
+        });
+        tasks.update(&task).unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        core.set_agent_id_for_testing("sup".into());
+        let response = core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(json!({"task_id":task.id, "dispatch_id":dispatch.id,
+                "status":"approved", "summary":"No delivery reviewed"})).unwrap())).await.unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked);
+        let current = cas_store::get_verification_dispatch(root, &dispatch.id).unwrap();
+        reconcile_blocked_task_alert(root, &task.id, current.resolved_at.unwrap() + chrono::Duration::minutes(5)).unwrap();
+        let rows = crate::store::open_prompt_queue_store(root).unwrap().peek_all(50).unwrap();
+        let alerts = rows.iter().filter(|row| row.source.starts_with(LIFECYCLE_WAKE_SOURCE_PREFIX)).collect::<Vec<_>>();
+        assert_eq!(alerts.len(), 1, "{rows:?}");
+        // pin: no-delivery approval finishes close automatically; a hold requires supervisor repair, never a worker retry.
+        assert!(alerts[0].prompt.contains("no-delivery") && !alerts[0].prompt.contains("worker has not retried close"),
+            "held auto-close must name the action its supervisor owns: {}", alerts[0].prompt);
     }
 
-    /// cas-7fc3 (GH #1388): a live worker Blocked on the documented
-    /// verification wait for exactly this dispatch gets the close retry. A
-    /// task held by any other blocker is not retried, and the receipt names
-    /// that hold rather than claiming no live worker exists.
     #[test]
-    fn approved_verification_retries_close_for_worker_in_verification_wait_cas_7fc3() {
-        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wait")]);
+    fn approved_verification_recovery_keeps_owner_and_independent_holds_cas_abb0() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "foreign-session")]);
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
         agents.init().unwrap();
-        let mut worker =
-            agent_in_session("wait-worker-id", "wait-worker", AgentRole::Worker, "sess-verdict-wait");
-        worker.status = AgentStatus::Idle;
-        agents.register(&worker).unwrap();
+        let mut owner = agent_in_session("owner-id", "owner", AgentRole::Supervisor, "owner-session");
+        owner.metadata.insert("supervisor_cli".into(), "codex".into());
+        let foreign = agent_in_session("foreign-id", "foreign", AgentRole::Supervisor, "foreign-session");
+        agents.register(&owner).unwrap();
+        agents.register(&foreign).unwrap();
         let tasks = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
         tasks.init().unwrap();
-        let blocked = |id: &str, blocker: &str| {
-            let mut task = Task::new(id.into(), "No-code artifact delivery".into());
-            task.status = TaskStatus::Blocked;
-            task.assignee = Some("wait-worker".into());
-            task.execution_note = Some("no-code".into());
-            task.notes = format!("[2026-10-27 15:00] 🚫 BLOCKER {blocker}");
-            tasks.add(&task).unwrap();
-            task
-        };
-
-        let waiting = blocked(
-            "cas-verdict-wait",
-            &crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-wait"),
-        );
-        let queued =
-            queue_approved_verification_close_retry(temp.path(), &waiting, "vdispatch-wait").unwrap();
-        assert!(matches!(queued, ApprovedCloseRetry::Queued(_)), "{queued:?}");
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target, "wait-worker");
-        // pin: the retry prompt must name the task whose wait was approved.
-        assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wait now"));
-
-        // A wait note left by an earlier, rejected dispatch A belongs to a
-        // finished cycle and must not disqualify the approval of dispatch B.
-        let mut restarted = Task::new("cas-verdict-restart".into(), "No-code artifact rework".into());
-        restarted.status = TaskStatus::Blocked;
-        restarted.assignee = Some("wait-worker".into());
-        restarted.notes = format!(
-            "[2026-10-27 14:00] 🚫 BLOCKER {}\n[2026-10-27 15:00] 🚫 BLOCKER {}",
-            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-rejected-a"),
-            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-current-b"),
-        );
-        tasks.add(&restarted).unwrap();
-        let retried =
-            queue_approved_verification_close_retry(temp.path(), &restarted, "vdispatch-current-b").unwrap();
-        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
-        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
-
-        // An ordinary blocker answered before this dispatch was requested
-        // ("need credentials") belongs to an earlier cycle and must not
-        // disqualify the retry the current wait is waiting for.
-        let dispatch = cas_store::create_verification_dispatch(
-            temp.path(),
-            "cas-verdict-answered",
-            "wait-worker-id",
-            "supervisor-id",
-            chrono::Utc::now() + chrono::Duration::minutes(10),
-        )
-        .unwrap();
-        let mut answered = Task::new("cas-verdict-answered".into(), "No-code artifact delivery".into());
-        answered.status = TaskStatus::Blocked;
-        answered.assignee = Some("wait-worker".into());
-        answered.notes = format!(
-            "[2026-01-02 09:00] 🚫 BLOCKER Need hub credentials before publishing.\n[{}] 🚫 BLOCKER {}",
-            dispatch.requested_at.format("%Y-%m-%d %H:%M"),
-            crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id),
-        );
-        tasks.add(&answered).unwrap();
-        let retried =
-            queue_approved_verification_close_retry(temp.path(), &answered, &dispatch.id).unwrap();
-        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
-        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
-
-        let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");
-        let refused =
-            queue_approved_verification_close_retry(temp.path(), &held, "vdispatch-held").unwrap();
-        let ApprovedCloseRetry::NotQueued(reason) = refused else {
-            panic!("a task held by another blocker must not be retried: {refused:?}");
-        };
-        assert!(reason.contains("blocked by a hold other than the verification wait"), "{reason}");
-        assert!(!reason.contains("no live assigned worker"), "{reason}");
-        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
+        let mut expected = 0;
+        for (name, status, verification_wait, eligible) in [
+            ("working", TaskStatus::InProgress, false, true),
+            ("parked", TaskStatus::AwaitingMerge, false, true),
+            ("waiting", TaskStatus::Blocked, true, true),
+            ("held", TaskStatus::Blocked, false, false),
+            ("closed", TaskStatus::Closed, false, false),
+            ("open", TaskStatus::Open, false, false),
+        ] {
+            let mut task = Task::new(format!("cas-recovery-{name}"), "Approved no-code task".into());
+            task.status = status;
+            task.assignee = Some("retired-worker".into());
+            let dispatch = cas_store::create_verification_dispatch(
+                temp.path(), &task.id, "retired-worker", &owner.id,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ).unwrap();
+            if status == TaskStatus::Blocked {
+                let blocker = if verification_wait {
+                    crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id)
+                } else {
+                    "Waiting on the operator's scope decision".into()
+                };
+                task.notes = format!("[{}] 🚫 BLOCKER {blocker}", dispatch.requested_at.format("%Y-%m-%d %H:%M"));
+            }
+            tasks.add(&task).unwrap();
+            let first = queue_approved_verification_close_recovery(temp.path(), &task, &dispatch).unwrap();
+            let retry = queue_approved_verification_close_recovery(temp.path(), &task, &dispatch).unwrap();
+            assert_eq!(first, retry, "{name}: recovery replay must be idempotent");
+            assert_eq!(matches!(first, ApprovedCloseRecovery::Queued), eligible, "{name}");
+            expected += usize::from(eligible);
+            let rows = queue.peek_all(20).unwrap();
+            assert_eq!(rows.len(), expected, "{name}");
+            assert!(rows.iter().all(|row| row.target == owner.name
+                && row.factory_session.as_deref() == Some("owner-session")), "{rows:?}");
+            // pin: recovery commands must use the actual recipient's registered harness alias.
+            assert!(rows.iter().all(|row| row.prompt.contains("mcp__cs__task action=close")), "{rows:?}");
+            assert_eq!(tasks.get(&task.id).unwrap().status, status, "routing cannot lift holds");
+        }
     }
 
     #[test]

@@ -346,8 +346,10 @@ prepare() {
     if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
         git add -- changelog.d
     fi
+    local ci_trailer=()
+    [[ -z "${train_ci_start:-}" ]] || ci_trailer=(-m "Train-CI-Head: $train_ci_start")
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
-        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
+        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version." "${ci_trailer[@]}"
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
     printf '%s\n' "$version"
 }
@@ -464,6 +466,19 @@ fi
 fetch_base
 train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
+# The starting train tip, before version preparation, must already have its
+# CI suite receipt. The queue alone proves the subsequent release commit.
+if [[ "$branch" == epic/release-train-* ]]; then
+    train_ci_start="$(git rev-parse HEAD)"
+    # A retry of this same prepared release reuses its original starting-tip
+    # receipt. The version-only commit is proved by the final queue, not again
+    # by the train suite. A new product commit must earn its own receipt.
+    if prior_ci_start="$(python3 "$script_dir/train-ci.py" prepared --repo "$repo_root")"; then
+        train_ci_start="$prior_ci_start"
+    fi
+    python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin" \
+        || die "train full-suite receipt is not green; no release commit was prepared"
+fi
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"

@@ -42,6 +42,8 @@
 //! }
 //! ```
 
+#[cfg(unix)]
+mod adopt;
 mod claude_binary;
 pub use claude_binary::{ClaudeBinaryError, MIN_CLAUDE_VERSION, resolve_claude_binary};
 pub mod claude_trust;

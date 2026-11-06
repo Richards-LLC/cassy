@@ -2750,10 +2750,11 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
         "9.99.1",
     )
     .expect("running sessions get a notice");
-    assert!(notice.contains("2 running factory session(s) keep their current build"), "{notice}");
-    assert!(notice.contains("pinned-session keep spawning workers"), "{notice}");
-    assert!(notice.contains("older-session started before build pinning and cannot spawn"), "{notice}");
-    assert!(notice.contains("9.99.1") && notice.contains("cas factory kill <session>"), "{notice}");
+    assert!(notice.contains("2 running factory session(s)"), "{notice}");
+    assert!(notice.contains("pinned-session"), "{notice}");
+    assert!(notice.contains("older-session"), "{notice}");
+    assert!(notice.contains("9.99.1") && notice.contains("cas factory reexec --session <session>"), "{notice}");
+    assert!(notice.contains("relaunch required"), "{notice}");
 }
 
 // One real Git repo carries the seven downstream drift shapes from cas-6718.
@@ -2941,23 +2942,23 @@ fn managed_commit_names_local_only_pr_next_step_cas_3b812() {
 }
 
 #[test]
-fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
+fn managed_sync_commits_on_named_branches_cas_10ad() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let home = env.home().to_path_buf();
     let mut failures = Vec::new();
     for (branch, can_commit) in [
-        ("main", false),
-        ("staging", false),
-        ("production", false),
-        ("release/base", false),
-        ("epic/shared", false),
+        ("main", true),
+        ("staging", true),
+        ("production", true),
+        ("release/base", true),
+        ("epic/shared", true),
         ("repair/managed", true),
         ("detached", false),
         ("repair/config-unreadable", false),
-        ("release/shared-state", false),
-        ("repair/unknown-default", false),
+        ("release/shared-state", true),
+        ("repair/unknown-default", true),
     ] {
         let project = cas_6718_drifted_project(&home.join(branch));
         let root = if branch == "release/shared-state" {
@@ -3014,6 +3015,10 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         if (after != before) != can_commit || report.commit.is_some() != can_commit {
             failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
         }
+        if can_commit {
+            assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty(), "{branch}");
+            assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{}..HEAD", before.trim())]).trim(), "1");
+        }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
         if !can_commit && report.commit.is_none() {
             assert_eq!(report.outcome, "staged", "{branch}");
@@ -3033,6 +3038,27 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
             assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
         }
         assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
+        if branch == "main" {
+            let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+            let settings_path = project.join(".claude/settings.json");
+            let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+            settings["theme"] = serde_json::json!("staged-project-choice");
+            std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+            cas_6718_git(&project, &["add", ".claude/settings.json"]);
+            let index: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
+            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+            assert_eq!(report.outcome, "staged", "project settings are never a managed commit");
+            assert!(report.commit_warning.unwrap().contains("staged"));
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+            let actual: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
+            assert_eq!(actual, index);
+        }
+        if branch == "detached" {
+            cas_6718_git(&project, &["checkout", "-qB", "main"]);
+            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+            assert_eq!(report.outcome, "committed", "rerun must clear pure sync staging");
+            assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -3043,6 +3069,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
+    cas_6718_git(&project, &["checkout", "-q", "main"]);
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
     let harnesses = crate::cli::project_files::harnesses(&project);
@@ -3061,7 +3088,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         "update left managed drift: {status}\n{}",
         cas_6718_git(&project, &["diff"])
     );
-    assert!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).starts_with("chore(cassy):"));
+    assert_eq!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).trim(), format!("chore(cas): sync managed files to v{}", env!("CARGO_PKG_VERSION")));
     for path in [
         ".claude/skills/cas/SKILL.md",
         ".claude/skills/cas-tdd/SKILL.md",

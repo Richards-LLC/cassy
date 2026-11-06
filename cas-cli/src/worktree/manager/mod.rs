@@ -12,7 +12,7 @@ use crate::types::{GitContext, Worktree};
 use crate::worktree::git::{GitError, GitOperations};
 
 /// Configuration for worktree management
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeConfig {
     /// Whether worktree creation is enabled
     pub enabled: bool,
@@ -184,6 +184,8 @@ pub(crate) fn residue_overlapping_merge(
 }
 
 impl WorktreeManager {
+    pub(crate) fn handoff_config(&self) -> WorktreeConfig { self.config.clone() }
+
     fn worker_ref(&self, worker_name: &str) -> WorktreeResult<&Worktree> {
         self.workers
             .get(worker_name)
@@ -505,13 +507,16 @@ impl WorktreeManager {
                 };
 
                 if !conflicting.is_empty() {
-                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
-                        crate::worktree::git::DirtyClassification {
-                            blocking: conflicting,
-                            warnings: Vec::new(),
-                        }
-                        .describe_blocking(),
-                    )));
+                    let mut details = crate::worktree::git::DirtyClassification {
+                        blocking: conflicting,
+                        warnings: Vec::new(),
+                    }.describe_blocking();
+                    if target_dirty.blocking.iter().all(|entry| entry.status.ends_with(' '))
+                        && crate::cli::project_files::staged_sync_only(&self.repo_root).unwrap_or(false)
+                    {
+                        details.push_str("\nCassy-managed sync changes are staged. Run `cas update --sync` in the shared target checkout to commit them, then retry worktree_merge.");
+                    }
+                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(details)));
                 }
 
                 tracing::warn!(

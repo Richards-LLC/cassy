@@ -62,8 +62,11 @@ When required supervisor review, approval or another decision blocks work:
 
 ## Verification-required close
 
-When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
-verdict closes the task; never re-close. Send only the blocker the refusal
+When close returns VERIFICATION REQUIRED naming a dispatch:
+Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+On older runtimes that queue a worker retry, the supervisor reads the exact
+dispatch and retries ordinary close through the existing gates.
+Send only the blocker the refusal
 names, if any, set `status=blocked` and record exactly this one-line blocker note:
 `Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
 Any other text wakes the supervisor as a real blocker. Start no other task

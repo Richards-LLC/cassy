@@ -16,7 +16,7 @@ material, not tests to install unchanged in another project.
 - [Real Git fixtures](#real-git-fixtures)
 - [Environment and cwd isolation](#environment-and-cwd-isolation)
 - [Independent expectations and missing assertions](#independent-expectations-and-missing-assertions)
-- [Hub-web: behavior versus internal collaborators](#hub-web-behavior-versus-internal-collaborators)
+- [Browser tests: behavior versus internal collaborators](#browser-tests-behavior-versus-internal-collaborators)
 - [Tests that pin unsafe behavior](#tests-that-pin-unsafe-behavior)
 - [Source and prose audits](#source-and-prose-audits)
 
@@ -137,7 +137,7 @@ Take expected values from a specification, independently worked example,
 known-good literal or external contract. Repeating production's algorithm can
 repeat its bug. A hand-derived snapshot with the same formatting/mapping logic
 has the same problem; review public-output snapshots against the actual contract.
-These schematic anti-examples use hub-web's `backoffDelay`:
+These schematic anti-examples use `backoffDelay`:
 
 ```typescript
 // Anti-example: duplicates the exponential calculation and jitter formula.
@@ -158,11 +158,10 @@ A constant compared with a restated literal is a change detector, not proof of
 retry behavior. A no-panic test needs an explicit no-panic contract; error or
 rejection tests must inspect the returned error rather than discard a `Result`.
 
-## Hub-web: behavior versus internal collaborators
+## Browser tests: behavior versus internal collaborators
 
-Use Vitest against the exported capability, as in
-`hub-web/src/connection-state.test.ts`. Keep `backoffDelay` real and control only
-its randomness seam. Copy the good example beside `connection-state.ts`:
+Use Vitest against the exported capability. Keep `backoffDelay` real and control only
+its randomness seam. Copy the good example beside the module under test:
 
 ```typescript
 import { expect, it } from "vitest";

@@ -6,9 +6,9 @@ Reminders are a safety net for work that may go quiet, not polling, acknowledgem
 
 | Situation | First action | Reminder? |
 |---|---|---|
-| Worker reports `MERGE REQUIRED` | Merge now; run the verifier on any pre-merge dispatch Cassy opens (PASS publishes and closes). In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. | No; cancel any phase reminder after |
+| Worker reports `MERGE REQUIRED` | Merge now; run the verifier on any pre-merge dispatch Cassy opens (PASS publishes and closes). In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. | No; cancel any phase reminder after |
 | Parked merge refused only for pending CI | Let Cassy's armed exact-SHA retry finish | No; act only on its notice |
-| Other CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
+| CI on a pushed or integrated SHA | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
 | Long release, publication or detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice |
 | Context-pressure handoff | Commit, push, task note, explicit handoff | One time checkpoint only if no next owner can acknowledge in time |
 | Blocked worker recovery | Read state and send one recovery instruction | Only when an external dependency could otherwise go quiet |

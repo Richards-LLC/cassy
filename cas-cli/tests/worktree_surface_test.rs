@@ -2553,6 +2553,88 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 }
 
 #[tokio::test]
+async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
+    let mut env = test_env();
+    for continuation in ["generated", "foreign", "spoofed"] {
+        let f = rebound_merge_fixture(&mut env).await;
+        run_git(&["switch", "main"], &f.repo.root);
+        std::fs::write(f.repo.root.join("released.txt"), "released upstream\n").unwrap();
+        run_git(&["add", "released.txt"], &f.repo.root);
+        run_git(&["commit", "-m", "fix(cas-abcd): released upstream"], &f.repo.root);
+        run_git(&["push", "origin", "main"], &f.repo.root);
+        run_git(&["merge", "--no-ff", "main", "-m", "merge(cas-e429): import main"], &f.worker);
+        let attributed = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        let tasks = open_task_store(&f.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.deliverables.factory_branch_anchor = Some(attributed.clone());
+        tasks.update(&task).unwrap();
+
+        run_git(&["switch", "epic/rebound"], &f.repo.root);
+        std::fs::write(f.repo.root.join("sibling.txt"), "integrated sibling\n").unwrap();
+        run_git(&["add", "sibling.txt"], &f.repo.root);
+        run_git(&["commit", "-m", "fix(cas-abcd): advance target"], &f.repo.root);
+        run_git(&["push", "origin", "epic/rebound"], &f.repo.root);
+        run_git(&["merge", "--no-ff", "epic/rebound", "-m", "sync target before first park"], &f.worker);
+        let merged = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        let generated = "cas-cli/src/builtins/reference-history.json";
+        std::fs::create_dir_all(f.worker.join(generated).parent().unwrap()).unwrap();
+        std::fs::write(f.worker.join(generated), "{}\n").unwrap();
+        run_git(&["add", generated], &f.worker);
+        run_git(&["commit", "-m", "build(builtins): regenerate reference-history from merged history", "-m",
+            &format!("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9])], &f.worker);
+        if continuation != "generated" {
+            std::fs::write(f.worker.join("foreign.txt"), "another task's work\n").unwrap();
+            run_git(&["add", "foreign.txt"], &f.worker);
+            let (subject, body) = if continuation == "foreign" {
+                ("feat(cas-abcd): unrelated continuation", "Another task's delivery")
+            } else {
+                ("build(builtins): regenerate reference-history from merged history",
+                 "Rebuilt by scripts/regenerate-generated-artifacts.sh after merging HEAD (cas-fb11).")
+            };
+            run_git(&["commit", "-m", subject, "-m", body], &f.worker);
+        }
+        let head = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", &f.branch], &f.worker);
+        let local_before = git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]);
+        let remote_before = git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        env.set_current_dir(&f.worker);
+        let closed = delivery_service(&f.cas_root, "rebound-worker").task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": format!("PASS {head}: fixture proof"),
+        })))).await.unwrap();
+        let text = get_text(&closed);
+        let parked = tasks.get(&task.id).unwrap();
+        if continuation == "foreign" {
+            assert_eq!(parked.status, TaskStatus::InProgress, "{text}");
+            assert!(text.contains("DELIVERY BRANCH UNRESOLVED"), "{text}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
+        env.set_current_dir(&f.repo.root);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(f.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        if continuation != "generated" {
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            let refused = f.service.factory(Parameters(merge)).await.expect_err("foreign continuation must never land");
+            assert!(refused.message.contains("PARKED DELIVERY SOURCE MOVED"), "{continuation}: {refused}");
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()),
+            "cas-9533: first park must bind the pushed, validated HEAD, not the earlier attributed merge: {text}");
+        let merged = f.service.factory(Parameters(merge)).await.expect("the first parked HEAD must merge without a re-park");
+        assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
+        assert_eq!(git_stdout(&f.repo.root, &["show", &format!("epic/rebound:{generated}")]), "{}");
+    }
+    env.set_current_dir(cas::test_paths::runtime_fixture_parent());
+}
+
+#[tokio::test]
 async fn cas_e051_required_verification_precedes_publication_without_blocking_exempt_lanes() {
     let mut env = test_env();
     for verdict in ["timed_out", "approved", "rejected"] {
@@ -2814,7 +2896,11 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
 #[tokio::test]
 async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
     let mut env = test_env();
-    for unpublished_merge in [true, false] {
+    for (unpublished_merge, overlaps_delivery, racing_writer) in [
+        (true, false, false), (false, false, false), (true, true, false),
+        #[cfg(unix)]
+        (true, true, true),
+    ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2830,9 +2916,15 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         let target = fixture.cas_root.join("target-writer");
         run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
         if unpublished_merge {
+            if overlaps_delivery {
+                // Git can merge both additions, but the unpublished extra
+                // content in a reviewed file must never inherit approval.
+                std::fs::write(fixture.repo.root.join(".git/info/attributes"), "delivery.txt merge=union\n").unwrap();
+            }
             run_git(&["checkout", "-b", "unpublished-sibling"], &target);
-            std::fs::write(target.join("unpublished.txt"), "Never published\n").unwrap();
-            run_git(&["add", "unpublished.txt"], &target);
+            let file = if overlaps_delivery { "delivery.txt" } else { "unpublished.txt" };
+            std::fs::write(target.join(file), if overlaps_delivery { "approved task delivery\nunreviewed extra\n" } else { "Never published\n" }).unwrap();
+            run_git(&["add", file], &target);
             run_git(&["commit", "-m", "Unpublished sibling"], &target);
             run_git(&["checkout", "epic/rebound"], &target);
             run_git(&["merge", "--no-ff", "-m", "Local merge before rejected publication", "unpublished-sibling"], &target);
@@ -2854,6 +2946,46 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         })))).await.unwrap();
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
         let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        if overlaps_delivery {
+            // The real merge returns its own SHA, then a third writer advances
+            // the same target before the handler observes the landing.
+            let race_tip = fixture.cas_root.join("third-writer-tip");
+            #[cfg(unix)]
+            if racing_writer {
+                use std::os::unix::fs::PermissionsExt;
+                let bin = fixture.cas_root.join("git-race-hooks");
+                std::fs::create_dir_all(&bin).unwrap();
+                let real_git = String::from_utf8(Command::new("sh").args(["-c", "command -v git"])
+                    .output().unwrap().stdout).unwrap();
+                let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+                let armed = bin.join("merged");
+                let script = format!(r#"#!/bin/sh
+real={real}
+[ "$1" = committed ] && [ ! -f {armed} ] || exit 0
+while read old new reference; do
+  if [ "$reference" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
+    touch {armed}
+    printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
+    "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
+    "$real" -C {target} rev-parse HEAD > {tip}
+  fi
+done
+"#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
+                std::fs::write(bin.join("reference-transaction"), script).unwrap();
+                std::fs::set_permissions(bin.join("reference-transaction"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                run_git(&["config", "core.hooksPath", bin.to_str().unwrap()], &fixture.repo.root);
+            }
+            let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
+            assert!(refused.message.contains(if racing_writer { "subsequent target progress" } else { "reviewed delivery" }), "{refused}");
+            let expected_target = if racing_writer {
+                std::fs::read_to_string(&race_tip).expect("third writer ran after the owned merge").trim().to_string()
+            } else { local_review_base.clone() };
+            assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), expected_target,
+                "refused landing may undo only its own merge, never a third writer: {refused}");
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), published_base);
+            assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
+            continue;
+        }
         // Roll back the unpublished local merge, then let a disjoint delivery
         // advance the published target, exactly as soundwave's main reflog did.
         run_git(&["reset", "--hard", &published_base], &target);
@@ -3312,6 +3444,8 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         ("factory/peer-worker-cas-0700", false, false),
         ("factory/peer-worker-cas-c28b6df4a2b653af", false, true),
         ("factory/peer-worker-cas-c28b6df4a2b653af-r10", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r11", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r12", false, false),
     ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -3410,7 +3544,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
-        if branch.ends_with("-r10") {
+        if branch.ends_with("-r10") || branch.ends_with("-r11") || branch.ends_with("-r12") {
             // The receiver saw the first parked tip before the worker rebased
             // its pushed task branch onto a newer target commit.
             run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")], &repo.root);
@@ -3422,13 +3556,32 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             run_git(&["push", "origin", "epic/peer"], &repo.root);
             run_git(&["switch", "main"], &repo.root);
             run_git(&["fetch", "origin", "epic/peer"], &peer);
-            run_git(&["rebase", "origin/epic/peer"], &peer);
+            if branch.ends_with("-r10") {
+                run_git(&["rebase", "origin/epic/peer"], &peer);
+            } else {
+                run_git(&["merge", "--no-ff", "-m", "merge epic into parked delivery", "origin/epic/peer"], &peer);
+                if branch.ends_with("-r12") {
+                    std::fs::write(peer.join("new-task.rs"), "pub fn unreviewed() {}\n").unwrap();
+                    run_git(&["add", "new-task.rs"], &peer);
+                    run_git(&["commit", "-m", "fix: new task-authored work after park"], &peer);
+                }
+            }
             let rebased_tip = git_stdout(&peer, &["rev-parse", "HEAD"]);
             assert_ne!(rebased_tip, anchor);
             run_git(&["push", "--force-with-lease", "origin", branch], &peer);
             env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+            if branch.ends_with("-r12") {
+                let target_before_refusal = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+                let refusal = svc.factory(Parameters(request)).await
+                    .expect_err("new authored work after a target sync still needs a park");
+                assert!(refusal.message.contains("does not match task"), "{refusal}");
+                assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
+                assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), target_before_refusal);
+                env.set_current_dir(&fixture_cwd);
+                continue;
+            }
             let merged = svc.factory(Parameters(request)).await
-                .expect("a reviewed same-patch rebase must merge from the pushed tip");
+                .expect("an unchanged delivery must merge from its pushed rebase or target-sync tip");
             assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
             assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(rebased_tip.as_str()));
             let landed = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
@@ -4062,6 +4215,13 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let held = service.factory(Parameters(request.clone())).await
         .expect_err("required verification now precedes the merge");
     assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
+    assert!(
+        held.message.to_ascii_lowercase().contains("spawn")
+            && held.message.contains("task-verifier")
+            && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
+        "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",
+        held.message
+    );
     let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
     let verdict = service.verification(Parameters(verification_req(serde_json::json!({
         "action": "add", "task_id": task_id, "dispatch_id": prepared.id,

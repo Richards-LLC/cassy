@@ -452,7 +452,8 @@ impl McpTestClient {
     fn send_request(&mut self, method: &str, params: Option<Value>) -> JsonRpcResponse {
         match self.try_send_request(method, params) {
             Ok(response) => response,
-            Err(err) => panic!("MCP transport failure: {err}"),
+            Err(err) => panic!("MCP transport failure: {err}\nServer stderr: {}",
+                self.stderr_tail.lock().expect("stderr tail poisoned").render()),
         }
     }
 

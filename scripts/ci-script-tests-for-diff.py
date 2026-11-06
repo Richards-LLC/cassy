@@ -169,9 +169,11 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         terminal_qa_related = test == TERMINAL_QA_TEST and any(
             path.startswith("scripts/terminal-qa") or path == TERMINAL_QA_BUILTIN for path in changed
         )
-        boundary_related = test == "scripts/test-model-boundary.py" and (
+        boundary_related = (test == "scripts/test-model-boundary.py" and (
             "cas-cli/src/builtins/skills/cas-qa-craft/scripts/model-boundary.py" in changed
-        )
+        )) or (test == "scripts/test-walk-kit.mjs" and (
+            "cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs" in changed
+        ))
         provisioned_related = test in PROVISIONED_INPUTS and any(
             fnmatchcase(path, pattern) for path in changed
             for pattern in (*PROVISIONED_INPUTS[test], *COHORT_INPUTS))

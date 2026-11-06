@@ -23,8 +23,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    `cas qa ledger check <path> --task <id>`. Follow [close-gate.md](references/close-gate.md) and
    [verify-before-claim](../verify-before-claim/SKILL.md), then close with
    `task action=close reason="PASS <sha>: <proof>"`.
-3. If close returns VERIFICATION REQUIRED naming a dispatch, its verdict closes the
-   task; follow [Verification-required close](references/recovery.md#verification-required-close).
+3. If close returns VERIFICATION REQUIRED naming a dispatch:
+   Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+   Follow [Verification-required close](references/recovery.md#verification-required-close).
 4. A park reads `PARKED … awaiting merge verdict; nothing more to do`.
    The park relay is the completion signal; send merge_request=true only for local_merge.
    The verdict wakes you once. Don't re-close or block on it. For a MERGE REQUIRED
@@ -41,7 +42,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
 
 - One integration per release: fixes merge to the train, the train goes through the gate once.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
-- Worker peer lane: collision warnings only, within the same factory session
+- Worker peer lane: local collision warnings within the same factory session; remote same-epic contracts
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.
 - The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
 - `kind=status` (actionable, work continues) requests a typed action wake; FYIs

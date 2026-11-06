@@ -17,6 +17,7 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use std::borrow::Cow;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::Content;
@@ -143,6 +144,43 @@ pub struct CasService {
     factory_context:
         std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
     message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// A tool future may outlive its response; backend retirement waits for it.
+    pub(crate) tool_work: Arc<ToolWork>,
+}
+
+/// Nonblocking accounting: an abandoned idle request must never stop tools
+/// from starting after the front's independent switch timeout.
+#[derive(Default)]
+pub(crate) struct ToolWork {
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+pub(crate) struct ToolWorkPermit(Arc<ToolWork>);
+
+impl Drop for ToolWorkPermit {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+impl ToolWork {
+    pub(crate) fn permit(self: &Arc<Self>) -> ToolWorkPermit {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        ToolWorkPermit(self.clone())
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let changed = self.idle.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 { return; }
+            changed.await;
+        }
+    }
 }
 
 impl CasService {
@@ -157,6 +195,7 @@ impl CasService {
             tool_router: Self::tool_router(),
             factory_context: Default::default(),
             message_sweep_lock: Default::default(),
+            tool_work: Default::default(),
         }
     }
 
@@ -1269,7 +1308,7 @@ impl CasService {
                         "reason",
                     ])
                 }
-                "train_merge" => Some(&["action", "id", "task_ids"]),
+                "train_merge" => Some(&["action", "id", "task_ids", "supervisor_override", "reason"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
                 "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
@@ -1371,7 +1410,7 @@ impl CasService {
                 "train_merge" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;
                     let inner = this.inner.clone();
-                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref()))
+                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref(), req.supervisor_override.unwrap_or(false), req.reason.as_deref()))
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))

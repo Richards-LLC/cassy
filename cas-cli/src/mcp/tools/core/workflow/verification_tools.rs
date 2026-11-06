@@ -215,6 +215,36 @@ impl CasCore {
         if crate::mcp::tools::core::task::lifecycle::stale_close_guard::is_terminal_closed(
             task.status,
         ) {
+            // A supervisor may replay its identical exact verdict after Cassy
+            // completed the saved close. This acknowledges history only: no
+            // dispatch, repository mutation, close or second notice is run.
+            let caller_id = self.get_agent_id()?;
+            let authenticated = agent_store.get(&caller_id).is_ok_and(|caller|
+                caller.is_alive() && caller.role == cas_types::AgentRole::Supervisor
+                    && self.has_server_internal_identity(&caller_id));
+            if authenticated && req.verifier_capability.is_none()
+                && let Some(dispatch_id) = req.dispatch_id.as_deref()
+                && let Some(dispatch) = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                && dispatch.id == dispatch_id
+                && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                && let Some(existing) = cas_store::get_verification_for_dispatch(&self.cas_root, dispatch_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            {
+                let mut candidate = authored_content.clone();
+                candidate.status = VerificationStatus::from_storage(&req.status, None);
+                candidate.set_agent(caller_id.clone());
+                candidate.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+                candidate.dispatch_id = Some(dispatch_id.to_string());
+                candidate.issuer_agent_id = Some(caller_id);
+                if let Some(confidence) = req.confidence { candidate.set_confidence(confidence); }
+                if req.verification_type.as_deref().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("epic")) {
+                    candidate.verification_type = VerificationType::Epic;
+                }
+                if supervisor_verification_retry_matches(&existing, &candidate, req.duration_ms) {
+                    return Ok(Self::success(format!("Verification {} for task {} (idempotent retry; already closed).", existing.id, req.task_id)));
+                }
+            }
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(
@@ -754,14 +784,18 @@ impl CasCore {
                         && existing.verification_type == VerificationType::Task
                         && proof_dispatch.delivery_transaction_id.is_none()
                     {
-                        match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
-                            &self.cas_root,
-                            &task,
-                            &requested_dispatch_id,
-                        ) {
-                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
-                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("; no close retry queued: {reason}"),
-                            Err(error) => format!("; close retry wake failed: {error}"),
+                        if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
+                            outcome
+                        } else {
+                            match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_recovery(
+                                &self.cas_root,
+                                &task,
+                                &proof_dispatch,
+                            ) {
+                                Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::Queued) => "; Supervisor close recovery queued for the exact dispatch".to_string(),
+                                Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::NotQueued(reason)) => format!("; no supervisor recovery queued: {reason}"),
+                                Err(error) => format!("; supervisor recovery notice failed: {error}; the supervisor must retry ordinary task close"),
+                            }
                         }
                     } else {
                         String::new()
@@ -1099,9 +1133,8 @@ impl CasCore {
 
         let status_emoji = verification_status_emoji(verification.status);
 
-        // GH #1036: the first worker retry may race the supervisor verdict.
-        // Queue only after the verdict transaction commits, so a woken worker
-        // can always observe the approval. A transactional delivery still
+        // Queue recovery only after the verdict transaction commits, so its
+        // supervisor can always observe the exact approval. A transactional delivery still
         // needs its merge transition before close and is excluded here.
         // cas-46ea: a merged delivery is closed or returned by its verdict;
         // the merge fact plus this dispatch-bound verdict are the authority.
@@ -1124,37 +1157,41 @@ impl CasCore {
             && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
         {
-            // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
-            // the worker retry remains the fallback when a gate still holds.
-            use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-            let cassy_close = self
-                .close_green_merged_delivery_after_verdict(&req.task_id, Some(&verification.id))
-                .await;
-            let worker_retry = match &cassy_close {
-                CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
-                // cas-e9d6: Cassy's close of a merged delivery runs the
-                // worker close's gates on the same evidence, so a worker
-                // retry cannot pass where it held. The gate is the
-                // supervisor's to resolve; never relay it to the worker.
-                CassyMergeClose::Held(_) if cassy_merged => {
-                    "\nNo worker close retry was queued: the gate above is the supervisor's to resolve before this merged delivery can close.".to_string()
-                }
-                CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
-                    Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
-                        &self.cas_root,
-                        &current,
-                        &requested_dispatch_id,
-                    ) {
-                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
-                        // cas-7fc3 (GH #1388): name the actual reason instead
-                        // of claiming no live worker exists.
-                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("\nNo close retry was queued: {reason}. A supervisor can retry task close."),
-                        Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
+            if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
+                outcome
+            } else {
+                // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
+                // the supervisor owns recovery when a gate still holds.
+                use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+                let cassy_close = self
+                    .close_green_merged_delivery_after_verdict(&req.task_id, Some(&verification.id))
+                    .await;
+                let recovery = match &cassy_close {
+                    CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
+                    // cas-e9d6: Cassy's close of a merged delivery runs the
+                    // worker close's gates on the same evidence, so a worker
+                    // retry cannot pass where it held. The gate is the
+                    // supervisor's to resolve; never relay it to the worker.
+                    CassyMergeClose::Held(_) if cassy_merged => {
+                        "\nNo worker close retry was queued: the gate above is the supervisor's to resolve before this merged delivery can close.".to_string()
+                    }
+                    CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
+                        Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_recovery(
+                            &self.cas_root,
+                            &current,
+                            &proof_dispatch,
+                        ) {
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::Queued) => "\nSupervisor close recovery queued for the exact dispatch; no worker retry is permitted.".to_string(),
+                            // cas-7fc3 (GH #1388): name the actual reason instead
+                            // of claiming no live worker exists.
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::NotQueued(reason)) => format!("\nNo supervisor recovery was queued: {reason}. The supervisor owns ordinary task close."),
+                            Err(error) => format!("\nSupervisor recovery notice failed after the verdict was recorded: {error}. The supervisor must retry ordinary task close; do not ask the worker."),
+                        },
+                        Err(error) => format!("\nSupervisor recovery could not read the task after the verdict was recorded: {error}. The supervisor must inspect the task and retry ordinary close; do not ask the worker."),
                     },
-                    Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),
-                },
-            };
-            format!("{}{worker_retry}", cassy_close.receipt(&req.task_id))
+                };
+                format!("{}{recovery}", cassy_close.receipt(&req.task_id))
+            }
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged

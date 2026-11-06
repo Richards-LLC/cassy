@@ -1162,10 +1162,7 @@ impl EmbeddedDaemon {
         // Check if agent was already registered directly (fallback path in SessionStart hook)
         // This happens when the hook runs before the daemon socket exists
         // The agent's PID is Claude Code's PID (our parent), not the MCP server's PID
-        #[cfg(unix)]
-        let cc_pid = std::os::unix::process::parent_id();
-        #[cfg(not(unix))]
-        let cc_pid = std::process::id();
+        let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
 
         let expected_owner = self.agent_id.read().await.clone();
         if let Ok(store) = open_agent_store(&self.config.cas_root)
@@ -2130,11 +2127,8 @@ impl EmbeddedDaemon {
         // In factory mode, all agents share .cas/daemon.sock — only the first
         // daemon to start owns the socket, so it receives SessionStart events
         // from ALL agents. We must only set self.agent_id for our own agent
-        // (matching parent PID) to avoid one daemon stealing another's heartbeat.
-        #[cfg(unix)]
-        let our_cc_pid = std::os::unix::process::parent_id();
-        #[cfg(not(unix))]
-        let our_cc_pid = std::process::id();
+        // (matching the validated harness PID) to avoid stealing another's heartbeat.
+        let our_cc_pid = crate::agent_id::get_cc_pid_for_mcp();
         let is_our_agent = cc_pid == our_cc_pid;
 
         // Quick check: already registered with same ID
@@ -2240,10 +2234,7 @@ impl EmbeddedDaemon {
             // shared socket and received our SessionStart event — the agent
             // was registered in the DB but this daemon never got notified.
             if self.agent_id.read().await.is_none() {
-                #[cfg(unix)]
-                let our_cc_pid = std::os::unix::process::parent_id();
-                #[cfg(not(unix))]
-                let our_cc_pid = std::process::id();
+                let our_cc_pid = crate::agent_id::get_cc_pid_for_mcp();
 
                 if let Ok(Some(agent)) = store.get_by_pid(our_cc_pid) {
                     eprintln!(

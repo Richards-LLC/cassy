@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub(crate) use app::{preferred_epic_focus_from_session_metadata_named, session_progress_named};
 pub(crate) use app::provisioning::{provisioner_executable, strip_deleted_suffix};
 pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
@@ -186,3 +187,7 @@ pub fn set_terminal_title(project_dir: &Path, epic_title: Option<&str>) {
     let title = build_terminal_title(project_dir, epic_title);
     let _ = execute!(io::stdout(), SetTitle(title));
 }
+
+pub(crate) use protocol::{FRAME_HEADER_SIZE, decode_length};
+
+pub use daemon::reexec::{handoff_check as daemon_handoff_check, resume_inherited_daemon};

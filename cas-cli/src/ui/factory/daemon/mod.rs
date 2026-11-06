@@ -443,6 +443,7 @@ pub mod cloud_client;
 mod fork_first;
 mod imports;
 mod process;
+pub mod reexec;
 pub(crate) mod runtime;
 
 pub use fork_first::{DaemonInitPhase, ForkFirstResult, fork_first_daemon};

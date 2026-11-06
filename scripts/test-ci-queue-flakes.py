@@ -163,11 +163,15 @@ class QueueRecovery(unittest.TestCase):
 
     def test_non_queue_events_never_rerun(self):
         for engine in ('rust','playwright'):
-            with self.subTest(engine=engine):
-                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                result = self.run_queue(engine,event='workflow_dispatch')
-                self.assertNotEqual(result.returncode,0)
-                self.assertEqual(len(self.calls()),1)
+            for event in ('workflow_dispatch', 'push'):
+                with self.subTest(engine=engine, event=event):
+                    self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
+                    (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                    result = self.run_queue(engine,event=event)
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertEqual(len(self.calls()),1)
+                    if engine == 'rust':
+                        self.assertEqual('--profile' in self.calls()[0], event == 'push')
 
     def test_missing_rerun_report_preserves_the_initial_failure(self):
         self.env['FIXTURE_MISSING_RERUN_REPORT'] = '1'

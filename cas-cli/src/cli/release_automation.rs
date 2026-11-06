@@ -111,7 +111,7 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
     );
     Ok((caller, train))
 }
-fn new_context(root: &Path, repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
+fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
     let branch = train
         .effective_epic_branch()
         .context("train has no lane")?
@@ -127,10 +127,9 @@ fn new_context(root: &Path, repo: &Path, train: &cas_types::Task) -> Result<Rele
         .epic_verification_owner
         .clone()
         .context("train has no supervisor owner")?;
-    let repository = crate::cloud::resolve_canonical_id(root)
-        .context("project identity unavailable")?
-        .trim_start_matches("github.com/")
-        .to_string();
+    let repository = crate::github_repo::origin_slug(repo, std::time::Duration::from_secs(3))
+        .map_err(anyhow::Error::msg)?
+        .context("release checkout has no GitHub origin")?;
     let base_commit = git(
         repo,
         &[
@@ -159,7 +158,7 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
         serde_json::from_slice(&fs::read(receipt_path(root, version)?)?)?
     } else {
         let (repo, train) = open_train(root)?;
-        let value = new_context(root, &repo, &train)?;
+        let value = new_context(&repo, &train)?;
         if let Some(branch) = &args.branch {
             ensure!(
                 branch == &value.branch,
@@ -183,7 +182,7 @@ fn track_on_train(
     repo: &Path,
     train: &cas_types::Task,
 ) -> Result<()> {
-    let mut expected = new_context(root, repo, train)?;
+    let mut expected = new_context(repo, train)?;
     ensure!(
         git(&repo, &["branch", "--show-current"])? == expected.branch,
         "release must be cut on the train branch"
@@ -312,7 +311,7 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
         return Ok(false);
     }
     let context: ReleaseContext = serde_json::from_slice(&fs::read(path)?)?;
-    if context.repository != repo {
+    if !context.repository.eq_ignore_ascii_case(repo) {
         return Ok(false);
     }
     // Load even a closed train: core may already have rolled to the next one.
@@ -392,7 +391,16 @@ mod tests {
         .unwrap();
         let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
         git(repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-        git(repo, &["remote", "add", "origin", "https://github.com/Example/Repo.git"]).unwrap();
+        git(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Example/Repo.git",
+            ],
+        )
+        .unwrap();
         let root = crate::store::init_cas_dir(repo).unwrap();
         fs::write(
             root.join("config.toml"),

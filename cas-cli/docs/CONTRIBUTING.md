@@ -4220,9 +4220,7 @@ pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
-## Operator project holds
-
-### Ordered train merge queue
+## Ordered train merge queue
 
 A registered supervisor can submit `factory action=train_merge id=<epic>` to
 merge that train's parked deliveries in updated-time order, or add
@@ -4239,6 +4237,8 @@ Single merges into the target are held throughout the queue, including between
 verdicts. Other targets remain independent. Repeat the action without `task_ids`
 to inspect an active queue; a successor may adopt a dead owner's queue. Queue
 state and results live in `.cas/train-merges/`. No CI stage is added.
+
+## Operator project holds
 
 Use `cas factory hold set --reason "<reason>"` from your own interactive
 terminal to stop project dispatch and merges. The state is local to the

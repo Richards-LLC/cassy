@@ -89,21 +89,30 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
         while let Ok(Some(line)) = lines.next_line().await {
             let request: Value = serde_json::from_str(&line).unwrap();
             let Some(id) = request.get("id").cloned() else { continue };
+            if request.get("method").is_none() { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "initialize" if fails => {
                     send(&mut server_out, json!({"jsonrpc":"2.0", "id":id,
                         "error":{"code":-32603, "message":"candidate failed startup"}})).await;
                     break;
                 }
-                "initialize" => json!({"protocolVersion":"2025-03-26", "capabilities":{"tools":{}},
+                "initialize" => json!({"protocolVersion": if version == "protocol" { "2024-11-05" } else { "2025-03-26" },
+                    "capabilities": if version == "capabilities" { json!({"tools":{"listChanged":true}}) } else { json!({"tools":{}}) },
                     "serverInfo":{"name":"cas", "version":version}}),
-                "tools/list" => json!({"tools":[{"name":"mutate", "inputSchema":{"type":"object"}}]}),
+                "tools/list" if request["params"]["cursor"] == "second" => json!({"tools":[{
+                    "name":"observe", "inputSchema": if version == "schema" {
+                        json!({"type":"object", "required":["changed"]})
+                    } else { json!({"type":"object"}) }}]}),
+                "tools/list" => json!({"tools":[{"name":"mutate", "inputSchema":{"type":"object"}}], "nextCursor":"second"}),
                 "ping" => json!({}),
                 "tools/call" => {
                     calls.lock().await.push((version.clone(), id.clone()));
                     if id == 2 {
+                        send(&mut server_out, json!({"jsonrpc":"2.0", "id":"server-work", "method":"roots/list"})).await;
                         started.notify_one();
                         finish.notified().await;
+                        send(&mut server_out, json!({"jsonrpc":"2.0", "method":"notifications/progress",
+                            "params":{"progressToken":"fixture", "progress":1}})).await;
                     }
                     json!({"version":version})
                 }
@@ -125,14 +134,19 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
 
 #[tokio::test]
 async fn failed_candidate_keeps_initialized_connection_serving_cas_81c4() {
-    let mut f = Fixture::new().await;
-    f.update("broken", true).await;
-    assert!(matches!(f.event().await, Event::Deferred(reason) if reason.contains("candidate failed startup")));
-    f.call(3).await;
-    let reply = receive(&mut f.input).await;
-    assert_eq!(reply["id"], 3);
-    assert_eq!(reply["result"]["version"], "old");
-    assert_eq!(*f.calls.lock().await, [("old".into(), json!(3))]);
+    for (version, fails, reason) in [("broken", true, "candidate failed startup"),
+        ("protocol", false, "protocol, capabilities or tool schema"),
+        ("capabilities", false, "protocol, capabilities or tool schema"),
+        ("schema", false, "protocol, capabilities or tool schema")] {
+        let mut f = Fixture::new().await;
+        f.update(version, fails).await;
+        assert!(matches!(f.event().await, Event::Deferred(actual) if actual.contains(reason)));
+        f.call(3).await;
+        let reply = receive(&mut f.input).await;
+        assert_eq!(reply["id"], 3);
+        assert_eq!(reply["result"]["version"], "old");
+        assert_eq!(*f.calls.lock().await, [("old".into(), json!(3))]);
+    }
 }
 
 #[tokio::test]
@@ -140,10 +154,14 @@ async fn compatible_candidate_drains_inflight_and_partial_input_without_replay_c
     let mut f = Fixture::new().await;
     f.call(2).await;
     f.started.notified().await;
+    let peer_request = receive(&mut f.input).await;
+    assert_eq!(peer_request["method"], "roots/list");
     f.output.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"").await.unwrap();
     f.update("new", false).await;
     assert!(matches!(f.event().await, Event::Prepared));
     f.finish.notify_one();
+    let progress = receive(&mut f.input).await;
+    assert_eq!(progress["method"], "notifications/progress");
     let reply = receive(&mut f.input).await;
     assert_eq!(reply["id"], 2);
     assert_eq!(reply["result"]["version"], "old");
@@ -151,6 +169,7 @@ async fn compatible_candidate_drains_inflight_and_partial_input_without_replay_c
     let reply = receive(&mut f.input).await;
     assert_eq!(reply["id"], 3);
     assert_eq!(reply["result"]["version"], "old");
+    send(&mut f.output, json!({"jsonrpc":"2.0", "id":peer_request["id"], "result":{"roots":[]}})).await;
     assert!(matches!(f.event().await, Event::Serving { version, .. } if version == "new"));
     f.call(4).await;
     let reply = receive(&mut f.input).await;
@@ -158,4 +177,23 @@ async fn compatible_candidate_drains_inflight_and_partial_input_without_replay_c
     assert_eq!(reply["result"]["version"], "new");
     assert_eq!(*f.calls.lock().await, [("old".into(), json!(2)),
         ("old".into(), json!(3)), ("new".into(), json!(4))]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_timeout_keeps_old_backend_and_pending_calls_cas_81c4() {
+    let mut f = Fixture::new().await;
+    f.call(2).await;
+    f.started.notified().await;
+    let request = receive(&mut f.input).await;
+    f.update("new", false).await;
+    assert!(matches!(f.event().await, Event::Prepared));
+    tokio::time::advance(DRAIN_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(matches!(f.event().await, Event::Deferred(reason) if reason.contains("drain timed out")));
+    f.finish.notify_one();
+    assert_eq!(receive(&mut f.input).await["method"], "notifications/progress");
+    assert_eq!(receive(&mut f.input).await["id"], 2);
+    send(&mut f.output, json!({"jsonrpc":"2.0", "id":request["id"], "result":{"roots":[]}})).await;
+    f.call(3).await;
+    assert_eq!(receive(&mut f.input).await["result"]["version"], "old");
+    assert_eq!(*f.calls.lock().await, [("old".into(), json!(2)), ("old".into(), json!(3))]);
 }

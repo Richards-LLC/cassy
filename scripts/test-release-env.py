@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -334,6 +335,20 @@ class QueueHealth(Fixture):
             if warning:
                 self.assertEqual(len(result.stderr.splitlines()), 1)
                 self.assertIn("gh api -X PUT repos/acme/repo/rulesets/42", result.stderr)
+                # Exercise the printed transform offline, never its gh PUT.
+                words = shlex.split(result.stderr.split("Run: ", 1)[1])
+                transform = words[words.index("jq") + 1]
+                before = json.loads((SCRIPTS.parent / "docs/branch-protection/main-ruleset.json").read_text())
+                original = json.loads(json.dumps(before))
+                queue_rule = next(r for r in before["rules"] if r["type"] == "merge_queue")
+                queue_rule["parameters"].update(max_entries_to_build=build, max_entries_to_merge=merge, grouping_strategy=grouping)
+                fixed = subprocess.run(["jq", transform], input=json.dumps(before), capture_output=True, text=True, check=True)
+                after = json.loads(fixed.stdout)
+                self.assertEqual([r for r in after["rules"] if r["type"] != "merge_queue"],
+                                 [r for r in original["rules"] if r["type"] != "merge_queue"])
+                params = next(r["parameters"] for r in after["rules"] if r["type"] == "merge_queue")
+                self.assertEqual((params["max_entries_to_build"], params["max_entries_to_merge"], params["grouping_strategy"]),
+                                 (max(build, 5), max(merge, 5), "ALLGREEN"))
             calls = log.read_text().splitlines()
             self.assertEqual(len(calls), 1, calls)
             self.assertNotIn("PUT", calls[0])

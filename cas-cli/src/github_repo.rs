@@ -257,7 +257,7 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
         let fix = format!(
             r#"gh api {endpoint} | jq '{{name,target,enforcement,conditions,bypass_actors,rules}} | (.rules[] | select(.type == "merge_queue").parameters) |= (.max_entries_to_build = ([.max_entries_to_build,5]|max) | .max_entries_to_merge = ([.max_entries_to_merge,5]|max) | .grouping_strategy = "ALLGREEN")' | gh api -X PUT {endpoint} --input -"#
         );
-        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge>=5, ALLGREEN. Run: {fix}"));
+        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge>=5, ALLGREEN. Run:\n{fix}"));
     }
     if !reports.is_empty() {
         return Ok(QueueReport {

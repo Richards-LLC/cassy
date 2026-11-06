@@ -4970,7 +4970,7 @@ impl FactoryDaemon {
         names.extend(ownership.iter().map(|record| record.worker_name.clone()));
         names.sort(); names.dedup();
         // Measure while registrations and worktrees still identify the work.
-        let agents = open_agent_store(self.app.cas_dir()).and_then(|store| store.list(None))
+        let agents = open_agent_store(self.app.cas_dir()).and_then(|store| Ok(store.list(None)?))
             .unwrap_or_default();
         let worker_states: Vec<_> = names.iter().map(|name| {
             let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name

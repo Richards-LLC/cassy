@@ -31,3 +31,15 @@ The header slash button opens the same palette directly below itself, inside vie
 ## Validation
 
 Extend keyed card coverage for skew/current/unknown versions, supported and unsupported harnesses, receipt phases and stable focus. Preserve and extend typed /mcp coverage; extend the existing HUB-J27 reload journey at desktop and phone to use both card and composer, assert no chat send, and wait for actual observed receipt/catalog evidence.
+
+## Critique
+
+Reviewed production captures at 1280×800/light and 390×844/dark. Strict visual QA inspected the actual card and open dropdown DOM in both schemes at each viewport: PASS, zero findings, no allowlist. This application requires JavaScript for authenticated machine control; its existing declaration and noscript explanation remain.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | The existing Cassy version badge leads directly to the named repair inside the Glass supervisor card. |
+| Fit to argument | 5 | The stale version and Reload Cassy action are visible together before a conversation or menu opens. |
+| Hierarchy | 4 | Reload is direct when needed; Session actions remains secondary and the header dropdown stays beside its opener. |
+| Craft | 4 | Strict visual QA PASS for card and dropdown at desktop/phone in light/dark, with zero clipping, overlap or overflow findings. |
+| Accessibility | 4 | Named native controls, keyed focus retention, Escape to the header opener, disabled unsupported harnesses and truthful dismissable receipts are exercised. |

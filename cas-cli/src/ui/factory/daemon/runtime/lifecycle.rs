@@ -2065,6 +2065,7 @@ mod worker_attention_tests {
             crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap()
         };
         let rows = relays(swept);
+        // pin: the relay names its exact dispatch id; that identity is the behavior under test
         assert!(rows.len() == 1 && rows[0].prompt.contains(&silent.id), "only silence expires: {rows:?}");
         for id in [&heartbeat.id, &lane.id] {
             let extended = cas_store::get_verification_dispatch(&cas_dir, id).unwrap();
@@ -2078,6 +2079,7 @@ mod worker_attention_tests {
         verifier.last_heartbeat = capped;
         agents.update(&verifier).unwrap();
         let rows = relays(capped);
+        // pin: the relay names its exact dispatch id; that identity is the behavior under test
         assert!(rows.iter().any(|row| row.prompt.contains(&heartbeat.id)), "the hour cap is hard: {rows:?}");
         assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &heartbeat.id).unwrap().deadline_at,
             swept + chrono::Duration::minutes(10));

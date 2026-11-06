@@ -10,6 +10,9 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         ("factory.design_review_window_hours", "Epic Design Review Window",
          "Rolling window in hours, measured from report task creation. Only Bug tasks labelled stakeholder-reported with P0/P1 count, including closed reports.",
          ConfigType::Int, "48", Constraint::Range(1, 8760)),
+        ("factory.release_train_max_age_hours", "Release Train Max Age",
+         "Hours after a release train's first child merge before the supervisor gets one \"train ready to cut\" notice, even with children still in progress. Never cuts automatically.",
+         ConfigType::Int, "3", Constraint::Range(1, 168)),
         ("factory.slot_id", "Cloud Supervisor Slot",
          "Stable Cloud reader slot override. Empty derives the slot from machine id, canonical project id, supervisor role and factory session. Use an override to retain a slot across different factory sessions or machines; sharing an override intentionally supersedes the earlier registration.",
          ConfigType::String, "", Constraint::None),
@@ -43,6 +46,9 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         ("factory.strict_cli", "Require Requested Worker CLI",
          "Refuse fallback to another harness when the requested Codex CLI is unavailable; also enabled by --strict-cli.",
          ConfigType::Bool, "false", Constraint::None),
+        ("factory.release_train", "Release Train",
+         "One integration per release: a task created with no epic and no target joins the open release-train epic cut from the integration branch; false targets each task to the integration branch.",
+         ConfigType::Bool, "true", Constraint::None),
         ("factory.target_cache_high_watermark_percent", "Cargo Cache High Watermark",
          "Filesystem usage percentage that signals factory Cargo cache pressure.",
          ConfigType::Int, "85", Constraint::Range(0, 100)),
@@ -218,6 +224,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         use_cases: &[
             "Set to `pnpm ci:local` so lint and test failures stop at the worker instead of costing a CI run",
             "Leave empty when the project has no cheap local gate",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.release_command",
+        section: "factory",
+        name: "Release Command",
+        description: "Command that cuts or promotes a release from the release train, run from the repository root on the train branch. The \"train ready to cut\" notice names it; Cassy never runs it. Empty names scripts/release.sh when the repository has one.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "release", "train", "promotion", "cut", "staging"],
+        use_cases: &[
+            "Set to the staging-to-main promotion command in a project that releases by promotion",
+            "Leave empty in a repository that has scripts/release.sh",
         ],
     });
 

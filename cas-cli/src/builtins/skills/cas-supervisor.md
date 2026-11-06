@@ -17,6 +17,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Close delivered work before expanding scope** ([closure pass](references/workflow.md#wall-clock-is-a-resource)).
 - **Merge once ready.** Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. Hold dependents of a missed target; ship the rest.
 - **Epics are yours to verify and close**, never a worker's.
+- **One integration per release:** fixes merge to the train, the train goes through the gate once. Tasks without an epic join it; `target_branch` is the hotfix route.
 - **Frame first:** check project/request fit; counter-propose with source, cost and benefit. Written standards (DESIGN.md, voice guide, spec, plan, rule) settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request.

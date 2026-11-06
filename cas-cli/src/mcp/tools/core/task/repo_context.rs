@@ -496,6 +496,16 @@ pub(crate) fn declare_work_target(
     }))
 }
 
+/// The checkout and integration branch a targetless task would default to:
+/// `[factory] epic_base_branch`, else the detected default branch.
+pub(crate) fn integration_branch(cas_root: &Path) -> Option<(PathBuf, String)> {
+    let (checkout_root, _) = git_checkout_layout(cas_root).ok()?;
+    let branch = crate::config::Config::configured_epic_base_branch(&checkout_root)
+        .or_else(|| resolve_default_branch(&checkout_root).ok())?;
+    let branch = validate_target_branch(&checkout_root, &branch).ok()?;
+    Some((checkout_root, branch))
+}
+
 /// Anchor a targetless Git task to the integration branch at creation.
 /// Non-Git task stores retain their legacy target-free behavior.
 pub(crate) fn standalone_work_target(

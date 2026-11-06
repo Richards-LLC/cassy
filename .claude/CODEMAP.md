@@ -67,6 +67,7 @@
 
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
+- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
@@ -99,6 +100,11 @@
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
 
+## GitHub health
+
+- `cas-cli/src/github_repo.rs` - explicit origin binding and bounded, report-only default-branch queue health shared by setup/doctor; one query reads canonical identity and applicable active rules.
+- `scripts/github-queue-health.graphql`, `scripts/github_queue_health.py` - shared embedded query and advisory release preflight; warns on drift/unavailable access without writing settings or failing release.
+
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
@@ -115,6 +121,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs` - confirmed-publication receipts over authenticated peer mail, durable import into existing dispatch/verdict records, local Git rebinding and exact close validation; queue retention carries no proof authority.
 - `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - exact-source PR creation/reuse and expected-head auto-merge for confirmed default-branch queues, before local merge mutation.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
+- `cas-cli/src/mcp/tools/core/task/release_train.rs` - release train as the default work target: a task created with no epic or target joins the open `release-train` epic cut from the integration branch; a landed train closes and the next opens on the next create.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cas-cli/src/cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.

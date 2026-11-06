@@ -421,6 +421,11 @@ publish_branch() {
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 
+# Advisory once per invocation, including dry-run and version preview. Never
+# include this probe in prepare/rebump loops or fail a release on provider drift.
+python3 "$script_dir/github_queue_health.py" --worktree "$repo_root" --gh "$gh_bin" \
+    || say "warning: merge queue unavailable; report only"
+
 if "$print_only"; then
     fetch_base
     base_version="$(version_at "$remote/$base")"

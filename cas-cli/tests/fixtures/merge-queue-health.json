@@ -1,0 +1,19 @@
+{
+  "nameWithOwner": "acme/repo",
+  "data": {
+    "repository": {
+      "nameWithOwner": "acme/repo",
+      "defaultBranchRef": {
+        "name": "trunk",
+        "rules": {
+          "pageInfo": { "hasNextPage": false },
+          "nodes": [{
+            "type": "MERGE_QUEUE",
+            "parameters": { "maxEntriesToBuild": 1, "maxEntriesToMerge": 1, "groupingStrategy": "ALLGREEN" },
+            "repositoryRuleset": { "databaseId": 42, "source": { "__typename": "Repository", "nameWithOwner": "acme/repo" } }
+          }]
+        }
+      }
+    }
+  }
+}

@@ -446,6 +446,128 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+/// GH #1558: an ordinary close after pushing a target merge must bind the
+/// merged tip, without asking the worker for an explicit commit receipt.
+#[tokio::test]
+async fn fresh_close_after_pushed_target_merge_binds_tip_without_receipt_cas_d81b() {
+    let mut env = TestEnvGuard::temp_home();
+    for merge_target in [false, true] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+        let mut task = tasks.get(TASK).unwrap();
+        task.deliverables.parked_branch = None;
+        task.deliverables.historical_factory_branch_anchors.clear();
+        tasks.update(&task).unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(&f.worker_path, &["push", "-q", "origin", "main", BRANCH]);
+        if merge_target {
+            // The default merge subject carries no task id and introduces
+            // only target commits after the commit-hook predecessor anchor.
+            git(&f.worker_path, &["merge", "-q", "--no-ff", "main"]);
+            git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert_eq!(git(repo, &["rev-parse", &format!("origin/{BRANCH}")]), tip);
+        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some(format!("PASS {tip}: final pushed delivery")),
+            commit_receipt: None,
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            search_manifest: None,
+        })).await.unwrap());
+        let parked = tasks.get(TASK).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(tip.as_str()));
+        let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].bound_head, tip);
+        if merge_target {
+            assert!(parked.deliverables.historical_factory_branch_anchors.contains(&f.predecessor));
+        }
+    }
+}
+
+/// GH #1571: generated history follows a target-sync merge, while the only
+/// passing focused receipt belongs to the complete, pushed final tree.
+#[tokio::test]
+async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e3() {
+    let mut env = TestEnvGuard::temp_home();
+    for (per_task_branch, generated_only) in [(true, false), (true, true), (false, false), (false, true)] {
+        let f = fixture_with_surface(&mut env, "cas-cli/src/lib.rs", false);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let branch = if per_task_branch {
+            let branch = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+            git(&f.worker_path, &["branch", "-m", &branch]);
+            branch
+        } else { BRANCH.to_string() };
+        std::fs::write(f.worker_path.join("Cargo.toml"), "[workspace]\nmembers = [\"cas-cli\"]\n").unwrap();
+        std::fs::write(f.worker_path.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+        git(&f.worker_path, &["add", "Cargo.toml", "cas-cli/Cargo.toml"]);
+        git(&f.worker_path, &["commit", "--amend", "-q", "--no-edit"]);
+        let merged = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        // Resume the same parked lane; the target merge was recorded by its
+        // commit hook before the required generated follow-up was committed.
+        task.deliverables.parked_branch = Some(branch.clone());
+        task.deliverables.factory_branch_anchor = Some(merged.clone());
+        task.notes = "no changelog: fixture for final-tip proof selection".into();
+        tasks.update(&task).unwrap();
+        let ledger = f.worker_path.join(REFERENCE_HISTORY_LEDGER);
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, "{}\n").unwrap();
+        if !generated_only {
+            // A source edit must not borrow the generator's subject/body.
+            std::fs::write(f.worker_path.join("cas-cli/src/lib.rs"), "fn foreign() {}\n").unwrap();
+        }
+        git(&f.worker_path, &["add", "."]);
+        git(&f.worker_path, &["commit", "-q", "-m",
+            "build(builtins): regenerate reference-history from merged history", "-m",
+            &format!("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9])]);
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(&f.worker_path, &["push", "-q", "origin", "main", &branch]);
+        let request = || TaskCloseRequest {
+            id: TASK.into(), reason: Some(format!("PASS {tip}: final pushed delivery")),
+            commit_receipt: None, no_delivery: None, supervisor_override: None,
+            stranded_branch_override: None, search_manifest: None,
+        };
+        if generated_only {
+            let refused = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
+            assert!(refused.contains("FOCUSED PROOF REQUIRED") && refused.contains(&tip[..12]),
+                "a generated follow-up still requires proof at the final tip: {refused}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
+        }
+        crate::factory_worker_check::record_passing_test_for_tests(
+            &cas_dir, &f.worker_path, &tip, "cas", "test(final_delivery)",
+        );
+        let output = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
+        let parked = tasks.get(TASK).unwrap();
+        if !generated_only {
+            assert_eq!(parked.status, TaskStatus::InProgress, "source edits cannot borrow regeneration authority: {output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
+            continue;
+        }
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "final tip has focused proof; merge parent does not: {output}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(tip.as_str()));
+    }
+}
+
 /// GH #1389: the first final close must use the pushed receipt, even when a
 /// commit hook saved its predecessor before the worker synchronized the target.
 #[tokio::test]

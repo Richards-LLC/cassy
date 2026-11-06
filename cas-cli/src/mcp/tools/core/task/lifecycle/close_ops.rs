@@ -266,6 +266,24 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
 
 }
 
+/// Select close's current proof cycle without granting approval or changing state.
+/// A pending/new dispatch prevents an older legacy row from authorizing close.
+/// Daemon merge relays use the same selection before asking a worker to close;
+/// repository, promotion and all other close gates remain authoritative.
+pub(crate) fn close_cycle_verdict(
+    root: &std::path::Path,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    legacy: Option<&cas_types::Verification>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
+    match dispatch {
+        Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+        }
+        None => Ok(legacy.filter(|row| row.dispatch_id.is_none()).cloned()),
+        _ => Ok(None),
+    }
+}
+
 fn delivery_audit_text_is_portable(value: &str) -> bool {
     delivery_audit_text_rejection(value).is_none()
 }
@@ -6896,7 +6914,7 @@ impl CasCore {
     /// stops apply:
     /// - the measured branch must be this task's per-task branch
     ///   (`factory/<assignee>-<task>`), or its active assignee's plain lane
-    ///   with every continuation commit explicitly claiming this task;
+    ///   with every authored continuation commit explicitly claiming this task;
     /// - no other open task's anchor may sit between the recorded anchor and
     ///   the tip, because that commit is another delivery's boundary.
     pub(crate) fn tip_is_own_task_lineage(
@@ -6961,15 +6979,17 @@ impl CasCore {
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
-                    (explicit_final_tip || !subjects.is_empty())
-                        && subjects.iter().all(|subject| {
+                    // A target-sync merge can leave no authored subjects.
+                    // Anchor advances still check target imports, first-parent
+                    // continuity and the sibling lease boundary separately.
+                    subjects.iter().all(|subject| {
                             // cas-93d7: an exact-tip receipt can identify an
                             // unnamed pre-push correction on the active lane.
                             // A foreign subject still belongs to another task.
                             message_references_task(subject, &task.id)
                                 || (explicit_final_tip
                                     && !message_claims_other_task(subject, Some(&task.id)))
-                        })
+                    })
                 })
         });
         if !own_task_branch && !own_active_lane {
@@ -9677,6 +9697,17 @@ impl CasCore {
                 policy.task_required()
             };
 
+        // Classify before orphan recovery: losing the implementer's session
+        // cannot waive an enforcement delivery's own adversarial review.
+        let delivery_verification_tier = (verification_enabled
+            && !depth_light
+            && close_disposition.requires_delivery_gates())
+        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
+        .flatten();
+        let tier_two = delivery_verification_tier.as_ref().is_some_and(|decision| {
+            decision.tier == super::review_tier::VerificationTier::Adversarial
+        });
+
         // Skip verification for orphaned tasks: if caller is supervisor and the
         // task's assignee is inactive (heartbeat expired or lease gone), allow
         // close without verification. cas-3bd4: compute the reason as a typed
@@ -9691,10 +9722,10 @@ impl CasCore {
         } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
             // cas-eda0: Cassy's own post-merge close never takes the
             // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic {
+            if task.task_type == TaskType::Epic || tier_two {
                 // Ownership admits this caller; the assembled epic still needs
-                // its own dispatch/verdict. Epics normally have no assignee,
-                // which is not orphan recovery and cannot imply verification.
+                // its own dispatch/verdict, as does a Tier 2 delivery whose
+                // assignee has retired. Only an explicit override waives it.
                 if req.supervisor_override.unwrap_or(false) {
                     VerificationSkipReason::SupervisorBypass
                 } else {
@@ -9780,12 +9811,7 @@ impl CasCore {
         // cas-5207: a delivery that changes nothing that runs has no independent
         // verifier. An existing dispatch or verdict keeps its authority, and the
         // delivery, CI and QA gates all sit outside this decision.
-        let verification_tier = (verification_enabled
-            && !skip_verification
-            && !depth_light
-            && close_disposition.requires_delivery_gates())
-        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
-        .flatten();
+        let verification_tier = delivery_verification_tier.filter(|_| !skip_verification);
         let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
             decision.tier == super::review_tier::VerificationTier::Mechanical
         }) && no_verification_on_record && !fast_lane_receipt_passed;
@@ -9951,24 +9977,11 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = match typed_dispatch.as_ref() {
-                    Some(dispatch)
-                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
-                    {
-                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-                    }
-                    // Pre-m213 tasks have no typed dispatch boundary. Preserve
-                    // their legacy close behavior, but only for rows that also
-                    // lack dispatch provenance. As soon as any typed dispatch
-                    // exists, this fallback is unreachable and can never
-                    // authorize that current cycle.
-                    None => match task_wide_latest.as_ref() {
-                        Ok(Some(row)) if row.dispatch_id.is_none() => Ok(Some(row.clone())),
-                        Ok(_) => Ok(None),
-                        Err(_) => Ok(None),
-                    },
-                    _ => Ok(None),
-                };
+                let latest = close_cycle_verdict(
+                    &self.cas_root,
+                    typed_dispatch.as_ref(),
+                    task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()),
+                );
 
                 // Typed state is authoritative for new dispatches. The legacy
                 // Error row remains a readable fallback for pre-m211 databases,
@@ -10240,8 +10253,21 @@ impl CasCore {
                         // task's local commit — as a delivered anchor, and a
                         // rebase of that next task voided the verdict
                         // (cas-3e66, cas-ba4a).
-                        let merged_receipt = if post_merge_target.is_none() {
-                            req.commit_receipt.as_deref().and_then(|receipt| {
+                        let supervisor_tier_two_recovery = tier_two
+                            && !in_cassy_merge_close()
+                            && self.resolve_live_supervisor_authority().is_ok()
+                            && matches!(self.compute_verification_skip_reason(&task, &req),
+                                VerificationSkipReason::NoAssignee
+                                    | VerificationSkipReason::AssigneeInactive { .. }
+                                    | VerificationSkipReason::AssigneeUnknown);
+                        // A retired worker's recorded delivery is the recovery
+                        // boundary even when close supplies no new receipt.
+                        // It must still be proven on the declared target below.
+                        let recovery_anchor = verification_tier.as_ref()
+                            .filter(|_| supervisor_tier_two_recovery)
+                            .map(|decision| decision.tip.as_str());
+                        let merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
+                            req.commit_receipt.as_deref().or(recovery_anchor).and_then(|receipt| {
                                 let resolved =
                                     resolve_task_commit_receipt_sha(&close_project_root, receipt)
                                         .ok()?;
@@ -10308,6 +10334,7 @@ impl CasCore {
                         }
 
                         if !is_epic && !empty_delivery
+                            && !(supervisor_tier_two_recovery && merged_receipt.is_some())
                             && task.deliverables.factory_branch_anchor.is_some()
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
@@ -14625,6 +14652,29 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+const REFERENCE_HISTORY_REGEN_SUBJECT: &str = "build(builtins): regenerate reference-history from merged history";
+
+/// The required post-merge ledger refresh cites its generator's task, rather
+/// than the worker's. Bind that exception to the actual merge and ledger-only
+/// diff; ordinary source commits cannot borrow the generator's attribution.
+fn is_reference_history_regeneration(repo: &std::path::Path, commit: &str) -> bool {
+    let Ok(metadata) = git_stdout_lines(repo, &["show", "-s", "--format=%P%x1f%B", commit]) else {
+        return false;
+    };
+    let metadata = metadata.join("\n");
+    let Some((parents, message)) = metadata.split_once('\u{1f}') else {
+        return false;
+    };
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [merged] = parents.as_slice() else { return false; };
+    if message != format!("{REFERENCE_HISTORY_REGEN_SUBJECT}\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9]) {
+        return false;
+    }
+    git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", merged])
+        .is_ok_and(|lines| lines.len() == 1 && lines[0].split_whitespace().count() == 3)
+        && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", merged, commit, "--"])
+            .is_ok_and(|paths| paths == [REFERENCE_HISTORY_LEDGER])
+}
 #[derive(serde::Deserialize)]
 struct ReferenceHistory {
     version: u64,
@@ -22641,11 +22691,22 @@ fn own_lane_subjects(
         excluded.push("refs/remotes/origin/HEAD".to_string());
     }
     let range = format!("{recorded}..{tip}");
-    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let mut args = vec!["log", "--no-merges", "--format=%H%x1f%s", range.as_str()];
     let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
     args.extend(negated.iter().map(String::as_str));
     args.push("--");
-    git_stdout_lines(repo_path, &args)
+    let mut subjects = Vec::new();
+    for record in git_stdout_lines(repo_path, &args)? {
+        let (commit, subject) = record.split_once('\u{1f}')
+            .ok_or_else(|| "cannot read authored commit subject".to_string())?;
+        if subject == REFERENCE_HISTORY_REGEN_SUBJECT
+            && is_reference_history_regeneration(repo_path, commit)
+        {
+            continue;
+        }
+        subjects.push(subject.to_string());
+    }
+    Ok(subjects)
 }
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
@@ -25190,7 +25251,7 @@ fn parked_anchor_advance_with_target_is_attributable(
         .args([
             "log",
             "--first-parent",
-            "--format=%P%x1f%ct%x1f%B%x1e",
+            "--format=%H%x1f%P%x1f%ct%x1f%B%x1e",
             &format!("{recorded}..{candidate}"),
             "--",
         ])
@@ -25207,9 +25268,11 @@ fn parked_anchor_advance_with_target_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (commit, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (parents, rest) = rest.split_once('\u{1f}')?;
             let (epoch, message) = rest.split_once('\u{1f}')?;
             Some((
+                commit,
                 parents.split_whitespace().collect::<Vec<_>>(),
                 epoch.trim().parse::<i64>().ok()?,
                 message,
@@ -25223,11 +25286,11 @@ fn parked_anchor_advance_with_target_is_attributable(
     // under the same rule cas-985f applies before park.
     let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
-    commits.last().is_some_and(|(parents, _, _)| {
+    commits.last().is_some_and(|(_, parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
-    }) && commits.iter().all(|(parents, epoch, message)| {
+    }) && commits.iter().all(|(commit, parents, epoch, message)| {
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
@@ -25236,7 +25299,10 @@ fn parked_anchor_advance_with_target_is_attributable(
                     })
             });
         (target_import
-            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            || (parents.len() == 1
+                && (!message_claims_other_task(message, Some(task_id))
+                    || (message.starts_with(REFERENCE_HISTORY_REGEN_SUBJECT)
+                        && is_reference_history_regeneration(repo_path, commit)))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })

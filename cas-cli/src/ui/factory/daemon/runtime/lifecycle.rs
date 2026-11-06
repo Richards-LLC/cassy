@@ -3508,100 +3508,127 @@ mod worker_attention_tests {
         }
     }
 
-    #[test]
-    fn pr_lane_failure_relay_names_pr_check_and_run_and_replays_once() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION",
-            "pr-lane-failure-test",
-        )]);
+    fn delivery_relay_fixture(local_worker: bool) -> (tempfile::TempDir, std::path::PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "pr-lane-failure-test");
-        let failure = crate::ui::factory::daemon::runtime::ci_watch::PrLaneFailure {
-            task_id: "cas-pr-lane".to_string(),
-            worker: "bright-otter".to_string(),
-            pr_number: 659,
-            head_sha: "current-head".to_string(),
-            run_id: 33436155392,
-            run_url: "https://github.test/runs/33436155392".to_string(),
-            check_name: crate::ui::factory::daemon::runtime::ci_watch::REQUIRED_PR_LANE_CHECK
-                .to_string(),
-        };
-
-        let first = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
-        let replay = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
-        assert!(matches!(
-            first,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
-        assert!(matches!(
-            replay,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
-        assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
-        assert!(rows[0].prompt.contains("PR #659"));
-        assert!(rows[0].prompt.contains("cas-pr-lane"));
-        assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
-        assert!(rows[0].prompt.contains("33436155392"));
-        assert_recovery_class_requires_daemon(&rows[0]);
+        register_supervisor(&cas_dir, "delivery-owner");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut watcher = Agent::new_with_role("watcher-id".into(), "watcher".into(), AgentRole::Supervisor);
+        watcher.factory_session = Some("relay-watcher".into());
+        agents.register(&watcher).unwrap();
+        if local_worker {
+            let mut worker = Agent::new_with_role("worker-id".into(), "delivery-worker".into(), AgentRole::Worker);
+            worker.factory_session = Some("delivery-owner".into());
+            agents.register(&worker).unwrap();
+        }
+        (temp, cas_dir)
     }
 
     #[test]
-    fn merged_delivery_records_receipt_wakes_worker_and_escalates_once() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION",
-            "delivery-pr-merged-test",
-        )]);
-        let temp = tempfile::TempDir::new().unwrap();
-        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "delivery-pr-merged-test");
-        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-        let mut task = cas_types::Task::new("cas-7ea6".to_string(), "delivery".to_string());
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.assignee = Some("calm-octopus-51".to_string());
-        task_store.add(&task).unwrap();
-        let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
-            task_id: "cas-7ea6".to_string(),
-            worker: "calm-octopus-51".to_string(),
-            branch: "factory/calm-octopus-51".to_string(),
-            pr_number: 932,
-            head_sha: "worker-tip".to_string(),
-            merge_commit: Some("merge-tip".to_string()),
-        };
+    fn pr_lane_failure_only_wakes_the_local_worker_owner_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let failure = crate::ui::factory::daemon::runtime::ci_watch::PrLaneFailure {
+                task_id: "cas-pr-lane".into(), worker: "delivery-worker".into(),
+                pr_number: 659, head_sha: "current-head".into(), run_id: 33436155392,
+                run_url: "https://github.test/runs/33436155392".into(),
+                check_name: crate::ui::factory::daemon::runtime::ci_watch::REQUIRED_PR_LANE_CHECK.into(),
+            };
+            let first = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+            let replay = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                "the watcher must never receive another factory's delivery alert");
+            if !local_worker {
+                assert!(rows.is_empty(), "foreign delivery must not wake locally: {rows:?}");
+                continue;
+            }
+            assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert!(matches!(replay, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
+            assert_eq!(rows[0].target, "supervisor");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects the PR-lane recovery route.
+            assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
+            assert!(rows[0].prompt.contains("PR #659"));
+            assert!(rows[0].prompt.contains("cas-pr-lane"));
+            assert!(rows[0].prompt.contains(&failure.check_name));
+            assert!(rows[0].prompt.contains("33436155392"));
+            assert_recovery_class_requires_daemon(&rows[0]);
+        }
+    }
 
-        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
-        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
-        let persisted = task_store.get("cas-7ea6").unwrap();
-        assert_eq!(persisted.deliverables.delivery_pr_number, Some(932));
-        assert_eq!(
-            persisted.deliverables.delivery_pr_merge_commit.as_deref(),
-            Some("merge-tip")
-        );
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target, "calm-octopus-51");
-        assert!(rows[0].prompt.contains("PR #932 merged at merge-tip"));
-        assert!(rows[0].prompt.contains("close cas-7ea6 with commit_receipt=merge-tip"));
-        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    #[test]
+    fn merged_delivery_only_wakes_the_local_worker_and_records_once_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = cas_types::Task::new("cas-7ea6".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("delivery-worker".into());
+            task_store.add(&task).unwrap();
+            let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+                task_id: task.id.clone(), worker: "delivery-worker".into(),
+                branch: "factory/delivery-worker".into(), pr_number: 932,
+                head_sha: "worker-tip".into(), merge_commit: Some("merge-tip".into()),
+            };
+            let first = apply_delivery_pr_observation(&cas_dir, &observation);
+            let replay = apply_delivery_pr_observation(&cas_dir, &observation);
+            let persisted = task_store.get(&task.id).unwrap();
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            if !local_worker {
+                assert!(first.is_err() && replay.is_err(), "unowned delivery stays retryable");
+                assert!(rows.is_empty(), "foreign worker must not receive a local wake: {rows:?}");
+                assert!(persisted.deliverables.delivery_pr_merge_commit.is_none(),
+                    "a foreign daemon must not stamp the receipt before the owner's wake");
+                assert!(cas_store::quality_events_for_task(&cas_dir, &task.id).unwrap().is_empty());
+                continue;
+            }
+            first.unwrap();
+            replay.unwrap();
+            assert_eq!(persisted.deliverables.delivery_pr_number, Some(932));
+            assert_eq!(persisted.deliverables.delivery_pr_merge_commit.as_deref(), Some("merge-tip"));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].target, "delivery-worker");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            assert!(rows[0].prompt.contains(&task.id));
+            assert!(rows[0].prompt.contains(&format!("commit_receipt={}", observation.merge_commit.as_deref().unwrap())));
+            assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        }
+    }
 
-        let mut aged = persisted;
-        aged.deliverables.delivery_pr_merged_at =
-            Some(chrono::Utc::now() - chrono::Duration::minutes(10));
-        task_store.update(&aged).unwrap();
-        relay_delivery_pr_merge_timeouts(&cas_dir);
-        relay_delivery_pr_merge_timeouts(&cas_dir);
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 2);
-        let supervisor_row = rows.iter().find(|row| row.target == "supervisor").unwrap();
-        assert!(supervisor_row.prompt.contains("kind=\"delivery_pr_merge_timeout\""));
-        assert!(supervisor_row.prompt.contains("PR #932"));
-        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
-            &supervisor_row.prompt
-        ));
+    #[test]
+    fn delivery_merge_timeout_only_wakes_the_local_worker_owner_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = cas_types::Task::new("cas-7ea6".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("delivery-worker".into());
+            task.deliverables.delivery_pr_number = Some(932);
+            task.deliverables.delivery_pr_merge_commit = Some("merge-tip".into());
+            task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+            task_store.add(&task).unwrap();
+            relay_delivery_pr_merge_timeouts(&cas_dir);
+            relay_delivery_pr_merge_timeouts(&cas_dir);
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                "a replicated task must not wake the watcher supervisor");
+            if !local_worker {
+                assert!(rows.is_empty(), "foreign merge timeout must not wake locally: {rows:?}");
+                continue;
+            }
+            assert_eq!(rows.len(), 1, "one escalation per owned merge receipt");
+            assert_eq!(rows[0].target, "supervisor");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects merged-delivery recovery.
+            assert!(rows[0].prompt.contains("kind=\"delivery_pr_merge_timeout\""));
+            assert!(rows[0].prompt.contains("PR #932"));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
+        }
     }
 
     /// cas-d511 (cas-6c03): a merged Tier 1 delivery waiting on the release

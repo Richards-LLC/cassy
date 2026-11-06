@@ -360,12 +360,15 @@ impl CasCore {
         let store = self.open_task_store()?;
         let task = store.get(task_id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let Some(intent) = task.deliverables.no_delivery_close_intent.as_ref() else { return Ok(None); };
+        // A retired attempt cannot change the behavior of a newer ordinary
+        // close. Only this dispatch owns the no-delivery declaration.
+        if intent.dispatch_id != dispatch_id { return Ok(None); }
         // A saved intent never falls back to a forbidden worker retry, even
         // when a successor or independent hold now prevents its completion.
         let held = |reason: &str| Some(format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued."));
         let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        if intent.dispatch_id != dispatch_id || intent.assignee != task.assignee
+        if intent.assignee != task.assignee
             || latest.as_ref().is_none_or(|dispatch| dispatch.id != dispatch_id
                 || dispatch.state != cas_types::VerificationDispatchState::Resolved)
         {

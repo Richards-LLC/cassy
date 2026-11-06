@@ -12602,6 +12602,12 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
     if !no_delivery {
         task.execution_note = Some("no-code".into());
         task.external_ref = Some("artifact:cas-7fc3/report".into());
+        // A prior declined no-delivery attempt is inert in this fresh
+        // ordinary no-code cycle; it must not suppress the legacy retry.
+        task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
+            dispatch_id: "retired-dispatch".into(), reason: "Earlier measurement".into(),
+            assignee: task.assignee.clone(),
+        });
     }
     task.risk = vec![cas::types::TaskRisk::None];
     task.deliverables.work_target = Some(WorkTarget {

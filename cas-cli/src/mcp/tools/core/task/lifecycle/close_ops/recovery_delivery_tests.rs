@@ -540,8 +540,13 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
         git(remote.path(), &["init", "-q", "--bare"]);
         git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         git(&f.worker_path, &["push", "-q", "origin", "main", &branch]);
+        let request = || TaskCloseRequest {
+            id: TASK.into(), reason: Some(format!("PASS {tip}: final pushed delivery")),
+            commit_receipt: None, no_delivery: None, supervisor_override: None,
+            stranded_branch_override: None, search_manifest: None,
+        };
         if generated_only {
-            let refused = close_output(&f).await;
+            let refused = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
             assert!(refused.contains("FOCUSED PROOF REQUIRED") && refused.contains(&tip[..12]),
                 "a generated follow-up still requires proof at the final tip: {refused}");
             assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
@@ -549,11 +554,7 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
         crate::factory_worker_check::record_passing_test_for_tests(
             &cas_dir, &f.worker_path, &tip, "cas", "test(final_delivery)",
         );
-        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
-            id: TASK.into(), reason: Some(format!("PASS {tip}: final pushed delivery")),
-            commit_receipt: None, no_delivery: None, supervisor_override: None,
-            stranded_branch_override: None, search_manifest: None,
-        })).await.unwrap());
+        let output = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
         let parked = tasks.get(TASK).unwrap();
         if !generated_only {
             assert_eq!(parked.status, TaskStatus::InProgress, "source edits cannot borrow regeneration authority: {output}");

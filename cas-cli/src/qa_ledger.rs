@@ -547,6 +547,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_verdicts_require_cited_visible_evidence_cas_3d6d() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LEDGER.md");
+        std::fs::write(dir.path().join("capture.txt"), "captured user result").unwrap();
+        for (schema, expected, observed, verdict, diagnostic) in [
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "database: row saved; credits charged", "PASS", Some("visible_outcome")),
+            ("schema: 2", "Invented Make It Mine offer", "visible: offer shown", "FAIL", Some("expectation_source")),
+            ("schema: 2", "Revised hook", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
+            ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
+            ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("", "Legacy expectation", "database: row saved", "PASS", None),
+        ] {
+            let pass = usize::from(verdict == "PASS");
+            let body = format!("{schema}\ncells=1; PASS={pass}; FAIL={}; NOT EXERCISED=0\nlabels: real-build=1\n{HEADER}\n| M01 | revise | {expected} | {observed} | {verdict} | real-build | capture.txt | cas-fixture |\n", 1 - pass);
+            std::fs::write(&path, body).unwrap();
+            let report = crate::cli::qa_ledger::check(&path, None);
+            match diagnostic {
+                Some(code) => assert!(report.diagnostics.iter().any(|d| d.code == code), "{observed}: {}", report.refusal()),
+                None => assert!(report.ok, "{}", report.refusal()),
+            }
+        }
+    }
+
+    #[test]
     fn scaffold_round_trip_preserves_honest_rows_and_task_policy() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("LEDGER.md");

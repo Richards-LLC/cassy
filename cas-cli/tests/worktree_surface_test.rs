@@ -4947,6 +4947,16 @@ async fn failed_queue_probe_refuses_before_local_merge_cas_662e() {
     protected_main_fixture_cas_d6cf("probe_failed", false).await;
 }
 
+/// cas-662e: replay Nov 5, 7:09 PM ET. "canonical GitHub repository lookup
+/// failed for origin Richards-LLC/cassy" left no slug, so the queue was never
+/// asked and the merge went local into GH013. A GitHub origin whose canonical
+/// lookup fails refuses the same way.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_canonical_lookup_refuses_before_local_merge_cas_662e() {
+    protected_main_fixture_cas_d6cf("lookup_failed", false).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
@@ -4955,7 +4965,7 @@ async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
 
 #[cfg(unix)]
 async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
-    let queued = matches!(mode, "queued" | "moved" | "probe_failed");
+    let queued = matches!(mode, "queued" | "moved" | "probe_failed" | "lookup_failed");
     let moved = mode == "moved";
     let mut env = test_env();
     let repo = GitRepo::new();
@@ -5000,6 +5010,11 @@ done
 [ -z "$(git status --porcelain --untracked-files=no)" ] || exit 1
 "#));
         let reported_head = if moved { "0".repeat(40) } else { source.clone() };
+        let repo_view = if mode == "lookup_failed" {
+            "exit 1".to_string()
+        } else {
+            r#"printf '%s\n' '{"nameWithOwner":"org/protected"}'"#.to_string()
+        };
         let queue_probe = if mode == "probe_failed" {
             "exit 1".to_string()
         } else {
@@ -5010,7 +5025,7 @@ done
 printf '%s\n' "$*" >> '{calls}'
 pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{reported_head}","headRefName":"factory/bob","baseRefName":"main"}}'
 case "$1 $2" in
-'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
+'repo view') {repo_view} ;;
 'api graphql') {queue_probe} ;;
 'api '*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
 'pr list') if [ -f '{exists}' ]; then printf '[%s]\n' "$pr"; else printf '[]\n'; fi ;;
@@ -5042,7 +5057,7 @@ printf '%s\n' "$peer" > '{}'
     request.allow_trunk = Some(true);
     request.cleanup = Some(cleanup);
     let result = service.factory(Parameters(request.clone())).await;
-    if mode == "probe_failed" {
+    if matches!(mode, "probe_failed" | "lookup_failed") {
         let refusal = result.expect_err("an unknown queue state must refuse");
         // pin: the refusal must name the unknown queue so the supervisor retries.
         assert!(refusal.message.contains("merge queue state unknown"), "{refusal:?}");

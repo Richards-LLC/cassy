@@ -2501,6 +2501,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         "category": "security",
         "code": raw_pat,
         "problem": raw_control,
+        "triage": {"reach":"main", "journey":"undeclared", "severity":"money", "repro":raw_pat},
         "suggestion": raw_password,
     }, {
         "file": "src/description.rs",
@@ -2546,6 +2547,8 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         Some(issued.capability.id.as_str())
     );
     assert_eq!(row.summary, "[REDACTED_SECRET]");
+    assert_eq!(row.issues[0].triage.reach, cas::types::FindingReach::Theoretical);
+    assert_eq!(row.issues[0].triage.repro.as_deref(), Some("[REDACTED_SECRET]"));
     assert_eq!(row.issues[0].file, "[REDACTED_PATH]");
     assert_eq!(row.issues[0].code, "[REDACTED_SECRET]");
     assert_eq!(row.issues[0].problem, "[REDACTED_CONTROL]");

@@ -282,6 +282,11 @@ impl CasService {
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let mut req = req;
+        if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            req.labels = Some(format!("{},runtime-repro", req.labels.as_deref().unwrap_or_default()));
+            let evidence = format!("Repro: {}\nAffected: {}", req.repro.as_deref().unwrap_or_default(), req.affected.as_deref().unwrap_or_default());
+            req.notes = Some(format!("{}\n{evidence}", req.notes.as_deref().unwrap_or_default()));
+        }
         if let Some(origin) = finding_origin.as_deref() {
             use crate::mcp::tools::core::task::lifecycle::review_loop::{FINDING_LABEL, origin_note};
             req.labels = Some(match req.labels.take().filter(|labels| !labels.trim().is_empty()) {

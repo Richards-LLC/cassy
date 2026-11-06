@@ -785,9 +785,70 @@ impl FromStr for IssueSeverity {
     }
 }
 
+/// User impact is separate from whether a review issue blocks its delivery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Money,
+    DataLoss,
+    #[default]
+    Broken,
+    Awkward,
+    Cosmetic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingReach {
+    Main,
+    Secondary,
+    #[default]
+    Theoretical,
+}
+
+/// A missing runtime reproduction is theoretical, including old verdicts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FindingTriage {
+    pub severity: FindingSeverity,
+    pub reach: FindingReach,
+    pub journey: Option<String>,
+    pub repro: Option<String>,
+}
+
+impl FindingTriage {
+    pub fn normalize(&mut self, declared_main: bool) {
+        if !self.repro.as_deref().is_some_and(|s| !s.trim().is_empty())
+            || (self.reach == FindingReach::Main && !declared_main)
+        {
+            self.reach = FindingReach::Theoretical;
+        }
+    }
+
+    /// P4 is backlog. Only money/data loss on a declared main journey gets
+    /// a theoretical exception (P2), below a reproduced broken main flow.
+    pub fn priority(&self, declared_main: bool) -> crate::task::Priority {
+        use FindingReach::*;
+        use FindingSeverity::*;
+        let mut normalized = self.clone();
+        normalized.normalize(declared_main);
+        crate::task::Priority(match (normalized.reach, self.severity) {
+            (Main, Money | DataLoss) => 0,
+            (Main, Broken) | (Secondary, Money | DataLoss) => 1,
+            (Main, Awkward) | (Secondary, Broken) => 2,
+            (Main, Cosmetic) | (Secondary, Awkward) => 3,
+            (Theoretical, Money | DataLoss) if declared_main => 2,
+            _ => 4,
+        })
+    }
+}
+
 /// An issue found during verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationIssue {
+    #[serde(default)]
+    pub triage: FindingTriage,
+
     /// File where the issue was found
     pub file: String,
 
@@ -818,6 +879,7 @@ impl VerificationIssue {
     /// Create a new verification issue
     pub fn new(file: String, category: String, problem: String) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line: None,
             severity: IssueSeverity::Blocking,
@@ -838,6 +900,7 @@ impl VerificationIssue {
         suggestion: Option<String>,
     ) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line,
             severity: IssueSeverity::Blocking,
@@ -851,6 +914,7 @@ impl VerificationIssue {
     /// Create a warning issue
     pub fn warning(file: String, category: String, problem: String) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line: None,
             severity: IssueSeverity::Warning,
@@ -1111,6 +1175,10 @@ impl Verification {
 
         self.issues.truncate(VERIFIER_ISSUES_MAX);
         for issue in &mut self.issues {
+            issue.triage.repro = issue.triage.repro.as_deref()
+                .map(|value| sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES));
+            issue.triage.journey = issue.triage.journey.as_deref()
+                .map(|value| sanitize_verifier_text(value, VERIFIER_ISSUE_CATEGORY_MAX_BYTES));
             issue.file = sanitize_verifier_text(&issue.file, VERIFIER_ISSUE_FILE_MAX_BYTES);
             issue.category =
                 sanitize_verifier_text(&issue.category, VERIFIER_ISSUE_CATEGORY_MAX_BYTES);
@@ -1165,6 +1233,20 @@ mod tests {
         wire["triage"] = serde_json::json!({"severity":"money", "reach":"main", "journey":"save", "repro":"save charged twice"});
         let restored: VerificationIssue = serde_json::from_value(wire).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap()["triage"]["journey"], "save");
+        for (severity, main, secondary) in [
+            ("money", 0, 1), ("data_loss", 0, 1), ("broken", 1, 2),
+            ("awkward", 2, 3), ("cosmetic", 3, 4),
+        ] {
+            let mut triage: FindingTriage = serde_json::from_value(serde_json::json!({
+                "severity":severity, "reach":"main", "journey":"save", "repro":"runtime failure",
+            })).unwrap();
+            assert_eq!(triage.priority(true).0, main, "{severity}: main");
+            triage.reach = FindingReach::Secondary;
+            assert_eq!(triage.priority(true).0, secondary, "{severity}: secondary");
+            triage.repro = None;
+            assert_eq!(triage.priority(false).0, 4, "unproved/undeclared findings stay backlog");
+        }
+
     }
 
     #[test]
@@ -1342,8 +1424,12 @@ mod tests {
             r"C:\Users\operator\private.rs".to_string(),
             "src/lib.rs".to_string(),
         ];
+        verification.issues[0].triage.repro = Some(raw_capability.to_string());
+        verification.issues[0].triage.journey = Some("/home/operator/private-flow".into());
         verification.sanitize_verifier_authored_content();
 
+        assert_eq!(verification.issues[0].triage.repro.as_deref(), Some(REDACTED_VERIFIER_SECRET));
+        assert_eq!(verification.issues[0].triage.journey.as_deref(), Some(REDACTED_VERIFIER_PATH));
         assert_eq!(verification.summary, REDACTED_VERIFIER_SECRET);
         assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
         assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);

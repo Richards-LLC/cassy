@@ -3456,6 +3456,7 @@ impl CasService {
             .flatten();
         // cas-ee68: store the brief on the task before the worker exists, so
         // the spawn message can quote it and task show/start list it.
+        let triage_notice = crate::finding_triage::staffing_notice(&self.inner.cas_root, &source_ids);
         let brief_delivery_note = match (spawn_brief.as_deref(), req.task_id.as_deref()) {
             (Some(brief), Some(task_id)) => {
                 let note = crate::ui::factory::daemon::runtime::queue_and_events::spawn_brief_note(
@@ -3594,11 +3595,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

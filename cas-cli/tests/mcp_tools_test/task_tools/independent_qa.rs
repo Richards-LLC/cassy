@@ -738,13 +738,16 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
         {"id":"F12", "scope":"pre-existing"}
     ])))).await.unwrap());
     assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
-    assert!(result.contains("below the spawn threshold (no repro or affected): F12"), "{result}");
+    assert!(result.contains("Theoretical backlog (P4): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
         .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
-    assert_eq!(follow_ups.len(), 1, "F10 already has a task; only F11 is filed");
-    assert!(follow_ups[0].title.contains("Strict contrast capture instability"));
-    assert!(follow_ups[0].description.contains("Problem: Strict contrast capture instability."));
-    assert!(!follow_ups[0].description.contains("(not described)"));
+    assert_eq!(follow_ups.len(), 2, "F10 is linked; F11 and theoretical F12 are retained");
+    let observed = follow_ups.iter().find(|t| t.title.contains("Strict contrast")).unwrap();
+    let theoretical = follow_ups.iter().find(|t| t.id != observed.id).unwrap();
+    assert_eq!(theoretical.priority.0, 4);
+    assert!(observed.title.contains("Strict contrast capture instability"));
+    assert!(observed.description.contains("Problem: Strict contrast capture instability."));
+    assert!(!observed.description.contains("(not described)"));
     assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
         .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
@@ -788,6 +791,13 @@ async fn gabber_findings_derive_priority_and_ready_order() {
         let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
         assert_eq!(task.priority.0, expected, "{title}: {:?}", task.labels);
         assert!(task.labels.iter().any(|label| label == "from-finding"));
+        if title == "Contradictory reader output" {
+            service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"update", "id":id, "priority":0,
+            })).unwrap())).await.unwrap();
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&id).unwrap().priority.0, 4,
+                "manual priority cannot promote a theoretical finding");
+        }
         if expected == 1 { visible.push(id); } else { corners.push(id); }
     }
     let ready = extract_text(service.task(Parameters(serde_json::from_value(serde_json::json!({

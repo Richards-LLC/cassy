@@ -1566,7 +1566,14 @@ impl CasCore {
         // authority. For ordinary updates, only a normalized priority change
         // needs the worker restriction; notes and idempotent priority values
         // must not require a registered session or readable agent store.
-        let requested_priority = req.priority.map(|priority| Priority(priority.min(4) as i32));
+        let mut triaged_labels = task.labels.clone();
+        if let Some(labels) = req.labels.as_deref() {
+            triaged_labels.extend(labels.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
+        }
+        let derived_priority = if req.priority.is_some() || req.labels.is_some() {
+            crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels)
+        } else { None };
+        let requested_priority = derived_priority.or_else(|| req.priority.map(|priority| Priority(priority.min(4) as i32)));
         let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);
         let requested_status_is_nonterminal = req
             .status
@@ -1668,16 +1675,8 @@ impl CasCore {
             changes.push("priority");
         }
 
-        if let Some(labels) = req.labels {
-            for label in labels
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                if !task.labels.contains(&label.to_string()) {
-                    task.labels.push(label.to_string());
-                }
-            }
+        if req.labels.is_some() || derived_priority.is_some() {
+            task.labels = triaged_labels;
             changes.push("labels");
         }
 

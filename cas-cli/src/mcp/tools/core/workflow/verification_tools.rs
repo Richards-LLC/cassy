@@ -158,7 +158,7 @@ impl CasCore {
         // inspecting one-time authority, or applying expiry transitions.
         // This makes malformed issues failure-atomic even when the named
         // capability or dispatch is expired.
-        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
+        let mut issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
             parse_verification_issues(issues_json).map_err(|message| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(message),
@@ -178,6 +178,9 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+        for issue in &mut issues {
+            crate::finding_triage::normalize_finding(&self.cas_root, &mut issue.triage);
+        }
         let mut authored_content = Verification::new(String::new(), req.task_id.clone());
         authored_content.summary = req.summary.clone();
         authored_content.issues = issues;
@@ -1266,6 +1269,7 @@ impl CasCore {
                     "\n{} [{}] {}\n",
                     severity_icon, issue.category, location
                 ));
+                output.push_str(&format!("   Reach: {:?}; impact: {:?}; journey: {}\n", issue.triage.reach, issue.triage.severity, issue.triage.journey.as_deref().unwrap_or("undeclared")));
                 output.push_str(&format!("   Problem: {}\n", issue.problem));
                 if !issue.code.is_empty() {
                     output.push_str(&format!("   Code: {}\n", issue.code));

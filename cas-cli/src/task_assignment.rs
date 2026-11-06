@@ -98,6 +98,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
             .map(|start| start.branch.as_str()).unwrap_or("see task details");
         text = format!("You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.\n\nView full details: {prefix}task action=show id={}\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, task.title, task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
     }
+    text.push_str(&crate::finding_triage::focus_brief(cas_dir));
     if occurrence.is_some() && task.status == TaskStatus::InProgress {
         text = crate::prompt_revalidation::attach_queue_continuation(&text, &task.id);
     }

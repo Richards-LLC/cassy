@@ -66,13 +66,9 @@ pub(crate) fn spawn_gate(request: &SpawnRequest<'_>) -> Result<Option<String>, S
             }
         }
     };
-    let filled = |field: Option<&str>| field.is_some_and(|value| !value.trim().is_empty());
-    if filled(request.repro) && filled(request.affected) {
-        return Ok(Some(origin));
-    }
-    Err(format!(
-        "SPAWN THRESHOLD: this follow-up originates from a review finding ({origin}). A finding becomes a task only when it is a reproduced, observable defect affecting someone today. Pass `repro` (the steps or command, plus the wrong output you observed) and `affected` (who acts on that output today), or leave it in the verdict. If this is not a review finding, pass finding_origin=\"{NOT_A_FINDING}\"."
-    ))
+    // Missing runtime evidence is retained as a theoretical backlog finding.
+    // Severity × reach, rather than another admission gate, decides its priority.
+    Ok(Some(origin))
 }
 
 /// The durable record of why this follow-up cleared the threshold.
@@ -202,9 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn a_follow_up_from_a_finding_needs_repro_and_affected() {
-        let refusal = spawn_gate(&request()).unwrap_err();
-        assert!(refusal.contains("SPAWN THRESHOLD"), "{refusal}");
+    fn a_follow_up_retains_its_origin_without_a_runtime_repro() {
+        assert_eq!(spawn_gate(&request()).unwrap().as_deref(), Some("verification:ver-7e87d441000d"));
         let accepted = SpawnRequest { repro: Some("cas x prints y"), affected: Some("the supervisor"), ..request() };
         assert_eq!(spawn_gate(&accepted).unwrap().as_deref(), Some("verification:ver-7e87d441000d"));
 
@@ -214,7 +209,7 @@ mod tests {
             reviewer_origin: Some("qa:cas-q"),
             ..request()
         };
-        assert!(spawn_gate(&reviewer).is_err(), "a reviewer cannot declare its way out");
+        assert_eq!(spawn_gate(&reviewer).unwrap().as_deref(), Some("qa:cas-q"));
         let declared = SpawnRequest { origin: Some("none"), ..request() };
         assert_eq!(spawn_gate(&declared).unwrap(), None);
     }
@@ -226,9 +221,9 @@ mod tests {
         let own = SpawnRequest { priority: 1, task_type: TaskType::Bug, ..request() };
         assert_eq!(spawn_gate(&own).unwrap(), None);
         let worker = SpawnRequest { priority: 1, task_type: TaskType::Bug, is_worker: true, ..request() };
-        assert!(spawn_gate(&worker).is_err());
+        assert!(spawn_gate(&worker).unwrap().is_some());
         let named = SpawnRequest { priority: 1, task_type: TaskType::Bug, origin: Some("verification:ver-1"), ..request() };
-        assert!(spawn_gate(&named).is_err());
+        assert!(spawn_gate(&named).unwrap().is_some());
     }
 
     #[test]

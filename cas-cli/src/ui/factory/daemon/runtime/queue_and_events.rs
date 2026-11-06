@@ -1096,6 +1096,7 @@ pub(crate) fn worker_spawn_prompt(
             }
         }
     }
+    message.push_str(&crate::finding_triage::focus_brief(cas_dir));
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
         .ok()
@@ -15721,6 +15722,13 @@ mod tests {
         assert!(prompt.contains("Rule references required for rule-177"), "{prompt}");
         // pin: Rule-driven sites: is the machine-readable receipt field name.
         assert!(prompt.contains("Rule-driven sites:"), "{prompt}");
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
+            &cas_dir, queue.as_ref(), "vd-focus", &task.id, "supervisor",
+            chrono::Utc::now() + chrono::Duration::minutes(10), &worker.name, None, None, None,
+        ).unwrap();
+        let handoff = queue.peek_all(10).unwrap().into_iter()
+            .find(|row| row.recipient == "supervisor").unwrap();
+        assert!(handoff.prompt.contains(focus), "{}", handoff.prompt);
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }
 

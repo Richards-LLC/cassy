@@ -13,6 +13,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 disabled MCP server, listing record IDs and file locations for review while
 preserving the original rules, skills, memories and brief templates.
 
+Projects declare their main journeys in the existing QA registry. Finding priority comes from severity × reach: reproduced broken main journeys precede theoretical code-read findings, which go to P4 backlog. The theoretical exception is money/data loss on a declared main journey (P2). Staffing theoretical work while a main-journey FAIL is unowned produces an advisory nudge. `factory.focus_mode` follows every worker/reviewer brief; see [triage](qa/triage.md).
+
 ## Personas
 
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.

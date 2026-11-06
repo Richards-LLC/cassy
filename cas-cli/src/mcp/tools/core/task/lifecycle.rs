@@ -1815,6 +1815,7 @@ impl CasCore {
             format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
         };
 
+        crate::finding_triage::apply(&self.cas_root, &mut task);
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -2230,6 +2231,8 @@ impl CasCore {
                 data: None,
             })?
         };
+
+        for task in &mut tasks { crate::finding_triage::apply(&self.cas_root, task); }
 
         let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {

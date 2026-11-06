@@ -1141,7 +1141,7 @@ pub fn validate_round_bundle(
 /// A `qa_record` issue the reviewer marked `"scope": "pre-existing"`: the base
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
 /// finding 1). It never rejects a correct, narrow change. Cassy files it as a
-/// follow-up linked to the delivery only when it clears the spawn threshold.
+/// follow-up linked to the delivery, with theoretical findings in the backlog.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
     pub triage: cas_types::FindingTriage,

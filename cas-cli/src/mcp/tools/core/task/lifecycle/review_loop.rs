@@ -1,7 +1,7 @@
-//! Review findings do not become work unless they clear the spawn threshold.
+//! Review findings retain provenance; severity × reach decides their priority.
 //!
 //! A follow-up that originates from a verifier, QA or reviewer finding must say
-//! how to reproduce the wrong behaviour and who acts on it today. Every such task
+//! whether its reach was observed or only inferred. Every such task
 //! carries [`FINDING_LABEL`], and the epic's loop gain counts them against its
 //! completed reviews: at 0.5 or more, reviews are generating work about as fast as
 //! they finish it, and the supervisor hears about it once for that epic.
@@ -92,7 +92,7 @@ impl LoopGain {
     }
 
     pub(crate) fn status_line(self) -> String {
-        let warning = if self.tripped() { " — findings are being filed as work; apply the spawn threshold" } else { "" };
+        let warning = if self.tripped() { " — keep theoretical findings in the backlog; staff main-journey FAILs first" } else { "" };
         format!(
             "Review loop gain: {:.2} ({} follow-ups from findings over the last {} reviews){warning}\n",
             self.ratio(),
@@ -155,7 +155,7 @@ pub(crate) fn notify_when_tripped(cas_root: &Path, epic: &str) {
         return;
     };
     let notice = format!(
-        "review loop gain {:.2}; findings are being filed as work; apply the spawn threshold",
+        "review loop gain {:.2}; keep theoretical findings in the backlog; staff main-journey FAILs first",
         gain.ratio()
     );
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_root) else {

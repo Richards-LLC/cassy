@@ -470,6 +470,26 @@ fn spawn_backend(program: &std::path::Path, standby: bool) -> Result<Backend> {
 }
 
 #[cfg(unix)]
+async fn watch_updates(
+    program: std::path::PathBuf,
+    image: std::sync::Arc<std::sync::Mutex<Option<crate::mcp::socket::ExeIdentity>>>,
+    updates: mpsc::Sender<Backend>,
+    mut spawn: impl FnMut(&std::path::Path, bool) -> Result<Backend>,
+) {
+        let mut ticks = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            ticks.tick().await;
+            let stale = image.lock().map(|image| image.as_ref()
+                .is_some_and(crate::mcp::socket::ExeIdentity::is_stale)).unwrap_or(false);
+            if !stale || updates.capacity() == 0 { continue; }
+            match spawn(&program, true) {
+                Ok(backend) => if updates.send(backend).await.is_err() { break; },
+                Err(error) => eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {error}"),
+            }
+        }
+}
+
+#[cfg(unix)]
 pub(super) async fn run() -> Result<()> {
     let root = super::runtime::resolve_mcp_serve_root()?;
     let watchdog = super::parent_watchdog::spawn();
@@ -481,19 +501,7 @@ pub(super) async fn run() -> Result<()> {
     let (updates, update_rx) = mpsc::channel(1);
     let (events, mut event_rx) = mpsc::channel(8);
     let image_watch = image.clone();
-    let watcher = tokio::spawn(async move {
-        let mut ticks = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            ticks.tick().await;
-            let stale = image_watch.lock().map(|image| image.as_ref()
-                .is_some_and(crate::mcp::socket::ExeIdentity::is_stale)).unwrap_or(false);
-            if !stale || updates.capacity() == 0 { continue; }
-            match spawn_backend(&program, true) {
-                Ok(backend) => if updates.send(backend).await.is_err() { break; },
-                Err(error) => eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {error}"),
-            }
-        }
-    });
+    let watcher = tokio::spawn(watch_updates(program, image_watch, updates, spawn_backend));
     let pid = std::process::id();
     let path = root.join("mcp-fronts").join(format!("{pid}.json"));
     let report_path = path.clone();

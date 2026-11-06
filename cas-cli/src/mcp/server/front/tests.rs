@@ -137,7 +137,7 @@ async fn failed_candidate_keeps_initialized_connection_serving_cas_81c4() {
     for (version, fails, reason) in [("broken", true, "candidate failed startup"),
         ("protocol", false, "protocolVersion"),
         ("capabilities", false, "capabilities differ"),
-        ("schema", false, "tools/list schema differs")] {
+        ("schema", false, "tools/list schema differs for tool observe")] {
         let mut f = Fixture::new().await;
         f.update(version, fails).await;
         assert!(matches!(f.event().await, Event::Deferred(actual) if actual.contains(reason)));
@@ -196,4 +196,32 @@ async fn drain_timeout_keeps_old_backend_and_pending_calls_cas_81c4() {
     f.call(3).await;
     assert_eq!(receive(&mut f.input).await["result"]["version"], "old");
     assert_eq!(*f.calls.lock().await, [("old".into(), json!(2)), ("old".into(), json!(3))]);
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn deferred_binary_is_not_respawned_until_install_changes_cas_81c4() {
+    let temp = tempfile::tempdir().unwrap();
+    let program = temp.path().join("cas");
+    std::fs::write(&program, "old").unwrap();
+    let serving = crate::mcp::socket::ExeIdentity::from_exe_path(program.clone());
+    let image = std::sync::Arc::new(std::sync::Mutex::new(Some(serving)));
+    let replacement = temp.path().join("replacement");
+    std::fs::write(&replacement, "incompatible").unwrap();
+    std::fs::rename(&replacement, &program).unwrap();
+    let (updates, mut incoming) = mpsc::channel(1);
+    let watcher = tokio::spawn(watch_updates(program.clone(), image, updates, |_, standby| {
+        assert!(standby);
+        Ok(backend("schema", false, Arc::default(), Arc::default(), Arc::default()))
+    }));
+    let first = incoming.recv().await.expect("first installed candidate");
+    drop(first); // The relay rejected this image; the old one keeps serving.
+    tokio::time::advance(Duration::from_secs(90)).await;
+    tokio::task::yield_now().await;
+    assert!(incoming.try_recv().is_err(), "deferred binary must not spawn every 30 seconds");
+    std::fs::write(&replacement, "compatible").unwrap();
+    std::fs::rename(&replacement, &program).unwrap();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(incoming.recv().await.is_some(), "a newly installed image must be retried");
+    watcher.abort();
 }

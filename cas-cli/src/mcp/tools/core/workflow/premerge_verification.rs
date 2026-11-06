@@ -1045,8 +1045,14 @@ impl CasCore {
         {
             return Ok(None);
         }
-        let candidate =
-            self.build_verification_candidate(task, repo, source, target, digest.to_string())?;
+        // cas-d4b7 requires a proven patch match. A conflicting/unbuildable
+        // candidate must fall through so the caller invalidates the old approval
+        // before the fresh-review path reports the candidate error.
+        let Ok(candidate) =
+            self.build_verification_candidate(task, repo, source, target, digest.to_string())
+        else {
+            return Ok(None);
+        };
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
         }

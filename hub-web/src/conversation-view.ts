@@ -5,6 +5,8 @@ import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-sh
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
 import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
+import { hydrateReplyImages } from "./reply-images";
+import type { ArtifactViewResult } from "./artifact-open";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { reconcileChildren, ThreadWindow } from "./thread-window";
@@ -99,6 +101,14 @@ const turnRenderers = new Map<RenderableKind, TurnRenderer>();
  * blocker fall back to a plain `.bub[data-kind]` and attachments to a link.
  * Returns a function that removes the registration.
  */
+/** Resolves a reply's inline image (cas-85bfb) through the publishing machine's media ticket. */
+export type ReplyImageResolver = (reference: string, context: TurnRenderContext) => Promise<ArtifactViewResult | undefined>;
+let replyImageResolver: ReplyImageResolver | undefined;
+export function registerReplyImageResolver(resolve: ReplyImageResolver): () => void {
+  replyImageResolver = resolve;
+  return () => { if (replyImageResolver === resolve) replyImageResolver = undefined; };
+}
+
 export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer): () => void {
   turnRenderers.set(kind, render);
   return () => { if (turnRenderers.get(kind) === render) turnRenderers.delete(kind); };
@@ -2058,7 +2068,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     table.append(scroll, actions, status);
     nodes.push(table);
   }
-  if (options.attachments === "none") return nodes;
+  if (options.attachments === "none") return withReplyImages(nodes, context);
   const sheet = turnRenderers.get("attachment");
   for (const attachment of reply.attachments ?? []) {
     if (sheet && context) { nodes.push(sheet(reply, { ...context, attachment })); continue; }
@@ -2066,6 +2076,13 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
     row.append(link); nodes.push(row);
   }
+  return withReplyImages(nodes, context);
+}
+
+/** Without a machine to ask, an inline image stays the reply's own text. */
+function withReplyImages(nodes: HTMLElement[], context: TurnRenderContext | undefined): HTMLElement[] {
+  const resolve = replyImageResolver;
+  hydrateReplyImages(nodes, reference => context && resolve ? resolve(reference, context) : Promise.resolve(undefined));
   return nodes;
 }
 

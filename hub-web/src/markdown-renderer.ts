@@ -6,6 +6,7 @@ import { appendEmojiText } from "./emoji-text";
  * innerHTML, which keeps tags, entities, and unsupported link schemes literal.
  */
 import { createCodeFrame } from "./code-frame";
+import { imagePlaceholder, imageReference } from "./reply-images";
 
 interface ListMarker {
   indent: number;
@@ -21,7 +22,7 @@ const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
 const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
 const ALL_CAPS_LABEL = "[A-Z][A-Z0-9]*(?:[ \\t]+[A-Z][A-Z0-9]*)*";
 const LEAD = new RegExp(`^(?:Status\\s+\\d{1,2}:[\\dx]{2}Z\\.(?:[ \\t]+${ALL_CAPS_LABEL}:)?|[^.\\n]{1,120}\\.[ \\t]+${ALL_CAPS_LABEL}:)`);
-const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\n)]+\)/;
+const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|!?\[[^\]\n]*\]\([^\n)]+\)/;
 
 function listMarker(line: string): ListMarker | undefined {
   const match = LIST.exec(line);
@@ -128,6 +129,22 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
         code.textContent = source.slice(index + 1, close);
         parent.append(code);
         index = close + 1;
+        plainStart = index;
+        continue;
+      }
+    }
+
+    // An image is an artifact or a project artifacts-directory file the
+    // machine re-proves; every other image URL stays literal text.
+    if (source[index] === "!" && source[index + 1] === "[") {
+      const labelEnd = source.indexOf("](", index + 2);
+      const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
+      if (labelEnd >= index + 2 && urlEnd > labelEnd + 2) {
+        const text = source.slice(index, urlEnd + 1);
+        const reference = imageReference(source.slice(labelEnd + 2, urlEnd));
+        flush(index);
+        parent.append(reference ? imagePlaceholder(document, source.slice(index + 2, labelEnd).trim(), reference, text) : document.createTextNode(text));
+        index = urlEnd + 1;
         plainStart = index;
         continue;
       }

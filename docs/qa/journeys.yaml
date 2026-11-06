@@ -12,16 +12,16 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  mcp-eager-initial-backend:
-    title: Initial MCP startup validates its store and reports readiness without waiting for a client handshake; replacement candidates remain inactive
-    tasks: [cas-bdda]
-    invariants: [HUB-J27-CARD-RELOAD]
-    journeys: [HUB-J27]
   train-rust-red-feedback:
     title: A red train tip wakes its owner once with complete evidence and holds ordered merges until green or an audited decision
     tasks: [cas-f0a9]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
+  mcp-eager-initial-backend:
+    title: Initial MCP startup validates its store and reports readiness without waiting for a client handshake; replacement candidates remain inactive
+    tasks: [cas-bdda]
+    invariants: [HUB-J27-CARD-RELOAD]
+    journeys: [HUB-J27]
   approved-dispatch-close-owner:
     title: Approved dispatch and batch receipt recovery use ordinary close gates without worker retries or repeated covered QA offers
     tasks: [cas-abb0]

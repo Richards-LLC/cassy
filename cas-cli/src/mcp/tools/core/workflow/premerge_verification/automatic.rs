@@ -29,21 +29,23 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     ))
 }
 
-fn command(output: &Path) -> Result<Command, String> {
+fn command(root: &Path, output: &Path) -> Result<Command, String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
     let model = route.spec.model.ok_or("verifier route has no model")?;
     let effort = route.spec.effort.ok_or("verifier route has no effort")?;
-    let harness = |name: &str| {
-        #[cfg(test)]
-        if let Some(binary) = std::env::var_os("CAS_TEST_PREMERGE_HARNESS") {
-            return Command::new(binary);
-        }
-        Command::new(name)
-    };
-    let mut command = match route.spec.cli {
+    // A daemon may have no provider account selector, even when the host has
+    // authenticated named accounts. Use the same checked launch environment
+    // as supervisor launches, rather than inheriting the daemon's default home.
+    let environment = crate::hub::launch_env::resolve_for_project(route.spec.cli, None, Some(root))
+        .map_err(|e| e.to_string())?;
+    let mut command = Command::new(environment.executable);
+    for key in environment.remove {
+        command.env_remove(key);
+    }
+    command.envs(environment.set);
+    match route.spec.cli {
         cas_mux::SupervisorCli::Codex => {
-            let mut command = harness("codex");
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
                 .arg("--model")
@@ -53,10 +55,8 @@ fn command(output: &Path) -> Result<Command, String> {
                 .args(["-c", "project_doc_max_bytes=0", "--output-last-message"])
                 .arg(output)
                 .arg("-");
-            command
         }
         cas_mux::SupervisorCli::Claude => {
-            let mut command = harness("claude");
             command.args(["-p", "--model"]).arg(model).args([
                 "--effort",
                 effort.as_str(),
@@ -66,10 +66,9 @@ fn command(output: &Path) -> Result<Command, String> {
                 "--mcp-config",
                 "{\"mcpServers\":{}}",
             ]);
-            command
         }
         other => return Err(format!("unsupported verifier harness: {other:?}")),
-    };
+    }
     crate::internal_llm::isolate_command(&mut command);
     for key in ["CAS_AGENT_ID", "CLAUDECODE", "CODEX_THREAD_ID"] {
         command.env_remove(key);
@@ -91,7 +90,7 @@ pub(super) fn launch(
     let directory = core.cas_root.join("verification-runs").join(&dispatch.id);
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
-    let mut command = command(&output)?;
+    let mut command = command(&core.cas_root, &output)?;
     command.current_dir(&proof.worktree_root);
     launch_command(core, task, dispatch, command, output)
 }
@@ -178,7 +177,26 @@ fn review(
     std::fs::write(output.with_file_name("harness.log"), &result.stderr)
         .map_err(|e| e.to_string())?;
     if !result.status.success() {
-        return Err(format!("harness exited {}", result.status));
+        // Keep the full log on disk; notices carry only the final eight lines
+        // within a 2 KiB window, so an echoed prompt cannot flood the owner.
+        let tail =
+            String::from_utf8_lossy(&result.stderr[result.stderr.len().saturating_sub(2048)..]);
+        let mut lines = tail.lines().rev().take(8).collect::<Vec<_>>();
+        lines.reverse();
+        let tail =
+            crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(
+                &lines.join("\n"),
+            );
+        return Err(format!(
+            "harness exited {}; stderr tail ({}):\n{}",
+            result.status,
+            output.with_file_name("harness.log").display(),
+            if tail.trim().is_empty() {
+                "(empty)"
+            } else {
+                &tail
+            },
+        ));
     }
     let bytes = if output.exists() {
         std::fs::read(output).map_err(|e| e.to_string())?
@@ -313,13 +331,24 @@ mod tests {
         let account = env.home().join(".codex-review");
         std::fs::create_dir_all(account.join("sessions")).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
-        std::fs::write(account.join("sessions/usage.jsonl"), serde_json::json!({
-            "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
-                "primary": {"used_percent": 20.0, "window_minutes": 10080,
-                    "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
-            }}
-        }).to_string()).unwrap();
-        for status in ["harness_failed", "approved", "rejected", "supervisor_call", "malformed"] {
+        std::fs::write(
+            account.join("sessions/usage.jsonl"),
+            serde_json::json!({
+                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
+                    "primary": {"used_percent": 20.0, "window_minutes": 10080,
+                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for status in [
+            "harness_failed",
+            "approved",
+            "rejected",
+            "supervisor_call",
+            "malformed",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             let run = |args: &[&str]| super::super::tests::run(repo, args);
@@ -417,7 +446,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let script = bin.join("codex");
             env.set("CAS_TEST_VERIFIER_STATUS", status);
-            std::fs::write(&script, r#"#!/bin/sh
+            std::fs::write(
+                &script,
+                r#"#!/bin/sh
 if [ "$1" = login ]; then
     [ -f "$CODEX_HOME/auth.json" ] || exit 1
     echo 'Logged in using ChatGPT'
@@ -432,9 +463,10 @@ fi
 [ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
 [ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
 cat "$CAS_TEST_VERIFIER_RESPONSE"
-"#).unwrap();
+"#,
+            )
+            .unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-            env.set("CAS_TEST_PREMERGE_HARNESS", &script);
             // Exercise the dispatch handler used by worktree_merge, replacing
             // only the external provider executable in this isolated fixture.
             let handle = core
@@ -496,14 +528,24 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     1,
                     "{status}: exactly one actionable notice: {prompts:?}"
                 );
-                assert!(prompts[0].prompt.contains(match status {
-                    "malformed" => "invalid verifier response",
-                    "harness_failed" => "401 Unauthorized: Missing bearer or basic authentication in header",
-                    _ => "operator draft probe",
-                }), "{status}: {:?}", prompts[0]);
+                assert!(
+                    prompts[0].prompt.contains(match status {
+                        "malformed" => "invalid verifier response",
+                        "harness_failed" =>
+                            "401 Unauthorized: Missing bearer or basic authentication in header",
+                        _ => "operator draft probe",
+                    }),
+                    "{status}: {:?}",
+                    prompts[0]
+                );
                 if status == "harness_failed" {
-                    let diagnostics = std::fs::read_to_string(output.with_file_name("harness.log")).unwrap();
-                    assert!(!prompts[0].prompt.contains(diagnostics.lines().next().unwrap()));
+                    let diagnostics =
+                        std::fs::read_to_string(output.with_file_name("harness.log")).unwrap();
+                    assert!(
+                        !prompts[0]
+                            .prompt
+                            .contains(diagnostics.lines().next().unwrap())
+                    );
                 }
             }
             eprintln!(

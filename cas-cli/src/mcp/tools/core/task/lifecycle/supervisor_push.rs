@@ -430,11 +430,13 @@ pub(crate) fn queue_approved_verification_close_recovery(
     let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
     let rows = agents.list(None).map_err(|error| error.to_string())?;
     let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+    let prefix = rows.iter().find(|agent| agent.id == recipient.id)
+        .and_then(crate::harness_policy::agent_tool_prefix).unwrap_or("");
     let head = dispatch.repository.as_ref()
         .map(|proof| format!(" Bound head: {}.", proof.head_commit))
         .unwrap_or_default();
     let detail = format!(
-        "Verification approved for task {} (exact dispatch {dispatch_id}).{head} Supervisor recovery: inspect the live task and run task action=close id={} through the ordinary gates, without supervisor_override. Resolve any independent hold first. The worker must never re-close; do not ask it to retry.",
+        "Verification approved for task {} (exact dispatch {dispatch_id}).{head} Supervisor recovery: inspect the live task and run {prefix}task action=close id={} through the ordinary gates, without supervisor_override. Resolve any independent hold first. The worker must never re-close; do not ask it to retry.",
         task.id, task.id,
     );
     crate::supervisor_notices::enqueue(
@@ -2239,7 +2241,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
         agents.init().unwrap();
-        let owner = agent_in_session("owner-id", "owner", AgentRole::Supervisor, "owner-session");
+        let mut owner = agent_in_session("owner-id", "owner", AgentRole::Supervisor, "owner-session");
+        owner.metadata.insert("supervisor_cli".into(), "codex".into());
         let foreign = agent_in_session("foreign-id", "foreign", AgentRole::Supervisor, "foreign-session");
         agents.register(&owner).unwrap();
         agents.register(&foreign).unwrap();
@@ -2281,6 +2284,8 @@ mod tests {
             assert_eq!(rows.len(), expected, "{name}");
             assert!(rows.iter().all(|row| row.target == owner.name
                 && row.factory_session.as_deref() == Some("owner-session")), "{rows:?}");
+            // pin: recovery commands must use the actual recipient's registered harness alias.
+            assert!(rows.iter().all(|row| row.prompt.contains("mcp__cs__task action=close")), "{rows:?}");
             assert_eq!(tasks.get(&task.id).unwrap().status, status, "routing cannot lift holds");
         }
     }

@@ -125,6 +125,7 @@ impl GraphQlTransport for GhCliTransport {
 /// and booleans as such and everything else as a string, and — the reason it is
 /// used here rather than string-interpolating into the query — a variable value
 /// can never be read as query syntax.
+#[track_caller]
 pub fn run_graphql(
     query: &str,
     variables: &[(&str, String)],

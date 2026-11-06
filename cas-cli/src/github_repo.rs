@@ -74,6 +74,7 @@ type CanonicalCache = std::sync::Mutex<
 /// One explicit lookup follows GitHub's rename/transfer redirect. cas-c24e:
 /// the answer is cached per process, so a daemon tick, a merge or a close
 /// stops spending a GraphQL request on an identity that never changes.
+#[track_caller]
 pub(crate) fn resolve_slug(
     origin: &str,
     cwd: &Path,
@@ -95,6 +96,7 @@ pub(crate) fn resolve_slug(
     Ok(repo)
 }
 
+#[track_caller]
 fn resolve_slug_uncached(
     origin: &str,
     cwd: &Path,
@@ -121,6 +123,9 @@ fn resolve_slug_uncached(
                 "canonical GitHub repository lookup unavailable for origin {origin} (cannot start or capture gh)"
             ),
         })?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("canonical GitHub repository lookup for origin {origin}: {refusal}"));
+    }
     if !output.status.success() {
         // No stderr here: gh can include credentials in an error. The CI
         // receipt names the failed operation, not arbitrary provider output.
@@ -165,6 +170,7 @@ pub(crate) struct QueueReport {
 }
 
 /// Reuse one response for origin and queue diagnostics, including redirects.
+#[track_caller]
 pub(crate) fn repository_health(
     origin: &str,
     cwd: &Path,
@@ -304,6 +310,7 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
 /// branch, including ruleset-backed queues. Do not infer one from workflows,
 /// plan names or branch protection alone. Provider errors are not absence.
 /// Schema: https://docs.github.com/en/graphql/reference/repos#repository
+#[track_caller]
 pub(crate) fn merge_queue_enabled(
     repo: &str,
     branch: &str,
@@ -322,6 +329,9 @@ pub(crate) fn merge_queue_enabled(
     ]);
     let output = run_command(&mut command, Deadline::after(timeout), timeout)
         .map_err(|_| "merge queue lookup unavailable or timed out".to_string())?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("merge queue lookup: {refusal}"));
+    }
     if !output.status.success() {
         return Err("merge queue lookup failed".into());
     }

@@ -39,11 +39,11 @@ pub(crate) struct GhTrainQueue(pub PathBuf);
 
 impl GhTrainQueue {
     fn gh(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gh")
-            .args(args)
-            .current_dir(&self.0)
-            .output()
-            .context("gh is unavailable")?;
+        let output = crate::gh_budget::output(
+            Command::new("gh").args(args).current_dir(&self.0),
+            std::time::Duration::from_secs(60),
+        )
+        .context("gh is unavailable")?;
         if !output.status.success() {
             bail!("gh {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
         }

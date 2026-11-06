@@ -3932,27 +3932,19 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
-                        let deliveries =
-                            super::merge_queue_ejection::awaiting_merge_deliveries(&watch_cas_dir);
-                        let supervisor_prs =
-                            super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
-                        let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
-                        let candidates = super::queue_and_events::ci_completed_candidates(
+                        // cas-c24e: the poll's GitHub reads, shared with
+                        // `cas factory ci-watch-dry-run` so their cost is measurable.
+                        let super::ci_watch::GithubPoll {
+                            failures,
+                            mut queue_poll,
+                            ejections,
+                            delivery_pr_observations,
+                            ci_wakes,
+                        } = super::ci_watch::read_github(
                             &watch_cas_dir,
-                            &session_name,
-                        );
-                        let ci_wakes = (
-                            super::ci_watch::collect_ci_wakes(&transport, &candidates),
-                            !candidates.is_empty(),
-                        );
-                        let failures = super::ci_watch::mark_merged_failures(
                             &project,
-                            super::ci_watch::collect_failures(&transport, &watched_branches)?,
-                        );
-                        let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
-                            &transport,
-                            &deliveries,
-                            &supervisor_prs,
+                            &session_name,
+                            &watched_branches,
                             &previously_queued,
                             &previously_armed,
                             &previously_held,
@@ -3978,24 +3970,6 @@ impl FactoryDaemon {
                         crate::cloud::peers_detail::save_pr_snapshot(
                             &watch_cas_dir, std::mem::take(&mut queue_poll.observed_prs), chrono::Utc::now(),
                         );
-                        // cas-fd0a: name each ejection's failing job for the
-                        // wake. GitHub calls stay on this blocking task
-                        // (GH #1165).
-                        let ejections = std::mem::take(&mut queue_poll.ejections)
-                            .into_iter()
-                            .map(|ejection| {
-                                let job = super::merge_queue_ejection::failing_job(
-                                    &transport,
-                                    ejection.failed_run_id,
-                                );
-                                (ejection, job)
-                            })
-                            .collect::<Vec<_>>();
-                        let delivery_pr_observations =
-                            super::ci_watch::collect_delivery_pr_observations(
-                                &transport,
-                                &deliveries,
-                            )?;
                         Ok((failures, queue_poll, ejections, delivery_pr_observations, ci_wakes))
                     }));
                     last_ci_watch = std::time::Instant::now();

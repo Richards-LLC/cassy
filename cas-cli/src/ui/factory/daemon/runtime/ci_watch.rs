@@ -42,6 +42,8 @@ pub(crate) fn ci_watch_interval(ci_wake_pending: bool, tracked_pr_queued: bool) 
 }
 const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// One open-PR merge-queue listing per repo per minute, machine-wide.
+const MERGE_QUEUE_PROBE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
 pub(crate) const DELIVERY_MERGE_CLOSE_GRACE: Duration = Duration::from_secs(5 * 60);
 
@@ -898,7 +900,15 @@ impl GhCiTransport {
         })
     }
 
+    #[track_caller]
     fn gh_json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T, CiWatchError> {
+        let stdout = self.gh_bytes(args)?;
+        serde_json::from_slice(&stdout)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+    }
+
+    #[track_caller]
+    fn gh_bytes(&self, args: &[String]) -> Result<Vec<u8>, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
         let output = run_command(
@@ -924,10 +934,10 @@ impl GhCiTransport {
                 .to_string();
             return Err(CiWatchError::Unavailable(detail));
         }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+        Ok(output.stdout)
     }
 
+    #[track_caller]
     fn gh_text(&self, args: &[String]) -> Result<String, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
@@ -1069,7 +1079,7 @@ impl CiTransport for GhCiTransport {
                 )
             })?;
         let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
-        let response: MergeQueueGraphqlResponse = self.gh_json(&[
+        let args = [
             "api".to_string(),
             "graphql".to_string(),
             "-f".to_string(),
@@ -1078,7 +1088,16 @@ impl CiTransport for GhCiTransport {
             format!("owner={}", repo.owner),
             "-F".to_string(),
             format!("name={}", repo.repo),
-        ])?;
+        ];
+        // cas-c24e: every daemon on this machine shares one listing per repo
+        // per minute instead of each polling it every 30 s.
+        let bytes = crate::gh_budget::shared_read(
+            &format!("merge-queue-{}", self.repo),
+            MERGE_QUEUE_PROBE_TTL,
+            || self.gh_bytes(&args),
+        )?;
+        let response: MergeQueueGraphqlResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid merge-queue JSON: {e}")))?;
         Ok(response.data.repository.pull_requests.nodes)
     }
 
@@ -1185,6 +1204,52 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
         previously_armed,
         &BTreeSet::new(),
     )
+}
+
+/// One CI-watch poll's GitHub reads, without persisting anything.
+pub(crate) struct GithubPoll {
+    pub failures: Vec<CiFailure>,
+    pub queue_poll: MergeQueuePoll,
+    pub ejections: Vec<(MergeQueueEjection, Option<String>)>,
+    pub delivery_pr_observations: Vec<DeliveryPrObservation>,
+    pub ci_wakes: (Vec<CiWake>, bool),
+}
+
+/// cas-c24e: the daemon's poll and `cas factory ci-watch-dry-run` share this
+/// read, so the dry run spends exactly what one daemon poll spends.
+pub(crate) fn read_github(
+    cas_dir: &Path,
+    project: &Path,
+    session_name: &str,
+    watched_branches: &BTreeSet<String>,
+    previously_queued: &BTreeSet<u64>,
+    previously_armed: &BTreeSet<u64>,
+    previously_held: &BTreeSet<u64>,
+) -> Result<GithubPoll, CiWatchError> {
+    let deliveries = super::merge_queue_ejection::awaiting_merge_deliveries(cas_dir);
+    let supervisor_prs = super::merge_queue_ejection::supervisor_prs(cas_dir);
+    let transport = GhCiTransport::from_project(project)?;
+    let candidates = super::queue_and_events::ci_completed_candidates(cas_dir, session_name);
+    let ci_wakes = (collect_ci_wakes(&transport, &candidates), !candidates.is_empty());
+    let failures = mark_merged_failures(project, collect_failures(&transport, watched_branches)?);
+    let mut queue_poll = collect_tracked_merge_queue_ejections(
+        &transport,
+        &deliveries,
+        &supervisor_prs,
+        previously_queued,
+        previously_armed,
+        previously_held,
+    )?;
+    // cas-fd0a: name each ejection's failing job for the wake.
+    let ejections = std::mem::take(&mut queue_poll.ejections)
+        .into_iter()
+        .map(|ejection| {
+            let job = super::merge_queue_ejection::failing_job(&transport, ejection.failed_run_id);
+            (ejection, job)
+        })
+        .collect();
+    let delivery_pr_observations = collect_delivery_pr_observations(&transport, &deliveries)?;
+    Ok(GithubPoll { failures, queue_poll, ejections, delivery_pr_observations, ci_wakes })
 }
 
 /// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
@@ -1911,6 +1976,33 @@ mod tests {
         assert_eq!(pulls.len(), 1);
         assert_eq!(pulls[0].number, 932);
         assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
+    }
+
+    #[test]
+    fn two_daemons_share_one_merge_queue_listing_per_repo_per_minute_cas_c24e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let temp = tempfile::TempDir::new().unwrap();
+        let gh = temp.path().join("gh");
+        let calls = temp.path().join("calls");
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\necho x >> '{}'\nprintf '%s' '{{\"data\":{{\"repository\":{{\"pullRequests\":{{\"nodes\":[{{\"number\":5,\"headRefName\":\"epic/train\",\"headRefOid\":\"tip\",\"isInMergeQueue\":true,\"updatedAt\":\"2026-11-06T01:00:00Z\"}}]}}}}}}}}'\n",
+                calls.display()
+            ),
+        );
+        let daemon = || GhCiTransport {
+            repo: "org/repo".to_string(),
+            cwd: temp.path().to_path_buf(),
+            gh_binary: gh.clone(),
+            completed: Default::default(),
+        };
+        for transport in [daemon(), daemon()] {
+            let pulls = transport.merge_queue_pull_requests().unwrap();
+            assert!(pulls[0].is_in_merge_queue);
+        }
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
     }
 
     #[test]

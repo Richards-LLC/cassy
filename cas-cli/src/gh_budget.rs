@@ -67,10 +67,7 @@ impl GhCall {
         }
         let remaining = backoff_remaining()?;
         record_line(&self.caller, &self.class, 0, "backoff");
-        Some(failed_output(format!(
-            "cas: GitHub rate-limit backoff for {}s more; this call was not sent\n",
-            remaining.as_secs()
-        )))
+        Some(failed_output(refusal(remaining)))
     }
 
     pub(crate) fn finish<E>(self, result: &Result<Output, E>) {
@@ -91,26 +88,100 @@ impl GhCall {
     }
 }
 
+/// `Command::output` for a `gh` call site outside `bounded_process`: the
+/// same budget log, backoff and process-group bound (cas-c24e).
+#[track_caller]
+pub(crate) fn output(command: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+    use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+    run_command(command, Deadline::after(timeout), timeout).map_err(|error| match error {
+        BoundedCommandError::TimedOut => std::io::Error::new(std::io::ErrorKind::TimedOut, "gh timed out"),
+        BoundedCommandError::Io => std::io::Error::new(std::io::ErrorKind::NotFound, "gh could not start"),
+    })
+}
+
+/// Exit code of a call held by the backoff (EX_TEMPFAIL): never sent.
+pub(crate) const BACKOFF_EXIT: i32 = 75;
+
+fn refusal(remaining: Duration) -> String {
+    format!(
+        "GitHub rate-limit backoff: not sent; Cassy retries GitHub in {}s (after a rate-limit response on this machine)",
+        remaining.as_secs().max(1)
+    )
+}
+
+/// The backoff refusal for a failed `gh` output, so callers that hide
+/// GitHub's stderr can still say why nothing was sent.
+pub(crate) fn backoff_refusal(output: &Output) -> Option<String> {
+    (output.status.code() == Some(BACKOFF_EXIT))
+        .then(|| String::from_utf8_lossy(&output.stderr).trim().to_string())
+        .filter(|text| text.starts_with("GitHub rate-limit backoff"))
+}
+
 #[cfg(unix)]
 fn failed_output(stderr: String) -> Output {
     use std::os::unix::process::ExitStatusExt;
-    Output { status: std::process::ExitStatus::from_raw(1 << 8), stdout: Vec::new(), stderr: stderr.into_bytes() }
+    let status = std::process::ExitStatus::from_raw(BACKOFF_EXIT << 8);
+    Output { status, stdout: Vec::new(), stderr: stderr.into_bytes() }
 }
 
 #[cfg(not(unix))]
 fn failed_output(stderr: String) -> Output {
     use std::os::windows::process::ExitStatusExt;
-    Output { status: std::process::ExitStatus::from_raw(1), stdout: Vec::new(), stderr: stderr.into_bytes() }
+    let status = std::process::ExitStatus::from_raw(BACKOFF_EXIT as u32);
+    Output { status, stdout: Vec::new(), stderr: stderr.into_bytes() }
 }
 
-/// GitHub's primary ("API rate limit exceeded"), secondary ("secondary rate
-/// limit") and GraphQL (`RATE_LIMITED`) refusals. Only failed calls are read,
-/// so a response body that mentions rate limits is never a refusal.
+/// GitHub's own refusal phrases on `gh`'s stderr: primary ("API rate limit
+/// exceeded" / "already exceeded"), secondary ("secondary rate limit") and
+/// GraphQL (`RATE_LIMITED`). Response bodies on stdout are never read.
 fn rate_limited(output: &Output) -> bool {
-    [&output.stderr, &output.stdout].iter().any(|bytes| {
-        let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-        text.contains("rate limit") || text.contains("rate_limited")
-    })
+    let text = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    ["api rate limit exceeded", "api rate limit already exceeded", "secondary rate limit", "rate_limited"]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+}
+
+/// cas-c24e: one answer per `key` per `ttl` for every Cassy process on this
+/// machine (the merge-queue listing). The first caller past the TTL fetches
+/// under a file lock; the others read its answer. Failures are not cached.
+pub(crate) fn shared_read<E>(
+    key: &str,
+    ttl: Duration,
+    fetch: impl FnOnce() -> Result<Vec<u8>, E>,
+) -> Result<Vec<u8>, E> {
+    #[cfg(test)]
+    if std::env::var_os("CAS_TEST_GH_BUDGET").is_none() {
+        return fetch();
+    }
+    let Some(dir) = cas_home().map(|home| home.join("gh-cache")) else { return fetch() };
+    let name: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let path = dir.join(format!("{name}.json"));
+    let fresh = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < ttl)
+    };
+    if fresh(&path) && let Ok(bytes) = std::fs::read(&path) {
+        return Ok(bytes);
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("{name}.lock")));
+    let _held = lock.ok().filter(|file| fs2::FileExt::lock_exclusive(file).is_ok());
+    if fresh(&path) && let Ok(bytes) = std::fs::read(&path) {
+        return Ok(bytes);
+    }
+    let bytes = fetch()?;
+    let staging = dir.join(format!("{name}.{}", std::process::id()));
+    if std::fs::write(&staging, &bytes).is_ok() {
+        let _ = std::fs::rename(&staging, &path);
+    }
+    Ok(bytes)
 }
 
 /// A stable, id-free name for what a call asks GitHub for.
@@ -290,6 +361,59 @@ pub(crate) fn doctor_summary() -> (bool, String) {
         message.push_str(&format!("\n  {n:>5}  {class}  ({caller})"));
     }
     (backoff.is_some(), message)
+}
+
+/// `cas factory ci-watch-dry-run`: the daemon poll's GitHub reads at the
+/// daemon's cadence for `minutes`, persisting nothing; returns the calls spent.
+pub(crate) fn ci_watch_dry_run(cas_dir: &Path, session: &str, minutes: u64) -> anyhow::Result<String> {
+    use crate::ui::factory::daemon::runtime::ci_watch;
+    let project = cas_dir.parent().ok_or_else(|| anyhow::anyhow!("project repository missing"))?;
+    // The daemon watches main plus its workers' branches.
+    let worktrees = Command::new("git").args(["worktree", "list", "--porcelain"]).current_dir(project).output()?;
+    let mut watched: std::collections::BTreeSet<String> = String::from_utf8_lossy(&worktrees.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("branch refs/heads/"))
+        .filter(|branch| branch.starts_with("factory/"))
+        .map(str::to_string)
+        .collect();
+    watched.insert("main".into());
+    let started = Instant::now();
+    let window = Duration::from_secs(minutes * 60);
+    let (mut queued, mut armed, mut held) = Default::default();
+    let mut polls = 0;
+    while started.elapsed() < window {
+        let poll = ci_watch::read_github(cas_dir, project, session, &watched, &queued, &armed, &held);
+        polls += 1;
+        let pending = match poll {
+            Ok(poll) => {
+                queued = poll.queue_poll.queued_prs;
+                armed = poll.queue_poll.auto_merge_prs;
+                held = poll.queue_poll.held_exits;
+                poll.ci_wakes.1
+            }
+            Err(error) => {
+                eprintln!("poll {polls}: {error}");
+                false
+            }
+        };
+        std::thread::sleep(ci_watch::ci_watch_interval(pending, !queued.is_empty()));
+    }
+    let usage = usage(started.elapsed() + Duration::from_secs(1), 10);
+    let hours = started.elapsed().as_secs_f64() / 3600.0;
+    let mut report = format!(
+        "{polls} polls over {:.1} min, {} branches watched: {} gh calls ({:.0}/h), {} GraphQL ({:.0}/h), {} held by backoff",
+        started.elapsed().as_secs_f64() / 60.0,
+        watched.len(),
+        usage.total,
+        usage.total as f64 / hours,
+        usage.graphql,
+        usage.graphql as f64 / hours,
+        usage.refused
+    );
+    for (caller, class, n) in &usage.top {
+        report.push_str(&format!("\n  {n:>5}  {:>6.0}/h  {class}  ({caller})", *n as f64 / hours));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

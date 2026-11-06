@@ -3916,6 +3916,8 @@ adopted by commit/tree. This adds no CI stage or duplicate gate.
 
 `python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only
 helpers for constant/literal equality and reads of Rust source as text.
+Rust assertion diagnostic and formatting arguments are excluded from prose-pin
+checks; literals in the assertion operands remain checked.
 `--changed-since <ref>` checks the merge-base diff, including working changes;
 files imported only by a released-trunk sync merge are excluded, while task
 edits before and after that merge remain checked. As with task attribution,

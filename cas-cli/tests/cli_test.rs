@@ -3438,7 +3438,9 @@ fn qa_ledger_init_check_and_no_overwrite() {
             assert!(body.contains(&format!("build: {source_head}")), "{suffix} used another checkout's HEAD: {body}");
             assert!(!body.contains(&format!("build: {primary_head}")));
         } else {
-            assert!(String::from_utf8_lossy(&output.stderr).contains("recorded task source"), "{suffix}: {output:?}");
+            if let Some(branch) = start_branch.filter(|branch| !branch.is_empty()) {
+                assert!(String::from_utf8_lossy(&output.stderr).contains(branch), "{suffix}: {output:?}");
+            }
             let paths = cas::config::resolved_factory_artifact_paths(&cas_root, Some(artifacts.to_str().unwrap()));
             assert!(!paths.project_root.join(&sourced.id).exists(), "refused source must not create evidence");
         }

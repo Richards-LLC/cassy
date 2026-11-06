@@ -50,6 +50,10 @@ impl RetainedWorktree {
 }
 
 impl RetainedInventory {
+    pub fn is_partial(&self) -> bool {
+        !self.errors.is_empty() || self.entries.iter().any(|entry| !entry.errors.is_empty())
+    }
+
     pub fn needs_attention(&self) -> bool {
         !self.entries.is_empty() || !self.errors.is_empty()
     }
@@ -58,7 +62,7 @@ impl RetainedInventory {
         format!(
             "Retained worker worktrees with local work: {}{}. Review `cas factory gc report --full`; commit dirty files after review and recover with `factory action=recover_branch task_id=<task> payload=<expected tips>`.\n",
             self.entries.len(),
-            if self.errors.is_empty() && self.entries.iter().all(|entry| entry.errors.is_empty()) {
+            if !self.is_partial() {
                 ""
             } else {
                 " (partial inventory; inspect errors)"

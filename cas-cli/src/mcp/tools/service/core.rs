@@ -265,7 +265,8 @@ impl CasService {
             &self.inner.load_config().qa().user_facing_labels,
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        // cas-0ad8: the review spawn threshold, for every project and role.
+        // Record finding provenance for every project and role; missing runtime
+        // evidence stays theoretical, and severity × reach derives priority.
         let reviewer_origin = self.caller_review_origin();
         let finding_origin = crate::mcp::tools::core::task::lifecycle::review_loop::spawn_gate(
             &crate::mcp::tools::core::task::lifecycle::review_loop::SpawnRequest {
@@ -282,6 +283,11 @@ impl CasService {
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let mut req = req;
+        if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            req.labels = Some(format!("{},runtime-repro", req.labels.as_deref().unwrap_or_default()));
+            let evidence = format!("Repro: {}\nAffected: {}", req.repro.as_deref().unwrap_or_default(), req.affected.as_deref().unwrap_or_default());
+            req.notes = Some(format!("{}\n{evidence}", req.notes.as_deref().unwrap_or_default()));
+        }
         if let Some(origin) = finding_origin.as_deref() {
             use crate::mcp::tools::core::task::lifecycle::review_loop::{FINDING_LABEL, origin_note};
             req.labels = Some(match req.labels.take().filter(|labels| !labels.trim().is_empty()) {

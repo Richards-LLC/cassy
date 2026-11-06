@@ -85,8 +85,8 @@ These hold for every walk, task pass or [independent pass](references/independen
   input early passes while the rest break. Entry paths take the first rows; any past the cap stay
   `NOT EXERCISED: <reason>`.
 - **Read the invariant back** from the system of record (database query, API read, admin view) after
-  the final step, not from the screen: a success message can sit on wrong data. Put the read and its
-  result in the row's `observed`.
+  the final step, not from the screen. Grade paid/account routes and adjudicate harness-only reds
+  using [server read-back](references/evidence-ledger.md#server-read-back-and-harness-failures); put the read and result in `observed`.
 - **Map the build.** For a served app, record the backend and frontend SHAs served at the start and
   end of each walk; disclose a mixed build in the ledger header. A backend-only merge ships no new
   frontend build: prove it with `git diff --stat <served-frontend-sha> <tip> -- <frontend paths>`.
@@ -110,7 +110,7 @@ report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_
 
 Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
 above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is
-missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Findings stay in your verdict unless they are a reproduced, observable defect affecting someone today.
+missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Every finding records severity × reach, journey and runtime repro in its triage. Code-read-only findings are theoretical P4 backlog; only money/data loss on a declared main journey gets a P2 exception. Reproduced main-journey FAILs come first. Honor the inherited operator focus.
 
 ## Boundaries
 

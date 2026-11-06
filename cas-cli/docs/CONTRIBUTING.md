@@ -201,6 +201,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+When the MCP daemon opens a pre-merge candidate dispatch, it launches the
+existing task verifier on the standard harness route. The registered child
+uses the same sealed capability and verification gate as a manually launched
+verifier. Its prompt includes the immutable candidate path, task criteria,
+parent plan and task notes, including receipts and adversarial review notes.
+The subprocess returns verdict arguments; only the daemon submits them with
+the bound task/dispatch identity. No bearer is exposed to the harness.
+
+Approval continues the normal merge admission and leaves a quiet one-line
+receipt. A train queue reservation retains control of that continuation.
+Rejection, a supervisor question, timeout or a failed review transport wakes
+the owning supervisor with findings; none grants a merge override. Review
+prompts, verdict output and harness diagnostics live under
+`.cas/verification-runs/<dispatch>/`. A manually claimed dispatch remains
+with its verifier. Non-daemon callers retain the existing manual handoff.
+
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
 CI and explicit CI overrides finish the intent without requesting automatic
@@ -1120,9 +1136,9 @@ An existing dispatch or verdict keeps its authority, and the `force-verifier` la
 
 A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
 
-Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
+Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
-`task action=create` enforces the threshold. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, needs `repro` and `affected`, or it is refused. It carries the `from-finding` label and a note recording all three. A P0/P1 bug that an operator or supervisor observed directly is exempt, and `finding_origin=none` declares that finding-like text is not a finding; reviewers cannot use it. `qa_record` applies the same threshold to its automatic pre-existing follow-ups: an issue without `repro` and `affected` stays in the verdict. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
+`task action=create` records finding provenance and derives priority from severity × reach. A follow-up from a finding, meaning an explicit `finding_origin`, a caller that is a verifier or holds a QA task, or text naming a finding, carries the `from-finding` label and a note recording origin, `repro` and `affected`. Missing runtime evidence is retained as theoretical backlog instead of refusing intake. Main reach requires a project-declared main journey and durable nonempty reproduction evidence; caller labels alone cannot attest it. A P0/P1 bug that an operator or supervisor observed directly need not infer an origin from finding-like text, and `finding_origin=none` declares that such text is not a finding; reviewers cannot use it. `qa_record` also retains theoretical pre-existing findings as backlog follow-ups with their triage axes. `lifecycle/review_loop.rs` counts labeled follow-ups against the epic's last 10 completed verifications and QA rounds. With at least 5 reviews, at 0.5 or more the supervisor gets one notice for that epic. `epic_status` shows the ratio whenever the epic has a completed review.
 
 ### Evidence-only task close
 
@@ -4229,6 +4245,24 @@ Supersession ends its validity and removes it from session context, including
 pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
+
+## Ordered train merge queue
+
+A registered supervisor can submit `factory action=train_merge id=<epic>` to
+merge that train's parked deliveries in updated-time order, or add
+`task_ids=["cas-first","cas-second"]` for an explicit order. The CLI parity is
+`cas factory train merge <epic> [task ...]`. Only exact parked anchors from the
+same train and factory session are admitted; queue options grant no CI override.
+
+The action records the queue and returns immediately. The existing factory
+daemon's CI scan resumes it through `worktree_merge`, reusing the current
+candidate approval or requesting review when context changes. Pending reviews
+and CI retain the current position. A content conflict reopens only its own task
+with the conflicting files and keeps its assignee; later deliveries continue.
+Single merges into the target are held throughout the queue, including between
+verdicts. Other targets remain independent. Repeat the action without `task_ids`
+to inspect an active queue; a successor may adopt a dead owner's queue. Queue
+state and results live in `.cas/train-merges/`. No CI stage is added.
 
 ## Operator project holds
 

@@ -4295,6 +4295,32 @@ impl CasCore {
         reason: Option<&str>,
         expected_delivery: Option<&crate::factory_ci_retry::Retry>,
     ) -> Result<CallToolResult, McpError> {
+        crate::async_runtime::heap_future(|| self.worktree_merge_admitted(
+            id, force, task_id, allow_trunk, cleanup, supervisor_override, reason,
+            expected_delivery, None,
+        )).await
+    }
+
+    pub(crate) async fn worktree_merge_queued(
+        &self, expected: &crate::factory_ci_retry::Retry, queue: &str,
+    ) -> Result<CallToolResult, McpError> {
+        crate::async_runtime::heap_future(|| self.worktree_merge_admitted(
+            &expected.branch, false, Some(&expected.task), false, Some(false), false, None, Some(expected), Some(queue),
+        )).await
+    }
+
+    async fn worktree_merge_admitted(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+        train_queue: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
@@ -4722,6 +4748,8 @@ impl CasCore {
         worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
             &self.cas_root, &worktree.parent_branch,
         );
+        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
@@ -4738,12 +4766,11 @@ impl CasCore {
             || target == integration || target == manager.git().detect_default_branch()
         {
             let tasks = self.open_task_store()?;
-            let mut trains = tasks.list(None).map_err(|error| Self::error(
+            let trains = tasks.list(None).map_err(|error| Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Cannot check open release trains before worktree_merge: {error}"),
             ))?;
-            trains.sort_by_key(|task| task.created_at);
-            if let Some(train) = trains.iter().find(|task| {
+            if let Some(train) = trains.iter().filter(|task| {
                 crate::mcp::tools::core::task::release_train::is_release_train(task)
                     && !task.is_terminal()
                     && task.deliverables.work_target.as_ref().is_some_and(|target| {
@@ -4751,12 +4778,18 @@ impl CasCore {
                             &cwd, &target.repo_selector,
                         )
                     })
-            }) {
+            }).min_by_key(|task| (
+                crate::mcp::tools::core::task::release_train::is_cut_train(task), task.created_at,
+            )) {
+                let guidance = if crate::mcp::tools::core::task::release_train::is_cut_train(train) {
+                    "This train is cut and accepts no further merges. Wait for it to land or open the next train before merging work."
+                } else {
+                    "Merge work into the train. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path."
+                };
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
                     "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \
                      trunk while this train is open, including with allow_trunk=true. \
-                     Merge work into the train. For a one-item hotfix train, run \
-                     `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path.",
+                     {guidance}",
                     train.id, train.effective_epic_branch().unwrap_or(&train.title),
                 )));
             }
@@ -4866,6 +4899,31 @@ impl CasCore {
             });
         }
 
+        // A queued content conflict must return its worker before candidate
+        // preparation can fail on that same conflict and strand the queue.
+        if train_queue.is_some() {
+            let remote = manager.git().fetch_merge_target(&worktree.parent_branch)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            let local = manager.git().resolve_commit(&worktree.parent_branch)
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train target missing"))?;
+            let target_tip = match remote {
+                Some(remote) if manager.git().is_ancestor(&local, &remote) => remote,
+                Some(remote) if !manager.git().is_ancestor(&remote, &local) => {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "train target diverged from origin; reconcile before resuming train_merge"));
+                }
+                _ => local,
+            };
+            let paths = manager.git().preflight_merge_conflicts(&target_tip, &worktree.branch)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            if !paths.is_empty() {
+                let error = crate::worktree::WorktreeError::Git(crate::worktree::GitError::MergeConflictPaths(paths));
+                let recovery = self.return_conflicted_parked_delivery(
+                    scoped_task.as_deref(), &error, &worktree, Some(&target_tip),
+                );
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("{error}{recovery}")));
+            }
+        }
+
         // The existing task verifier runs on a disposable merge candidate,
         // outside the target lock. Pending/rejected reviews hold only this lane.
         // A previously published source is a receipt/reconciliation request,
@@ -4911,6 +4969,8 @@ impl CasCore {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
+        super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
             &cas_root, &worktree.parent_branch,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
@@ -5241,7 +5301,8 @@ impl CasCore {
                     })?;
                 }
                 let mut retry_notice = String::new();
-                if matches!(branch_ci_state, BranchCiState::CodePending { .. })
+                if train_queue.is_none()
+                    && matches!(branch_ci_state, BranchCiState::CodePending { .. })
                     && let Some(task) = scoped_task.as_deref()
                     && task.status == cas_types::TaskStatus::AwaitingMerge
                     && let Some(source_sha) = parked_source_tip.as_deref()

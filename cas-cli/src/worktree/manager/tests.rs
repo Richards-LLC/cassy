@@ -1803,6 +1803,7 @@ fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
 /// cas-10ad: sync residue has a runnable recovery, mixed project work does not.
 #[test]
 fn managed_sync_residue_names_clearing_command_cas_10ad() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
     let (_temp, repo_path) = create_test_repo();
     let mut config = WorktreeConfig::default();
     config.auto_merge = true;
@@ -1817,7 +1818,7 @@ fn managed_sync_residue_names_clearing_command_cas_10ad() {
     let block = crate::builtins::render_builtin_gitignore_block(&paths);
     for mixed in [false, true] {
         let prefix = if mixed { "project-output/\nuser-change/\n" } else { "project-output/\n" };
-        std::fs::write(repo_path.join(".gitignore"), format!("{prefix}\n{block}\n")).unwrap();
+        std::fs::write(repo_path.join(".gitignore"), format!("{prefix}\n{block}")).unwrap();
         assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo_path).status().unwrap().success());
         let before = manager.git().ref_sha("HEAD").unwrap();
         let error = manager.merge_and_cleanup(&mut worker, false, false).unwrap_err();

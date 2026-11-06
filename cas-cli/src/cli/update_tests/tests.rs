@@ -3038,6 +3038,20 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
         }
         assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
+        if branch == "main" {
+            let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+            let settings_path = project.join(".claude/settings.json");
+            let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+            settings["theme"] = serde_json::json!("staged-project-choice");
+            std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+            cas_6718_git(&project, &["add", ".claude/settings.json"]);
+            let index = cas_6718_git(&project, &["show", ":.claude/settings.json"]);
+            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+            assert_eq!(report.outcome, "staged", "project settings are never a managed commit");
+            assert!(report.commit_warning.unwrap().contains("staged"));
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+            assert_eq!(cas_6718_git(&project, &["show", ":.claude/settings.json"]), index);
+        }
         if branch == "detached" {
             cas_6718_git(&project, &["checkout", "-qB", "main"]);
             let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
@@ -3054,6 +3068,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
+    cas_6718_git(&project, &["checkout", "-q", "main"]);
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
     let harnesses = crate::cli::project_files::harnesses(&project);
@@ -3072,7 +3087,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         "update left managed drift: {status}\n{}",
         cas_6718_git(&project, &["diff"])
     );
-    assert!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).starts_with("chore(cassy):"));
+    assert_eq!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).trim(), format!("chore(cas): sync managed files to v{}", env!("CARGO_PKG_VERSION")));
     for path in [
         ".claude/skills/cas/SKILL.md",
         ".claude/skills/cas-tdd/SKILL.md",

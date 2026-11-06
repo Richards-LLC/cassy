@@ -13149,6 +13149,7 @@ mod managed_commits_tests {
         git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
         assert!(managed_commits_check(&repo).is_none());
         git(&["-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
+        git(&["-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost", "commit", "--allow-empty", "-qm", crate::worktree::git::MANAGED_SYNC_SUBJECT]);
         let main = git(&["rev-parse", "main"]);
         git(&["checkout", "-qb", "factory/probe", "origin/main"]);
         // Diagnose local main even when the worker checkout itself is aligned.
@@ -13158,7 +13159,7 @@ mod managed_commits_tests {
         assert_eq!(json[0]["status"], "warning");
         assert_eq!(json[0]["group"], "config");
         let message = json[0]["message"].as_str().unwrap();
-        assert!(message.contains("1") && message.contains("main") && message.contains("origin/main") && message.contains("reconcile"), "{message}");
+        assert!(message.contains("2") && message.contains("main") && message.contains("origin/main") && message.contains("reconcile"), "{message}");
         let remedy = json[0]["remediation"].as_str().expect("action belongs in remediation");
         assert!(remedy.contains("origin") && remedy.contains("PR"), "{remedy}");
         assert_eq!(git(&["rev-parse", "main"]), main, "doctor must not move local history");

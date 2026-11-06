@@ -484,6 +484,13 @@ if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"
     exit 0
 fi
+# Best-effort measured history; an older installed CLI cannot block a cut.
+for estimate_stage in train_tip_suite merge_queue release_publish; do
+    "$cas_bin" ledger estimate pipeline "$estimate_stage" --preview >&2 \
+        || say "$estimate_stage ETA unavailable; no measured range"
+done
+"$cas_bin" ledger estimate release "v$version" >&2 \
+    || say "release ETA unavailable; no estimate recorded"
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then

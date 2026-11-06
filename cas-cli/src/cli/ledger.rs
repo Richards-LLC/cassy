@@ -33,6 +33,25 @@ enum LedgerCommand {
         /// How many days of task notes and verifications to read
         #[arg(long, default_value_t = 30)]
         days: i64,
+        /// Push/pull the ledger after recording local history
+        #[arg(long)]
+        sync: bool,
+    },
+    /// Give a measured range and record who received it; use --preview for a read
+    Estimate {
+        /// pipeline, task, epic or release
+        kind: String,
+        /// Stage name, task id or release version
+        subject: String,
+        /// Bind a pipeline promise to the SHA whose completion will settle it
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long, default_value = "operator")]
+        recipient: String,
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+        #[arg(long)]
+        preview: bool,
     },
     /// Record a published release from its latency receipt (the release train runs this)
     #[command(hide = true)]
@@ -57,24 +76,35 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
                 print!("{}", render(&report));
             }
         }
-        LedgerCommand::Backfill { days } => {
+        LedgerCommand::Backfill { days,sync } => {
             let since = Utc::now() - Duration::days(*days);
             let inserted = crate::quality_ledger::backfill(cas_root, since)?;
             let gh = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
                 .filter(|value| !value.is_empty())
                 .map_or_else(|| std::path::PathBuf::from("gh"), std::path::PathBuf::from);
+            let pipeline = crate::quality_ledger::estimates::github_history(cas_root, 20, since);
+            let (pipeline_inserted, pipeline_skipped) = match pipeline {
+                Ok(n) => (n,None), Err(error) => (0,Some(error.to_string())),
+            };
             let friction = crate::quality_ledger::backfill_friction(cas_root, since, &gh)?;
+            let cloud_sync=if *sync { sync_ledger(cas_root)? } else { None };
             if cli.json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "inserted": inserted + friction.tasks + friction.issues,
+                        "cloud_sync": cloud_sync,
+                        "inserted": inserted + pipeline_inserted + friction.tasks + friction.issues,
+                        "pipeline_samples": pipeline_inserted,
+                        "pipeline_skipped": pipeline_skipped,
                         "friction_tasks": friction.tasks,
                         "friction_issues": friction.issues,
                         "friction_issues_skipped": friction.issues_skipped,
                     })
                 );
             } else {
+                if *sync { println!("Cloud sync: {}",cloud_sync.map_or_else(||"not logged in".into(),|s|format!("{} pushed, {} pulled, {} refused, unavailable={}",s.pushed,s.pulled,s.refused,s.capability_absent))); }
+                println!("Recorded {pipeline_inserted} measured pipeline samples.");
+                if let Some(reason)=pipeline_skipped { println!("Pipeline history skipped: {reason}"); }
                 println!("Recorded {inserted} events from the last {days} days of history.");
                 println!(
                     "Recorded {} friction row(s): {} Cassy bug task(s), {} Cassy issue(s).",
@@ -85,6 +115,16 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
                 if let Some(reason) = &friction.issues_skipped {
                     println!("Cassy issues skipped: {reason}");
                 }
+            }
+        }
+        LedgerCommand::Estimate { kind,subject,instance,recipient,runs,preview } => {
+            if kind == "pipeline" && !preview && instance.is_none() {
+                bail!("pipeline estimates need --instance <sha> so completion can settle the promise; use --preview for a read");
+            }
+            let result=crate::quality_ledger::estimates::estimate(cas_root,kind,subject,instance.as_deref(),recipient,*runs,!preview)?;
+            if cli.json { println!("{}",serde_json::to_string_pretty(&result)?); }
+            else { println!("{}",result.render());
+                for reference in result.references { println!("  {}: {:.1} min",reference.id,reference.minutes); }
             }
         }
         LedgerCommand::RecordRelease { receipt } => {
@@ -99,27 +139,16 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
 /// A report reads the fleet's rows, so it asks for them first. Being offline or
 /// on a server without the route still leaves a correct local report.
 fn pull_before_report(cas_root: &Path) {
-    let synced = (|| -> Result<_> {
-        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
-        let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
-        if !config.is_logged_in() {
-            return Ok(None);
-        }
-        let queue = std::sync::Arc::new(SyncQueue::open(cas_root)?);
-        queue.init()?;
-        let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
-        let syncer = CloudSyncer::new_for_project(
-            queue,
-            config,
-            CloudSyncerConfig::default(),
-            project_id,
-            cas_root,
-        );
-        Ok(Some(syncer.sync_quality_events(true)?))
-    })();
-    if let Err(error) = synced {
-        tracing::warn!(%error, "ledger report: showing local rows; cloud sync failed");
-    }
+    if let Err(error)=sync_ledger(cas_root) { tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"); }
+}
+fn sync_ledger(cas_root:&Path)->Result<Option<crate::cloud::syncer::quality_events::QualitySyncSummary>> {
+    use crate::cloud::{CloudConfig,CloudSyncer,CloudSyncerConfig,SyncQueue};
+    let config=CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    if !config.is_logged_in() { return Ok(None); }
+    let queue=std::sync::Arc::new(SyncQueue::open(cas_root)?); queue.init()?;
+    let project_id=crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+    let syncer=CloudSyncer::new_for_project(queue,config,CloudSyncerConfig::default(),project_id,cas_root);
+    Ok(Some(syncer.sync_quality_events(true)?))
 }
 
 /// Trimmed stdout of a successful git command, empty output included.
@@ -263,10 +292,6 @@ fn release_range(repo: &Path, release: &str, published: bool) -> Result<(String,
     Ok((previous, release.to_string()))
 }
 
-fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
-    let rank = ((percentile * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
-    sorted[rank - 1]
-}
 
 /// Per delivery (each first-parent landing on main), minutes from its earliest
 /// authored commit to the landing.
@@ -292,7 +317,7 @@ fn delivery_landing_spread(repo: &Path, from: &str, to: &str) -> Measure<Landing
     minutes.sort_by(f64::total_cmp);
     Measure::Known(LandingSpread {
         median_minutes: median(minutes.clone()).unwrap_or_default(),
-        p90_minutes: nearest_rank(&minutes, 0.9),
+        p90_minutes: crate::quality_ledger::estimates::percentile(&minutes, 0.9),
         deliveries: minutes.len(),
     })
 }
@@ -477,6 +502,15 @@ fn record_release(cas_root: &Path, repo: &Path, receipt: &Path) -> Result<String
     event.occurred_at = published_at;
     event.release_version = Some(version.clone());
     crate::quality_ledger::emit(cas_root, &event);
+    // A full release sample uses the receipt's request-to-publication endpoint.
+    if let Some(seconds)=fields.get("REQUEST_TO_PUBLISHED_SECS").and_then(|v|v.parse::<f64>().ok()) {
+        let mut sample=cas_store::NewQualityEvent::new(format!("release_duration|{version}"),
+            QualityPayload::CheckRun { check_id:"release_total".into(),stage:cas_store::CheckStage::Lane,
+                outcome:CheckOutcome::Pass,sha:None,minutes:Some(seconds/60.0) });
+        sample.occurred_at=published_at; sample.release_version=Some(version.clone());
+        crate::quality_ledger::emit(cas_root,&sample);
+    }
+    crate::quality_ledger::estimates::complete(cas_root,"release",&version,published_at,None,Some(&version));
     Ok(version)
 }
 
@@ -566,6 +600,8 @@ struct LedgerReport {
     features: BTreeMap<String, FeatureRow>,
     excluded_unscoped_measurements: usize,
     friction: Vec<FrictionRow>,
+    estimates: crate::quality_ledger::estimates::Calibration,
+    estimate_trend: BTreeMap<String,crate::quality_ledger::estimates::Calibration>,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -641,6 +677,17 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         published_at,
     );
     report.friction = friction_rows(cas_root, repo, &events);
+    let history=cas_store::quality_events_between(cas_root,None,None)?;
+    let mut grouped=BTreeMap::<String,Vec<QualityEvent>>::new();
+    let releases=cas_store::quality_release_events(cas_root)?;
+    for event in history.into_iter().filter(|e| matches!(e.payload,QualityPayload::EstimateOutcome {..})) {
+        let version=event.release_version.clone().or_else(|| releases.iter()
+            .filter(|r| r.occurred_at>=event.occurred_at).min_by_key(|r|r.occurred_at)
+            .and_then(|r| r.release_version.clone())).unwrap_or_else(||"unreleased".into());
+        grouped.entry(version).or_default().push(event);
+    }
+    report.estimate_trend=grouped.into_iter().map(|(release,events)|
+        (release,crate::quality_ledger::estimates::calibration(&events))).collect();
     Ok(report)
 }
 
@@ -688,6 +735,8 @@ fn friction_rows(cas_root: &Path, repo: &Path, events: &[QualityEvent]) -> Vec<F
         };
         let (state, status) = if !event.project_id.is_empty() {
             ("filed", format!("reported by {}", event.project_id))
+        } else if *source == FrictionSource::Estimate {
+            ("missed", "actual exceeded the bad-day estimate".into())
         } else if *source == FrictionSource::Task {
             tasks.get(reference).map_or(("filed", "task not found here".into()), |task| {
                 task_state(repo, task)
@@ -765,6 +814,8 @@ fn aggregate(
         features: BTreeMap::new(),
         excluded_unscoped_measurements: 0,
         friction: Vec::new(),
+        estimates: crate::quality_ledger::estimates::calibration(events),
+        estimate_trend: BTreeMap::new(),
     };
     for event in events {
         let project = project_name(event);
@@ -816,7 +867,7 @@ fn aggregate(
                 }
             }
             // Status needs the task store; build_report resolves these rows.
-            QualityPayload::Friction { .. } => {}
+            QualityPayload::Friction { .. } | QualityPayload::Estimate { .. } | QualityPayload::EstimateOutcome { .. } => {}
             QualityPayload::FeatureFeedback { feature, verdict, source, injected, opened, used } => {
                 // Old backfills dated lifetime totals as new measured rows.
                 // Their keys were hashed and the rows may already be synced, so
@@ -960,6 +1011,13 @@ fn render(report: &LedgerReport) -> String {
         let _ = writeln!(out, "  {stage:<10}{}/{}/{}/{}", row.pass, row.fail, row.flaky, row.error);
     }
 
+    let estimates=&report.estimates;
+    let _ = writeln!(out,"\nEstimates: {} completed, {} hits, {} misses, {} below typical",
+        estimates.completed,estimates.hits,estimates.misses.len(),estimates.below_typical);
+    let _ = writeln!(out,"  hit rate: {}",estimates.hit_rate.map_or_else(||"uncalibrated: no completed estimates".into(),|r|format!("{:.0}%",r*100.0)));
+    for miss in &estimates.misses { let _=writeln!(out,"  {}: {:.1} min ({}, estimate {})",miss.subject,miss.actual_minutes,miss.reason,miss.estimate_id); }
+    for (release,row) in &report.estimate_trend { let _=writeln!(out,"  {release}: {}/{} hits, {} below typical",row.hits,row.completed,row.below_typical); }
+
     let _ = writeln!(out, "\nFeature feedback");
     if report.excluded_unscoped_measurements > 0 {
         let _ = writeln!(out,
@@ -993,6 +1051,23 @@ fn render(report: &LedgerReport) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn estimate_report_shows_hit_rate_and_miss_reasons() {
+        let root=tempfile::tempdir().unwrap();
+        for (id,hit,below) in [("early",true,true),("late",false,false)] {
+            crate::quality_ledger::emit(root.path(),&cas_store::NewQualityEvent::new(id,
+                cas_store::QualityPayload::EstimateOutcome { estimate_id:id.into(),subject:"merge_queue:abc1234".into(),
+                    actual_minutes:if hit {10.0} else {45.0},inside_range:hit,below_typical:below,
+                    reason:if hit {"below_typical"} else {"above_p90"}.into() }));
+        }
+        let events=cas_store::quality_events_between(root.path(),None,None).unwrap();
+        let report=super::aggregate("v1.2.3".into(),true,None,None,&events);
+        let text=super::render(&report);
+        assert_eq!(report.estimates.hit_rate,Some(0.5));
+        assert!(text.contains("Estimates: 2 completed, 1 hits, 1 misses, 1 below typical"));
+        assert!(text.contains("hit rate: 50%") && text.contains("above_p90"));
+    }
+
     use super::*;
     use cas_store::{InterventionKind, NewQualityEvent};
     use chrono::TimeZone;

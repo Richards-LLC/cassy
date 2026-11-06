@@ -281,10 +281,15 @@ pub struct SystemRequest {
 
     /// Search query for config_search action
     #[schemars(
-        description = "Search query for config_search (searches keys, descriptions, keywords, use cases)"
+        description = "Config search; estimate: pipeline:<stage>:<sha>, task:<id>, epic:<id> or release:<version>"
     )]
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Audience receiving an estimate.
+    #[schemars(description = "estimate recipient: operator (default) or client")]
+    #[serde(default)]
+    pub recipient: Option<String>,
 
     // ========== Bug Reporting Fields (report_cas_bug) ==========
     /// Bug title (for report_cas_bug)

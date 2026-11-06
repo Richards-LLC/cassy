@@ -70,6 +70,7 @@ case "$1 $2" in
     esac
     printf '{"branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
+  "ledger estimate") echo 'typical 16 min, bad day 31 min; 20 references'; exit "${FAKE_ESTIMATE_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
 esac
 EOF
@@ -589,7 +590,7 @@ one_item_hotfix_train() {
     write_valid_draft "$tmp/one-hotfix-notes.md"
     mkdir -p "$tmp/one-hotfix-state" "$tmp/one-hotfix-assets"
     FAKE_GH_STATE="$tmp/one-hotfix-state" FAKE_GH_LOG="$tmp/one-hotfix-gh.log" \
-        FAKE_CAS_LOG="$tmp/one-hotfix-cas.log" \
+        FAKE_CAS_LOG="$tmp/one-hotfix-cas.log" FAKE_ESTIMATE_EXIT=23 \
         run "$fixture" --hotfix --notes "$tmp/one-hotfix-notes.md" >"$tmp/one-hotfix.log" 2>&1 || { cat "$tmp/one-hotfix.log"; return 1; }
     cut="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$(git -C "$fixture" log -1 --format=%s)" == "release: v$version" &&
@@ -597,6 +598,8 @@ one_item_hotfix_train() {
     grep -q "^pr create --base main --head $branch " "$tmp/one-hotfix-gh.log" &&
         [[ "$(grep -c '^pr merge ' "$tmp/one-hotfix-gh.log")" == 1 ]] &&
         grep -q "^release track --commit $cut --version $version " "$tmp/one-hotfix-cas.log" || return 1
+    grep -q "^ledger estimate release v$version$" "$tmp/one-hotfix-cas.log" || return 1
+    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 3 ]] || return 1
     # Stand in only for the external merge queue's landing, then invoke the
     # same publisher as the release workflow against its exact landed SHA.
     git -C "$fixture" switch --quiet main

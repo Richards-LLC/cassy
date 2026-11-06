@@ -27,7 +27,7 @@ pub const QUALITY_EVENT_SCHEMA_STATEMENTS: &[&str] = &[
         id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN
             ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn',
-             'friction')),
+             'friction', 'estimate', 'estimate_outcome')),
         occurred_at TEXT NOT NULL,
         task_id TEXT,
         release_version TEXT,
@@ -46,6 +46,7 @@ pub const QUALITY_EVENT_SCHEMA_STATEMENTS: &[&str] = &[
      BEGIN SELECT RAISE(ABORT, 'quality_events is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS quality_events_no_delete BEFORE DELETE ON quality_events
      BEGIN SELECT RAISE(ABORT, 'quality_events is append-only'); END",
+    "CREATE INDEX IF NOT EXISTS idx_quality_events_kind ON quality_events(kind, project_id)",
 ];
 
 /// Rebuild the historical CHECK without changing any row. Caller owns the transaction.
@@ -88,6 +89,29 @@ pub const QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS: &[&str] = &[
     QUALITY_EVENT_SCHEMA_STATEMENTS[2],
     QUALITY_EVENT_SCHEMA_STATEMENTS[3],
     QUALITY_EVENT_SCHEMA_STATEMENTS[4],
+];
+
+/// Admit estimate kinds while retaining immutable rows, sequence and triggers.
+pub const QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS: &[&str] = &[
+
+    "CREATE TABLE quality_events_estimate_upgrade (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN
+            ('check_run', 'intervention', 'escape', 'release', 'feature_feedback', 'turn',
+             'friction', 'estimate', 'estimate_outcome')),
+        occurred_at TEXT NOT NULL, task_id TEXT, release_version TEXT, actor TEXT,
+        title TEXT, link TEXT, payload TEXT NOT NULL, local_note TEXT,
+        origin TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'cloud')),
+        project_id TEXT NOT NULL DEFAULT '', UNIQUE (project_id, id)
+    )",
+    "INSERT INTO quality_events_estimate_upgrade SELECT * FROM quality_events",
+    "DROP TABLE quality_events",
+    "ALTER TABLE quality_events_estimate_upgrade RENAME TO quality_events",
+    QUALITY_EVENT_SCHEMA_STATEMENTS[1],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[2],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[3],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[4],
+    QUALITY_EVENT_SCHEMA_STATEMENTS[5],
 ];
 
 /// Immutable channel evidence; never inferred from sender prose.
@@ -203,6 +227,8 @@ pub enum FrictionSource {
     Task,
     /// An issue on the Cassy tracker, filed from any project.
     Issue,
+    /// A promise exceeded its measured bad-day duration.
+    Estimate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -212,10 +238,23 @@ pub enum FeedbackSource {
     Supervisor,
 }
 
+/// Portable evidence: event/task identity and measured elapsed minutes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EstimateReference { pub id: String, pub minutes: f64 }
+
 /// Kind-specific metrics. Strings are slugs, versions or hex; never free text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QualityPayload {
+    Estimate {
+        subject_kind: String, subject: String,
+        typical_minutes: f64, bad_day_minutes: f64, evidence_count: u64,
+        references: Vec<EstimateReference>, recipient: String,
+    },
+    EstimateOutcome {
+        estimate_id: String, subject: String, actual_minutes: f64,
+        inside_range: bool, below_typical: bool, reason: String,
+    },
     Turn {
         woken_by: WakeChannel,
         actions: Vec<TurnAction>,
@@ -280,6 +319,8 @@ pub enum QualityPayload {
 impl QualityPayload {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Estimate { .. } => "estimate",
+            Self::EstimateOutcome { .. } => "estimate_outcome",
             Self::Turn { .. } => "turn",
             Self::CheckRun { .. } => "check_run",
             Self::Intervention { .. } => "intervention",
@@ -292,6 +333,19 @@ impl QualityPayload {
 
     fn validate(&self) -> std::result::Result<(), String> {
         match self {
+            Self::Estimate { subject_kind, subject, typical_minutes,bad_day_minutes,evidence_count,references,recipient } => {
+                if !matches!(subject_kind.as_str(),"pipeline"|"task"|"epic"|"release") || !is_slug(subject)
+                    || !matches!(recipient.as_str(),"operator"|"client")
+                    || !typical_minutes.is_finite() || *typical_minutes<0.0 || !bad_day_minutes.is_finite() || bad_day_minutes<typical_minutes
+                    || *evidence_count==0 || references.is_empty() || references.len()>5 || references.len() as u64>*evidence_count
+                    || references.iter().any(|r|!is_slug(&r.id) || !r.minutes.is_finite() || r.minutes<0.0) {
+                    return Err("invalid estimate metrics or evidence".into());
+                }
+            }
+            Self::EstimateOutcome { estimate_id,subject,actual_minutes,inside_range,below_typical,reason } => {
+                if !is_slug(estimate_id) || !is_slug(subject) || !is_slug(reason) || !actual_minutes.is_finite() || *actual_minutes<0.0
+                    || (*below_typical && !inside_range) { return Err("invalid estimate outcome".into()); }
+            }
             Self::Turn { actions, no_op, minutes, .. } => {
                 if *no_op != actions.is_empty() || actions.len() > 8
                     || actions.iter().collect::<std::collections::BTreeSet<_>>().len() != actions.len()
@@ -349,6 +403,8 @@ pub struct NewQualityEvent {
 }
 
 impl NewQualityEvent {
+    pub fn id(&self) -> String { event_id(&self.scope,self.payload.kind(),&self.natural_key) }
+
     pub fn new(natural_key: impl Into<String>, payload: QualityPayload) -> Self {
         Self {
             scope: String::new(),
@@ -512,10 +568,10 @@ pub fn ensure_quality_event_schema(conn: &Connection) -> Result<()> {
     let historical = conn.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='quality_events'",
         [], |row| row.get::<_, String>(0),
-    ).ok().is_some_and(|sql| !sql.contains("'friction'"));
+    ).ok().is_some_and(|sql| !sql.contains("'estimate_outcome'"));
     conn.execute_batch("SAVEPOINT quality_event_schema")?;
     let result = (|| -> Result<()> {
-        let statements = if historical { QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS }
+        let statements = if historical { QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS }
             else { QUALITY_EVENT_SCHEMA_STATEMENTS };
         for statement in statements { conn.execute(statement, [])?; }
         Ok(())
@@ -697,6 +753,24 @@ pub fn quality_events_after(
     })
 }
 
+/// Local unresolved promises, without decoding the potentially large Turn history.
+pub fn quality_open_estimates(cas_dir:&Path)->Result<Vec<QualityEvent>> {
+    with_conn(cas_dir,|conn| collect(conn,&format!(
+        "SELECT {COLUMNS} FROM quality_events e WHERE kind='estimate' AND origin='local'
+        AND NOT EXISTS (SELECT 1 FROM quality_events o WHERE o.kind='estimate_outcome'
+        AND o.project_id=e.project_id AND json_extract(o.payload,'$.estimate_id')=e.id)
+        ORDER BY occurred_at,seq"),&[]))
+}
+
+/// Last successful measured samples for one reference class.
+pub fn quality_check_samples(cas_dir:&Path,check_id:&str,limit:usize)->Result<Vec<QualityEvent>> {
+    with_conn(cas_dir,|conn| collect(conn,&format!(
+        "SELECT {COLUMNS} FROM quality_events WHERE kind='check_run' AND origin='local'
+        AND json_extract(payload,'$.check_id')=?1 AND json_extract(payload,'$.outcome')='pass'
+        AND json_extract(payload,'$.minutes')>0 ORDER BY occurred_at DESC,seq DESC LIMIT ?2"),
+        &[&check_id,&(limit as i64)]))
+}
+
 /// Every event in `(from, to]`, across all synced projects, oldest first.
 pub fn quality_events_between(
     cas_dir: &Path,
@@ -831,7 +905,7 @@ mod tests {
         // Simulate a database shipped before Turn existed, preserving its rows.
         guard.execute_batch("DROP TRIGGER quality_events_no_update; DROP TRIGGER quality_events_no_delete; ALTER TABLE quality_events RENAME TO old_quality_events;").unwrap();
         let old_ddl = QUALITY_EVENT_SCHEMA_STATEMENTS[0]
-            .replace(", 'turn',\n             'friction'", "");
+            .replace(", 'turn',\n             'friction', 'estimate', 'estimate_outcome'", "");
         assert!(!old_ddl.contains("'turn'") && !old_ddl.contains("'friction'"));
         guard.execute(&old_ddl, []).unwrap();
         guard.execute("INSERT INTO quality_events SELECT * FROM old_quality_events", []).unwrap();

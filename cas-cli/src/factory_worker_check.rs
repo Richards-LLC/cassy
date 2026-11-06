@@ -3248,31 +3248,81 @@ printf '%s\n' "$@" > target/cargo-args"#);
     #[cfg(unix)]
     #[test]
     fn scratch_root_worker_check_builds_into_relocated_target() {
+        const PROBE: &str = "CAS_CFA7_TEMP_PROBE";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let expected = PathBuf::from(expected);
+            assert_eq!(std::env::temp_dir(), expected, "native test temporary HOME must use worker scratch");
+            for key in ["TMPDIR", "TMP", "TEMP"] {
+                assert_eq!(std::env::var_os(key).as_deref(), Some(expected.as_os_str()), "{key}");
+            }
+            // Replay an abandoned temporary HOME without copying a multi-GB binary.
+            let temporary = tempfile::tempdir().unwrap().keep();
+            assert!(temporary.starts_with(&expected));
+            std::fs::write(temporary.join("temporary-home-binary"), b"fixture").unwrap();
+            return;
+        }
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join(".cas");
+        let base = dir.path().canonicalize().unwrap();
+        let project = base.join("project");
+        fixture_commit(&project);
+        std::fs::write(project.join(".gitignore"), ".cas/\ntarget/\n").unwrap();
+        fixture_commit_as(&project, "ignore factory state");
+        let root = crate::store::init_cas_dir(&project).unwrap();
         let repo = root.join("worktrees/worker");
-        fixture_commit(&repo);
-        let scratch = dir.path().join("rewind");
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        git(&project, &["worktree", "add", "-qb", "factory/worker", repo.to_str().unwrap()]).unwrap();
+        let head = fixture_head(&repo);
+        git(&project, &["remote", "add", "origin", project.to_str().unwrap()]).unwrap();
+        git(&project, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
+        let scratch = base.join("rewind");
         std::fs::write(
             root.join("config.toml"),
-            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+            format!("[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n", scratch.display().to_string(), base.join("artifacts").display().to_string()),
         )
         .unwrap();
+        let ambient = base.join("ambient-temp");
+        std::fs::create_dir_all(&ambient).unwrap();
+        for key in ["TMPDIR", "TMP", "TEMP"] { env.set(key, &ambient); }
         let expected = scratch
             .join(cas_types::factory_scratch::project_key(&root))
             .join("targets/worker");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, &format!(
-            "[ \"$CARGO_TARGET_DIR\" = {:?} ] || exit 4\n[ -f \"$CARGO_TARGET_DIR/{}\" ] || exit 5\necho run >> \"$CARGO_TARGET_DIR/runs\"",
+            r#"if [ "$1" = check ]; then
+    [ "$CARGO_TARGET_DIR" = {:?} ] || exit 4
+    [ -f "$CARGO_TARGET_DIR/{}" ] || exit 5
+    echo run >> "$CARGO_TARGET_DIR/runs"
+else
+    export {PROBE}="$CARGO_TARGET_DIR/tmp"
+    {:?} --exact factory_worker_check::tests::scratch_root_worker_check_builds_into_relocated_target --nocapture || exit 6
+    printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
+fi"#,
             expected.display().to_string(),
             crate::factory_target_cache::owner::MARKER,
+            std::env::current_exe().unwrap().display().to_string(),
         ));
         execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo).unwrap();
         assert_eq!(std::fs::read_to_string(expected.join("runs")).unwrap(), "run\n");
         assert!(!repo.join("target/debug").exists());
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        assert!(expected.join("tmp").read_dir().unwrap().next().is_some());
+        crate::store::open_task_store(&root).unwrap()
+            .add(&crate::types::Task::new("cas-temp-proof".into(), "temp proof".into())).unwrap();
+        execute_verifier_at(&root, "cas-temp-proof", None, &head, &args, &project, &cargo, None).unwrap();
+        let review = scratch.join(cas_types::factory_scratch::project_key(&root))
+            .join("verify/cas-temp-proof").join(format!("walk-{head}/repo/target/tmp"));
+        assert!(review.read_dir().unwrap().next().is_some(), "verifier uses managed scratch too");
+        let mut retired = crate::types::Agent::new("retired".into(), "worker".into());
+        retired.metadata.insert("clone_path".into(), repo.to_str().unwrap().into());
+        assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).unwrap());
+        assert!(!expected.exists(), "GC reclaims abandoned temporary HOME with retired target");
+        assert!(repo.join(".git").is_file(), "retirement retains worker source");
+        assert_eq!(std::env::var_os("TMPDIR").unwrap(), ambient.as_os_str(), "parent environment stays unchanged");
     }
 
     #[cfg(unix)]

@@ -576,7 +576,11 @@ impl CasCore {
             {
                 // QA attests the walk, never the review. Ordinary close may
                 // finish a dedicated review or report the missing release verdict.
-                self.close_after_batch_receipt(task_id, receipt, None).await
+                match crate::qa_batch::satisfying_receipt(&self.cas_root, &task, &repo, &target, &anchor) {
+                    Ok(Some(qa)) => self.close_after_batch_receipt(task_id, &qa, None).await,
+                    Ok(None) => CassyMergeClose::Held("Batch QA receipt no longer covers the current delivery anchor; record current QA evidence before close.".into()),
+                    Err(error) => CassyMergeClose::Held(error),
+                }
             } else {
                 CassyMergeClose::NotEligible
             };

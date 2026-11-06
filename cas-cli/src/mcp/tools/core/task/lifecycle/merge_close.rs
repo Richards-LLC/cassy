@@ -96,6 +96,7 @@ struct VerdictRelease {
     note: String,
     foreign_hold: Option<String>,
     was_blocked: bool,
+    resumed_status: TaskStatus,
     hold: Option<serde_json::Value>,
 }
 
@@ -387,12 +388,13 @@ impl CasCore {
             note: format!("[{}] Cassy close authority: explicit no_delivery intent + verdict dispatch {dispatch_id}.", chrono::Utc::now().format("%Y-%m-%d %H:%M")),
             foreign_hold: None,
             was_blocked: task.status == TaskStatus::Blocked,
+            resumed_status: TaskStatus::InProgress,
             hold: hold.as_ref().and_then(|hold| serde_json::to_value(hold).ok()),
         };
         if release.was_blocked {
             // Reuse the existing restoration path for a failed verdict close.
             let mut released = task.clone();
-            released.status = TaskStatus::AwaitingMerge;
+            released.status = release.resumed_status;
             store.update_if_current(&released, &task)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         }
@@ -713,6 +715,7 @@ impl CasCore {
             note,
             foreign_hold: foreign_hold.map(|hold| hold.reason.clone()),
             was_blocked: task.status == TaskStatus::Blocked,
+            resumed_status: TaskStatus::AwaitingMerge,
             hold: hold
                 .as_ref()
                 .and_then(|hold| serde_json::to_value(hold).ok()),
@@ -778,7 +781,7 @@ impl CasCore {
         // A source gate may already have returned this delivery to the
         // worker. Never restore the old verdict hold over that fresh cycle.
         let current = match store.get(task_id) {
-            Ok(current) if current.status != TaskStatus::AwaitingMerge => {
+            Ok(current) if current.status != release.resumed_status => {
                 return CassyMergeClose::Held(text);
             }
             Ok(current) => Some(current),
@@ -966,7 +969,8 @@ mod tests {
         task.status = TaskStatus::AwaitingMerge;
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
         let release = || VerdictRelease {
-            note: "Cassy close authority".into(), foreign_hold: None, was_blocked: true, hold: None,
+            note: "Cassy close authority".into(), foreign_hold: None, was_blocked: true,
+            resumed_status: TaskStatus::AwaitingMerge, hold: None,
         };
         store.inject_error(cas_store::StoreError::Other("disk full".into()));
         let held = core.held_after_verdict(&store, &task.id, Some(release()), "gate text".into());

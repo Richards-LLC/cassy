@@ -100,7 +100,7 @@ fn request_close_verification_dispatch(
     owner_id: &str,
     boundary: &cas_types::VerificationProofBoundary,
     supervisor_recovery: bool,
-    no_delivery_reason: Option<&str>,
+    no_delivery_intent: Option<(&str, Option<&str>)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
     let persist = || -> cas_store::Result<cas_types::VerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
@@ -111,11 +111,14 @@ fn request_close_verification_dispatch(
             chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
             supervisor_recovery,
         )?;
-        if let Some(reason) = no_delivery_reason {
+        if let Some((reason, expected_assignee)) = no_delivery_intent {
             let (encoded, assignee): (String, Option<String>) = tx.query_row(
                 "SELECT deliverables, assignee FROM tasks WHERE id = ?1",
                 [task_id], |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
+            if assignee.as_deref() != expected_assignee {
+                return Err(cas_store::StoreError::Other("Assignment changed before no-delivery dispatch; close intent was not saved".into()));
+            }
             let mut deliverables: cas_types::TaskDeliverables = serde_json::from_str(&encoded)?;
             deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
                 dispatch_id: dispatch.id.clone(), reason: reason.to_string(), assignee,
@@ -10506,7 +10509,7 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
-                            req.no_delivery.filter(|value| *value).map(|_| req.reason.as_deref().unwrap_or_default()),
+                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), task.assignee.as_deref())),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {

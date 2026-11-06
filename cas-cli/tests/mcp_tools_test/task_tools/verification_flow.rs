@@ -12547,17 +12547,19 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 /// closes the task with no source commit.
 #[tokio::test]
 async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
-    verification_wait_close_fixture(false, false).await;
+    verification_wait_close_fixture(false, "verification").await;
 }
 
 #[tokio::test]
 async fn approved_no_delivery_wait_closes_without_worker_retry_cas_842d() {
-    for independent_hold in [false, true] {
-        verification_wait_close_fixture(true, independent_hold).await;
+    for wait in ["verification", "independent", "successor"] {
+        verification_wait_close_fixture(true, wait).await;
     }
 }
 
-async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bool) {
+async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
+    let independent_hold = wait == "independent";
+    let changed_assignment = wait == "successor";
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, _core) = setup_cas(&mut test_env);
     let repo = temp.path();
@@ -12632,6 +12634,13 @@ async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bo
     // The worker records the documented verification wait.
     let mut waiting = tasks.get(&task.id).unwrap();
     waiting.status = TaskStatus::Blocked;
+    if changed_assignment {
+        let mut successor = worker.clone();
+        successor.id = "successor-842d".into();
+        successor.name = "successor-842d".into();
+        agents.register(&successor).unwrap();
+        waiting.assignee = Some(successor.name);
+    }
     waiting.notes.push_str(&format!(
         "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
         dispatch.requested_at.format("%Y-%m-%d %H:%M"),
@@ -12657,20 +12666,23 @@ async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bo
     );
     if no_delivery {
         let current = tasks.get(&task.id).unwrap();
-        let expected = if independent_hold { TaskStatus::Blocked } else { TaskStatus::Closed };
+        let expected = if independent_hold || changed_assignment { TaskStatus::Blocked } else { TaskStatus::Closed };
         assert_eq!(current.status, expected, "approval must finish only its exact no-delivery wait: {approved}");
         if independent_hold {
             let state = tasks.get_execution_state(&task.id).unwrap().unwrap();
             assert_eq!(state["blocked_hold"]["reason"], "Operator decision still required");
+        } else if changed_assignment {
+            assert!(current.deliverables.no_delivery_close_intent.is_some());
+            assert_eq!(current.assignee.as_deref(), Some("successor-842d"));
         } else {
             assert_eq!(current.close_reason.as_deref(), Some(reason));
             assert!(current.deliverables.no_delivery_close_intent.is_none());
-            assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("blocked_hold").is_none());
+            assert!(tasks.get_execution_state(&task.id).unwrap().unwrap_or_default().get("blocked_hold").is_none());
         }
         let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(50).unwrap();
         // pin: the worker contract forbids a second close after its verdict.
-        assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains("Retry task close")));
+        assert!(!rows.iter().any(|row| row.prompt.contains("Retry task close")));
         supervisor_core.cas_verification_add(Parameters(approval())).await.expect("identical verdict retry is idempotent");
         let again = tasks.get(&task.id).unwrap();
         assert_eq!(again.status, expected);

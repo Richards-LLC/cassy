@@ -162,9 +162,11 @@ async fn loose_task_parented_to_epic_closes_after_merge_to_epic_only_cas_e258() 
     let repo = GitRepo::new();
     run_git(&repo.root, &["branch", "epic/lane"]);
     let cas_root = init_cas_dir(&repo.root).unwrap();
+    // cas-1896: this case exercises standalone-to-explicit-epic close semantics,
+    // so opt out of automatic train enrollment and retain the initial main target.
     std::fs::write(
         cas_root.join("config.toml"),
-        "[worktrees]\nenabled = false\n[verification]\nenabled = false\n",
+        "[worktrees]\nenabled = false\n[verification]\nenabled = false\n[factory]\nrelease_train = false\n",
     )
     .unwrap();
     let store = open_task_store(&cas_root).unwrap();

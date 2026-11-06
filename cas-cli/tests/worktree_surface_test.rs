@@ -3031,6 +3031,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 tasks.update(&task).unwrap();
             }
             "target" => {
+                // cas-d4b7 carries only an unchanged full-context patch. This
+                // conflicting add/add changes the reviewed input and must invalidate.
                 let target = fixture.cas_root.join("target-writer");
                 run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
                 std::fs::write(target.join("delivery.txt"), "Sibling changed the reviewed file\n").unwrap();

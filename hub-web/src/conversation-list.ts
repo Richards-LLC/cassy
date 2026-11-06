@@ -440,7 +440,9 @@ export class ConversationList {
       if (reload && !row.ended) {
         const control = extra(`reload:${row.key}`, () => {
           const node = document.createElement("div"); node.className = "conversation-reload";
-          node.innerHTML = '<button type="button" data-reload-cassy="direct">Reload Cassy</button><details><summary>Session actions</summary><button type="button" data-reload-cassy="menu">Reload Cassy</button><p class="conversation-reload-reason"></p></details><p class="conversation-reload-receipt" role="status"></p>';
+          // Secondary actions stay in the existing conversation-header menu.
+          // Ordinary rows must keep their height and one navigation Tab stop.
+          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><p class="conversation-reload-receipt" role="status"></p>';
           return node;
         });
         const receipt = row.reloadReceipt;
@@ -454,11 +456,10 @@ export class ConversationList {
           action.onclick = () => reload(row);
         }
         control.setAttribute("aria-label", `Cassy controls for ${row.supervisor} on ${machineName(row.host)}`);
-        const reason = control.querySelector<HTMLElement>(".conversation-reload-reason")!;
-        reason.textContent = unavailable ?? ""; reason.hidden = !unavailable;
         const status = control.querySelector<HTMLElement>(".conversation-reload-receipt")!;
         status.textContent = receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
         status.hidden = !status.textContent;
+        control.hidden = direct.hidden && status.hidden;
         ordered.push(control);
       }
 

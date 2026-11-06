@@ -12,7 +12,7 @@ function setup() {
 beforeEach(() => localStorage.clear());
 
 describe("project-first navigation", () => {
-  it("keeps Reload Cassy on skewed supervisor cards and in Session actions with honest receipts", () => {
+  it("keeps Reload Cassy on skewed cards without adding conversation Tab stops, with honest receipts", () => {
     const nav = setup();
     const navigation = new ProjectNavigation();
     const reload = vi.fn();
@@ -23,6 +23,7 @@ describe("project-first navigation", () => {
       const action = nav.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
       expect(action).not.toBeNull();
       expect(action.hidden).toBe(false);
+      expect(action.tabIndex, "keyboard actions stay in the conversation header menu").toBe(-1);
       expect(action.disabled).toBe(harness !== "claude");
       if (harness === "claude") {
         action.click(); expect(reload).toHaveBeenLastCalledWith(expect.objectContaining({ key: supervisor.key }));
@@ -33,8 +34,13 @@ describe("project-first navigation", () => {
     const current = row("reload", { harness: "claude", machine_online: true, mcp_version: "4.1.0", installed_version: "4.1.0", reloadReceipt: { client_ref: "r", command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 4.1.0", output: "", interactive: false } });
     navigation.render(nav, [current], open, undefined, { reload });
     expect(nav.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!.hidden).toBe(true);
-    expect(nav.querySelector("details summary")?.textContent).toBe("Session actions");
+    const body = nav.querySelector(".project-card-rows")!;
+    const stops = [...body.querySelectorAll<HTMLElement>("button, summary, [tabindex]")]
+      .filter(node => node.tabIndex >= 0 && !node.closest("[hidden]"));
+    expect(stops).toEqual([...body.querySelectorAll(".conversation-row")]);
     expect(nav.querySelector(".conversation-reload-receipt")?.textContent).toContain("version 4.1.0");
+    navigation.render(nav, [{ ...current, reloadReceipt: undefined }], open, undefined, { reload });
+    expect(nav.querySelector<HTMLElement>(".conversation-reload")!.hidden, "no empty action line on current cards").toBe(true);
     expect(open).not.toHaveBeenCalled();
   });
   it("compares published versions numerically without inventing updates for unknown runtimes", () => {

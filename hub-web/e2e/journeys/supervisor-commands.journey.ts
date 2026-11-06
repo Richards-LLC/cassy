@@ -101,6 +101,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const toggle = page.locator("#conversation-commands");
         await toggle.click();
         const palette = page.locator("#supervisor-command-palette");
+        await expect(palette.locator('[data-supervisor-command="mcp"]')).toContainText("Reload Cassy");
+        await expect(palette.locator('[data-supervisor-command="mcp"]')).toBeVisible();
         const [buttonBox, paletteBox] = await Promise.all([toggle.boundingBox(), palette.boundingBox()]);
         if (!buttonBox || !paletteBox) throw new Error("Supervisor command dropdown is not laid out");
         expect(paletteBox.y).toBeGreaterThanOrEqual(buttonBox.y + buttonBox.height);

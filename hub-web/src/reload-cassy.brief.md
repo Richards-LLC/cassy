@@ -6,7 +6,7 @@ When the installed Cassy is newer, the supervisor card puts Reload Cassy beside 
 
 ## Hero form
 
-An inline action beneath the supervisor row names the repair without opening a menu. Session actions keeps the same command reachable when versions already agree.
+An inline action beneath the supervisor row names the repair without opening a menu. The existing conversation-header command menu keeps the same session actions reachable when versions already agree.
 
 ## Emotional register
 
@@ -22,7 +22,7 @@ No new server command, daemon relaunch, guessed success, polling owner or second
 
 ## State and access
 
-Reuse the card's observed MCP/installed versions from factory_binary_skew. Card controls are siblings of the navigation button, never nested buttons. A native details control exposes Session actions; a skewed card shows its Reload Cassy action directly. Keep keyed controls and focus across catalog refreshes. Pending requests are bound to the selected session birth and cancelled on selection change or failed attachment. Both card and typed /mcp use the existing mcp command and receipt. The application requires JavaScript for authenticated session control; existing print and reduced-motion behavior applies.
+Reuse the card's observed MCP/installed versions from factory_binary_skew. Card controls are siblings of the navigation button, never nested buttons. The existing header menu exposes session actions; a skewed card shows its Reload Cassy action directly. Ordinary cards add no action line or extra Tab stop. Keyboard users reach Reload Cassy through the header menu; the direct pointer shortcut is outside sequential Tab navigation. Keep keyed controls and focus across catalog refreshes. Pending requests are bound to the selected session birth and cancelled on selection change or failed attachment. Both card and typed /mcp use the existing mcp command and receipt. The application requires JavaScript for authenticated session control; existing print and reduced-motion behavior applies.
 
 ## Header and receipt follow-through
 
@@ -40,6 +40,6 @@ Reviewed production captures at 1280×800/light and 390×844/dark. Strict visual
 | --- | --- | --- |
 | Distinctiveness | 4 | The existing Cassy version badge leads directly to the named repair inside the Glass supervisor card. |
 | Fit to argument | 5 | The stale version and Reload Cassy action are visible together before a conversation or menu opens. |
-| Hierarchy | 4 | Reload is direct when needed; Session actions remains secondary and the header dropdown stays beside its opener. |
+| Hierarchy | 4 | Reload is direct when needed; session actions use the existing header dropdown beside its opener. |
 | Craft | 4 | Strict visual QA PASS for card and dropdown at desktop/phone in light/dark, with zero clipping, overlap or overflow findings. |
 | Accessibility | 4 | Named native controls, keyed focus retention, Escape to the header opener, disabled unsupported harnesses and truthful dismissable receipts are exercised. |

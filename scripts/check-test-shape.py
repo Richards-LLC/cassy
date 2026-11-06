@@ -14,6 +14,7 @@ merge-base(ref, HEAD), including working changes, excluding files imported only
 by a released-trunk sync merge.
 """
 import argparse
+import ast
 from pathlib import Path
 import re
 import subprocess
@@ -180,6 +181,29 @@ def rust_runtime_inputs(source):
             yield ts[i + 1].end, ts[ps[i + 1]].start
 
 
+def python_runtime_inputs(source):
+    """Path literals consumed by file reads are inputs, not returned-text pins."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return
+    lines = source.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def offset(line, byte_column):
+        # AST columns count UTF-8 bytes; text_literals uses character offsets.
+        return starts[line - 1] + len(lines[line - 1].encode('utf-8')[:byte_column].decode('utf-8'))
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ('read_text', 'read_bytes')):
+            for value in ast.walk(node.func.value):
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    yield offset(value.lineno, value.col_offset), offset(value.end_lineno, value.end_col_offset)
+
+
 def lint_text_pins(source, path, ranges=None, changed_lines=None):
     """Find brittle prose pins in a conventional test file, independent of language."""
     if not is_test_file(path) and not ranges:
@@ -188,6 +212,8 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
     literals = list(text_literals(source, path))
     diagnostics = list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs' else []
     inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
+    if Path(path).suffix in ('.py', '.pyi'):
+        inputs = list(python_runtime_inputs(source))
     for start, end, body in literals:
         if any(left <= start < right for left, right in diagnostics):
             continue

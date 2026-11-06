@@ -108,8 +108,7 @@ def test_workflow_command():
     def test_python_file_read_inputs_leave_output_pins_in_scope_cas_c49b(self):
         cases = [
             ("self.assertEqual(json.loads((self.repo/'receipts/receipt.json').read_text())['outcome'], 'FLAKY')", 0),
-            ("""label = 'é'; self.assertEqual(
-    json.loads((self.repo / 'receipts/receipt.json').read_bytes())['outcome'],
+            ("""label = 'é'; self.assertEqual(json.loads((self.repo / 'receipts/receipt.json').read_text())['outcome'],
     'FLAKY')""", 0),
             ("self.assertEqual((self.repo/'receipts/receipt.json').read_text(), 'When a test fails, name the responsible boundary and preserve its first result.')", 1),
             ("self.assertIn('uses: actions/checkout@v4', (self.repo/'.github/workflows/ci.yml').read_text())", 1),

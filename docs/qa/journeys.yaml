@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-replay-catalog-control-fanout:
+    title: A peer replay catalog refresh does not invalidate an unchanged selected session's controls
+    tasks: [cas-c4b7]
+    invariants: [HUB-J12-PEER-REPLAY-CONTROLS]
+    journeys: [HUB-J12]
   peer-ask-merge-scope:
     title: Only explicit asks hold related merges and later messages from that peer clear them
     tasks: [cas-5ec1]
@@ -461,6 +466,10 @@ invariants:
     statement: While offline, both held-message and composer copy disclose the finite two-minute automatic-send window; expired words remain available with Edit and Retry and never send on a later reconnect without a new click.
     check: Run the original-deadline reheld-send case in network-switch.journey.ts, then hold a real native-hub message through the wall-clock timeout on desktop and phone; read heldAt and error state back from the journal and verify no expired text enters prompt_queue when the hub returns.
     bug: {task: cas-1c0e}
+  HUB-J12-PEER-REPLAY-CONTROLS:
+    statement: Retained peer events and their catalog refresh leave unchanged sessions' controls alone. New or revived destinations get status, health heartbeats still refresh status, and the selected session's own events still refresh status and lease.
+    check: Run the HUB-J12 peer clean exit and retained replay part at one and four workers; retain zero selected control reads before the heartbeat, bounded status-only heartbeat reads, and both controls on the selected session's own event.
+    bug: {task: cas-c4b7}
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -1667,6 +1676,7 @@ journeys:
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
   - HUB-J12-CATALOG-FOOTER
+  - HUB-J12-PEER-REPLAY-CONTROLS
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null

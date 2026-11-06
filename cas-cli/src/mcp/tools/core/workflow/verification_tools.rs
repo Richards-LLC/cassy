@@ -749,7 +749,7 @@ impl CasCore {
                     let retry_note = if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some()
                     {
-                        self.continue_premerge_after_verdict(&proof_dispatch, existing.status).unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+                        self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
                         && proof_dispatch.delivery_transaction_id.is_none()
@@ -1111,7 +1111,7 @@ impl CasCore {
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let close_retry = if candidate.is_some() {
-            self.continue_premerge_after_verdict(&proof_dispatch, verification.status).unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+            self.continue_premerge_after_verdict(&proof_dispatch, verification.status).await.unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
         } else if verification.status == VerificationStatus::SupervisorCall {
             format!(
                 "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",

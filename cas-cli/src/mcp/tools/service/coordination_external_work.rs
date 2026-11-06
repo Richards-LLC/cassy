@@ -1,4 +1,4 @@
-//! Supervisor entry point for journaled Slack-thread authority.
+//! Supervisor entry point for Slack-thread authority and GitHub source handoff.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,6 +119,27 @@ impl CasService {
                 ErrorCode::INVALID_REQUEST,
                 "External thread authority is available only to the authenticated supervisor.",
             ));
+        }
+
+        if request.action == "release_claim"
+            && let Some(key) = request.resource_id.as_deref()
+                .and_then(crate::cloud::peer_claims::github_source_key)
+        {
+            let claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.inner.cas_root)
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_REQUEST,
+                    "GitHub source handoff requires Cassy Cloud login for this project."))?;
+            let root = self.inner.cas_root.clone();
+            let registration = agent.id.clone();
+            let budget = crate::cloud::peer_claims::PeerBudget::default();
+            let released = budget.run(move || {
+                claims.with_budget(budget).release_source_for_handoff(&root, &registration, &key)
+            }).await.map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?
+                .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+            return Ok(Self::success(json!({
+                "code": if released { "released" } else { "not_held" },
+                "source": request.resource_id,
+                "registration_id": agent.id,
+            }).to_string()));
         }
 
         let command = command_from_request(&request)

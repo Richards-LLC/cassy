@@ -201,6 +201,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+When the MCP daemon opens a pre-merge candidate dispatch, it launches the
+existing task verifier on the standard harness route. The registered child
+uses the same sealed capability and verification gate as a manually launched
+verifier. Its prompt includes the immutable candidate path, task criteria,
+parent plan and task notes, including receipts and adversarial review notes.
+The subprocess returns verdict arguments; only the daemon submits them with
+the bound task/dispatch identity. No bearer is exposed to the harness.
+
+Approval continues the normal merge admission and leaves a quiet one-line
+receipt. A train queue reservation retains control of that continuation.
+Rejection, a supervisor question, timeout or a failed review transport wakes
+the owning supervisor with findings; none grants a merge override. Review
+prompts, verdict output and harness diagnostics live under
+`.cas/verification-runs/<dispatch>/`. A manually claimed dispatch remains
+with its verifier. Non-daemon callers retain the existing manual handoff.
+
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
 CI and explicit CI overrides finish the intent without requesting automatic
@@ -3289,6 +3305,13 @@ The value must be an absolute path. Once it is set, each project gets its own
   leases, parking and retirement all resolve this same path. Sources stay in
   the checkout, and the main checkout and lane previews keep their in-tree
   `target/`.
+- Capped worker and verifier Cargo children set `TMPDIR`, `TMP` and `TEMP` to
+  their private target's `tmp/` directory. Test temporary HOMEs and binary
+  copies therefore use the scratch drive when configured, rather than the
+  host's potentially memory-backed `/tmp`. Without a scratch root they use
+  the checkout's private `target/tmp/`. Retirement GC removes these files
+  with the owned target without copying them into durable evidence; verifier
+  target reclamation removes them too. The caller's environment stays intact.
 - Published baselines live in `<scratch_root>/<project-key>/build-cache`.
   `scripts/refresh-worker-build-cache.sh` reads the key through `cas config get`
   and prints `Worker build-cache root:`, and the release host update reads that
@@ -4219,6 +4242,24 @@ Supersession ends its validity and removes it from session context, including
 pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
+
+## Ordered train merge queue
+
+A registered supervisor can submit `factory action=train_merge id=<epic>` to
+merge that train's parked deliveries in updated-time order, or add
+`task_ids=["cas-first","cas-second"]` for an explicit order. The CLI parity is
+`cas factory train merge <epic> [task ...]`. Only exact parked anchors from the
+same train and factory session are admitted; queue options grant no CI override.
+
+The action records the queue and returns immediately. The existing factory
+daemon's CI scan resumes it through `worktree_merge`, reusing the current
+candidate approval or requesting review when context changes. Pending reviews
+and CI retain the current position. A content conflict reopens only its own task
+with the conflicting files and keeps its assignee; later deliveries continue.
+Single merges into the target are held throughout the queue, including between
+verdicts. Other targets remain independent. Repeat the action without `task_ids`
+to inspect an active queue; a successor may adopt a dead owner's queue. Queue
+state and results live in `.cas/train-merges/`. No CI stage is added.
 
 ## Operator project holds
 

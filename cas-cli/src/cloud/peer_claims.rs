@@ -920,6 +920,17 @@ impl PeerClaims {
         self.coordinator(agent_id)?.release_expecting(&key, lock.epoch, lock.renewal_count)
     }
 
+    /// Explicitly hand back a GitHub source, including its heartbeat registration.
+    pub(crate) fn release_source_for_handoff(
+        &self, root: &Path, agent_id: &str, key: &str,
+    ) -> Result<bool, String> {
+        let _fence = lock_task_claim_release(root, key).map_err(|error| error.to_string())?;
+        self.remaining().map_err(|error| error.to_string())?;
+        let released = self.release_own(key, agent_id).map_err(|error| error.to_string())?;
+        forget_source_claim(root, agent_id, key)?;
+        Ok(released)
+    }
+
     /// The holder as Cassy Cloud lists it: whether it is live, and its
     /// name and machine from registration.
     fn listed_holder(&self, held_by: &str) -> Listed {
@@ -1165,6 +1176,13 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         let mut source_task = None;
         let _source_fence = if task_id.starts_with("ask-") {
             let Ok(fence) = lock_task_claim_release(cas_root, &task_id) else { report.failed += 1; continue; };
+            // A handoff may have removed this registration after the heartbeat
+            // snapshot. Re-check under the same fence before renewing/reclaiming.
+            let Ok(current) = agents.get(agent_id) else { report.failed += 1; continue; };
+            if !current.metadata.get(META_SOURCE_CLAIMS)
+                .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .is_some_and(|keys| keys.contains(&task_id))
+            { continue; }
             match active_source_task(cas_root, &task_id) {
                 Ok(Some(task)) => source_task = Some(task),
                 Ok(None) => {

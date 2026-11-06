@@ -4484,6 +4484,11 @@ impl FactoryDaemon {
                     }
                     let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::mcp::tools::core::workflow::train_merge::resume_pending(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "train merge scan deferred");
+                        }
                         // Durable merge intents are independent of reminders and
                         // model turns. Run normal admission on the blocking pool.
                         if let Err(error) = retry_runtime.block_on(

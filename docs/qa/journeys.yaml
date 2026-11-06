@@ -17,6 +17,16 @@ bug_families:
     tasks: [cas-aa10]
     invariants: [HUB-J13-STARTUP-TURN]
     journeys: [HUB-J13]
+  peer-replay-catalog-control-fanout:
+    title: A peer replay catalog refresh does not invalidate an unchanged selected session's controls
+    tasks: [cas-c4b7]
+    invariants: [HUB-J12-PEER-REPLAY-CONTROLS]
+    journeys: [HUB-J12]
+  native-claude-command-receipts:
+    title: Completed Claude turns accept commands while local command transcript receipts remain compact
+    tasks: [cas-99e7]
+    invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
+    journeys: [HUB-J27]
   card-reload-and-command-follow-through:
     title: Reload Cassy is visible on skewed supervisor cards; header commands open beside their button and stale busy receipts resolve or dismiss
     tasks: [cas-fd9ff]
@@ -281,6 +291,10 @@ invariants:
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
+  HUB-J27-NATIVE-IDLE-COMMANDS:
+    statement: An empty Claude prompt after native turn completion accepts Exit and Reload Cassy on the first request despite old busy prose or background repaint; local command receipts never start a model turn or appear as raw XML in the thread or preview.
+    check: Run the cas-99e7 HUB-J27 part and conversations Vitest case, the supervisor command runtime tests and latest Claude turn observation regression. Verify active turns, drafts and modals still refuse; retain actual PTY admission and one semantic command frame per request.
+    bug: {task: cas-99e7}
   HUB-J27-ALLOWLIST:
     statement: A command requires authenticated control and an active lease; arbitrary strings, foreign references, busy prompts and operator drafts cannot inject input.
     check: Run hub::server::supervisor_commands_require_control_confirmation_and_private_audited_receipts and the supervisor_commands runtime module; verify the closed wire enum and guarded actual PTY bytes, including stale native chooser recovery.
@@ -481,6 +495,10 @@ invariants:
     statement: While offline, both held-message and composer copy disclose the finite two-minute automatic-send window; expired words remain available with Edit and Retry and never send on a later reconnect without a new click.
     check: Run the original-deadline reheld-send case in network-switch.journey.ts, then hold a real native-hub message through the wall-clock timeout on desktop and phone; read heldAt and error state back from the journal and verify no expired text enters prompt_queue when the hub returns.
     bug: {task: cas-1c0e}
+  HUB-J12-PEER-REPLAY-CONTROLS:
+    statement: Retained peer events and their catalog refresh leave unchanged sessions' controls alone. New or revived destinations get status, health heartbeats still refresh status, and the selected session's own events still refresh status and lease.
+    check: Run the HUB-J12 peer clean exit and retained replay part at one and four workers; retain zero selected control reads before the heartbeat, bounded status-only heartbeat reads, and both controls on the selected session's own event.
+    bug: {task: cas-c4b7}
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -1695,6 +1713,7 @@ journeys:
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J12-LOADED-HOST-LIVENESS
   - HUB-J12-CATALOG-FOOTER
+  - HUB-J12-PEER-REPLAY-CONTROLS
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
@@ -2653,7 +2672,7 @@ journeys:
   - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN]
+  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

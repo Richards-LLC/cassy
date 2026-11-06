@@ -604,6 +604,78 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
     other.core.cas_task_create(Parameters(create("Independent repository callback", "https://github.com/acme/other/issues/42"))).await.unwrap();
 }
 
+/// The owner can hand off a GitHub ask without cancelling its local card or
+/// asking the receiver to override a still-live supervisor (cas-5b76).
+#[tokio::test]
+async fn github_source_handoff_allows_peer_assignment_without_override() {
+    async fn release(machine: &Machine, request: serde_json::Value) -> Result<serde_json::Value, String> {
+        let response = factory_service(machine).factory(Parameters(
+            serde_json::from_value(request).unwrap(),
+        )).await.map_err(|error| error.message.to_string())?;
+        serde_json::from_str(&extract_text(response)).map_err(|error| error.to_string())
+    }
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "source-owner");
+    let bravo = machine(&cloud.url, PROJECT, "source-receiver");
+    for machine in [&alpha, &bravo] {
+        let agents = open_agent_store(&machine.cas_dir).unwrap();
+        let mut actor = agents.get(&machine.agent_id).unwrap();
+        actor.role = AgentRole::Supervisor;
+        agents.update(&actor).unwrap();
+        cloud.live(machine, &actor.name);
+    }
+    let source = "https://github.com/Acme/Widget/issues/1565";
+    alpha.core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
+        "title":"Handoff callback repair", "description":"Continue the agreed repair on the peer machine.",
+        "task_type":"task", "risk":"none", "external_ref":source,
+    })).unwrap())).await.unwrap();
+    let task = open_task_store(&alpha.cas_dir).unwrap().list(None).unwrap()
+        .into_iter().find(|task| task.external_ref.as_deref() == Some(source)).unwrap();
+    bravo.put_task(&task.id, TaskType::Task);
+    let tasks = open_task_store(&bravo.cas_dir).unwrap();
+    let mut received = tasks.get(&task.id).unwrap();
+    received.external_ref = Some("https://github.com/acme/widget/pull/1565/files".into());
+    tasks.update(&received).unwrap();
+    let assign = || serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({
+        "id":task.id, "assignee":"receiver-worker",
+    })).unwrap();
+    let refusal = bravo.core.cas_task_update(Parameters(assign())).await.unwrap_err();
+    assert!(refusal.message.contains("SOURCE HELD BY A PEER"), "{refusal}");
+    let agents = open_agent_store(&alpha.cas_dir).unwrap();
+    let keys: Vec<String> = serde_json::from_str(
+        agents.get(&alpha.agent_id).unwrap().metadata.get(cas::cloud::peer_claims::META_SOURCE_CLAIMS).unwrap(),
+    ).unwrap();
+    let release_request = serde_json::json!({
+        "action":"release_claim", "resource_id":"https://github.com/acme/widget/pull/1565/files?view=all",
+    });
+    // A competing supervisor cannot release the owner, and no other role can
+    // use its supervisor-only handoff even on the owner's machine.
+    let result = release(&bravo, release_request.clone()).await.unwrap();
+    assert_eq!(result["code"], "not_held");
+    for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Worker] {
+        let mut actor = agents.get(&alpha.agent_id).unwrap();
+        actor.role = role;
+        agents.update(&actor).unwrap();
+        assert!(release(&alpha, release_request.clone()).await.is_err(), "{role}");
+        assert_eq!(cloud.active_lock(&keys[0]).unwrap().1.agent_id, alpha.agent_id);
+    }
+    let mut actor = agents.get(&alpha.agent_id).unwrap();
+    actor.role = AgentRole::Supervisor;
+    agents.update(&actor).unwrap();
+    let result = release(&alpha, release_request).await.unwrap();
+    assert_eq!(result["code"], "released");
+    assert!(!open_task_store(&alpha.cas_dir).unwrap().get(&task.id).unwrap().is_terminal());
+    let heartbeat = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    assert_eq!(heartbeat.renewed, 0, "the old open card must not reclaim its source: {heartbeat:?}");
+    bravo.core.cas_task_update(Parameters(assign())).await.expect("the receiver assigns without an override");
+    let received = tasks.get(&task.id).unwrap();
+    assert_eq!(received.assignee.as_deref(), Some("receiver-worker"));
+    assert!(received.deliverables.source_claim_override.is_none());
+    assert_eq!(cloud.active_lock(&keys[0]).unwrap().1.agent_id, bravo.agent_id);
+}
+
 /// Acceptance: B's start of a task A holds is refused with A's identity; once
 /// A releases it, B starts it. The claim key is scoped to the repository.
 #[tokio::test]

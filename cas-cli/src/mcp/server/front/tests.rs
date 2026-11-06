@@ -204,6 +204,8 @@ async fn deferred_binary_is_not_respawned_until_install_changes_cas_81c4() {
     let temp = tempfile::tempdir().unwrap();
     let program = temp.path().join("cas");
     std::fs::write(&program, "old").unwrap();
+    // Keep the old inode alive, as an executing backend does on Unix.
+    let _serving_file = std::fs::File::open(&program).unwrap();
     let serving = crate::mcp::socket::ExeIdentity::from_exe_path(program.clone());
     let image = std::sync::Arc::new(std::sync::Mutex::new(Some(serving)));
     let replacement = temp.path().join("replacement");
@@ -222,6 +224,7 @@ async fn deferred_binary_is_not_respawned_until_install_changes_cas_81c4() {
     std::fs::write(&replacement, "compatible").unwrap();
     std::fs::rename(&replacement, &program).unwrap();
     tokio::time::advance(Duration::from_secs(30)).await;
-    assert!(incoming.recv().await.is_some(), "a newly installed image must be retried");
+    assert!(tokio::time::timeout(Duration::from_secs(31), incoming.recv()).await
+        .expect("new install must be retried on the next tick").is_some());
     watcher.abort();
 }

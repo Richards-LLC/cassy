@@ -337,7 +337,13 @@ impl Connection {
             return Some("candidate server identity differs from the initialized session".into());
         }
         if self.tools != candidate.tools {
-            return Some("candidate tools/list schema differs from the initialized session".into());
+            let changed = self.tools.iter().chain(&candidate.tools).find(|tool| {
+                let name = &tool["name"];
+                self.tools.iter().find(|entry| &entry["name"] == name)
+                    != candidate.tools.iter().find(|entry| &entry["name"] == name)
+            });
+            let name = changed.and_then(|tool| tool["name"].as_str()).unwrap_or("<unnamed>");
+            return Some(format!("candidate tools/list schema differs for tool {name} from the initialized session"));
         }
         None
     }
@@ -476,17 +482,24 @@ async fn watch_updates(
     updates: mpsc::Sender<Backend>,
     mut spawn: impl FnMut(&std::path::Path, bool) -> Result<Backend>,
 ) {
-        let mut ticks = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            ticks.tick().await;
-            let stale = image.lock().map(|image| image.as_ref()
-                .is_some_and(crate::mcp::socket::ExeIdentity::is_stale)).unwrap_or(false);
-            if !stale || updates.capacity() == 0 { continue; }
-            match spawn(&program, true) {
-                Ok(backend) => if updates.send(backend).await.is_err() { break; },
-                Err(error) => eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {error}"),
-            }
+    let mut ticks = tokio::time::interval(Duration::from_secs(30));
+    let mut attempted = None;
+    loop {
+        ticks.tick().await;
+        let stale = image.lock().map(|image| image.as_ref()
+            .is_some_and(crate::mcp::socket::ExeIdentity::is_stale)).unwrap_or(false);
+        if !stale || updates.capacity() == 0 { continue; }
+        let installed = crate::mcp::socket::ExeIdentity::from_exe_path(program.clone());
+        if attempted.as_ref() == Some(&installed) { continue; }
+        // Remember before spawning: failures, incompatibility and drain
+        // deferrals all keep the old backend, but must not retry this image.
+        // A later install changes the identity and permits another attempt.
+        attempted = Some(installed);
+        match spawn(&program, true) {
+            Ok(backend) => if updates.send(backend).await.is_err() { break; },
+            Err(error) => eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {error}"),
         }
+    }
 }
 
 #[cfg(unix)]

@@ -267,6 +267,6 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    factory action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    ```
 
-   Queued landing integrates to base; merge locally only without it. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
+   Queued landing integrates to base; merge locally only without a queue. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
 8. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
 9. Shut down the epic's workers by name once each has pushed and parked: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`.

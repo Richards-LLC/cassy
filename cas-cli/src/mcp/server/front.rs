@@ -534,7 +534,11 @@ pub(super) async fn run() -> Result<()> {
         () = watchdog.tripped() => return Ok(()),
         }
     };
-    if serde_json::from_slice::<Value>(&ready)?["event"] != "ready" {
+    let ready: Value = serde_json::from_slice(&ready)?;
+    if let Some(error) = ready["error"].as_str() {
+        bail!("initial MCP backend startup failed: {error}");
+    }
+    if ready["event"] != "ready" {
         bail!("initial MCP backend did not confirm readiness");
     }
     let image = backend.image.clone();

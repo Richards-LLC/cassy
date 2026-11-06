@@ -393,8 +393,14 @@ mod tests {
         );
         let path = crate::ui::factory::metadata_path(session);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let artifact_dir = crate::config::project_factory_artifacts_root(&cas_dir,
+            &crate::config::resolved_factory_artifacts_root(None)).join(&lane.id);
+        std::fs::create_dir_all(&artifact_dir).unwrap();
         for (case, status, expected) in [
             ("one", TaskStatus::InProgress, true),
+            ("flat", TaskStatus::InProgress, true),
+            ("resumed", TaskStatus::InProgress, true),
+            ("legacy", TaskStatus::InProgress, true),
             ("multiple", TaskStatus::InProgress, false),
             ("pending", TaskStatus::Open, false),
             ("blocked", TaskStatus::Blocked, false),
@@ -406,6 +412,12 @@ mod tests {
             ("foreign helper", TaskStatus::InProgress, false),
             ("pending message", TaskStatus::InProgress, false),
         ] {
+            let ledger = match case {
+                "flat" | "held lane" => "progress_at: 2026-11-06T12:00:00Z\ncells=1; PASS=0; FAIL=1\n",
+                "legacy" => "cells=1; PASS=0; FAIL=1\n",
+                _ => "progress_at: 2026-11-06T12:08:00Z\ncells=1; PASS=0; FAIL=1\n",
+            };
+            std::fs::write(artifact_dir.join("LEDGER.md"), ledger).unwrap();
             lane.status = status;
             second.status = if case == "multiple" {
                 TaskStatus::Open
@@ -449,7 +461,7 @@ mod tests {
             let report = read(&cas_dir, Some(session), now).unwrap();
             assert_eq!(
                 report.advisories.len(),
-                usize::from(expected),
+                if case == "flat" { 2 } else { usize::from(expected) },
                 "{case}: {report:?}"
             );
             if expected {

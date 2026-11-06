@@ -2832,10 +2832,10 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
 /// cas-d4b7 replays the six manual rebinds (cas-d1fe, cas-015e, cas-8aa1,
 /// cas-cff4 twice, cas-62c3): after approval the target edits a file the
 /// delivery also edits, so the reviewed tree no longer recomputes, yet the
-/// patch the merge adds is unchanged. Far and context-only edits rebind
-/// the one approval with a receipt; a target that lands one of the
-/// delivery's hunks itself and edits elsewhere changes both the tree and
-/// the delivered patch, so it still dispatches a fresh review.
+/// patch the merge adds is unchanged. A far edit rebinds the one approval
+/// with a receipt and the task closes on it. An edit inside a delivered
+/// hunk's context changes the full-context patch-id (a zero-context id would
+/// hide an `if ok` -> `if !ok` beside the hunk), so it gets a fresh review.
 #[tokio::test]
 async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
     let mut env = test_env();
@@ -2845,12 +2845,10 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    let cases: [(&str, &[(usize, &str)]); 3] = [
+    let cases: [(&str, &[(usize, &str)]); 2] = [
         ("full-context", &[(18, "target 18")]),
-        ("zero-context", &[(5, "target 5")]),
-        // The target lands one delivered hunk itself plus a far edit, so the
-        // tree differs and the delivered patch lacks that hunk.
-        ("changed patch", &[(12, "delivered 12"), (18, "target 18")]),
+        // Adversarial probe: line 5 is context of the line-3 hunk.
+        ("context edit", &[(5, "target 5")]),
     ];
     for (case, target_edits) in cases {
         let fixture = rebound_merge_fixture(&mut env).await;
@@ -2908,9 +2906,9 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
                 .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
         assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
-        if case == "changed patch" {
+        if case == "context edit" {
             assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
-            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
+            assert_eq!(handoffs, 2, "{case}: a changed full-context patch gets a fresh review: {text}");
             assert!(!landed, "{case}: nothing publishes before that review: {text}");
             continue;
         }
@@ -2923,6 +2921,12 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
             shared(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
+        // Close consumes the carried approval through its landed mapping.
+        let closed = fixture.service.task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "rebound approval landed",
+        })))).await;
+        let closed = match &closed { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{case}: {closed}");
     }
 }
 

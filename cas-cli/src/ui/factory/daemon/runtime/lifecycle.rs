@@ -150,6 +150,9 @@ pub(super) fn record_operator_page(
 /// Progress is a verifier heartbeat or an active verifier-lane checkout at
 /// the bound head. Each sweep moves a due-soon deadline ten minutes out,
 /// never past an hour after the request. Returns how many were extended.
+/// Known cost: a verifier that dies just after an extension is reported up
+/// to about twelve minutes late (the ten-minute extension plus the two-minute
+/// lead), never later than the hour cap.
 fn extend_progressing_verification_dispatches(
     cas_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,

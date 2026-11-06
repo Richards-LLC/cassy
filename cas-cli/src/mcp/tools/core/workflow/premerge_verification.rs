@@ -98,11 +98,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// cas-d4b7: whitespace-exact patch-ids of the change `tree` adds to `target`,
-/// at full and at zero context. Patch-ids ignore line numbers, so a target
-/// edit beside the delivery changes only the full-context id. An empty or
-/// unreadable patch is an error, never a match.
-fn delivered_patch_ids(repo: &Path, target: &str, tree: &str) -> Result<(String, String), String> {
+/// cas-d4b7: whitespace-exact, full-context (three-line) patch-id of the
+/// change `tree` adds to `target`. Patch-ids ignore hunk headers, so a
+/// zero-context id would hide a target edit beside a delivered hunk (`if ok`
+/// to `if !ok` two lines away); only full-context identity may rebind. An
+/// empty or unreadable patch is an error, never a match.
+fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {
@@ -147,7 +148,7 @@ fn delivered_patch_ids(repo: &Path, target: &str, tree: &str) -> Result<(String,
             .map(str::to_string)
             .ok_or_else(|| "git patch-id produced no id".to_string())
     };
-    Ok((patch_id("-U3")?, patch_id("-U0")?))
+    patch_id("-U3")
 }
 
 /// Review the fetched published target. An unpublished local merge can be
@@ -1019,7 +1020,7 @@ impl CasCore {
         {
             return Ok(None);
         }
-        let Ok(approved) = delivered_patch_ids(repo, &prior.target_sha, &prior.tree) else {
+        let Ok(approved) = delivered_patch_id(repo, &prior.target_sha, &prior.tree) else {
             return Ok(None);
         };
         // The fresh-review path enforces this gate; a rebind may not skip it.
@@ -1037,16 +1038,13 @@ impl CasCore {
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
         }
-        let Ok(current) = delivered_patch_ids(repo, &candidate.target_sha, &candidate.tree) else {
+        let Ok(current) = delivered_patch_id(repo, &candidate.target_sha, &candidate.tree) else {
             return Ok(None);
         };
-        let matched = if current.0 == approved.0 {
-            format!("full-context patch-id {}", current.0)
-        } else if current.1 == approved.1 {
-            format!("zero-context patch-id {} (only context lines changed)", current.1)
-        } else {
+        if current != approved {
             return Ok(None);
-        };
+        }
+        let matched = format!("full-context patch-id {current}");
         let receipt = format!(
             "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} unchanged, target {} -> {}, delivered {matched} identical.",
             verdict.id,

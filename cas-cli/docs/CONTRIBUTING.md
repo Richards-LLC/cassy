@@ -4236,6 +4236,24 @@ pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
+## Ordered train merge queue
+
+A registered supervisor can submit `factory action=train_merge id=<epic>` to
+merge that train's parked deliveries in updated-time order, or add
+`task_ids=["cas-first","cas-second"]` for an explicit order. The CLI parity is
+`cas factory train merge <epic> [task ...]`. Only exact parked anchors from the
+same train and factory session are admitted; queue options grant no CI override.
+
+The action records the queue and returns immediately. The existing factory
+daemon's CI scan resumes it through `worktree_merge`, reusing the current
+candidate approval or requesting review when context changes. Pending reviews
+and CI retain the current position. A content conflict reopens only its own task
+with the conflicting files and keeps its assignee; later deliveries continue.
+Single merges into the target are held throughout the queue, including between
+verdicts. Other targets remain independent. Repeat the action without `task_ids`
+to inspect an active queue; a successor may adopt a dead owner's queue. Queue
+state and results live in `.cas/train-merges/`. No CI stage is added.
+
 ## Operator project holds
 
 Use `cas factory hold set --reason "<reason>"` from your own interactive

@@ -18,7 +18,7 @@ import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { pendingSessionLabel, reconcileCatalog, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -1034,7 +1034,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (listed, freshnessThresholdSecs, stopped) => {
-      const items = reconcileCatalog(sessions.get(machine.id) ?? [], listed, stopped);
+      const previous = new Map((sessions.get(machine.id) ?? []).map(item => [item.name, item]));
+      const items = reconcileCatalog([...previous.values()], listed, stopped);
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
       // cas-9846: the machine answered; its cached catalog gives way, and the
       // live one is kept for the next reload during an outage.
@@ -1053,7 +1054,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);
       sessions.set(machine.id, items);
-      refreshEpicSessions(machine.id);
+      // A peer's retained events refresh the catalog too (cas-c4b7). Only a
+      // new or revived destination needs status here; existing sessions keep
+      // their own event invalidations and the independent health heartbeat.
+      for (const item of items) {
+        const before = previous.get(item.name);
+        if (sessionReachable(item) && (!before || !sessionReachable(before) || before.started_at !== item.started_at)) {
+          void loadStatus(machine.id, item.name);
+        }
+      }
       const stoppedSelection = selectedMachineId === machine.id && selectedSession !== undefined
         && !items.some(item => item.name === selectedSession && sessionRunning(item));
       if (stoppedSelection) commitSelection({ machineId: machine.id });

@@ -1124,6 +1124,10 @@ mod tests {
         task.assignee = Some("worker".into());
         task.deliverables.factory_branch_anchor = Some("a".repeat(40));
         task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "remote:github.com/org/repo".into(),
+            target_branch: "epic/cas-delivery".into(),
+        });
         task.deliverables.delivery_pr_number = Some(932);
         task.deliverables.delivery_pr_merge_commit = Some("merge-tip".into());
         task.deliverables.delivery_pr_merged_at = Some(Utc::now());
@@ -1154,11 +1158,17 @@ mod tests {
         // GH #1276: deterministically pause a close retry after its read,
         // then let the supervisor commit request_changes before it writes.
         let stale_park = task_store.get(&task.id).unwrap();
-        let outcome = crate::request_changes_for_parked_delivery(
+        let invalid = crate::request_changes_for_parked_delivery_with_merge_sources(
+            root.path(), &task.id, "supervisor-session", "required import", &["release/moving".into()],
+        ).unwrap_err();
+        assert!(invalid.to_string().contains("full immutable commit SHA"));
+        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+        let outcome = crate::request_changes_for_parked_delivery_with_merge_sources(
             root.path(),
             &task.id,
             "supervisor-session",
-            "Keep the parser refactor, but revert the public output change before re-delivery.",
+            &format!("Keep the parser refactor, but revert the public output change before re-delivery. merge_source={}", "d".repeat(40)),
+            &["d".repeat(40)],
         )
         .unwrap();
         assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Exact);
@@ -1188,6 +1198,11 @@ mod tests {
         assert!(reopened.notes.contains("Decision: changes requested"));
         assert!(reopened.notes.contains("prior commits remain on factory/worker"));
         assert!(reopened.notes.contains("revert the public output change"));
+        let sources = &reopened.deliverables.authorized_merge_sources;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].commit, "d".repeat(40));
+        assert_eq!(sources[0].supervisor_id, "supervisor-session");
+        assert_eq!(Some(&sources[0].work_target), task.deliverables.work_target.as_ref());
 
         let (_, delivery) = get_worker_delivery_by_receipt(root.path(), &receipt.id)
             .unwrap()

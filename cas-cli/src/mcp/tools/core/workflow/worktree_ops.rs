@@ -2253,24 +2253,24 @@ impl CasCore {
         let Some(tip) = git.resolve_commit(source) else {
             return original;
         };
-        // A descendant is new work (including a local target-sync merge),
-        // not the same-patch rewritten delivery supported by cas-e833.
-        if git.is_ancestor(anchor, &tip) {
-            return original;
-        }
         let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
         } else {
             crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(repo, parent_branch)
         };
-        if !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
-            repo, anchor, &tip, &target, &task.id,
-        ) {
+        let unchanged = if git.is_ancestor(anchor, &tip) {
+            crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(repo, anchor, &tip, &target)
+        } else {
+            crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+                repo, anchor, &tip, &target, &task.id,
+            )
+        };
+        if !unchanged {
             return original;
         }
         self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip))
-            .map_err(|error| format!("Cannot rebind rebased delivery anchor: {error}"))?;
-        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload rebased delivery anchor: {error}"))?;
+            .map_err(|error| format!("Cannot advance parked delivery anchor: {error}"))?;
+        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload parked delivery anchor: {error}"))?;
         let Some(anchor) = rebound.deliverables.factory_branch_anchor.as_deref() else {
             return original;
         };
@@ -4095,11 +4095,16 @@ impl CasCore {
             let target = crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(
                 manager.repo_root(), parent_branch,
             );
-            if git.is_ancestor(recorded_anchor, &pushed_tip)
-                || !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+            let unchanged = if git.is_ancestor(recorded_anchor, &pushed_tip) {
+                crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(
+                    manager.repo_root(), recorded_anchor, &pushed_tip, &target,
+                )
+            } else {
+                crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
                     manager.repo_root(), recorded_anchor, &pushed_tip, &target, &task.id,
                 )
-            {
+            };
+            if !unchanged {
                 return Err(refuse(format!(
                     "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,
                 )));
@@ -4107,9 +4112,9 @@ impl CasCore {
             let store = self.open_task_store()?;
             self.advance_awaiting_merge_anchor(
                 store.as_ref(), task, manager.repo_root(), parent_branch, Some(&pushed_tip),
-            ).map_err(|error| refuse(format!("cannot rebind rebased delivery anchor: {error}")))?;
+            ).map_err(|error| refuse(format!("cannot advance parked delivery anchor: {error}")))?;
             let rebound = store.get(&task.id)
-                .map_err(|error| refuse(format!("cannot reload rebased delivery anchor: {error}")))?;
+                .map_err(|error| refuse(format!("cannot reload parked delivery anchor: {error}")))?;
             if rebound.deliverables.factory_branch_anchor.as_deref() != Some(pushed_tip.as_str()) {
                 return Err(refuse(format!(
                     "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,

@@ -1075,6 +1075,16 @@ fn shutdown_worker_snapshot(
     }
 }
 
+/// The same worktree/task evidence used by explicit shutdown, before daemon teardown.
+pub(crate) fn worker_shutdown_state(cas_root: &std::path::Path, worker: &cas_types::Agent) -> String {
+    let tasks = shutdown_safety_tasks(cas_root);
+    let mut snapshot = shutdown_worker_snapshot(cas_root, worker, tasks.as_deref().unwrap_or_default(), false, None);
+    if let Err(error) = tasks {
+        snapshot.mark_task_state_unknown(&error);
+    }
+    snapshot.render_state()
+}
+
 fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: bool) -> String {
     if !crate::worktree::should_finalize_worker_worktree(false, has_open_tasks) {
         return format!("worktree {} kept (nonterminal tasks)", path.display());
@@ -7368,6 +7378,10 @@ impl CasService {
             .iter()
             .filter(|wt| !Path::new(&wt.path).exists())
             .collect();
+        let retained = crate::worktree::retained::scan_until(
+            &self.inner.cas_root,
+            report_deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2)),
+        );
 
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let trace_archive =
@@ -7443,6 +7457,7 @@ impl CasService {
                 &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
             )
         ));
+        out.push_str(&retained.render());
         match agent_store.list(None) {
             Ok(agents) => out.push_str(&serve_memory_report(&agents)),
             Err(error) => out.push_str(&format!("\nServe memory: agent inventory unavailable: {error}\n")),
@@ -7790,6 +7805,13 @@ impl CasService {
             &close_project_root,
             status_options,
         );
+        // Retained local work is a separate read-only concern from the
+        // immutable delivery content proof used by close.
+        let mut retained = crate::worktree::retained::scan(&self.inner.cas_root);
+        retained.entries.retain(|entry| subtasks.iter().any(|task| entry.matches_task(task)));
+        let retained_tasks: Vec<String> = subtasks.iter()
+            .filter(|task| retained.entries.iter().any(|entry| entry.matches_task(task)))
+            .map(|task| task.id.clone()).collect();
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
         // merge order, rather than only in the creation message that scrolled
@@ -7840,7 +7862,8 @@ impl CasService {
             }
         }
         let mut report =
-            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on, &retained_tasks);
+        report.push_str(&retained.render());
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());
         }

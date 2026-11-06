@@ -166,6 +166,10 @@ fn cut_notice_is_sent_once_per_state_and_names_the_project_release_command_cas_d
     assert_eq!(notices().len(), 1, "one max-age notice");
     assert!(notices()[0].payload.contains("max age"), "{}", notices()[0].payload);
     assert!(notices()[0].payload.contains("run `scripts/release.sh`"), "the repository's own script by default");
+    let notice = notices()[0].payload.to_lowercase();
+    assert!(notice.contains("remain assigned") && notice.contains("retarget") && notice.contains("next train"),
+        "the notice must require moving unfinished work, not claim it moved: {notice}");
+    assert!(!notice.contains("in flight ride the next train"), "{notice}");
 
     // A project that releases by promotion names its own command.
     let mut config = crate::config::Config::load(&cas_dir).unwrap();

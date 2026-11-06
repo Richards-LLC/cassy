@@ -48,7 +48,7 @@ pub(crate) fn read(
         None,
         project.as_deref(),
     )?;
-    let tasks = crate::store::open_task_store(cas_dir)?;
+    let tasks = crate::store::open_task_store_local(cas_dir)?;
     let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
     let focus =
         crate::ui::factory::preferred_epic_focus_from_session_metadata_named(session).epic_id;

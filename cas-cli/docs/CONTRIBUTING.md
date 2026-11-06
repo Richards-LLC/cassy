@@ -45,7 +45,8 @@ idempotent copies for both supervisors before acknowledging the original mail.
 Only untyped, ask, answer and receipt intent is allowed; urgency, blocker/merge
 escalation and supervisor action kinds remain unavailable. Explicit `wake=false`
 stays quiet. Replies bind to a peer message delivered to that worker and recheck
-the current scope. CLI coordination uses the same handler and policy.
+the current scope. This uses the existing MCP coordination dispatch; the factory
+message CLI retains its local queue behavior.
 
 ## Automatic supervisor replies
 

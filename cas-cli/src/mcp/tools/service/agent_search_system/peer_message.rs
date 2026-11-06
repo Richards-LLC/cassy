@@ -5,9 +5,9 @@
 //! has) reaches any supervisor of the caller's own Cassy Cloud user in
 //! another project, never another user's. Same rules: advisory only.
 //!
-//! Only a registered supervisor may send. A peer message is never urgent and
-//! never operator-authored, and it is only ever delivered to a supervisor, so
-//! it cannot interrupt a pane or spawn or direct workers (cas-604d).
+//! Supervisors use the normal peer routes. A narrow worker route permits
+//! advisory same-account/repo/epic contracts; it cannot enter user scope or
+//! grant urgency, operator or assignment authority (cas-604d).
 
 use crate::cloud::peer_mailbox::{self, PeerMailbox};
 use crate::cloud::peers::{PeerDiscovery, UserPeerDiscovery, discover_peers, discover_user_peers};

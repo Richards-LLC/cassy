@@ -2162,4 +2162,11 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     // pin: this exact queued payload must never arrive after the claim expires.
     assert!(!inbox(&b).iter().any(|r| r.prompt.contains("must not arrive")));
     assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"expired", "message":"no claim"})).await.is_err());
+    locks.lock().unwrap()[0]["expires_at"] = json!((chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339());
+    coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"quiet", "message":"contract FYI", "wake":false})).await.unwrap();
+    let bb = b.clone();
+    tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
+    let quiet = inbox(&b).into_iter().filter(|row| row.target == "worker-b").last().unwrap();
+    let intent = parse_envelope(&quiet.prompt).unwrap();
+    assert!(!intent.wakes_idle(), "explicit wake=false must survive worker sanitizing");
 }

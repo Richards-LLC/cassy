@@ -1,4 +1,4 @@
-//! Cross-machine supervisor messaging through a Cassy Cloud peer mailbox
+//! Cross-machine supervisor and scoped worker messaging through a Cloud mailbox
 //! (cas-f9c7).
 //!
 //! A supervisor addresses a peer supervisor of the same repo (found by
@@ -9,8 +9,8 @@
 //!
 //! Authority: a peer message is a Daemon-stamped row whose first line is a
 //! CAS-written [`PeerEnvelope`]. It is never urgent, never operator-authored,
-//! and only ever addressed to a local supervisor, so it cannot interrupt a
-//! pane, act as the operator, or spawn or direct workers (cas-604d).
+//! and reaches a supervisor or an authorized same-epic worker. Worker mail
+//! is advisory; it cannot grant operator or assignment authority (cas-604d).
 
 use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};

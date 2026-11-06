@@ -482,7 +482,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     task.notes = format!("Decision: merge_source={approved}");
     tasks.update(&task).unwrap();
     git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
-    assert!(task_attribution::started_delivery(repo, &task).unwrap_err().contains("foreign commit"));
+    assert!(task_attribution::started_delivery(repo, &task).err().unwrap().contains("foreign commit"));
     git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
     task.status = TaskStatus::AwaitingMerge;
     tasks.update(&task).unwrap();
@@ -525,7 +525,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
     let mut continued = parked;
     continued.status = TaskStatus::InProgress;
-    assert!(task_attribution::started_delivery(repo, &continued).unwrap_err().contains("foreign commit"));
+    assert!(task_attribution::started_delivery(repo, &continued).err().unwrap().contains("foreign commit"));
 }
 
 /// GH #1389: the first final close must use the pushed receipt, even when a

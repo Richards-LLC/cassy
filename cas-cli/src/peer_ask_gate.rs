@@ -203,12 +203,17 @@ mod tests {
     }
 
     fn sent_ask_from(conn: &rusqlite::Connection, sender: &str, cloud_id: &str, body: &str) {
+        sent_message_from(conn, sender, cloud_id, body, Some("ask"));
+    }
+
+    fn sent_message_from(conn: &rusqlite::Connection, sender: &str, cloud_id: &str, body: &str, kind: Option<&str>) {
         let payload = serde_json::json!({
-            "body": format!("<cas-peer-intent kind=\"ask\"/>\n{body}"),
+            "body": crate::cloud::peer_mailbox::attach_message_intent(body, kind, false).unwrap(),
+            "recipient_agent_id": "p",
         });
         conn.execute(
             "INSERT INTO peer_message_outbox (sender_agent_id, sender_name, recipient, payload, state, created_at, next_attempt_at, cloud_id)
-             VALUES (?3, 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now'), 0, ?2)",
+             VALUES (?3, 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now') - 60, 0, ?2)",
             rusqlite::params![payload.to_string(), cloud_id, sender],
         )
         .unwrap();
@@ -244,14 +249,6 @@ mod tests {
             "only the merging supervisor's own asks hold its merge"
         );
 
-        conn.execute(
-            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
-             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-4251\" kind=\"answer\"/>')",
-            [],
-        )
-        .unwrap();
-        assert!(merge(4251).is_none(), "a peer reply answers the ask");
-
         crate::store::open_task_store(&root)
             .unwrap()
             .append_note("cas-0c7f", &format!("{OVERRIDE_MARKER} ask-4249: 3 green gates; prowl silent 7h"))
@@ -268,6 +265,15 @@ mod tests {
         );
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-4251\" kind=\"answer\"/>')",
+            [],
+        )
+        .unwrap();
+        assert!(merge(4251).is_none(), "a peer reply answers the ask");
+
+
     }
 
     fn fixture() -> (crate::test_support::TestEnvGuard, tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
@@ -309,31 +315,64 @@ mod tests {
         }
     }
 
-    /// Verifier ver-37f17bf1f171 (3) and cas-5c23: an acknowledgement or a
-    /// progress status ("reviewing, ETA 1h") leaves the ask open; an answer
-    /// or an untyped reply releases it.
     #[test]
-    fn only_an_answer_reply_releases_an_ask_cas_bddf9() {
+    fn only_explicit_asks_hold_a_merge_cas_5ec1() {
         let (_env, _temp, root, conn) = fixture();
+        for (index, kind) in [None, Some("blocker"), Some("status"), Some("ask")].into_iter().enumerate() {
+            let sender = format!("sup-kind-{index}");
+            sent_message_from(&conn, &sender, &format!("message-{index}"), "Context for PR #4249", kind);
+            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), kind == Some("ask"), "kind={kind:?}");
+        }
+    }
+
+    /// The peer may answer in a new message, or decide the split instead of
+    /// replying to the context note that accompanied its proposal.
+    #[test]
+    fn a_later_message_from_the_same_peer_clears_an_ask_cas_5ec1() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
         let cases = [
-            (" kind=\"receipt\"", "ok", true),
-            (" kind=\"status\"", "reviewing, ETA 1h", true),
-            (" kind=\"answer\"", "approved", false),
-            ("", "approved", false),
+            (None, "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::Answer), "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::Status), "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::Receipt), "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::EpicSplitDecided), "p", "cosmic-shark-29", "now", false),
+            (None, "other-peer", "cosmic-shark-29", "now", true),
+            (None, "p", "other-supervisor", "now", true),
+            (None, "p", "cosmic-shark-29", "-2 minutes", true),
         ];
-        for (index, (kind, text, holds)) in cases.iter().enumerate() {
-            let sender = format!("sup-reply-{index}");
-            let ask = format!("ask-reply-{index}");
-            sent_ask_from(&conn, &sender, &ask, "Can you review PR #4249?");
+        for (kind, peer, target, time, holds) in cases {
+            let (_env, _temp, root, conn) = fixture();
+            sent_ask(&conn, "ask-review", "Can you review PR #4249?");
+            assert!(pr_merge(&root, "sup-soundwave", 4249).is_some());
+            let envelope = PeerEnvelope {
+                id: "new-message".into(),
+                sender_name: "lively-cheetah-57".into(),
+                sender_agent_id: peer.into(),
+                machine: "prowl".into(),
+                session: None,
+                repo: "gabber-studio".into(),
+                in_reply_to: None,
+                kind,
+                scope: PeerScope::Project,
+            };
             conn.execute(
-                &format!(
-                    "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
-                     '<cas-peer-message v=\"1\" id=\"r-{index}\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"{ask}\"{kind}/>' || char(10) || '{text}')"
-                ),
-                [],
-            )
-            .unwrap();
-            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), *holds, "reply{kind}: {text}");
+                "INSERT INTO prompt_queue (source, target, prompt, created_at) VALUES (?1, ?2, ?3, datetime('now', ?4))",
+                rusqlite::params![format!("peer:{}@prowl", envelope.sender_name), target,
+                    format!("{}\nThe review or split is decided", render_envelope(&envelope)),
+                    if time == "now" { "+0 seconds" } else { time }],
+            ).unwrap();
+            assert_eq!(pr_merge(&root, "sup-soundwave", 4249).is_some(), holds,
+                "kind={kind:?}, peer={peer}, target={target}, time={time}");
+        }
+    }
+
+    #[test]
+    fn an_ask_about_another_task_does_not_hold_a_merge_cas_5ec1() {
+        let (_env, _temp, root, conn) = fixture();
+        sent_ask(&conn, "ask-task", "Please review cas-task-x before merging it");
+        for (task, holds) in [("cas-task-x", true), ("cas-task-y", false), ("cas-task-xy", false)] {
+            assert_eq!(merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", None,
+                &MergeSubject { task_id: Some(task.into()), ..Default::default() }).is_some(), holds, "task={task}");
         }
     }
 

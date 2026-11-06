@@ -3237,6 +3237,9 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         (".gitignore", "\n!/AGENTS.md\n"),
         ("CLAUDE.md", "manual managed edit"),
         (".claude/settings.json", "echo user-owned-statusline"),
+        (".mcp.json", "user-owned-mcp"),
+        (".codex/config.toml", "user-owned-mcp"),
+        (".codex/hooks.json", "user-owned-timeout"),
     ] {
         let file = project.join(path);
         let original = std::fs::read_to_string(&file).unwrap();
@@ -3244,6 +3247,21 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             original.replace("@AGENTS.md", suffix)
         } else if path == ".claude/settings.json" {
             original.replace("cas statusline --with-session", suffix)
+        } else if path == ".mcp.json" {
+            let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+            value["mcpServers"]["cas"]["command"] = suffix.into();
+            value.to_string()
+        } else if path == ".codex/config.toml" {
+            let mut value: toml_edit::DocumentMut = original.parse().unwrap();
+            value["mcp_servers"]["cs"]["command"] = toml_edit::value(suffix);
+            value.to_string()
+        } else if path == ".codex/hooks.json" {
+            let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+            let hook = value["hooks"]["PreToolUse"].as_array_mut().unwrap().iter_mut()
+                .flat_map(|group| group["hooks"].as_array_mut().unwrap().iter_mut())
+                .find(|hook| hook["command"].as_str().is_some_and(|command| command.contains("cas hook"))).unwrap();
+            hook["timeout"] = 999.into();
+            value.to_string()
         } else {
             format!("{original}{suffix}")
         };

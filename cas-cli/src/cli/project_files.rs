@@ -325,8 +325,8 @@ fn matches_settings_projection(local: &str, baseline: &str, expected: &str) -> b
         local.get(key) == baseline.get(key) || local.get(key) == expected.get(key))
 }
 
-/// Persist the last sync's blocking conflicts so SessionStart can report them;
-/// an unblocked sync clears the record (cas-3199). Unattended syncs otherwise
+/// Persist the last sync's preserved conflicts so SessionStart can report them;
+/// a sync without conflicts clears the record (cas-3199). Unattended syncs otherwise
 /// leave the refusal only in a timer journal nobody reads.
 pub(crate) fn record_conflicts(cas_root: &Path, conflicts: &[String]) -> Result<()> {
     let path = cas_root.join(CONFLICT_RECORD);
@@ -361,7 +361,7 @@ pub(crate) struct Reconcile {
 impl Reconcile {
     /// Preflight before any writer, including malformed documents, unmerged
     /// files, symlinks and local edits to a managed body. Conflicts are visible
-    /// and leave this project's files and index untouched.
+    /// and preserve each conflicting path in both the worktree and index.
     pub(crate) fn begin(root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
         if authoring(root) || !git_root(root) {
             return Ok(None);

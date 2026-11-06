@@ -3863,11 +3863,6 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
     }
 }
 
-/// `workflows` is `Some` for a harness that carries a workflow catalog (Claude),
-/// even when that catalog is empty: cas-c4e4 (GH #967, #971). Every builtin
-/// workflow is retired today, so `BUILTIN_WORKFLOWS` is empty, and gating the
-/// prune on a non-empty catalog left the retired `cas-code-review.js` in about
-/// 20 projects after every sync.
 fn excluded_path(path: &Path, excluded: &[PathBuf]) -> bool {
     excluded.iter().any(|conflict| path.starts_with(conflict))
 }
@@ -3881,6 +3876,11 @@ fn retain_excluded_names(dir: &Path, excluded: &[PathBuf], keep: &mut HashSet<St
     }
 }
 
+/// `workflows` is `Some` for a harness that carries a workflow catalog (Claude),
+/// even when that catalog is empty: cas-c4e4 (GH #967, #971). Every builtin
+/// workflow is retired today, so `BUILTIN_WORKFLOWS` is empty, and gating the
+/// prune on a non-empty catalog left the retired `cas-code-review.js` in about
+/// 20 projects after every sync.
 fn sync_project_catalog(
     harness: SupervisorCli,
     target_dir: &Path,

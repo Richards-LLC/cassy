@@ -683,9 +683,10 @@ invariants:
     statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
     check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
     bug: {task: cas-a147}
-  HUB-J26-EPIC-TABS:
-    statement: Every running session's live epics are visible above the conversation across paired machines, with authoritative merged/total and live worker dots; the busiest opens by default and an explicit selection survives updates until epic closure. Phone tabs scroll and open a task sheet with focus return.
-    check: Run the HUB-J26 epic tabs across machines cases in team.journey.ts at desktop and phone; compare both machines' status snapshots, switch to the peer epic, observe a merge event and inspect keyboard, forced colors and overflow.
+  HUB-J26-PROJECT-EPICS:
+    statement: Tasks & progress shows the selected session's project's live epics only, joined across paired machines by epic id, after the release header; each row and the train header show the TUI's open / in progress / merged split with a segmented bar, untitled epics and placeholder counts never render, and nothing sits between the conversation tabs and the conversation. Phone reads the same section in the Tasks & progress sheet with focus return.
+    check: Run the HUB-J26 project epics cases in team.journey.ts at 1280x800 and 390x844 in light and dark; confirm the foreign project's epic is absent and its session's status is never read, expand the peer epic, observe a merge event update its split, and inspect forced colors, reduced motion and overflow.
+    bug: {task: cas-9b99}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -2611,7 +2612,7 @@ journeys:
   - Read Team with forced colors and reduced motion
   owner_groups: [commander_runtime]
   owners:
-  - hub-web/src/epic-tabs.ts
+  - hub-web/src/epic-progress.ts
   - hub-web/src/team-view.ts
   - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
@@ -2627,7 +2628,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
+import { journeyNow } from "./clock";
 
 const file = (id: string, name: string, mime: string) => ({ artifact_id: id, name, mime, size_bytes: 1024, sha256: "9f".repeat(32) });
 const patch = ["--- a/launch.ts", "+++ b/launch.ts", "@@ -1,25 +1,25 @@", "-launchWithoutEvidence()", "+launchWithEvidence()", ...Array.from({ length: 24 }, (_, i) => ` context ${i}`)].join("\n");
@@ -342,3 +343,51 @@ test("HUB-J22 unavailable syntax color retains source and reading controls", jou
     await expect(frame.locator('[role="status"]')).toHaveText("Copied");
   });
 });
+
+for (const variant of variants) {
+  test.describe(`inline reply images ${variant.name}`, () => {
+    test.use({ viewport: { width: variant.width, height: variant.height }, colorScheme: variant.scheme });
+    test(`HUB-J22 inline reply images · ${variant.name}`, journeyPart, async ({ page, journey }, testInfo) => {
+      const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+      const png = readFileSync(new URL("../media/evidence.png", import.meta.url));
+      const shown = "cas-85bfb/after/desktop.png";
+      const local = `local-${Buffer.from(shown).toString("base64url")}`;
+      const tickets: string[] = [];
+      // The machine re-proves each reference; here it admits the artifacts-directory screenshot only.
+      await page.route(`**/v1/sessions/${PELICAN}/artifacts/*/ticket`, route => {
+        const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/")[5]!);
+        tickets.push(id);
+        return id === local ? route.fulfill({ json: { ticket: "fixture-local", expires_at: new Date(journeyNow() + 60_000).toISOString() } }) : route.fulfill({ status: 404, json: { error: "not_found" } });
+      });
+      await page.route(`**/v1/sessions/${PELICAN}/artifacts/${local}/content?*`, route => route.fulfill({ contentType: "image/png", body: png, headers: { "cache-control": "private, no-store" } }));
+      const log = page.getByRole("log");
+      await journey.stage("A supervisor reply shows its screenshot inline and keeps refused images as text", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await expect(page.locator("#conversation-connection")).toContainText("Live");
+        hub.supervisorSays(PELICAN, `Epic progress, ready for review.\n\n![Epic progress at desktop width](${shown})\n\n![Outside the artifacts directory](/etc/shadow.png)\n\n![Remote](https://example.com/x.png)`);
+        const image = log.getByRole("img", { name: "Epic progress at desktop width" });
+        await expect(image).toBeVisible();
+        expect(await image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        await expect(log).toContainText("![Outside the artifacts directory](/etc/shadow.png)");
+        await expect(log).toContainText("![Remote](https://example.com/x.png)");
+        expect(tickets).not.toContain("https://example.com/x.png");
+        const box = (await image.boundingBox())!;
+        expect(box.width).toBeLessThanOrEqual(variant.width);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath(`inline-reply-image-${variant.width}-${variant.scheme}.png`) });
+        if (process.env.REPLY_IMAGE_QA) await page.screenshot({ path: `${process.env.REPLY_IMAGE_QA}/inline-reply-image-${variant.width}-${variant.scheme}.png` });
+      });
+      await journey.stage("Tap the image to enlarge it, then close back to the reply", async () => {
+        const opener = log.getByRole("button", { name: "Epic progress at desktop width. Enlarge image" });
+        await opener.click();
+        const viewer = page.getByRole("dialog", { name: "Image viewer" });
+        await expect(viewer).toBeVisible();
+        if (process.env.REPLY_IMAGE_QA) await page.screenshot({ path: `${process.env.REPLY_IMAGE_QA}/inline-reply-image-${variant.width}-${variant.scheme}-enlarged.png` });
+        await page.keyboard.press("Escape");
+        await expect(viewer).toBeHidden();
+        await expect(opener).toBeFocused();
+      });
+    });
+  });
+}

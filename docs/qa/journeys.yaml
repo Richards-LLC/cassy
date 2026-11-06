@@ -1465,6 +1465,8 @@ journeys:
     agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
   - It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces
     the return), the held message goes out exactly once and is delivered, and no transport alarm is left
+  - Re-exec the real factory daemon in place — its PID stays the same, a fresh Welcome reconnects the attached device,
+    the conversation keeps its prior turns without duplication, and a new queued message is delivered
   - Sending works again — a message goes through and is answered
   - On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and
     dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own

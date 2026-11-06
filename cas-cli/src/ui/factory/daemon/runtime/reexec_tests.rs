@@ -159,8 +159,8 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         env.set(key, home.path().join(directory));
     }
     for fail_adopt in [false, true] {
-        let project = env
-            .home()
+        let project = home
+            .path()
             .join(if fail_adopt { "fallback" } else { "update" });
         std::fs::create_dir_all(&project).unwrap();
         let root = crate::store::init_cas_dir(&project).unwrap();

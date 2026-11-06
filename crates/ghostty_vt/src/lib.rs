@@ -41,6 +41,8 @@ pub enum Error {
 
     #[error("Failed to dump viewport")]
     DumpFailed,
+    #[error("Terminal output ends inside a control sequence or UTF-8 character; retry reexec after more output")]
+    HandoffNotReady,
 
     #[error("Failed to set palette: code {0}")]
     PaletteFailed(i32),
@@ -299,6 +301,9 @@ impl Terminal {
     /// Dump the viewport content as a UTF-8 string
     /// Serialize both screens and scrollback to a VT replay for daemon exec.
     pub fn handoff_bytes(&self) -> Result<Vec<u8>> {
+        if !unsafe { sys::ghostty_vt_terminal_handoff_ready(self.ptr.as_ptr()) } {
+            return Err(Error::HandoffNotReady);
+        }
         let bytes = unsafe { sys::ghostty_vt_terminal_handoff(self.ptr.as_ptr()) };
         if bytes.is_null() { return Err(Error::DumpFailed); }
         let data = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) }.to_vec();

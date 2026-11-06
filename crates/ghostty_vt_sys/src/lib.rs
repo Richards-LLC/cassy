@@ -84,6 +84,7 @@ pub const GHOSTTY_VT_MOD_SUPER: u16 = 0x0008;
 
 unsafe extern "C" {
     /// VT state for both screens and scrollback, suitable for a fresh terminal.
+    pub fn ghostty_vt_terminal_handoff_ready(terminal: *mut GhosttyVtTerminal) -> bool;
     pub fn ghostty_vt_terminal_handoff(terminal: *mut GhosttyVtTerminal) -> ghostty_vt_bytes_t;
 
     /// Create a new terminal instance
@@ -271,6 +272,15 @@ mod handoff_tests {
             let old = ghostty_vt_terminal_new(24, 4);
             let data = b"history-1\r\nhistory-2\r\nhistory-3\r\nhistory-4\r\nhistory-5\x1b[?1049h\x1b[Halt-screen";
             ghostty_vt_terminal_feed(old, data.as_ptr(), data.len());
+            let partial = b"\xe7\x95";
+            ghostty_vt_terminal_feed(old, partial.as_ptr(), partial.len());
+            assert!(!ghostty_vt_terminal_handoff_ready(old));
+            let end = b"\x8c\x1b[31";
+            ghostty_vt_terminal_feed(old, end.as_ptr(), end.len());
+            assert!(!ghostty_vt_terminal_handoff_ready(old));
+            let final_byte = b"m";
+            ghostty_vt_terminal_feed(old, final_byte.as_ptr(), final_byte.len());
+            assert!(ghostty_vt_terminal_handoff_ready(old));
             let state = ghostty_vt_terminal_handoff(old);
             assert!(!state.is_null());
             let new = ghostty_vt_terminal_new(24, 4);

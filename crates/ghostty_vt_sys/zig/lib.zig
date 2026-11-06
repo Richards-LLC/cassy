@@ -1070,10 +1070,18 @@ export fn ghostty_simd_decode_utf8_until_control_seq(
     return i;
 }
 
+// A snapshot cannot reconstruct a half-decoded code point or control string.
+// Refuse that cut and resume the old reader rather than dropping prefix bytes.
+export fn ghostty_vt_terminal_handoff_ready(terminal_ptr: ?*anyopaque) callconv(.c) bool {
+    if (terminal_ptr == null) return false;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return handle.stream.parser.state == .ground and handle.stream.utf8decoder.state == 0;
+}
+
 // Emit both screens, including hidden primary scrollback, using Ghostty's own
 // VT formatter so graphemes, wide cells, hyperlinks and styles survive exec.
 export fn ghostty_vt_terminal_handoff(terminal_ptr: ?*anyopaque) callconv(.c) ghostty_vt_bytes_t {
-    if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
+    if (!ghostty_vt_terminal_handoff_ready(terminal_ptr)) return .{ .ptr = null, .len = 0 };
     const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
     const alloc = std.heap.c_allocator;
     var builder: std.Io.Writer.Allocating = .init(alloc);

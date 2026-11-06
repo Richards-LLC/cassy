@@ -187,3 +187,11 @@
 - MCP: `cas-cli/src/mcp/daemon.rs` (`cas serve`); bridge: `cas-cli/src/bridge/server/` (`cas bridge serve`).
 - Commander: `hub-web/src/main.ts`; Slack services: `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts`.
 - Tests: capped named nextest filters for workers; Vitest/typecheck and affected journeys for web changes; merge queue owns the full Rust suite.
+
+## In-place factory daemon updates
+
+- `crates/cas-pty/src/adopt.rs` - owned inherited Unix master descriptors and direct-child waitpid handles.
+- `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs` - quiesced pane snapshots, drafts and launch policy restored around inherited PTYs.
+- `cas-cli/src/ui/factory/app/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs` - daemon schema preflight, sealed inherited manifest, same-PID exec and one-shot rollback.
+- `cas-cli/src/cli/factory/reexec.rs` - local socket control and per-daemon post-update outcomes.
+- `hub-web/e2e/journeys/real-hub.journey.ts` - HUB-J11 includes in-place daemon re-exec and same-PID attachment recovery.

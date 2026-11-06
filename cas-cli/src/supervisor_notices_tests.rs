@@ -234,7 +234,7 @@ fn release_and_binary_skew_notices_wake_once() {
     for row in rows {
         assert_eq!(row.target, owner.name);
         assert_eq!(row.factory_session, owner.factory_session);
-        assert!(is_action_envelope(&row.prompt), "trusted action must wake: {}", row.prompt);
+        assert!(is_action_envelope(&row.prompt));
     }
     assert!(!is_action_envelope("<cas-supervisor-notice kind=\"status\" notification_id=\"1\">\nFYI\n</cas-supervisor-notice>"));
 }

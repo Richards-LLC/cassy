@@ -2088,6 +2088,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     assert!(report.errors.is_empty(), "{report:?}");
     let worker_rows: Vec<_> = inbox(&b).into_iter().filter(|r| r.target == "worker-b").collect();
     assert_eq!(worker_rows.len(), 1, "{report:?}");
+    // pin: peer delivery preserves the caller-authored payload verbatim.
     assert!(worker_rows[0].prompt.ends_with("notice API uses stable train IDs"));
     assert_eq!(parse_envelope(&worker_rows[0].prompt).unwrap().sender_agent_id, "wa");
     let aa = a.clone();
@@ -2095,6 +2096,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     for (root, target) in [(&a, "sup-a"), (&b, "sup-b")] {
         let copies: Vec<_> = inbox(root).into_iter().filter(|r| r.target == target).collect();
         assert_eq!(copies.len(), 1, "one copy for {target}: {copies:?}");
+        // pin: supervisor copies preserve the caller-authored peer payload.
         assert!(copies[0].prompt.contains("notice API uses stable train IDs"));
         assert!(!parse_envelope(&copies[0].prompt).unwrap().wakes_idle(), "supervisor copy must be inbox-only");
     }
@@ -2102,6 +2104,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     let aa = a.clone();
     let report = tokio::task::spawn_blocking(move || tick(&aa, "a")).await.unwrap();
     assert!(report.errors.is_empty(), "{report:?}");
+    // pin: peer reply transport preserves the caller-authored payload.
     assert!(inbox(&a).iter().any(|r| r.target == "worker-a" && r.prompt.ends_with("contract agreed")));
     // Re-deliver the same cloud message: worker and both supervisor copies stay once.
     for row in mailbox.lock().unwrap().iter_mut() { row["status"] = json!("queued"); }
@@ -2109,6 +2112,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     let report = tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
     assert!(report.errors.is_empty(), "{report:?}");
     assert_eq!(inbox(&b).iter().filter(|r| r.target == "worker-b").count(), 1);
+    // pin: count copies of this caller-authored payload, not unrelated replies.
     assert_eq!(inbox(&b).iter().filter(|r| r.target == "sup-b" && r.prompt.contains("notice API uses stable train IDs")).count(), 1);
     for flags in [json!({"urgent":true}), json!({"blocker":true}), json!({"merge_request":true}), json!({"kind":"status"}), json!({"kind":"secret"})] {
         let before = mailbox.lock().unwrap().len();
@@ -2139,6 +2143,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     locks.lock().unwrap()[0]["expires_at"] = json!((chrono::Utc::now()-chrono::Duration::seconds(1)).to_rfc3339());
     let bb = b.clone();
     tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
+    // pin: this exact queued payload must never arrive after the claim expires.
     assert!(!inbox(&b).iter().any(|r| r.prompt.contains("must not arrive")));
     assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"expired", "message":"no claim"})).await.is_err());
 }

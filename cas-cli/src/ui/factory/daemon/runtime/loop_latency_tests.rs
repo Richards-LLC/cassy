@@ -766,3 +766,70 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
         .unwrap();
     assert!(row.is_some(), "the send wrote its prompt_queue row");
 }
+
+/// cas-b235: three panes receive the same attach input while output is flowing.
+/// A one-shot sender can close between the input phase and the output flush;
+/// a failed output write must not discard that sender's unread input.
+#[tokio::test]
+async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
+    if !super::supervisor_single_turn_tests::fixture_child(
+        "ui::factory::daemon::runtime::loop_latency_tests::concurrent_attach_input_survives_sender_close_during_output_flush",
+    ) {
+        return;
+    }
+    let (root, cas_dir) = logged_in_project();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.gui_listener.set_nonblocking(true).unwrap();
+    let names = ["proof-lead", "kept-a", "kept-b"];
+    for name in names {
+        let pty = cas_mux::Pty::spawn(name, cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf ready; exec cat > \"$1\"".into(),
+                "fixture".into(), root.path().join(name).to_str().unwrap().into()],
+            cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        daemon.app.mux.add_pane(cas_mux::Pane::with_pty(
+            name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+        ).unwrap());
+        super::provisioning_tests::await_ready_fixture_pane(&mut daemon, name).await;
+    }
+    let mut clients: Vec<_> = names.iter().map(|_| UnixStream::connect(cas_dir.join("gui.sock")).unwrap()).collect();
+    assert!(daemon.accept_gui_clients());
+    for client in &mut clients {
+        let mut header = [0; 4];
+        client.read_exact(&mut header).unwrap();
+        let mut welcome = vec![0; u32::from_be_bytes(header) as usize];
+        client.read_exact(&mut welcome).unwrap();
+    }
+    // All three sends land after this pass's input read, before its output flush.
+    assert!(!daemon.process_gui_client_input().await);
+    std::thread::scope(|scope| {
+        for (name, client) in names.iter().zip(&mut clients) {
+            scope.spawn(move || {
+                let frame = crate::ui::factory::protocol::encode_message(
+                    &crate::ui::factory::protocol::ClientMessage::Input {
+                        pane_id: (*name).into(), data: b"PROOF-HISTORY\r".to_vec(),
+                    },
+                ).unwrap();
+                client.write_all(&frame).unwrap();
+            });
+        }
+    });
+    drop(clients.pop()); // Last sender closes with its input still in the socket.
+    daemon.forward_pane_output_to_gui("kept-b", b"SEQ:kept-b:1\r\n");
+    daemon.flush_gui_client_output();
+    daemon.process_gui_client_input().await;
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if names.iter().all(|name| std::fs::read(root.path().join(name)).ok().as_deref() == Some(b"PROOF-HISTORY\r")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    let received: Vec<_> = names.iter().map(|name| (*name, std::fs::read(root.path().join(name)).unwrap_or_default())).collect();
+    for pane in daemon.app.mux.panes_mut() {
+        pane.kill_tree_force();
+    }
+    assert!(result.is_ok(), "all three PTY consumers must receive their input: {received:?}");
+}

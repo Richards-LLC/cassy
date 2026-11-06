@@ -2844,7 +2844,11 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
 #[tokio::test]
 async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
     let mut env = test_env();
-    for (unpublished_merge, overlaps_delivery, racing_writer) in [(true, false, false), (false, false, false), (true, true, false), (true, true, true)] {
+    for (unpublished_merge, overlaps_delivery, racing_writer) in [
+        (true, false, false), (false, false, false), (true, true, false),
+        #[cfg(unix)]
+        (true, true, true),
+    ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2894,6 +2898,7 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
             // The real merge returns its own SHA, then a third writer advances
             // the same target before the handler observes the landing.
             let race_tip = fixture.cas_root.join("third-writer-tip");
+            #[cfg(unix)]
             if racing_writer {
                 use std::os::unix::fs::PermissionsExt;
                 let bin = fixture.cas_root.join("git-race-bin");

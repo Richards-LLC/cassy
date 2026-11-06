@@ -14,7 +14,7 @@ fn main() -> ExitCode {
         && preflight_args[2] == "handoff-check" && preflight_args[3] == "--schema" {
         return match preflight_args[4].to_str().and_then(|value| value.parse().ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid handoff schema"))
-            .and_then(cas::ui::factory::daemon::reexec::handoff_check) {
+            .and_then(cas::ui::factory::daemon_handoff_check) {
                 Ok(reply) => { println!("{reply}"); ExitCode::SUCCESS }
                 Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
             };
@@ -124,7 +124,7 @@ fn main() -> ExitCode {
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    if let Some(outcome) = cas::ui::factory::daemon::reexec::resume_inherited_daemon() { return outcome; }
+    if let Some(outcome) = cas::ui::factory::resume_inherited_daemon() { return outcome; }
 
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);

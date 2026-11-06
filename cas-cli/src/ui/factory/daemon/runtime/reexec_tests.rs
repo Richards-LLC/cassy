@@ -250,9 +250,22 @@ pub(crate) async fn finish_exec_probe(
         before["argv"],
         serde_json::to_value(std::env::args_os().collect::<Vec<_>>())?
     );
+    let state = daemon.build_session_state();
+    let scrollback = daemon.build_scrollback(&state);
     let panes = before["panes"].as_array().unwrap();
     for original in panes {
         let name = original[0].as_str().unwrap();
+        let replay: Vec<u8> = scrollback
+            .get(name)
+            .expect("reconnecting clients need the adopted pane replay")
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        assert!(
+            String::from_utf8_lossy(&replay).contains(&format!("{name} history 0")),
+            "reconnecting clients must retain historical lines"
+        );
         let pane = daemon.app.mux.get_mut(name).unwrap();
         assert_eq!(
             pane.process_group_id(),

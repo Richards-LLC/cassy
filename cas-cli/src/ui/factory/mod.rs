@@ -188,3 +188,5 @@ pub fn set_terminal_title(project_dir: &Path, epic_title: Option<&str>) {
 }
 
 pub(crate) use protocol::{FRAME_HEADER_SIZE, decode_length};
+
+pub use daemon::reexec::{handoff_check as daemon_handoff_check, resume_inherited_daemon};

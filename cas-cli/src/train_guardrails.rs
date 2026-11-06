@@ -13,21 +13,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use cas_types::{Task, TaskStatus, TaskType};
+use cas_types::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
 
 use crate::mcp::CasCore;
 use crate::supervisor_notices::{self, Recipient};
 
-/// The release-train epic's label (cas-1896 owns train creation).
-pub(crate) const RELEASE_TRAIN_LABEL: &str = "release-train";
 const DROP_NOTE: &str = "Train drop:";
 const REENQUEUED: &str = "re-enqueued PR #";
 
 /// The train branch of a release-train epic.
-// TODO(cas-1896): use task::release_train::is_release_train once it lands on the epic.
 pub(crate) fn train_lane(epic: &Task) -> Option<&str> {
-    (epic.task_type == TaskType::Epic && epic.labels.iter().any(|l| l == RELEASE_TRAIN_LABEL))
+    crate::mcp::tools::core::task::release_train::is_release_train(epic)
         .then(|| epic.effective_epic_branch())
         .flatten()
 }

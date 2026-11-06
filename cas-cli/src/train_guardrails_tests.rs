@@ -4,7 +4,7 @@
 use super::*;
 use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
 use crate::test_support::TestEnvGuard;
-use cas_types::{Agent, AgentRole, Dependency, DependencyType};
+use cas_types::{Agent, AgentRole, Dependency, DependencyType, TaskType};
 use std::sync::Mutex;
 
 const EPIC: &str = "cas-tr00";
@@ -37,7 +37,7 @@ fn train(repo: &Path, children: &[(&str, TaskStatus)]) -> PathBuf {
     agents.register(&supervisor).unwrap();
     let mut epic = Task::new(EPIC.into(), "Release train vNEXT".into());
     epic.task_type = TaskType::Epic;
-    epic.labels = vec![RELEASE_TRAIN_LABEL.into()];
+    epic.labels = vec![crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into()];
     epic.branch = Some(TRAIN.into());
     epic.epic_verification_owner = Some("sup-id".into());
     tasks.add(&epic).unwrap();

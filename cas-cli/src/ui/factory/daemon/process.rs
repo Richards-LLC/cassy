@@ -338,8 +338,8 @@ pub(super) fn from_app_after_fork(
     if handoff.is_none() { super::runtime::teams::TeamsManager::cleanup_orphans(); }
 
     // Initialize native Agent Teams for inter-agent messaging.
-    let teams = if handoff.is_some() {
-        Some(super::runtime::teams::TeamsManager::new(&session_name))
+    let teams = if let Some(handoff) = handoff {
+        handoff.teams_present.then(|| super::runtime::teams::TeamsManager::new(&session_name))
     } else {
         let tm = super::runtime::teams::TeamsManager::new(&session_name);
         let worker_cwds: std::collections::HashMap<String, std::path::PathBuf> = app

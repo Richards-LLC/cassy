@@ -1095,7 +1095,15 @@ export fn ghostty_vt_terminal_handoff(terminal_ptr: ?*anyopaque) callconv(.c) gh
     builder.writer.writeAll("\x1b[r\x1b[?69l\x1b[?6l\x1b[?47l\x1b[H") catch return .{ .ptr = null, .len = 0 };
     formatHandoffScreen(handle.terminal.screens.get(.primary).?, &builder.writer) catch return .{ .ptr = null, .len = 0 };
     if (handle.terminal.screens.get(.alternate)) |screen| {
-        builder.writer.writeAll("\x1b[?47h\x1b[H") catch return .{ .ptr = null, .len = 0 };
+        // Preserve the original alternate-screen mode, rather than leaving
+        // legacy mode 47 enabled for an application that only requested 1049.
+        const enter: []const u8 = if (handle.terminal.screens.active_key == .alternate and
+            !handle.terminal.modes.get(.alt_screen_legacy)) enter: {
+            if (handle.terminal.modes.get(.alt_screen_save_cursor_clear_enter)) break :enter "\x1b[?1049l\x1b[?1049h\x1b[H";
+            if (handle.terminal.modes.get(.alt_screen)) break :enter "\x1b[?1047l\x1b[?1047h\x1b[H";
+            break :enter "\x1b[?47h\x1b[H";
+        } else "\x1b[?47h\x1b[H";
+        builder.writer.writeAll(enter) catch return .{ .ptr = null, .len = 0 };
         formatHandoffScreen(screen, &builder.writer) catch return .{ .ptr = null, .len = 0 };
     }
     if (handle.terminal.screens.active_key == .primary) {

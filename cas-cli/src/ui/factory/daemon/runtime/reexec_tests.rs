@@ -148,8 +148,13 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         .prefix("cas-reexec-")
         .tempdir_in(&scratch)
         .unwrap();
+    // Unix socket names have a short fixed limit. Keep only a tiny symlink
+    // and socket path under /tmp; all fixture files live in the disk HOME.
+    let socket_home = tempfile::tempdir_in("/tmp").unwrap();
+    let home_alias = socket_home.path().join("h");
+    std::os::unix::fs::symlink(home.path(), &home_alias).unwrap();
     let mut env = crate::test_env_guard::TestEnvGuard::new();
-    env.set("HOME", home.path());
+    env.set("HOME", &home_alias);
     env.set("TMPDIR", &scratch);
     for (key, directory) in [
         ("XDG_CONFIG_HOME", ".config"),
@@ -159,11 +164,10 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         env.set(key, home.path().join(directory));
     }
     for fail_adopt in [false, true] {
-        let project = home
-            .path()
-            .join(if fail_adopt { "fallback" } else { "update" });
+        let project = home_alias.join(if fail_adopt { "fallback" } else { "update" });
         std::fs::create_dir_all(&project).unwrap();
-        let root = crate::store::init_cas_dir(&project).unwrap();
+        crate::store::init_cas_dir(&project).unwrap();
+        let root = project.join(".cas");
         let wrapper = project.join("next-cas");
         let executable = std::env::current_exe().unwrap();
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));

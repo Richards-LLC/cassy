@@ -27,6 +27,7 @@ pub(super) struct Handoff {
     pub(super) listener: i32,
     pub(super) gui_listener: i32,
     pub(super) ws_listener: Option<i32>,
+    pub(super) teams_present: bool,
     reply: Option<i32>,
     pub(super) app: AppHandoff,
 }
@@ -138,6 +139,7 @@ impl FactoryDaemon {
             listener: self.listener.as_raw_fd(),
             gui_listener: self.gui_listener.as_raw_fd(),
             ws_listener: self.ws_listener.as_ref().map(AsRawFd::as_raw_fd),
+            teams_present: self.teams.is_some(),
             reply,
             app,
         };
@@ -201,12 +203,14 @@ fn pin_rollback(session: &str) -> Result<tempfile::TempPath> {
         // The fixture's stable test image can be linked. Copying a gigabyte
         // debug image per exec would exhaust a RAM-backed test HOME.
         std::fs::remove_file(&path)?;
-        std::fs::hard_link(std::env::current_exe()?, &path)
+        std::os::unix::fs::symlink(std::env::current_exe()?, &path)
             .context("Could not link isolated rollback test image")?;
     } else {
         std::fs::copy(source, &path).context("Could not preserve old daemon for rollback")?;
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    if !fixture {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    }
     File::open(&path)?.sync_all()?;
     Ok(path)
 }

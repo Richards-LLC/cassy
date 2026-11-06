@@ -48,6 +48,23 @@ it('another tab settles adjacent held sends without manufacturing unsent chips',
   expect(history.visibleEvents()).toEqual([]);
 });
 describe('conversation evidence', () => {
+  it('renders native slash-command history as a compact receipt while preserving literal operator text (cas-99e7)', () => {
+    const xml = '<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>reconnect cas</command-args>';
+    const history = new ConversationHistory();
+    history.hydrateSend({ notification_id: 9907, target: 'terminal-history', text: xml,
+      state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: '2026-11-06T13:10:00Z' });
+    const view = new ConversationView(document, history, 'supervisor');
+    document.body.replaceChildren(view.element); view.update();
+    const receipt = view.element.querySelector('.native-command-receipt');
+    expect(receipt?.textContent).toContain('/mcp reconnect cas');
+    expect(receipt?.classList.contains('bub')).toBe(false);
+    expect(view.element.textContent).not.toContain('<command-name>');
+    expect(history.preview()).not.toContain('<command-name>');
+    history.hydrateSend({ notification_id: 9908, target: 'supervisor', text: `Explain this XML: ${xml}`,
+      state: 'acknowledged', stamped: true, device_id: 'phone', operator_label: 'Daniel', at: '2026-11-06T13:11:00Z' });
+    view.update();
+    expect(view.element.textContent).toContain(`Explain this XML: ${xml}`);
+  });
   it('a later reply keeps explicit Send again available until that send is confirmed (cas-9dc6)', () => {
     const history = new ConversationHistory();
     history.submit('unknown', 'supervisor', 'Did the Mac tests start?', 1_000);

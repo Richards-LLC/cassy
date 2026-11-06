@@ -735,7 +735,7 @@ mod tests {
             if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
             let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
                 command: "/bin/sh".into(),
-                args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
+                args: vec!["-c".into(), "stty raw -echo; printf '\\033cPrevious turn: ✢ Working… esc to interrupt\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
                     "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
                 cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
             }).unwrap();
@@ -746,11 +746,20 @@ mod tests {
                 loop {
                     let pane = daemon.app.mux.get_mut(&name).unwrap();
                     pane.drain_output();
-                    if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
+                    if pane.dump_row(19).unwrap().trim() == "❯" && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
             if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
+            if mode == "idle" {
+                // cas-99e7: /exit and /mcp share this admission path. Old
+                // spinner text and shell repaint cannot contradict native end.
+                tokio::time::timeout(COMMAND_SETTLE_WAIT, daemon.wait_for_command_prompt())
+                    .await.expect("native idle admits the first request")
+                    .expect("completed Claude turn must admit commands despite old busy text");
+            } else {
+                assert!(daemon.wait_for_command_prompt().await.is_err(), "busy or unknown native state cannot override the busy screen");
+            }
             let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
             let receipt = daemon.dispatch_supervisor_command(
                 Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),

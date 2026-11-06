@@ -1951,18 +1951,18 @@ url = "https://context7.invalid/mcp"
     }
 
     #[test]
-    // pin: The watchdog must be armed before blocking schema work; isolate run_server_impl so the test cannot match its own strings.
+    // pin: Parent death must remain observable before potentially blocking schema work.
     fn casb123_mcp_startup_arms_parent_watchdog_before_schema_migration() {
-        let source = include_str!("runtime.rs");
+        let source = include_str!("backend.rs");
         let body = source
-            .split_once("async fn run_server_impl()")
-            .expect("run_server_impl source")
+            .split_once("async fn run(fd:")
+            .expect("private backend startup source")
             .1;
         let watchdog = body
             .find("parent_watchdog::spawn()")
             .expect("startup watchdog arm");
         let migration = body
-            .find("ensure_mcp_schema(&cas_root)?")
+            .find("check_migrations(&root)")
             .expect("startup schema check");
         assert!(
             watchdog < migration,

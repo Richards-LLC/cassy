@@ -166,20 +166,27 @@ pub(crate) fn snapshot_with_installed(
         if !fresh {
             continue;
         }
-        let Some(parent_pid) = epoch_live_parent(pid, &epoch.started_at) else {
+        let Some(mut parent_pid) = epoch_live_parent(pid, &epoch.started_at) else {
             continue;
         };
+        let version = if let Some(state) = crate::mcp::serving_state(cas_root, parent_pid) {
+            // A prepared candidate may already have a daemon epoch. Only the
+            // front's confirmed serving child is user-visible version proof.
+            if state.backend_pid != pid { continue; }
+            parent_pid = state.harness_pid;
+            Some(state.backend_version)
+        } else { epoch.version };
         if !seen_server_pid.insert(pid) {
             continue;
         }
         by_agent_pid
             .entry(pid)
             .or_default()
-            .push((pid, epoch.version.clone()));
+            .push((pid, version.clone()));
         by_agent_pid
             .entry(parent_pid)
             .or_default()
-            .push((pid, epoch.version));
+            .push((pid, version));
     }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
@@ -190,7 +197,9 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let matches = by_agent_pid.get(&pid).cloned().unwrap_or_default();
+        let matches = by_agent_pid.get(&pid)
+            .or_else(|| agent.ppid.and_then(|parent| by_agent_pid.get(&parent)))
+            .cloned().unwrap_or_default();
         if matches.is_empty() {
             servers.push(ServerVersion {
                 name: agent.name,

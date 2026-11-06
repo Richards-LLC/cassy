@@ -102,7 +102,7 @@ fn control_socket(fd: i32) -> Result<tokio::net::UnixStream> {
         std::process::Command::new("ps").args(["-p", &parent.to_string(), "-o", "comm=", "-o", "args="]),
         crate::bounded_process::Deadline::after(std::time::Duration::from_millis(500)),
         std::time::Duration::from_millis(500),
-    )?;
+    ).map_err(|error| anyhow::anyhow!("cannot verify owning front: {error:?}"))?;
     let command = String::from_utf8_lossy(&output.stdout);
     let executable = command.split_whitespace().next().context("owning front executable is unavailable")?;
     if std::path::Path::new(executable).file_name() != std::env::current_exe()?.file_name()
@@ -117,6 +117,7 @@ fn control_socket(fd: i32) -> Result<tokio::net::UnixStream> {
 
 pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     let control = control_socket(fd)?;
+    let front_pid = std::os::unix::process::parent_id();
     let root = super::runtime::resolve_mcp_serve_root()?;
     let watchdog = super::parent_watchdog::spawn();
     if !crate::store::detect::cas_store_present(&root) { bail!("no initialized Cassy store; run cas init first") }
@@ -163,13 +164,19 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
                         }
                     }
                     Some("activate") => Ok(()),
+                    Some("resume") => {
+                        if let Some(service) = switchable.active.get()
+                            && let Some(Some(id)) = service.inner.agent_id.get() {
+                            service.inner.ensure_agent_active(id).map_err(|error| anyhow::anyhow!("{error}"))
+                        } else { Ok(()) }
+                    }
                     Some("idle") => { switchable.wait_idle().await; Ok(()) }
                     Some("retire") => { switchable.wait_idle().await; retire = true; Ok(()) }
                     _ => Err(anyhow::anyhow!("unknown private backend control action")),
                 };
                 let reply = match result {
-                    Ok(()) => json!({"ok":true}),
-                    Err(error) => json!({"ok":false, "error":error.to_string()}),
+                    Ok(()) => json!({"id":request["id"], "ok":true}),
+                    Err(error) => json!({"id":request["id"], "ok":false, "error":error.to_string()}),
                 };
                 write.write_all(&serde_json::to_vec(&reply)?).await?;
                 write.write_all(b"\n").await?;
@@ -182,7 +189,10 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     if let Some(daemon) = daemon { daemon.shutdown(); }
     // Retirement is a transport replacement, never a session shutdown.
     // A rejected standby also never owned the session's task leases.
-    if !retire && switchable.active.get().is_some() {
+    if !retire && switchable.active.get().is_some()
+        && !crate::mcp::daemon::pid_alive(front_pid)
+        && super::front::reported_state(&root, front_pid)
+            .is_some_and(|state| state.backend_pid == std::process::id()) {
         if let Ok(id) = crate::agent_id::read_session_for_mcp(&root) {
             super::runtime::release_agent_tasks(&root, &id, end_reason)?;
         }

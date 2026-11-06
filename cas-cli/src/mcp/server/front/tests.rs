@@ -114,8 +114,9 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
     });
     tokio::spawn(async move {
         let mut lines = BufReader::new(control_in).lines();
-        while let Ok(Some(_)) = lines.next_line().await {
-            send(&mut control_out, json!({"ok":true})).await;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            send(&mut control_out, json!({"id":request["id"], "ok":true})).await;
         }
     });
     Backend { input: Box::new(front_in), output: Box::new(front_out),

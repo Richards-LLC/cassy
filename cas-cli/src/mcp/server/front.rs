@@ -74,6 +74,18 @@ where
             prepared.take();
             let _ = events.send(Event::Deferred("drain timed out; old backend is still serving".into())).await;
         }
+        if initialized && prepared.is_some() && pending.is_empty() && input.bytes.is_empty() {
+            match input.try_read().await {
+                std::task::Poll::Ready(Ok(Some(frame))) => {
+                    pending.client(&frame)?;
+                    write(&mut serving.input, &frame).await?;
+                    continue;
+                }
+                std::task::Poll::Ready(Err(error)) => return Err(error),
+                std::task::Poll::Ready(Ok(None)) => return Ok(()),
+                std::task::Poll::Pending => {}
+            }
+        }
         if initialized && prepared.is_some() && pending.is_empty()
             && input.bytes.is_empty() && serving.output.bytes.is_empty()
         {
@@ -106,6 +118,7 @@ where
                 }
                 result => {
                     candidate.stop().await;
+                    let _ = timeout(DRAIN_TIMEOUT, serving.control("resume")).await;
                     let reason = match result {
                         Ok(Err(error)) => error.to_string(),
                         Err(_) => "activation/drain timed out".into(),
@@ -117,6 +130,8 @@ where
             continue;
         }
 
+        let drain_deadline = prepared.as_ref().map(|(_, deadline)| *deadline)
+            .unwrap_or_else(|| Instant::now() + DRAIN_TIMEOUT);
         tokio::select! {
             frame = input.read() => {
                 let Some(frame) = frame? else {
@@ -173,7 +188,7 @@ where
                     }
                 }
             }
-            () = async { tokio::time::sleep_until(prepared.as_ref().unwrap().1).await }, if prepared.is_some() => {}
+            () = tokio::time::sleep_until(drain_deadline), if prepared.is_some() => {}
         }
     }
 }
@@ -199,6 +214,14 @@ impl<R: AsyncRead + Unpin> Frames<R> {
             }
             self.bytes.extend_from_slice(&chunk[..count]);
         }
+    }
+
+    async fn try_read(&mut self) -> std::task::Poll<Result<Option<Vec<u8>>>> {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+        let future = self.read();
+        tokio::pin!(future);
+        poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
     }
 }
 
@@ -303,11 +326,15 @@ impl Connection {
     }
 
     async fn control(&mut self, action: &str) -> Result<()> {
-        write_json(&mut self.control_input, &json!({"action":action})).await?;
-        let reply = self.control_output.read().await?.context("backend control closed")?;
-        let reply: Value = serde_json::from_slice(&reply)?;
-        if reply["ok"] != true { bail!("backend {action}: {}", reply["error"]) }
-        Ok(())
+        let id = uuid::Uuid::new_v4().to_string();
+        write_json(&mut self.control_input, &json!({"id":id, "action":action})).await?;
+        loop {
+            let reply = self.control_output.read().await?.context("backend control closed")?;
+            let reply: Value = serde_json::from_slice(&reply)?;
+            if reply["id"] != id { continue; }
+            if reply["ok"] != true { bail!("backend {action}: {}", reply["error"]) }
+            return Ok(());
+        }
     }
 
     async fn activate(&mut self) -> Result<()> {
@@ -375,13 +402,21 @@ pub(crate) struct ServingState {
     pub front_version: String,
     pub backend_version: String,
     pub deferred: Option<String>,
+    pub front_starttime: u64,
+    pub backend_starttime: u64,
+}
+
+pub(super) fn reported_state(root: &std::path::Path, front_pid: u32) -> Option<ServingState> {
+    let state: ServingState = serde_json::from_slice(&std::fs::read(
+        root.join("mcp-fronts").join(format!("{front_pid}.json"))).ok()?).ok()?;
+    (state.front_pid == front_pid).then_some(state)
 }
 
 pub(crate) fn serving_state(root: &std::path::Path, front_pid: u32) -> Option<ServingState> {
-    let state: ServingState = serde_json::from_slice(&std::fs::read(
-        root.join("mcp-fronts").join(format!("{front_pid}.json"))).ok()?).ok()?;
-    (state.front_pid == front_pid
-        && crate::agent_id::get_parent_of_pid(front_pid) == Some(state.harness_pid))
+    let state = reported_state(root, front_pid)?;
+    (crate::agent_id::get_parent_of_pid(front_pid) == Some(state.harness_pid)
+        && crate::mcp::daemon::pid_matches_fingerprint(front_pid, state.front_starttime)
+        && crate::mcp::daemon::pid_matches_fingerprint(state.backend_pid, state.backend_starttime))
         .then_some(state)
 }
 
@@ -453,7 +488,9 @@ pub(super) async fn run() -> Result<()> {
                     eprintln!("[Cassy] MCP serving backend {version} (PID {backend_pid}); stable front {} (PID {pid})", env!("CARGO_PKG_VERSION"));
                     state = Some(ServingState { front_pid: pid,
                         harness_pid: std::os::unix::process::parent_id(), backend_pid,
-                        front_version: env!("CARGO_PKG_VERSION").into(), backend_version: version, deferred: None });
+                        front_version: env!("CARGO_PKG_VERSION").into(), backend_version: version, deferred: None,
+                        front_starttime: crate::mcp::daemon::read_pid_starttime(pid).unwrap_or(0),
+                        backend_starttime: crate::mcp::daemon::read_pid_starttime(backend_pid).unwrap_or(0) });
                 }
                 Event::Deferred(reason) => {
                     eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {reason}");
@@ -472,13 +509,21 @@ pub(super) async fn run() -> Result<()> {
                 if let Err(error) = save() { eprintln!("[Cassy] MCP serving-version report failed: {error}"); }
             }
         }
+        state.is_some()
     });
     let result = tokio::select! {
         result = relay(tokio::io::stdin(), tokio::io::stdout(), backend, update_rx, events) => result,
         () = watchdog.tripped() => Ok(()),
     };
     watcher.abort();
-    reporter.abort();
+    // Drain the serving report before deciding whether this front ever owned
+    // the session. Only the front releases leases on a real client shutdown;
+    // failed candidates and retired children must never do so.
+    if reporter.await.unwrap_or(false) {
+        if let Ok(id) = crate::agent_id::read_session_for_mcp(&root) {
+            super::runtime::release_agent_tasks(&root, &id, "front_transport_closed")?;
+        }
+    }
     let _ = std::fs::remove_file(path);
     result
 }

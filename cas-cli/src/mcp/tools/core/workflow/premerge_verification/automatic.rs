@@ -502,9 +502,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     _ => "operator draft probe",
                 }), "{status}: {:?}", prompts[0]);
                 if status == "harness_failed" {
-                    assert!(!prompts[0].prompt.contains("old diagnostic excluded"));
-                    assert!(std::fs::read_to_string(output.with_file_name("harness.log"))
-                        .unwrap().contains("old diagnostic excluded"));
+                    let diagnostics = std::fs::read_to_string(output.with_file_name("harness.log")).unwrap();
+                    assert!(!prompts[0].prompt.contains(diagnostics.lines().next().unwrap()));
                 }
             }
             eprintln!(

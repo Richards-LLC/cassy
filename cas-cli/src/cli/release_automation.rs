@@ -537,6 +537,33 @@ mod tests {
             &rows[0].prompt
         ));
     }
+
+    #[tokio::test]
+    async fn a_cut_train_sends_new_tasks_to_a_fresh_train_cas_2b8d() {
+        use rmcp::handler::server::wrapper::Parameters;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _, args) = fixture();
+        let _cwd = env.enter_dir(temp.path());
+        track(&args, &root).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
+            "title": "Next train followup", "task_type": "task", "risk": "none",
+        })).unwrap())).await.unwrap();
+        let store = open_task_store(&root).unwrap();
+        let child = store.list(None).unwrap().into_iter().find(|t| t.title == "Next train followup").unwrap();
+        let next = store.get_parent_epic(&child.id).unwrap().unwrap();
+        assert_ne!(next.id, train.id, "new work must not join the queued release");
+        assert_eq!(git(temp.path(), &["rev-parse", next.effective_epic_branch().unwrap()]).unwrap(),
+            git(temp.path(), &["rev-parse", "main"]).unwrap(), "fresh train starts from integration");
+        assert!(store.get(&train.id).unwrap().labels.iter().any(|label| label == "release-train-cut"));
+        // A restarted cut still resolves its original train, even after new
+        // work has opened a different train. Its reminders stay idempotent.
+        track(&args, &root).unwrap();
+        assert_eq!(open_reminder_store(&root).unwrap().list_all_pending().unwrap().len(), 2);
+        let recorded: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
+        assert_eq!(recorded.train_id, train.id);
+    }
     #[test]
     fn release_tracking_owner_fallback_never_blocks() {
         for (recorded_owner, peer_available) in [(false, true), (false, false), (true, false)] {

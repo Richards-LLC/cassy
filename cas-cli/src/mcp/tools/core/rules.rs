@@ -1901,10 +1901,19 @@ mod tests {
     async fn a_repeat_observation_counts_against_its_candidate_and_never_becomes_a_rule() {
         let (_temp, core) = isolated_core();
         let lesson = "Every test-first task must add a new test file";
-        for (link, content) in [("cas-7da6:ver-1", lesson), ("cas-dbea:ver-2", "A test-first task must add a new test file")] {
-            core.cas_rule_observe(None, content.into(), "testing".into(), link.into())
-                .await
-                .unwrap();
+        for (task, verdict_id) in [("cas-7da6", "ver-1"), ("cas-7da6", "ver-repeat"), ("cas-dbea", "ver-2")] {
+            let mut verdict = cas_types::Verification::new(verdict_id.into(), task.into());
+            verdict.provenance = cas_types::VerificationProvenance::System;
+            verdict.status = cas_types::VerificationStatus::Rejected;
+            cas_store::add_system_verification(&core.cas_root, &verdict).unwrap();
+        }
+        for links in ["cas-7da6:ver-1", "cas-7da6:ver-1,cas-7da6:ver-repeat", "cas-7da6:ver-1,cas-other:ver-2"] {
+            assert!(core.cas_rule_observe(None, lesson.into(), "testing".into(), links.into()).await.is_err(), "refuse insufficient/forged evidence: {links}");
+            assert!(cas_store::list_rule_candidates(&core.cas_root).unwrap().is_empty());
+        }
+        let links = "cas-7da6:ver-1,cas-dbea:ver-2";
+        for content in [lesson, "A test-first task must add a new test file"] {
+            core.cas_rule_observe(None, content.into(), "testing".into(), links.into()).await.unwrap();
         }
 
         let candidates = cas_store::list_rule_candidates(&core.cas_root).unwrap();
@@ -1929,7 +1938,7 @@ mod tests {
         let held = connection.lock().unwrap();
         let budget = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
         let error = core
-            .cas_rule_observe(None, lesson.into(), "testing".into(), "cas-0ab2:ver-busy".into())
+            .cas_rule_observe(None, lesson.into(), "testing".into(), links.into())
             .await
             .unwrap_err();
         drop(budget);

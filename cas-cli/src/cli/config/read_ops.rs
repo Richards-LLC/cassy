@@ -1158,6 +1158,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn draft_rule_ttl_round_trips_and_resets() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let key = "rules.draft_ttl_days";
+        let mut config = Config::default();
+        assert_eq!(config.get(key).as_deref(), Some("30"));
+        config.set(key, "7").unwrap();
+        config.save(&root).unwrap();
+        let loaded = Config::load(&root).unwrap();
+        assert_eq!(loaded.get(key).as_deref(), Some("7"));
+        assert!(loaded.list().contains(&(key.into(), "7".into())));
+        assert_eq!(reset_config_value(key, &root).unwrap(), ("7".into(), "30".into()));
+        assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some("30"));
+    }
+
+    #[test]
     fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
         let registry = crate::config::registry();
         let mut keys = registry.all_keys();

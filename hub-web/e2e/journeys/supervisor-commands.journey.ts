@@ -2,30 +2,122 @@ import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { SCOPES } from "./hub-double";
 import { journeyStamp } from "./clock";
+import { mkdirSync, writeFileSync } from "node:fs";
+import type { Page } from "@playwright/test";
 
-for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+async function captureReload(page: Page, name: string, width: number): Promise<void> {
+  const dir = process.env.QA_ARTIFACTS;
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  const cssUrl = new URL("app.css", page.url());
+  let css = await (await page.request.get(cssUrl.href)).text();
+  for (const match of [...css.matchAll(/url\(([^)]+)\)/g)]) {
+    const path = match[1].replace(/["\']/g, "");
+    if (path.startsWith("data:") || path.startsWith("#")) continue;
+    const response = await page.request.get(new URL(path, cssUrl).href);
+    css = css.replaceAll(match[0], `url(data:${response.headers()["content-type"] ?? "application/octet-stream"};base64,${(await response.body()).toString("base64")})`);
+  }
+  const html = await page.evaluate(() => {
+    const clone = document.documentElement.cloneNode(true) as HTMLElement;
+    clone.removeAttribute("data-scheme");
+    clone.querySelectorAll("script, link, style").forEach(node => node.remove());
+    return clone.outerHTML;
+  });
+  writeFileSync(`${dir}/${name}-${width}.html`, "<!doctype html>" + html.replace("</head>", `<style>${css}</style></head>`));
+  await page.screenshot({ path: `${dir}/${name}-${width}.png` });
+}
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
-    test.use({ viewport });
+    test.use({ viewport, colorScheme: viewport.width === 390 ? "dark" : "light" });
     test("HUB-J27 reload Claude's Cassy server and read its replacement process", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
-      await journey.stage("Reload Cassy from slash input without sending chat text", async () => {
+      const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+      await journey.stage("See Reload Cassy on the older supervisor card without opening a menu", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await expect(page.locator('[data-reload-cassy="direct"]')).toBeVisible();
+        await expect(page.locator(".supervisor-version")).toContainText("9.99.1");
+        await captureReload(page, "card", viewport.width);
+      });
+      await journey.stage("Reload from the card and wait for the replacement receipt and catalog", async () => {
+        await page.locator('[data-reload-cassy="direct"]').click();
+        await expect.poll(() => mutations().length).toBe(1);
+        const request = mutations()[0].body as { client_ref: string; command: string };
+        expect(request.command).toBe("mcp");
+        const receipt = page.locator(".supervisor-command-receipt");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "queued");
+        await expect(page.locator(".supervisor-version")).toContainText("9.99.1");
+        machine.sessions[0]!.mcp_version = "9.99.2";
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(page.locator(".supervisor-version")).toContainText("9.99.2");
+        await expect(page.locator('[data-reload-cassy="direct"]')).toBeHidden();
+        expect(hub.sends).toHaveLength(0);
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+      });
+      await journey.stage("Open the header dropdown beside its button, then submit typed mcp without chat", async () => {
+        const toggle = page.locator("#conversation-commands");
+        await toggle.click();
+        const palette = page.locator("#supervisor-command-palette");
+        const [buttonBox, paletteBox] = await Promise.all([toggle.boundingBox(), palette.boundingBox()]);
+        if (!buttonBox || !paletteBox) throw new Error("Supervisor command dropdown is not laid out");
+        expect(paletteBox.y).toBeGreaterThanOrEqual(buttonBox.y + buttonBox.height);
+        expect(paletteBox.y - buttonBox.y - buttonBox.height).toBeLessThan(24);
+        expect(paletteBox.x).toBeGreaterThanOrEqual(0);
+        expect(paletteBox.x + paletteBox.width).toBeLessThanOrEqual(viewport.width);
+        await captureReload(page, "dropdown", viewport.width);
+        await page.keyboard.press("Escape");
+        await expect(toggle).toBeFocused();
         const input = page.locator("#message-text");
         await input.fill("/mcp");
         await expect(page.locator('[data-supervisor-command="mcp"]')).toContainText("Reload Cassy");
         await input.press("Enter");
-        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
-        const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string; command: string };
+        await expect.poll(() => mutations().length).toBe(2);
+        const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         expect(hub.sends).toHaveLength(0);
         const receipt = page.locator(".supervisor-command-receipt");
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
-        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await expect(receipt).toContainText("PID 2202, version 9.99.2");
+        await expect(receipt).toContainText("PID 3303, version 9.99.2");
+        expect(mutations()).toHaveLength(2);
+      });
+    });
+    test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
+      await journey.stage("Dismiss a refused busy reload without sending chat or retrying it", async () => {
+        await journey.open();
+        await page.locator(".conversation-row").click();
+        await page.locator("#message-text").fill("/mcp");
+        await page.locator("#message-send").click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
+        const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
+        const receipt = page.locator(".supervisor-command-receipt");
+        await expect(receipt).toHaveAttribute("data-phase", "refused");
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect(receipt).toHaveCount(0);
+        expect(hub.sends).toHaveLength(0);
         expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(1);
+      });
+      await journey.stage("A later queued reload resolves and leaves no stale busy panel", async () => {
+        await page.locator("#message-text").fill("/mcp");
+        await page.locator("#message-send").click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1].body as { client_ref: string };
+        const receipt = page.locator(".supervisor-command-receipt");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "queued");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(receipt).not.toContainText("busy");
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect(receipt).toHaveCount(0);
+        expect(hub.sends).toHaveLength(0);
       });
     });
     test("HUB-J27 run a supervisor command and read its actual outcome", journeyPart, async ({ page, journey }) => {

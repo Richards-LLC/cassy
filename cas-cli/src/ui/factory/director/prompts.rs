@@ -871,7 +871,8 @@ pub fn recipient_worker_cli(
         DirectorEvent::SupervisorStalled { .. }
         | DirectorEvent::EpicStarted { .. }
         | DirectorEvent::EpicCompleted { .. }
-        | DirectorEvent::EpicAllSubtasksClosed { .. } => default_worker_cli,
+        | DirectorEvent::EpicAllSubtasksClosed { .. }
+        | DirectorEvent::QaWalkAttention { .. } => default_worker_cli,
     }
 }
 

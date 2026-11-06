@@ -764,6 +764,10 @@ invariants:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image. The native real-hub HUB-J24 part must decode a pending raster object URL under the actual embedded document CSP with no img-src violations, while SVG stays a named file without a preview.'
     bug: {task: cas-e1ee}
+  HUB-J22-REPLY-IMAGES:
+    statement: A supervisor reply's `![alt](artifact:<id>)` or `![alt](<path>)` image renders inline only when its machine re-proves it through the session media ticket (a PNG, JPEG, WebP or GIF under the project's artifacts directory, at most 10 MiB, no symlinks or traversal); remote URLs and refused references stay the reply's text, and a tap enlarges it.
+    check: Run the HUB-J22 inline reply images cases at 1280x800 and 390x844 in light and dark; confirm the decoded inline image, the literal outside-root and remote references, the image viewer and focus return, and the local_image allow-list unit test.
+    bug: {task: cas-85bfb}
   HUB-J22-SYNTAX-SOURCE:
     statement: Tagged code loads color after plain source, preserves selection across coloring and message repaint, and remains readable and copyable when the color chunk fails or source exceeds its budget. Rust lifetimes stay plain beside colored characters; JSX word apostrophes and script single-quoted strings never color subsequent lines as strings; shell single quotes retain entire multi-line programs and literal backslashes. Uncacheable source preserves existing cache entries.
     check: Run the code-frame stage and unavailable syntax color part of rich-content.journey.ts in the production snapshot; prove no syntax request before tagged source, delayed-load selection, safe token text, light/dark and forced-color readability, exact Copy/Wrap and visible fallback. Named markdown-renderer.test.ts regressions cover oversized input, Rust lifetimes and characters, JSX apostrophes, script single-string line bounds, multi-line awk/jq shell quotes and cache preservation.
@@ -843,6 +847,8 @@ journeys:
   - hub-web/src/local-network-access.ts
   - hub-web/src/machine-accent.ts
   - hub-web/src/markdown-renderer.ts
+  - hub-web/src/reply-images.ts
+  - cas-cli/src/hub/local_image.rs
   - hub-web/src/raw-output.ts
   - hub-web/src/refusal.ts
   - hub-web/src/request-deadline.ts
@@ -2521,7 +2527,7 @@ journeys:
   - hub-web/e2e/journeys/rich-content.journey.ts
   - hub-web/playwright.rich-content-hub.config.ts
   - hub-web/scripts/rich-content-visual-qa.mjs
-  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY, HUB-J22-SYNTAX-SOURCE]
+  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY, HUB-J22-SYNTAX-SOURCE, HUB-J22-REPLY-IMAGES]
   traffic:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.

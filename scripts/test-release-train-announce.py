@@ -192,6 +192,7 @@ class Announce(unittest.TestCase):
 
     def test_writing_rules_match_lint(self):
         root = SCRIPT.parent.parent
+        self.assertEqual(set(announce.USER_SWAPS), set(announce.USER_FORBIDDEN))
         for relative in ("cas-cli/src/builtins/skills/cas-release-notes/SKILL.md",
                          "docs/RELEASE_SLACK_RUBRIC.md"):
             with self.subTest(document=relative):

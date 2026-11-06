@@ -38,6 +38,15 @@ USER_FORBIDDEN = (
     "epic",
     "lane",
 )
+USER_SWAPS = {
+    "watermark": "saved position", "metadata": "details", "ingest": "import",
+    "upsert": "save", "envelope": "message", "scope stamp": "access label",
+    "canonical id": "shared ID", "team pull": "team update",
+    "purge-foreign": "remove unrelated data", "cloud identity": "account",
+    "registration": "connection", "harness": "coding tool", "agent": "session",
+    "factory": "workspace", "worker": "session", "supervisor": "session",
+    "daemon": "background service", "epic": "workstream", "lane": "workstream",
+}
 TOP_LEVEL_LABEL = re.compile(
     r"^\*(?:Live on production|Staging|Source on main) — "
     r"(?:User|Dev) — Cassy(?: v[0-9]+\.[0-9]+\.[0-9]+)?\*$"
@@ -46,6 +55,7 @@ SECTION_HEADING = re.compile(r"\*[^*\n]+\*")
 # The hub's long_line rule (violet_ps apps/violet/lib/readability.ts): a line
 # over 300 code points, counting a <url|label> link as its label.
 HUB_LINE_LIMIT = 300
+TOP_LEVEL_WORD_LIMIT = 25
 SLACK_LINK = re.compile(r"<[^<>\n|]+\|([^<>\n]*)>")
 
 
@@ -68,58 +78,56 @@ PRE_PUBLICATION_TOKENS = frozenset({
 })
 
 
-def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
+def body_errors(index: int, body: str, pre_publication: bool = False) -> list[str]:
+    errors = []
+
+    def report(line: int, rule: str, detail: str) -> None:
+        errors.append(f"body {BODY_NAMES[index]} line {line} {detail} [rule: {rule}]")
+
     lines = body_lines(body)
     if not lines:
-        fail(f"body {BODY_NAMES[index]} is empty")
+        report(1, "empty_body", "is empty; write the release message")
+        return errors
     normalized = normalize_body(body)
-    token = next(
-        (match for match in re.finditer(r"\{\{.*?\}\}", normalized, flags=re.DOTALL)
-         if not (pre_publication and match.group() in PRE_PUBLICATION_TOKENS)),
-        None,
-    )
-    if token:
-        line_number = normalized[:token.start()].count("\n") + 1
-        fail(f"body {BODY_NAMES[index]} line {line_number} contains unresolved token {token.group()}")
-    if "**" in body:
-        fail(f"body {BODY_NAMES[index]} contains forbidden ** markdown")
+    for token in re.finditer(r"\{\{.*?\}\}", normalized, flags=re.DOTALL):
+        if not (pre_publication and token.group() in PRE_PUBLICATION_TOKENS):
+            report(normalized[:token.start()].count("\n") + 1, "unresolved_token",
+                   f"contains unresolved token {token.group()}; fill its published value")
     for line_number, line in enumerate(lines, start=1):
+        if "**" in line:
+            report(line_number, "slack_bold", "contains forbidden ** markdown; use *bold*")
         visible = len(SLACK_LINK.sub(r"\1", line))
         if visible > HUB_LINE_LIMIT:
-            fail(
-                f"body {BODY_NAMES[index]} line {line_number} is {visible} characters; "
-                f"the Violet hub refuses lines over {HUB_LINE_LIMIT}"
-            )
+            report(line_number, "long_line", f"is {visible} characters; "
+                   f"the Violet hub refuses lines over {HUB_LINE_LIMIT}; shorten or split it")
         if line.startswith("#"):
-            fail(f"body {BODY_NAMES[index]} line {line_number} starts with #")
+            report(line_number, "slack_heading", "starts with #; use a *bold* heading")
         if re.match(r"^-\s", line):
-            fail(f"body {BODY_NAMES[index]} line {line_number} uses a hyphen bullet")
+            report(line_number, "slack_bullet", "uses a hyphen bullet; use •")
         if index in (0, 1):
-            lowered = line.lower()
             for forbidden in USER_FORBIDDEN:
-                if forbidden in lowered:
-                    fail(
-                        f"body {BODY_NAMES[index]} line {line_number} contains forbidden "
-                        f"user wording: {forbidden}: {line}"
-                    )
+                for match in re.finditer(r"\b" + re.escape(forbidden) + r"\b", line, re.IGNORECASE):
+                    report(line_number, "user_word", f"contains forbidden user wording: {match.group()}; "
+                           f"try {USER_SWAPS[forbidden]}")
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
         # Check the eventual title shape without changing the reviewed text.
         label = lines[0].replace("{{VERSION}}", "0.0.0") if pre_publication else lines[0]
         if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(label):
-            fail(f"body {BODY_NAMES[index]} top-level must contain exactly two lines")
-        if "Was:" not in lines[1] or "→ Now:" not in lines[1]:
-            fail(f"body {BODY_NAMES[index]} top-level must use Was → Now")
-        if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9’'-]*", lines[1])) > 25:
-            fail(f"body {BODY_NAMES[index]} top-level punch exceeds 25 words")
-        return
+            report(1, "top_level_shape", "top-level must contain exactly two lines with a release audience label")
+        punch = lines[1] if len(lines) > 1 else ""
+        if "Was:" not in punch or "→ Now:" not in punch:
+            report(2, "was_now", "top-level must use Was → Now")
+        if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9’'-]*", punch)) > TOP_LEVEL_WORD_LIMIT:
+            report(2, "punch_length", f"top-level punch exceeds {TOP_LEVEL_WORD_LIMIT} words; shorten it")
+        return errors
     if not bullets:
-        fail(f"body {BODY_NAMES[index]} has no bullet")
+        report(1, "missing_bullet", "has no bullet; add • *Short label* — Was: … → Now: …")
     for position, line_number in enumerate(bullets):
         if not re.match(r"^• \*[^*\n]+\* — ", lines[line_number]):
-            fail(f"body {BODY_NAMES[index]} bullet lacks a bold label")
+            report(line_number + 1, "bullet_label", "bullet lacks a bold label; start • *Short label* —")
         if position and (line_number == 0 or lines[line_number - 1].strip()):
-            fail(f"body {BODY_NAMES[index]} bullets need blank lines between items")
+            report(line_number + 1, "bullet_spacing", "bullets need blank lines between items")
         # A bullet ends at a blank line or a section heading (a line of only
         # *bold* text), so a two-line bullet may precede the next section.
         span = 1
@@ -128,7 +136,21 @@ def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
                 break
             span += 1
         if span > 2:
-            fail(f"body {BODY_NAMES[index]} bullet spans more than two lines")
+            report(line_number + 1, "bullet_span", "bullet spans more than two lines; shorten it")
+    return errors
+
+
+def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
+    errors = body_errors(index, body, pre_publication)
+    if errors:
+        fail("\n".join(errors))
+
+
+def lint_bodies(bodies: list[str], pre_publication: bool = False) -> None:
+    errors = [error for index, body in enumerate(bodies)
+              for error in body_errors(index, body, pre_publication)]
+    if errors:
+        fail("\n".join(errors))
 
 
 def extract_bodies(draft: Path, pre_publication: bool = False) -> list[str]:
@@ -136,9 +158,8 @@ def extract_bodies(draft: Path, pre_publication: bool = False) -> list[str]:
     bodies = re.findall(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", text, flags=re.DOTALL)
     if len(bodies) != 4:
         fail(f"draft must contain exactly four fenced bodies; found {len(bodies)}")
-    for index, body in enumerate(bodies):
-        bodies[index] = normalize_body(body)
-        lint_body(index, bodies[index], pre_publication)
+    bodies = [normalize_body(body) for body in bodies]
+    lint_bodies(bodies, pre_publication)
     return bodies
 
 
@@ -198,8 +219,7 @@ def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
         body = re.sub(r"(?m)^• \*(?:Release effort|Publication timing)\* — .*\n?", "", bodies[index]).rstrip()
         bodies[index] = body + "\n\n" + effort
     bodies[3] += "\n\n" + line + f" INTERVENTIONS={int(interventions)}."
-    for index in (1, 3):
-        lint_body(index, bodies[index])
+    lint_bodies(bodies)
     source = draft.read_text(encoding="utf-8")
     fences = list(re.finditer(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", source, re.DOTALL))
     updated = source
@@ -344,8 +364,8 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
     texts = [normalize_body(path.read_text(encoding="utf-8")) for path in paths]
     # The membership read may take time. Check every captured body again before
     # the first write, then post these same strings without reopening the files.
+    lint_bodies(texts)
     for index, text in enumerate(texts):
-        lint_body(index, text)
         if text != bodies[index]:
             fail(f"validated body is changed: {paths[index]}")
     posted_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -408,12 +428,16 @@ def main(argv: list[str]) -> int:
         if len(argv) >= 3 and argv[1] == "--lint":
             # cas-e7d4: the gate's fast row lints changed drafts at park with
             # this same implementation; placeholders are still allowed.
+            errors = []
             for draft in argv[2:]:
                 try:
                     extract_bodies(Path(draft), pre_publication=True)
-                except ValueError as exc:
-                    raise ValueError(f"{draft}: {exc}") from None
-                print(f"announce lint PASS · bodies=4 · draft={draft}")
+                except (OSError, ValueError) as exc:
+                    errors.append(f"{draft}: {exc}")
+                else:
+                    print(f"announce lint PASS · bodies=4 · draft={draft}")
+            if errors:
+                fail("\n".join(errors))
             return 0
         if len(argv) == 6 and argv[1] == "--post":
             post(argv[2], argv[3], argv[4], argv[5])

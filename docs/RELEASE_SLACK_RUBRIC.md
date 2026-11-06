@@ -3,6 +3,17 @@
 **This is a hard rule. Runtime releases and harness-diary updates each have a
 mandatory #cas-internal publication workflow. They are separate duties.**
 
+<!-- release-lint:begin -->
+User-thread words the lint refuses (whole words/phrases, case-insensitive):
+`watermark`, `metadata`, `ingest`, `upsert`, `envelope`,
+`scope stamp`, `canonical id`, `team pull`, `purge-foreign`, `cloud identity`,
+`registration`, `harness`, `agent`, `factory`, `worker`,
+`supervisor`, `daemon`, `epic`, `lane`.
+
+Top-level punch: at most 25 words.
+Visible line: at most 300 characters; a `<url|label>` link counts as its label.
+<!-- release-lint:end -->
+
 > This file defines **what** to post. For transport preflight, the canonical
 > supervisor-owned route, and the designed handoff used when a worker has no
 > Slack connection of its own, see
@@ -198,10 +209,7 @@ the merge action after fetching the PR landing so Cassy can reconcile delivery.
 Write the User top-level and reply first as a product changelog for someone who
 has never seen the codebase. Describe what the person sees and what changed for
 them. On the User side, forbid function, struct, and file names; flags the user
-does not type; table or column names; and the words `watermark`, `metadata`,
-`ingest`, `upsert`, `envelope`, `scope stamp`, `canonical id`, `team pull`,
-`purge-foreign`, `cloud identity`, `registration`, `registrations`, `harness`,
-`agent`, `factory`, `worker`, `supervisor`, `epic`, and `lane`. Apply a
+does not type; and table or column names. Use the refused-word list above. Apply a
 read-aloud test: if a bullet needs the codebase to make sense, rewrite it.
 Attach before/after screenshots to the User reply under the
 [release-notes rubric](release-notes/RUBRIC.md)'s before/after rule, with
@@ -217,9 +225,8 @@ Slack mrkdwn only:
   `#`, markdown tables, or `[label](url)` links; use bare URLs or `<url|label>`.
 - A top-level message is exactly two lines. Line 1 is
   `*Live on production — User — Cassy vX.Y.Z*` (or `Staging` / `Dev`). Line 2
-  is a Was → Now punch of 25 words or fewer.
-- No line may run over 300 characters, counting a `<url|label>` link as its
-  label: the Violet hub refuses the whole post as `long_line`, and
+  is a Was → Now punch within the word limit above.
+- No line may exceed the visible-character limit above: the Violet hub refuses the whole post as `long_line`, and
   announcement lint refuses it first.
 - A reply has one bullet per shipped change, with no item cap. Each bullet
   starts `• *Short label* —`, contains Was → Now, stays within two lines, and

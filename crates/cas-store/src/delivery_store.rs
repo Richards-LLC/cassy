@@ -1158,16 +1158,17 @@ mod tests {
         // GH #1276: deterministically pause a close retry after its read,
         // then let the supervisor commit request_changes before it writes.
         let stale_park = task_store.get(&task.id).unwrap();
-        let invalid = crate::request_changes_for_parked_delivery(
-            root.path(), &task.id, "supervisor-session", "merge_source=release/moving",
+        let invalid = crate::request_changes_for_parked_delivery_with_merge_sources(
+            root.path(), &task.id, "supervisor-session", "required import", &["release/moving".into()],
         ).unwrap_err();
         assert!(invalid.to_string().contains("full immutable commit SHA"));
         assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
-        let outcome = crate::request_changes_for_parked_delivery(
+        let outcome = crate::request_changes_for_parked_delivery_with_merge_sources(
             root.path(),
             &task.id,
             "supervisor-session",
             &format!("Keep the parser refactor, but revert the public output change before re-delivery. merge_source={}", "d".repeat(40)),
+            &["d".repeat(40)],
         )
         .unwrap();
         assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Exact);

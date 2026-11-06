@@ -13307,16 +13307,30 @@ impl CasCore {
                 format!("task request_changes requires registered supervisor identity: {error}"),
             )
         })?;
+        // Only this supervisor request is a command. QA/verifier findings and
+        // queue-ejection detail reach the store as inert review text.
+        let source_commits = req.reason.split_whitespace()
+            .filter_map(|word| word.strip_prefix("merge_source="))
+            .map(|source| {
+                if !matches!(source.len(), 40 | 64)
+                    || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "merge_source requires a full immutable commit SHA"));
+                }
+                Ok(source.to_ascii_lowercase())
+            }).collect::<Result<Vec<_>, _>>()?;
 
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
         // proof boundary was merged, unbound, or legacy — exactly the states a
         // failed review produces. Boundary shape is reported, never gating.
-        let outcome = cas_store::request_changes_for_parked_delivery(
+        let outcome = cas_store::request_changes_for_parked_delivery_with_merge_sources(
             &self.cas_root,
             &task.id,
             &supervisor_id,
             &req.reason,
+            &source_commits,
         )
         .map_err(|error| {
             Self::error(

@@ -3771,6 +3771,10 @@ review decision. Its ancestors count as upstream imports during source and park
 attribution; later descendants and unrelated work do not. Movable branch names
 are refused. A worker copying the marker into notes grants no authority, and a
 grant for a different task target does not apply.
+Only the authenticated supervisor request handler parses these markers and
+passes explicit SHA grants to storage. QA/verifier findings and queue-ejection
+details remain review text: quoting a valid or malformed marker grants nothing
+and cannot prevent the delivery from returning to its worker.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

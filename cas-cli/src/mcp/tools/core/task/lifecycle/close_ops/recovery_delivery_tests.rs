@@ -496,6 +496,17 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
         }
     )).await.is_err(), "a worker cannot authorize its own import");
     env.set("CAS_AGENT_ROLE", "supervisor");
+    for source in ["release/moving", ""] {
+        let invalid = supervisor.cas_task_request_changes(Parameters(
+            crate::mcp::tools::TaskRequestChangesRequest {
+                id: TASK.into(), reason: format!("merge_source={source}"),
+            }
+        )).await;
+        assert!(invalid.is_err());
+        let still_parked = tasks.get(TASK).unwrap();
+        assert_eq!(still_parked.status, TaskStatus::AwaitingMerge);
+        assert!(still_parked.deliverables.authorized_merge_sources.is_empty());
+    }
     let decision = text(supervisor.cas_task_request_changes(Parameters(
         crate::mcp::tools::TaskRequestChangesRequest {
             id: TASK.into(),

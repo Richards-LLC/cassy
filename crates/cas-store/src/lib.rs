@@ -267,7 +267,8 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
-    request_changes_for_parked_delivery, resolve_verification_dispatch_for_add,
+    request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
+    resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
 };

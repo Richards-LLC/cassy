@@ -55,6 +55,7 @@
 - `cas-cli/src/hooks/handoff_updates.rs` - bounded Violet reads of handoff-named channels and threads; newer human posts precede the saved handoff.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync/presence, peer mailboxes with task-scoped artifact fetch pointers, and local agent binding.
+- `cas-cli/src/cloud/peer_mailbox/transcript.rs` - own-account supervisor transcript requests and bounded, redacted daemon replies before prompt admission; `cas peers --transcript` and coordination share the same request path.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - knowledge distillation, indexing and composed retrieval.
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, brand resolution, HTML/PDF finalization and immutable captures.

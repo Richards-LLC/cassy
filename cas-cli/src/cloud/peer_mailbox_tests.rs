@@ -678,7 +678,7 @@ fn history_delivery(machine: &Machine, mailbox: &FakeMailbox, history: &Recipien
     deliver_claimed_with_history(
         mailbox, open_prompt_queue_store(&machine.cas).unwrap().as_ref(),
         open_agent_store(&machine.cas).unwrap().as_ref(), REPO, &[], session,
-        "consumer", history, &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered),
+        "consumer", history, &|_,_| Ok(None), &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered),
     )
 }
 

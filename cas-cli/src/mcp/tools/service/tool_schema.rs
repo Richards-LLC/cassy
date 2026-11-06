@@ -74,6 +74,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "cross_session",
     // cas-2a5a: `peers scope=all` lists the account's supervisors.
     "scope",
+    "peer",
 ];
 
 /// Descriptions `coordination` publishes in place of the shared
@@ -99,11 +100,12 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
     ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked unnamed batch reads reappear once."),
-    ("limit", "inbox_poll: max rows."),
+    ("limit", "inbox_poll: max rows; peer_transcript: context lines 0..10 (default 2)."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary|sub_agent|worker|ci."),
     ("parent_id", "register/session_start: parent id."),
-    ("session_id", "register/session_start/session_end: harness id."),
+    ("session_id", "Harness id; peer_transcript: current (default) or known supervisor session."),
+    ("peer", "peer_transcript: own-account name@machine; message is the regex (max 512 bytes)."),
     ("remind_message", "Reminder text; ask: default at deadline."),
     ("remind_delay_secs", "Seconds: time reminder. ask: deadline."),
     ("remind_event", "task_*|worker_idle|epic_completed|epic_split_decided|ci_completed|branch_contained_in|tag_exists; external: cross_session=true."),

@@ -582,7 +582,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors), peer_transcript (own-account transcript query). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
@@ -1366,6 +1366,7 @@ impl CasService {
 
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => heap_future(|| this.coordination_peers(req)).await,
+                "peer_transcript" => heap_future(|| this.coordination_peer_transcript(req)).await,
 
                 // cas-72d3: journaled external Slack-thread authority.
                 "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim"

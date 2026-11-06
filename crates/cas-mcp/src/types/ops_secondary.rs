@@ -1027,7 +1027,7 @@ pub struct CoordinationRequest {
     pub detail: Option<bool>,
 
     /// Select one peer supervisor; implies detail.
-    #[schemars(description = "peers only: supervisor name or name@machine; implies detail")]
+    #[schemars(description = "peers: supervisor name or name@machine; peer_transcript: own-account supervisor selector")]
     #[serde(default)]
     pub peer: Option<String>,
 

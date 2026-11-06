@@ -172,6 +172,7 @@ impl PeerMailboxRuntime {
                 &self.consumer_id,
                 &history,
                 &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
+                &|recipient, message| transcript::serve(&self.cas_dir, &mailbox, recipient, message),
                 &move |recipient, message| {
                     use crate::mcp::tools::core::workflow::premerge_verification::{PeerReceiptIngested, ingest_peer_receipt};
                     match ingest_peer_receipt(&cas_dir, recipient, message)? {

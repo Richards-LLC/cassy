@@ -31,6 +31,16 @@ node <skills-dir>/cas-qa-craft/scripts/check-feature-map.mjs --root .
 
 Import these functions from the project's pinned copy:
 
+`runSurfaceLanes({surfaces,outputDir,profileRoot,createPersona,disposePersona,run})`
+creates one lane per channel/viewport (for example web-1440, web-390, sms), with
+three concurrent jobs by default (`maxParallel` overrides the bound). Evidence
+and private browser-profile roots must be separate. Persona adapters return distinct
+`id`s; shared identities are refused before any job starts. Each `run(lane)` uses
+its `ledgerPath`, `browserProfileDir` and `persona`, closes its browser in `finally`,
+and produces its own ledger. After all jobs settle, personas and profiles are
+cleaned up. Split independent cases onto idle workers when one lane remains;
+never share a login, cart or mutable fixture across lanes.
+
 - `requireBuild({backend: sha, frontend: sha}, readBuild)` reads actual served
   identities at start and end. Missing or moved SHAs hold the walk; no fallback.
 - `waitForReply(page, options)` receives pre-send IDs, measured `sentAt` and a

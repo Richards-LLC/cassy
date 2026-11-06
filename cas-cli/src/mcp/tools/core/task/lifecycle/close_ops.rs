@@ -266,6 +266,24 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
 
 }
 
+/// Select close's current proof cycle without granting approval or changing state.
+/// A pending/new dispatch prevents an older legacy row from authorizing close.
+/// Daemon merge relays use the same selection before asking a worker to close;
+/// repository, promotion and all other close gates remain authoritative.
+pub(crate) fn close_cycle_verdict(
+    root: &std::path::Path,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    legacy: Option<&cas_types::Verification>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
+    match dispatch {
+        Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+        }
+        None => Ok(legacy.filter(|row| row.dispatch_id.is_none()).cloned()),
+        _ => Ok(None),
+    }
+}
+
 fn delivery_audit_text_is_portable(value: &str) -> bool {
     delivery_audit_text_rejection(value).is_none()
 }
@@ -9959,24 +9977,11 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = match typed_dispatch.as_ref() {
-                    Some(dispatch)
-                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
-                    {
-                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-                    }
-                    // Pre-m213 tasks have no typed dispatch boundary. Preserve
-                    // their legacy close behavior, but only for rows that also
-                    // lack dispatch provenance. As soon as any typed dispatch
-                    // exists, this fallback is unreachable and can never
-                    // authorize that current cycle.
-                    None => match task_wide_latest.as_ref() {
-                        Ok(Some(row)) if row.dispatch_id.is_none() => Ok(Some(row.clone())),
-                        Ok(_) => Ok(None),
-                        Err(_) => Ok(None),
-                    },
-                    _ => Ok(None),
-                };
+                let latest = close_cycle_verdict(
+                    &self.cas_root,
+                    typed_dispatch.as_ref(),
+                    task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()),
+                );
 
                 // Typed state is authoritative for new dispatches. The legacy
                 // Error row remains a readable fallback for pre-m211 databases,

@@ -34,7 +34,7 @@ def report(value):
         build, merge, grouping = (params[k] for k in ("maxEntriesToBuild", "maxEntriesToMerge", "groupingStrategy"))
         if type(build) is not int or type(merge) is not int or not isinstance(grouping, str):
             raise ValueError("queue parameters invalid")
-        if build >= 5 and merge >= 5 and grouping == "ALLGREEN":
+        if build >= 5 and merge == 1 and grouping == "ALLGREEN":
             continue
         ruleset = rule["repositoryRuleset"]
         source, identifier = ruleset["source"], ruleset["databaseId"]
@@ -47,9 +47,9 @@ def report(value):
         update = ('{name,target,enforcement,conditions,bypass_actors,rules} | '
                   '(.rules[] | select(.type == "merge_queue").parameters) |= '
                   '(.max_entries_to_build = ([.max_entries_to_build,5]|max) | '
-                  '.max_entries_to_merge = ([.max_entries_to_merge,5]|max) | .grouping_strategy = "ALLGREEN")')
+                  '.max_entries_to_merge = 1 | .min_entries_to_merge = 1 | .grouping_strategy = "ALLGREEN")')
         fix = f"gh api {endpoint} | jq '{update}' | gh api -X PUT {endpoint} --input -"
-        warnings.append(f"ruleset {identifier}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge>=5, ALLGREEN. Run: {fix}")
+        warnings.append(f"ruleset {identifier}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge=1, ALLGREEN. Run: {fix}")
     return f"merge queue drift on {branch}: " + "; ".join(warnings) if warnings else None
 
 

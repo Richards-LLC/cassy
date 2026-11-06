@@ -20,18 +20,22 @@ therefore retained in the fan-in, not dropped.
 
 [`main-ruleset.json`](main-ruleset.json) requires `Fast Validation`, blocks branch
 deletion and force-pushes, and requires GitHub's merge queue. The queue permits at
-least five concurrent builds and up to five entries per merge group, with a minimum
-of one entry and zero fill wait. It uses `ALLGREEN`, so every entry in a group
-must pass its required checks. Higher build/merge limits remain valid.
+least five concurrent builds and exactly one entry per merge group, with a minimum
+of one entry and zero fill wait. It uses `ALLGREEN`, so each entry must pass its
+required checks. Parallel builds remain enabled; singleton landing keeps a
+release's landed tree identical to its prebuilt archives, even when other PRs
+are queued (cas-d637). Higher build limits remain valid.
 
 `cas setup --project <dir>` and `cas doctor` read the default branch's active queue
-rules and report drift below 5/5 or away from `ALLGREEN`. Origin identity and queue
-health share one GitHub request per invocation, bounded to five seconds.
+rules and report drift below five parallel builds, away from singleton landing,
+or away from `ALLGREEN`. Origin identity and queue health share one GitHub request per invocation, bounded to five seconds.
 Projects with no active merge-queue rule do not receive a drift warning. The release preflight uses
 the same GraphQL document and prints one warning on drift or unavailable access
 (including rate limits); it never fails a release for this advisory check.
+The existing PR admission read also verifies the target queue uses singleton landing and `ALLGREEN`; release
+admission refuses missing or unsafe settings before enabling auto-merge.
 Diagnostics only print a repair command. That command reads the full ruleset,
-changes only the queue limits/grouping and preserves higher limits and other rules.
+changes only the queue limits/grouping and preserves higher build limits and other rules.
 Neither setup, doctor nor release preflight writes the ruleset automatically.
 Repair commands cover repository rulesets; unsupported sources report unavailable.
 

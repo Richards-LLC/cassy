@@ -3565,6 +3565,10 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 4. Hotfix: branch from `main`, commit the fix and its changelog fragment,
    then `scripts/release.sh --hotfix` (the next patch version). It takes the
    same PR, queue and workflow path.
+   Release admission requires `maximumEntriesToMerge=1` and `ALLGREEN` on the
+   target queue; five or more builds can still run concurrently. The singleton
+   landing prevents another PR from changing the prebuilt release tree.
+
 5. The merge-queue run also runs `release-prebuild.yml` for a PR that changes
    the version: Linux `release-fast` and macOS ARM64 (LTO off) start at
    enqueue, in parallel with the tests, on hosted runners. They are not

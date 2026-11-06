@@ -1137,7 +1137,8 @@ fn enqueue_delivery_pr_merged_wake(
             close_cycle_verdict, required_verification_type,
         };
         let task = crate::store::open_task_store_cached(cas_dir)
-            .and_then(|store| store.get(task_id))
+            .map_err(|error| format!("could not open merged task store: {error}"))?
+            .get(task_id)
             .map_err(|error| format!("could not read merged task: {error}"))?;
         let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id)
             .map_err(|error| format!("could not read merged delivery proof cycle: {error}"))?;

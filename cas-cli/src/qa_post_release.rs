@@ -230,6 +230,17 @@ mod tests {
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per release SHA");
+        // cas-8863: unrelated integrations move the target, not its live task set.
+        let mut target_tip = live.clone();
+        for name in ["unrelated-one", "unrelated-two"] {
+            git(&["checkout", "-qb", name, &target_tip]);
+            anchor(&format!("{name}.md"));
+            git(&["checkout", "-q", "--detach", &target_tip]);
+            git(&["merge", "--no-ff", "-qm", name, name]);
+            target_tip = git(&["rev-parse", "HEAD"]);
+            git(&["update-ref", "refs/remotes/origin/main", &target_tip]);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        }
         // A delivery parked later at the already-noticed tip still gets its own offer.
         let mut late = Task::new("cas-late".into(), "late".into());
         late.status = cas_types::TaskStatus::AwaitingMerge;

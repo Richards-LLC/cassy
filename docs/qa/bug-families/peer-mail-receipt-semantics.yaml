@@ -1,0 +1,4 @@
+title: Cloud acceptance and machine acknowledgement cannot claim peer supervisor surfacing
+tasks: [cas-292a]
+invariants: [HUB-J5-RECEIPT-STAGES]
+journeys: [HUB-J5]

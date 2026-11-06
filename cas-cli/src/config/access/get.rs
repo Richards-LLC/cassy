@@ -190,6 +190,7 @@ impl Config {
             "factory.delivery_stalled_priority_secs" => Some(factory.delivery_stalled_priority_secs.to_string()),
             "factory.delivery_stalled_normal_secs" => Some(factory.delivery_stalled_normal_secs.to_string()),
             "factory.strict_cli" => Some(factory.strict_cli.to_string()),
+            "factory.release_train" => Some(factory.release_train.to_string()),
             "factory.target_cache_high_watermark_percent" => Some(factory.target_cache_high_watermark_percent.to_string()),
             "factory.target_cache_low_watermark_percent" => Some(factory.target_cache_low_watermark_percent.to_string()),
             "factory.target_cache_min_idle_secs" => Some(factory.target_cache_min_idle_secs.to_string()),

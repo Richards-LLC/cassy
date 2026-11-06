@@ -1100,6 +1100,13 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_base_branch: Option<String>,
 
+    /// One integration per release: a task created with no epic and no
+    /// explicit target joins the repository's open release-train epic, cut
+    /// from the integration branch, instead of targeting it directly. Off
+    /// restores per-task trunk targets.
+    #[serde(default = "default_true")]
+    pub release_train: bool,
+
     /// Refuse to silently fall back when a resolved worker/supervisor spec
     /// requests Codex but Codex is unavailable — bail with an actionable
     /// error instead of rewriting to Claude (cas-7199 / cas-a487). OR'd
@@ -1367,6 +1374,7 @@ impl Default for FactoryConfig {
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
+            release_train: true,
             strict_cli: false,
             target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),

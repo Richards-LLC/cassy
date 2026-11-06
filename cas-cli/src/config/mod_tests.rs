@@ -1125,6 +1125,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.delivery_stalled_priority_secs", "120", "120"),
         ("factory.delivery_stalled_normal_secs", "240", "240"),
         ("factory.strict_cli", "true", "true"),
+        ("factory.release_train", "false", "false"),
         ("factory.target_cache_high_watermark_percent", "90", "90"),
         ("factory.target_cache_low_watermark_percent", "70", "70"),
         ("factory.target_cache_min_idle_secs", "7200", "7200"),

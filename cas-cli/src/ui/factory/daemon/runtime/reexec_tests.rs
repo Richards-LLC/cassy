@@ -66,7 +66,24 @@ const EXEC_TEST: &str = "ui::factory::daemon::runtime::reexec_tests::reexec_adop
 #[test]
 fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
     if let Some(root) = std::env::var_os("CAS_REEXEC_TEST_ROOT") {
-        let _guard = crate::test_env_guard::TestEnvGuard::new();
+        // TestEnvGuard deliberately scrubs CAS_*; retain only this isolated
+        // subprocess's explicit protocol inputs across that scrub.
+        let protocol: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                let key = key.to_string_lossy();
+                key.starts_with("CAS_REEXEC_TEST_")
+                    || matches!(
+                        key.as_ref(),
+                        "CAS_DAEMON_HANDOFF_FD"
+                            | "CAS_DAEMON_HANDOFF_FALLBACK"
+                            | "CAS_DAEMON_ROLLBACK_BINARY"
+                    )
+            })
+            .collect();
+        let mut guard = crate::test_env_guard::TestEnvGuard::new();
+        for (key, value) in protocol {
+            guard.set(key, value);
+        }
         if std::env::var_os("CAS_DAEMON_HANDOFF_FD").is_some() {
             assert_eq!(
                 super::super::reexec::resume_inherited_daemon(),
@@ -74,6 +91,11 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
             );
             return;
         }
+        assert_eq!(
+            std::env::var("CAS_REEXEC_TEST_VERSION").as_deref(),
+            Ok("old"),
+            "an exec image without its handoff marker must fail, never spawn another fixture"
+        );
         let root = std::path::PathBuf::from(root);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -114,7 +136,28 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
-    let env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // Large debug images must never be staged in a RAM-backed temporary HOME.
+    // The caller supplies the host's scratch TMPDIR; CI defaults to its checkout.
+    let scratch = std::env::var_os("TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/reexec-tmp")
+        });
+    std::fs::create_dir_all(&scratch).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("cas-reexec-")
+        .tempdir_in(&scratch)
+        .unwrap();
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    env.set("HOME", home.path());
+    env.set("TMPDIR", &scratch);
+    for (key, directory) in [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CACHE_HOME", ".cache"),
+    ] {
+        env.set(key, home.path().join(directory));
+    }
     for fail_adopt in [false, true] {
         let project = env
             .home()

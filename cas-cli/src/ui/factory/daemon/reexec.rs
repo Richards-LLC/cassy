@@ -193,7 +193,19 @@ fn pin_rollback(session: &str) -> Result<tempfile::TempPath> {
     let source = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
     let source = crate::ui::factory::provisioner_pin_path(session);
-    std::fs::copy(source, &path).context("Could not preserve old daemon for rollback")?;
+    #[cfg(test)]
+    let fixture = std::env::var_os("CAS_REEXEC_TEST_ROOT").is_some();
+    #[cfg(not(test))]
+    let fixture = false;
+    if fixture {
+        // The fixture's stable test image can be linked. Copying a gigabyte
+        // debug image per exec would exhaust a RAM-backed test HOME.
+        std::fs::remove_file(&path)?;
+        std::fs::hard_link(std::env::current_exe()?, &path)
+            .context("Could not link isolated rollback test image")?;
+    } else {
+        std::fs::copy(source, &path).context("Could not preserve old daemon for rollback")?;
+    }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
     File::open(&path)?.sync_all()?;
     Ok(path)

@@ -453,6 +453,17 @@ pub(crate) enum ApprovedCloseRetry {
     NotQueued(String),
 }
 
+/// Completion of an explicit no-delivery close is quiet and dispatch-idempotent.
+pub(crate) fn queue_no_delivery_close_notice(
+    cas_root: &Path, task: &cas_types::Task, dispatch_id: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| (
+        format!("cassy-no-delivery-closed:{}:{dispatch_id}:worker:{worker_name}", task.id),
+        format!("{}Task {} is closed: its exact verdict approved your recorded no_delivery close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
+        format!("No-delivery close completed: {}", task.id),
+    ))
+}
+
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
 /// merged delivery, in its next-turn digest without waking it.
 pub(crate) fn queue_cassy_merge_close_notice(

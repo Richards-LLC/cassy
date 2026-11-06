@@ -3729,7 +3729,7 @@ anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 An undeclared helper that never delivered code may instead close with
 `no_delivery=true reason="<completed helper outcome>"`. This declaration is
-required on every attempt and audited with the registered caller, repository,
+required on every worker attempt and audited with the registered caller, repository,
 target SHA and measured refs. Cassy requires readable Git and task attribution,
 no recorded delivery or binding QA round, and no task commits or unmerged work
 on any local/origin candidate lane or closing HEAD. Empty diffs alone grant no
@@ -3738,6 +3738,12 @@ preserving verification and uncommitted-work checks; it sets no methodology,
 external reference or delivery anchor. It cannot be combined with other close
 receipts, dispositions or overrides. The unified MCP and per-action close
 requests expose this flag; there is no separate CLI task-close command.
+When verification is required, Cassy saves the explicit no-delivery reason and
+assignee atomically with the exact dispatch. Approval resumes that close through
+the ordinary absence and proof gates, lifting only that dispatch's verification
+wait. Independent holds stay blocked, and no worker close retry is queued.
+A reopen retires the saved intent; identical supervisor verdict replay after
+closure acknowledges history without closing or notifying again.
 A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.

@@ -1414,13 +1414,12 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
-        // Missing directory authority, including a temporarily absent local
-        // registration, leaves the claim unacknowledged for a later poll.
-        if recipient.role == AgentRole::Worker && directory.as_ref()
-            .is_none_or(|directory| !directory.matches_local(recipient)) { continue; }
         if recipient.role == AgentRole::Worker {
-            let pair = directory.as_ref().expect("recipient authority was checked")
-                .pair_for_receipt(&message.sender_agent_id, &recipient.id);
+            // Missing directory authority, including a temporarily absent local
+            // registration, leaves the claim unacknowledged for a later poll.
+            let Some(directory) = directory.as_ref().filter(|directory| directory.matches_local(recipient))
+                else { continue; };
+            let pair = directory.pair_for_receipt(&message.sender_agent_id, &recipient.id);
             if message.scope != PeerScope::Project || !same_repo || pair.is_err()
                 || !workers::allowed_intent(&message.body)
             {

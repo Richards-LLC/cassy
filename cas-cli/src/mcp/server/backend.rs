@@ -49,7 +49,7 @@ impl Switchable {
             changed.as_mut().enable();
             if self.handlers.load(Ordering::Acquire) == 0 {
                 let service = self.active.get().unwrap_or(&self.passive);
-                let _tool_work = service.tool_work.write().await;
+                service.tool_work.wait_idle().await;
                 if self.handlers.load(Ordering::Acquire) == 0 { return; }
             }
             changed.await;
@@ -240,7 +240,7 @@ mod tests {
         assert_ne!(response.is_error, Some(true));
         assert!(!finished.load(Ordering::Acquire), "the response must precede background completion");
         // The front times out in another process. Its abandoned idle request
-        // stays alive in this backend, including after the45s switch budget.
+        // stays alive in this backend, including after the 45s switch budget.
         let idle_backend = backend.clone();
         let idle = tokio::spawn(async move { idle_backend.wait_idle().await });
         tokio::task::yield_now().await;

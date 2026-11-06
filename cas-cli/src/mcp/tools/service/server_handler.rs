@@ -487,7 +487,7 @@ impl CasService {
             .and_then(|args| args.get("id"))
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
-        let tool_work = self.tool_work.clone().read_owned().await;
+        let tool_work = self.tool_work.permit();
         let start = std::time::Instant::now();
         let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), async move {
             let _tool_work = tool_work;

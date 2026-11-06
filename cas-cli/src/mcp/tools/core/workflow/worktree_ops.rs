@@ -8524,6 +8524,68 @@ mod cas_7ce6_parked_merge_source_tests {
     }
 
     #[test]
+    fn target_sync_merge_advances_parked_anchor_without_reclose_cas_e5af() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for shape in ["target-sync", "worker-on-next-task", "new-task-commit", "foreign-parent", "anchor-on-side", "unpushed"] {
+            let (repo, anchor) = stacked_lane();
+            let path = repo.path();
+            git(path, &["remote", "add", "origin", "unused-fixture-origin"]);
+            git(path, &["checkout", "-q", "main"]);
+            commit(path, "target-update");
+            git(path, &["update-ref", "refs/remotes/origin/main", "main"]);
+            if shape == "foreign-parent" {
+                git(path, &["checkout", "-qb", "foreign"]);
+                commit(path, "unmerged-foreign-work");
+            }
+            if shape == "anchor-on-side" {
+                git(path, &["checkout", "-qb", "integration", "main"]);
+                git(path, &["merge", "--no-ff", "-m", "integration merge", "factory/w"]);
+                git(path, &["branch", "-f", "factory/w", "HEAD"]);
+            } else {
+                git(path, &["checkout", "-q", "factory/w"]);
+                if shape == "new-task-commit" {
+                    commit(path, "fix(cas-park): new task-authored correction");
+                }
+                let target = if shape == "foreign-parent" { "foreign" } else { "main" };
+                git(path, &["merge", "--no-ff", "-m", "merge epic into parked delivery", target]);
+            }
+            let tip = git(path, &["rev-parse", "factory/w"]);
+            git(path, &["update-ref", "refs/remotes/origin/factory/w",
+                if shape == "unpushed" { &anchor } else { &tip }]);
+            let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("w".into());
+            task.deliverables.parked_branch = Some("factory/w".into());
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let mut next = cas_types::Task::new("cas-next".into(), "worker's next task".into());
+            next.status = cas_types::TaskStatus::InProgress;
+            next.assignee = task.assignee.clone();
+            let tasks = if shape == "worker-on-next-task" { vec![task.clone(), next.clone()] } else { vec![task.clone()] };
+            let store = crate::store::mock::MockTaskStore::with_tasks(tasks);
+            let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
+            let target_before = git(path, &["rev-parse", "main"]);
+            let result = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task);
+            let saved = store.get(&task.id).unwrap();
+            if matches!(shape, "target-sync" | "worker-on-next-task") {
+                assert_eq!(result, Ok(None), "{shape}");
+                assert_eq!(saved.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{shape}");
+                assert!(saved.notes.contains(&anchor) && saved.notes.contains(&tip), "audit: {}", saved.notes);
+                assert_eq!(core.parked_merge_source_for_task(&store, path, "factory/w", "main", &saved), Ok(None));
+                assert_eq!(store.get(&task.id).unwrap().notes, saved.notes, "retry is idempotent");
+                if shape == "worker-on-next-task" {
+                    assert_eq!(store.get(&next.id).unwrap().status, next.status);
+                }
+            } else {
+                let refusal = result.expect_err(shape);
+                assert!(refusal.contains("PARKED DELIVERY SOURCE MOVED"), "{shape}: {refusal}");
+                assert_eq!(serde_json::to_value(&saved).unwrap(), serde_json::to_value(&task).unwrap(), "{shape}");
+            }
+            assert_eq!(git(path, &["rev-parse", "main"]), target_before, "source validation never merges");
+        }
+    }
+
+    #[test]
     fn rebased_same_patch_delivery_rebinds_and_merges_without_reclose_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();

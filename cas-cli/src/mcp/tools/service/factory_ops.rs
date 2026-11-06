@@ -14314,12 +14314,24 @@ mod spawn_lifecycle_tests {
         use cas_types::Task;
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().expect("temp project");
-        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[factory]\nfocus_mode='visible chunks first'\n").unwrap();
+        std::fs::create_dir_all(temp.path().join("docs/qa")).unwrap();
+        std::fs::write(temp.path().join("docs/qa/journeys.yaml"),
+            "main_journeys: [save]\njourneys:\n- id: save\n  status: active\n").unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let task_store = core.open_task_store().expect("open task store");
         task_store.init().expect("init task store");
         task_store
             .add(&Task::new("cas-brief1".to_string(), "Fix the sweep".to_string()))
             .expect("add task");
+        let mut theoretical = task_store.get("cas-brief1").unwrap();
+        theoretical.labels = vec!["from-finding".into(), "reach:theoretical".into(), "severity:broken".into()];
+        task_store.update(&theoretical).unwrap();
+        let mut main = Task::new("cas-visible".into(), "Save fails for everyone".into());
+        main.labels = vec!["reach:main".into(), "severity:broken".into(), "journey:save".into(), "runtime-repro".into()];
+        task_store.add(&main).unwrap();
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -14360,6 +14372,11 @@ mod spawn_lifecycle_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
+        assert!(text.contains("TRIAGE") && text.contains("cas-visible"), "{text}");
+        let prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
+            &cas_root, "worker-1", "cas-brief1", "Fix the sweep", cas_mux::SupervisorCli::Claude,
+        );
+        assert!(prompt.contains("visible chunks first"), "{prompt}");
         let notes = task_store.get("cas-brief1").expect("task").notes;
         assert!(
             notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),

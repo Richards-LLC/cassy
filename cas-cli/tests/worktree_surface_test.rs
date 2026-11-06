@@ -2953,7 +2953,7 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
             #[cfg(unix)]
             if racing_writer {
                 use std::os::unix::fs::PermissionsExt;
-                let bin = fixture.cas_root.join("git-race-bin");
+                let bin = fixture.cas_root.join("git-race-hooks");
                 std::fs::create_dir_all(&bin).unwrap();
                 let real_git = String::from_utf8(Command::new("sh").args(["-c", "command -v git"])
                     .output().unwrap().stdout).unwrap();
@@ -2961,22 +2961,19 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
                 let armed = bin.join("merged");
                 let script = format!(r#"#!/bin/sh
 real={real}
-if [ "$1" = update-ref ] && [ "$2" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
-  "$real" "$@" || exit $?
-  touch {armed}
-  exit 0
-fi
-if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = 'epic/rebound^{{commit}}' ] && [ -f {armed} ]; then
-  rm {armed}
-  printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
-  "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
-  "$real" -C {target} rev-parse HEAD > {tip}
-fi
-exec "$real" "$@"
+[ "$1" = committed ] && [ ! -f {armed} ] || exit 0
+while read old new reference; do
+  if [ "$reference" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
+    touch {armed}
+    printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
+    "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
+    "$real" -C {target} rev-parse HEAD > {tip}
+  fi
+done
 "#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
-                std::fs::write(bin.join("git"), script).unwrap();
-                std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
-                env.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+                std::fs::write(bin.join("reference-transaction"), script).unwrap();
+                std::fs::set_permissions(bin.join("reference-transaction"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                run_git(&["config", "core.hooksPath", bin.to_str().unwrap()], &fixture.repo.root);
             }
             let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
             assert!(refused.message.contains(if racing_writer { "subsequent target progress" } else { "reviewed delivery" }), "{refused}");
@@ -4219,7 +4216,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         .expect_err("required verification now precedes the merge");
     assert!(held.message.contains("PRE-MERGE VERIFICATION"), "{}", held.message);
     assert!(
-        held.message.contains("spawn")
+        held.message.to_ascii_lowercase().contains("spawn")
             && held.message.contains("task-verifier")
             && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
         "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",

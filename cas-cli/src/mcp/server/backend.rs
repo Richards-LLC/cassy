@@ -136,7 +136,7 @@ fn control_socket(fd: i32) -> Result<tokio::net::UnixStream> {
 }
 
 pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
-    let control = control_socket(fd)?;
+    let mut control = control_socket(fd)?;
     let front_pid = std::os::unix::process::parent_id();
     let root = super::runtime::resolve_mcp_serve_root()?;
     let watchdog = super::parent_watchdog::spawn();
@@ -146,13 +146,22 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
     }
     let switchable = Switchable::standby(root.clone());
     let input = super::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
+    let mut daemon = None;
+    if !standby {
+        // Initial startup retains the eager store/schema checks and readiness
+        // banner even before a client sends initialize. Replacements stay inert.
+        let (service, running_daemon) = super::runtime::prepare_service(root.clone()).await?;
+        daemon = running_daemon;
+        let _ = switchable.active.set(service);
+        control.write_all(b"{\"event\":\"ready\"}\n").await?;
+        control.flush().await?;
+    }
     let server = switchable.clone().serve((input, tokio::io::stdout())).await?;
     let cancel = server.cancellation_token();
     let waiting = server.waiting();
     tokio::pin!(waiting);
     let (read, mut write) = control.into_split();
     let mut control = BufReader::new(read);
-    let mut daemon = None;
     let mut retire = false;
     let end_reason = loop {
         let mut line = String::new();

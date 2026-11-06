@@ -108,7 +108,7 @@
 
 ## MCP, storage and delivery gates
 
-- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/`, `cas-cli/src/mcp/server/front.rs`, `cas-cli/src/mcp/server/backend.rs`, `cas-cli/src/mcp/server/front/tests.rs` - stable stdio framing, in-flight tool accounting, standby activation and compatible backend replacement.
+- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/`, `cas-cli/src/mcp/server/front.rs`, `cas-cli/src/mcp/server/backend.rs`, `cas-cli/src/mcp/server/front/tests.rs` - stable stdio framing, eager initial startup, in-flight tool accounting, standby activation and compatible backend replacement.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - core operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/service/factory_ops.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - harness token-accounting readers, measured worker context notices and authenticated response context.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs` - task closure, shared-lane ownership, batch-squash precedence and target-sync/generated-continuation attribution.

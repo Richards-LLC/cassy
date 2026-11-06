@@ -521,9 +521,22 @@ async fn watch_updates(
 pub(super) async fn run() -> Result<()> {
     let root = super::runtime::resolve_mcp_serve_root()?;
     let watchdog = super::parent_watchdog::spawn();
+    let input = super::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
     let program = std::env::args_os().next().map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute()).unwrap_or(std::env::current_exe()?);
-    let backend = spawn_backend(&program, false)?;
+    let mut backend = spawn_backend(&program, false)?;
+    let ready = {
+        let mut control = Frames::new(&mut backend.control_output);
+        tokio::select! {
+        result = timeout(STARTUP_TIMEOUT, control.read()) =>
+            result.context("initial MCP backend startup timed out")??
+                .context("initial MCP backend exited during startup")?,
+        () = watchdog.tripped() => return Ok(()),
+        }
+    };
+    if serde_json::from_slice::<Value>(&ready)?["event"] != "ready" {
+        bail!("initial MCP backend did not confirm readiness");
+    }
     let image = backend.image.clone();
     let image = std::sync::Arc::new(std::sync::Mutex::new(image));
     let (updates, update_rx) = mpsc::channel(1);
@@ -566,7 +579,7 @@ pub(super) async fn run() -> Result<()> {
         state.is_some()
     });
     let result = tokio::select! {
-        result = relay(tokio::io::stdin(), tokio::io::stdout(), backend, update_rx, events) => result,
+        result = relay(input, tokio::io::stdout(), backend, update_rx, events) => result,
         () = watchdog.tripped() => Ok(()),
     };
     watcher.abort();

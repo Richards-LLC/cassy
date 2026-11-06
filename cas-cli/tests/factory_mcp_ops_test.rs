@@ -2451,7 +2451,9 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
         "no eligible account",
         "Pass config_dir",
         "project worker config_dir",
-        registered.to_str().unwrap(),
+        // Unusable accounts are listed by label with their rejection cause;
+        // only authenticated alternatives belong in the usable-home list.
+        "registered@example.com",
     ] {
         assert!(error.message.contains(detail), "missing {detail:?}: {error}");
     }

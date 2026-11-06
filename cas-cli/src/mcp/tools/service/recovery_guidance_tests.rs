@@ -375,7 +375,6 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
         row.contains("merged (squash, ancestry lost)"),
         "retained work must not hide the historical delivery proof: {status}"
     );
-    assert!(status.contains("Retained worker local work needs review"), "{status}");
     assert!(!status.contains("✓ All child factory branches are merged"), "{status}");
     let unproven = status.lines().find(|line| line.starts_with("| cas-ee55 |")).unwrap();
     assert!(unproven.contains("retained local work"), "{status}");

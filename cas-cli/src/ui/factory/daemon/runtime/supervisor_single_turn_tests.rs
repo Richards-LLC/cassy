@@ -980,6 +980,8 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                     assert_eq!(readable.len(), 1, "{context}: explicit inbox read stays available");
                     assert_eq!(readable[0].prompt, body, "{context}");
                 }
+                // Reap each fixture before the next row; live cats retain PTY readers/fds.
+                daemon.app.mux.get_mut(&name).unwrap().kill_tree(true).await;
             }
         }
     }

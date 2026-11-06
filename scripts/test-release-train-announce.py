@@ -164,6 +164,13 @@ class Announce(unittest.TestCase):
         for word in ("agent", "lane"):
             self.assertIn(f"forbidden user wording: {word}", result.stderr)
 
+        bodies[1] = BODIES[1] + " Agents use these lanes."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for word in ("Agents", "lanes"):
+            self.assertIn(f"forbidden user wording: {word}", result.stderr)
+
         bodies[1] = BODIES[1]
         bodies[3] += " A worker can use it."
         self.write_draft(bodies)

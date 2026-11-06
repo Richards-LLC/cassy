@@ -3217,15 +3217,33 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             .join(".claude/skills/cas-personal/SKILL.md")
             .is_file()
     );
+    // cas-c754: the preceding sync wrote and staged settings, but HEAD is
+    // still the project's old version. A new hook projection must recognize
+    // those prior Cassy bytes rather than blaming them on the operator.
+    let config_path = root.join("config.toml");
+    let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&config_path).unwrap().parse().unwrap();
+    config["hooks"]["pre_tool_use"]["timeout"] = toml_edit::value(17);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+    assert_eq!(receipt["managed_files"]["conflicts"], serde_json::json!([]),
+        "settings written by the previous sync are not a user conflict: {receipt}");
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(project.join(".claude/settings.json")).unwrap()).unwrap();
+    assert!(settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
+        .any(|group| group["hooks"][0]["timeout"] == 17));
     // Ignore exceptions and staged edits to owned text are both preflight conflicts.
     for (path, suffix) in [
         (".gitignore", "\n!/AGENTS.md\n"),
         ("CLAUDE.md", "manual managed edit"),
+        (".claude/settings.json", "echo user-owned-statusline"),
     ] {
         let file = project.join(path);
         let original = std::fs::read_to_string(&file).unwrap();
         let conflicted = if path == "CLAUDE.md" {
             original.replace("@AGENTS.md", suffix)
+        } else if path == ".claude/settings.json" {
+            original.replace("cas statusline --with-session", suffix)
         } else {
             format!("{original}{suffix}")
         };
@@ -3234,6 +3252,8 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             cas_6718_git(&project, &["add", path]);
         }
         let index = cas_6718_git(&project, &["ls-files", "--stage"]);
+        let builtin = project.join(".claude/skills/cas-tdd/SKILL.md");
+        std::fs::remove_file(&builtin).unwrap();
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
@@ -3246,16 +3266,16 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 .any(|p| p == path),
             "{receipt}"
         );
+        assert!(builtin.is_file(), "a conflict on {path} must not skip the other builtin writers");
         if path == ".gitignore" {
             let (result, human) = capture_phase(true, || {
                 execute(&args, &update_test_cli(false), Some(&root))
             });
             result.unwrap();
             assert!(
-                human.starts_with("Managed files: 1 conflicts preserved;"),
+                human.contains("Managed files: 1 conflicts preserved;"),
                 "{human}"
             );
-            assert!(!human.contains("[OK] Syncing"), "{human}");
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);

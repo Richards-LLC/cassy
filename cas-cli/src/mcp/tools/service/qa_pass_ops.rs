@@ -586,7 +586,7 @@ impl CasService {
             }
         };
         let mut tracked = Vec::new();
-        let mut below_threshold = Vec::new();
+        let mut backlog = Vec::new();
         for issue in issues {
             // cas-2849: a finding that names its existing follow-up is linked,
             // not filed again.
@@ -600,11 +600,6 @@ impl CasService {
                 tracked.push(format!("{label} by {existing}"));
                 continue;
             }
-            if !issue.clears_spawn_threshold() {
-                let label = if issue.id.is_empty() { issue.problem.as_str() } else { issue.id.as_str() };
-                below_threshold.push(label.to_string());
-                continue;
-            }
             let id = match store.generate_id() {
                 Ok(id) => id,
                 Err(error) => {
@@ -612,8 +607,12 @@ impl CasService {
                     continue;
                 }
             };
-            let task =
+            let mut task =
                 crate::qa_pass::follow_up_task(&id, &delivery, pass, issue, ledger_path, epic.as_ref());
+            crate::finding_triage::apply(&self.inner.cas_root, &mut task);
+            if task.labels.iter().any(|label| label == "triage-backlog") {
+                backlog.push(if issue.id.is_empty() { issue.problem.clone() } else { issue.id.clone() });
+            }
             if let Err(error) = store.create_atomic(
                 &task,
                 &[],
@@ -649,10 +648,10 @@ impl CasService {
                 filed.join(", ")
             ));
         }
-        if !below_threshold.is_empty() {
+        if !backlog.is_empty() {
             out.push_str(&format!(
-                "\nLeft in the verdict, below the spawn threshold (no repro or affected): {}.",
-                below_threshold.join("; ")
+                "\nTheoretical backlog (P4): {}.",
+                backlog.join("; ")
             ));
         }
         if !tracked.is_empty() {

@@ -3,6 +3,7 @@
 # Header policy is authoritative; local qa.registry.enforce is fallback only.
 # A delivery uses the stricter policy at base and head.
 version: 1
+main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26]
 updated: '2026-10-26'
 selection: legacy_catalog
 enforce: enforce

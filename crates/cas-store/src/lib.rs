@@ -247,7 +247,7 @@ pub use verification_store::{
     REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
     SqliteVerificationStore, TaskReopenLifecycleOutbox,
     VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_DURATION_SOURCE_STATEMENT,
-    VERIFICATION_SCHEMA,
+    VERIFICATION_SCHEMA, VERIFICATION_ISSUE_TRIAGE_STATEMENT,
     VERIFICATION_STATUS_DETAIL_STATEMENT, VERIFICATION_STATUS_NORMALIZE_STATEMENT,
     VerificationStore, add_system_verification, add_verification_with_conn,
     adopt_orphaned_verification_dispatches, bind_server_verifier_handoff,

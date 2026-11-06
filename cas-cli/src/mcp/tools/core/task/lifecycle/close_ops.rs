@@ -6896,7 +6896,7 @@ impl CasCore {
     /// stops apply:
     /// - the measured branch must be this task's per-task branch
     ///   (`factory/<assignee>-<task>`), or its active assignee's plain lane
-    ///   with every continuation commit explicitly claiming this task;
+    ///   with every authored continuation commit explicitly claiming this task;
     /// - no other open task's anchor may sit between the recorded anchor and
     ///   the tip, because that commit is another delivery's boundary.
     pub(crate) fn tip_is_own_task_lineage(
@@ -6961,15 +6961,17 @@ impl CasCore {
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
-                    (explicit_final_tip || !subjects.is_empty())
-                        && subjects.iter().all(|subject| {
+                    // A target-sync merge can leave no authored subjects.
+                    // Anchor advances still check target imports, first-parent
+                    // continuity and the sibling lease boundary separately.
+                    subjects.iter().all(|subject| {
                             // cas-93d7: an exact-tip receipt can identify an
                             // unnamed pre-push correction on the active lane.
                             // A foreign subject still belongs to another task.
                             message_references_task(subject, &task.id)
                                 || (explicit_final_tip
                                     && !message_claims_other_task(subject, Some(&task.id)))
-                        })
+                    })
                 })
         });
         if !own_task_branch && !own_active_lane {

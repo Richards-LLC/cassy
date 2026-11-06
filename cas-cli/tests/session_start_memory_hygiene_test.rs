@@ -1,13 +1,11 @@
 use assert_cmd::Command;
 use cas::hooks::build_context_with_token_budget;
+use cas::store::open_rule_store;
 use cas::types::{Entry, EntryType};
 use cas_core::hooks::context::{ContextStores, SurfacedItemCallback, build_context_with_stores};
 use cas_core::hooks::{DefaultHooksConfig, HookInput};
 use cas_core::memory::{contamination_patterns, find_contaminated_entries};
-use cas_store::{
-    RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore,
-    SqliteSurfacedArtifactStore, Store,
-};
+use cas_store::{SkillStore, SqliteSkillStore, SqliteStore, SqliteSurfacedArtifactStore, Store};
 use cas_types::{MemoryTier, Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
 use rusqlite::Connection;
 use std::fs;
@@ -32,8 +30,9 @@ fn cli_session_start_persists_surface_ledger_for_injected_rules_and_skills() {
     let session = Session::new("surface-session".to_string(), "/project".to_string(), None);
     entry_store.start_session(&session).unwrap();
 
-    let rule_store = SqliteRuleStore::open(&cas_root).unwrap();
-    rule_store.init().unwrap();
+    // Create fresh policy through the lifecycle opener; a raw pre-existing
+    // Proven row without a rule file is deliberately held as legacy policy.
+    let rule_store = open_rule_store(&cas_root).unwrap();
     let mut rule = Rule::new("surface-rule".to_string(), "Surface this rule".to_string());
     rule.status = RuleStatus::Proven;
     rule_store.add(&rule).unwrap();

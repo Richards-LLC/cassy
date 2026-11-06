@@ -7,6 +7,73 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-06
+
+### Fixed — Factory pushes
+
+- **First pushes follow the assigned epic** — New factory branches run fast
+  checks against their task's target branch when available. Changes inherited
+  from an epic that lags main no longer block an unrelated first push.
+- **Unchanged version fixtures allow pushes** — The next-release literal check
+  scans only lines added by a lane, so existing dependency fixtures no longer
+  block an unrelated change in the same file.
+
+### Changed — Factory
+
+- **Fixes ride the release train** — Was: a task created without an epic
+  targeted trunk directly, so every fix took its own merge-queue cycle. Now: it
+  joins the open release-train epic cut from the integration branch (main or
+  staging), merges locally into the train, and the train goes through the gate
+  once; a landed train closes and the next opens on the next create. Pass
+  `target_branch` for a hotfix, or set `factory.release_train=false`.
+- **Ejected deliveries go straight back to their worker** — When a merge-queue run fails and ejects a delivery PR, Cassy now returns the task Open to the same worker, with the failing job, step and failing tests as the change request, and wakes that worker. The supervisor no longer has to run request changes by hand. A task gets one such repair cycle, counted only for a failed run of its current delivery tip; a second such failure leaves it parked and pages the operator once. A red run GitHub still lists from an earlier ejection (including one repaired by hand), a run of an older head, a failure the merge-group entry ahead may have caused (it failed the same job, is still running or cannot be read), and a dequeue without a failed run change nothing.
+- **Review once when only the target moved** — When the target branch moves under an approved delivery and the patch the merge adds is unchanged, including its three lines of surrounding context (same full-context patch-id), Cassy carries the approval to the new candidate automatically. No verifier runs; the new verdict and a task note record the original verdict, both target commits and the matching patch-id. A target change inside the delivered patch or its surrounding context still gets a fresh review.
+- **Verifier deadlines follow progress** — A verification dispatch no longer expires at ten minutes while its verifier is still working. A live verifier heartbeat, a running verifier-lane test or a verifier-test attempt in the last five minutes moves the deadline ten minutes out, up to one hour after the request. Silent dispatches still expire and wake the supervisor as before; a verifier that stops just after an extension is reported up to about twelve minutes late.
+- **Release trains work for every project** — The "train ready to cut" notice names the project's own release or promotion command from `factory.release_command` (for example a staging-to-main promotion), and names `scripts/release.sh` only when the repository has it. Without either, it asks the supervisor to set the command.
+- **Drop several fixes in one repair cycle** — `cas factory train drop <task>... --reason "<failure>"` reverts every named child in one step and re-enqueues the train once, so a second bad fix from the same queue run no longer reads as a second ejection. If a revert conflicts, nothing on the train changes and the error names the conflicting files and what to do next.
+
+### Fixed — Peer messaging
+
+- **Quiet merge heads-ups** — Automatic about-to-merge notices arrive as receipts and stay in the peer inbox without waking an idle supervisor.
+
+### Fixed — Release train handoff
+
+- **Release follow-through** — Release preparation reuses the open train PR and
+  returns after one admission check, with durable landing and publication wakes
+  armed automatically. Published installs wake the owning supervisor once for
+  post-release work, and failed notices retry without reinstalling. Receipts
+  report first-child-to-main and main-to-publication times plus queue attempts.
+- **Hotfix exception** — A missing train, different train lane or unavailable
+  tracking cannot block a hotfix cut through its original base branch. Pending
+  auto-merge with failed required checks is reported as not admitted, and a
+  version re-bump retires both old release watches.
+
+### Fixed — Factory
+
+- **Merges to a queued main no longer fall back to a local merge** — Was: when `worktree_merge` could not check main's merge queue, it treated that as "no queue" and tried a local merge. That happened when the queue check failed or the GitHub repository lookup failed. The local merge then refused over unrelated edits in the main checkout, or merged locally and was rejected on push. Now: either failure refuses before anything changes, says the queue state is unknown and asks for a retry. A repository with no merge queue, or whose origin is not GitHub, still merges locally. A GitHub origin needs a working `gh` to merge into main.
+- **A QA verdict no longer carries to changed code** — Was: when a delivery was re-parked, Cassy could carry an earlier independent QA pass to the new tip by claiming the reviewed source patch was byte-identical. The comparison ignored whitespace, cut the diff to the directory the merge ran from, compared each tip with a moving target branch (or whatever `HEAD` the checkout held) and never compared the two tips directly, so a follow-up commit with new source changes could merge without QA. Now: a tip that descends from the reviewed tip keeps the verdict only when the commits since then change nothing but generated build output (`hub-web/dist`). A rewritten tip keeps it only when its whole-repository source patch, whitespace and three lines of context included, is identical against the delivery's recorded target branch; with no recorded target it gets a new QA round.
+- **Cassy spends far fewer GitHub API calls** — The factory's CI watcher no longer re-reads a delivery's pull request every 30 seconds after GitHub has reported it merged; in batch QA those deliveries wait for the release verdict, and polling them was the factory's largest GraphQL cost. A process now resolves a repository's canonical name once an hour instead of on every poll, merge and close, one CI poll reads completed workflow runs once instead of twice, and every daemon on a machine shares one open-PR merge-queue listing per repository per minute.
+- **One rate-limit response pauses every caller** — When GitHub refuses a call for rate limiting, every Cassy `gh` call on that machine fails fast for two minutes instead of each caller retrying into the limit, and the refusal says it was held by the backoff and when GitHub is tried again.
+- **See who spends the budget** — Every Cassy `gh` call is logged with its caller and endpoint to `~/.cas/logs/gh-calls-<date>.tsv` (kept 7 days), and `cas doctor` shows the last hour's total, GraphQL share and top five callers. `cas factory ci-watch-dry-run --minutes <n>` runs the CI watcher's GitHub reads at the daemon's cadence, persisting nothing, and prints what they cost.
+- **Merge-queue repair cycles survive hand repairs and busy queues** — A task sent back by hand after a merge-queue ejection no longer bounces Open when GitHub lists the old failed run again, and its next real failure starts its one repair cycle instead of paging the operator. When the merge-group entry ahead is still running, Cassy waits one poll; if it is still running or unreadable, the failure is not counted against the task. Repeat ejections reuse the failed run's job and log instead of downloading the log on every poll.
+
+### Fixed — Rules
+
+- **Respect removed policy** — Deleting a generated rule file retires its stored source. Rules active when the shared store opener starts receipt tracking are held when their old files are absent, for an explicit keep or retire decision; later Cloud and team arrivals stay active and project normally. Rule listing shows stored, repository and personal sources. An authenticated operator or supervisor can create an active personal rule in one action with the operator’s exact words.
+
+### Fixed — Releases
+
+- **Preserve prebuilt release archives at queue landing** — Release admission requires singleton merges with every entry passing its checks. Queue configuration and repair commands retain at least five parallel builds while landing one PR at a time, preventing a batched landing from forcing a full archive rebuild.
+
+### Added — Factory
+
+- **Drop one fix off the release train** — `cas factory train drop <task> --reason "<failure>"` reverts that child's merge on the train with a new revert commit (no history rewrite), returns the task to its worker with the failure and how to restore the change, and re-enqueues the train PR. Each train gets one repair cycle: a second drop after a re-enqueue changes nothing and goes to the operator as a P0.
+- **Trains are cut early and often** — The supervisor gets one "train ready to cut" notice when the train has reviewed fixes merged, no child in progress and no queue run in flight, and one more when the train reaches `factory.release_train_max_age_hours` (default 3) since its first fix. Each notice names the release command. Cassy never cuts a release on its own.
+
+### Added — Delivery health
+
+- **Merge queue drift advice** — For projects with an active merge queue, setup, doctor and release preflight report a queue that builds fewer than five entries in parallel, merges more than one entry at a time, or groups other than ALLGREEN, with a ruleset-preserving repair command. Checks only report; unavailable GitHub access never blocks a release.
+
 ## [4.0.5] - 2026-11-06
 
 ### Fixed — Factory

@@ -189,7 +189,7 @@ impl CasCore {
                 return (
                     Some(train.id.clone()),
                     format!(
-                        "{receipt}\n\nRELEASE TRAIN: joined {} ({}); its delivery merges into the train, which reaches `{integration}` once per release. Pass target_branch=`{integration}` only for a hotfix.",
+                        "{receipt}\n\nRELEASE TRAIN: joined {} ({}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.",
                         train.id,
                         train.effective_epic_branch().unwrap_or(integration.as_str()),
                     ),

@@ -214,7 +214,10 @@ receipt. A train queue reservation retains control of that continuation.
 Rejection, a supervisor question, timeout or a failed review transport wakes
 the owning supervisor with findings; none grants a merge override. Review
 prompts, verdict output and harness diagnostics live under
-`.cas/verification-runs/<dispatch>/`. A manually claimed dispatch remains
+`.cas/verification-runs/<dispatch>/`. Automatic reviews use the existing
+account-aware launch resolver, including registered named profiles when the
+default home is logged out. Failed harness notices include up to eight stderr
+lines from the final 2 KiB and the full diagnostic log path. A manually claimed dispatch remains
 with its verifier. Non-daemon callers retain the existing manual handoff.
 
 A nontransactional task merge records a recovery intent before Git changes and

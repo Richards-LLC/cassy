@@ -82,6 +82,10 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         runtime.block_on(async {
             let mut daemon = daemon(&root);
             daemon.app.set_factory_session("provision-test".into());
+            let gui = crate::ui::factory::gui_socket_path("provision-test");
+            if gui.exists() { std::fs::remove_file(&gui).unwrap(); }
+            daemon.gui_listener = std::os::unix::net::UnixListener::bind(gui).unwrap();
+            daemon.gui_listener.set_nonblocking(true).unwrap();
             for index in 0..2 {
                 let name = format!("kept-{index}");
                 let rows = 4 + index;
@@ -100,9 +104,12 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
             std::fs::write(root.join("before.json"), serde_json::to_vec(&serde_json::json!({
                 "pid": std::process::id(), "panes": daemon.app.mux.panes().map(|pane| (pane.id(), pane.process_group_id())).collect::<Vec<_>>()
             })).unwrap()).unwrap();
-            let binary = std::env::var_os("CAS_REEXEC_TEST_BINARY").unwrap();
-            daemon.reexec(std::path::Path::new(&binary), "next", None, "same-pid").await.unwrap();
-            panic!("successful exec must not return");
+            std::fs::write(root.join("ready"), "ready").unwrap();
+            loop {
+                daemon.accept_gui_clients();
+                daemon.process_gui_client_input().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
         });
         return;
     }
@@ -131,6 +138,29 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
             .stderr(log)
             .spawn()
             .unwrap();
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !root.join("ready").exists() {
+            if std::time::Instant::now() >= ready_deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "reexec fixture did not start: {}",
+                    std::fs::read_to_string(project.join("child.log")).unwrap()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let wire_receipt = crate::cli::factory::reexec::request("provision-test", &wrapper)
+            .unwrap_or_else(|error| {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "{error:#}: {}",
+                    std::fs::read_to_string(project.join("child.log")).unwrap()
+                );
+            });
+        assert_eq!(wire_receipt.pid, child.id());
+        assert_eq!(wire_receipt.fallback, fail_adopt);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {

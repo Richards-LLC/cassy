@@ -43,7 +43,7 @@ case "$1 $2" in
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
-    else echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}'; fi ;;
+    else echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}'; fi | jq --argjson config "${FAKE_QUEUE_CONFIG:-$(printf '%s' '{"maximumEntriesToMerge":1,"mergingStrategy":"ALLGREEN"}')}" '. + {queueConfiguration: $config}' ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
 EOF
@@ -488,6 +488,16 @@ echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}' >"$tmp/no
 status=0
 (cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
 check '[[ "$status" == 3 ]] && grep -q "no auto-merge and no merge-queue entry" "$tmp/not-enqueued.err"' 'cas-61e0: a missing enqueue is reported immediately after admission'
+
+# cas-d637: replay a release beside other queued PRs. Never enable admission
+# when GitHub can batch the release, skip per-entry checks, or hide its config.
+for config in '{"maximumEntriesToMerge":5,"mergingStrategy":"ALLGREEN"}' '{"maximumEntriesToMerge":1,"mergingStrategy":"HEADGREEN"}' null; do
+    rm -f "$FAKE_GH_STATE/admitted"
+    : >"$FAKE_GH_LOG"
+    status=0
+    (cd "$epic" && FAKE_QUEUE_CONFIG="$config" ./scripts/release.sh --no-watch) >"$tmp/unsafe-queue.err" 2>&1 || status=$?
+    check '[[ "$status" == 3 ]] && ! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -qi "singleton" "$tmp/unsafe-queue.err"' "cas-d637: unsafe release queue config $config refuses before enqueue"
+done
 
 # A hotfix remains an explicit exception, including actual CLI refusal shapes.
 hotfix_fallback() {

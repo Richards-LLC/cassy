@@ -265,7 +265,7 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
             .pointer("/parameters/groupingStrategy")
             .and_then(serde_json::Value::as_str)
             .ok_or("grouping strategy missing")?;
-        if build >= 5 && merge >= 5 && grouping == "ALLGREEN" {
+        if build >= 5 && merge == 1 && grouping == "ALLGREEN" {
             continue;
         }
         let ruleset = &rule["repositoryRuleset"];
@@ -282,11 +282,11 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
             _ => return Err("ruleset source unsupported"),
         };
         // Print only. Read the complete current ruleset before an operator's
-        // PUT so unrelated protection, bypasses and higher limits survive.
+        // PUT so unrelated protection, bypasses and higher build limits survive.
         let fix = format!(
-            r#"gh api {endpoint} | jq '{{name,target,enforcement,conditions,bypass_actors,rules}} | (.rules[] | select(.type == "merge_queue").parameters) |= (.max_entries_to_build = ([.max_entries_to_build,5]|max) | .max_entries_to_merge = ([.max_entries_to_merge,5]|max) | .grouping_strategy = "ALLGREEN")' | gh api -X PUT {endpoint} --input -"#
+            r#"gh api {endpoint} | jq '{{name,target,enforcement,conditions,bypass_actors,rules}} | (.rules[] | select(.type == "merge_queue").parameters) |= (.max_entries_to_build = ([.max_entries_to_build,5]|max) | .max_entries_to_merge = 1 | .min_entries_to_merge = 1 | .grouping_strategy = "ALLGREEN")' | gh api -X PUT {endpoint} --input -"#
         );
-        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge>=5, ALLGREEN. Run:\n{fix}"));
+        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge=1, ALLGREEN. Run:\n{fix}"));
     }
     if !reports.is_empty() {
         return Ok(QueueReport {
@@ -302,7 +302,7 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
     }
     Ok(QueueReport {
         warning: false,
-        message: format!("merge queue on {branch}: build>=5, merge>=5, ALLGREEN"),
+        message: format!("merge queue on {branch}: build>=5, merge=1, ALLGREEN"),
     })
 }
 

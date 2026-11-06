@@ -375,9 +375,13 @@ open_or_update_pr() {
     rm -f "$body"
     local state
     state="$(pr_state)"
+    # cas-d637: batch landing can add another PR after this entry's prebuild.
+    # Build concurrency stays independent; only landing must be a singleton.
+    singleton_queue <<<"$state"
     if ! admitted <<<"$state"; then
         "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
         state="$(pr_state)"
+        singleton_queue <<<"$state"
     fi
     admitted <<<"$state" || {
         printf 'error: PR #%s has no auto-merge and no merge-queue entry after enqueue; repair admission and rerun.\n' "$pr_number" >&2
@@ -398,19 +402,27 @@ open_or_update_pr() {
     fi
 }
 
+singleton_queue() {
+    jq -e '.queueConfiguration.maximumEntriesToMerge == 1 and .queueConfiguration.mergingStrategy == "ALLGREEN"' >/dev/null || {
+        printf 'error: release requires a singleton merge queue (maximumEntriesToMerge=1, ALLGREEN); keep parallel builds enabled, repair the queue configuration and rerun.\n' >&2
+        exit 3
+    }
+}
+
 # One enqueue smoke check, never a watch or CI polling loop.
 admitted() {
     jq -e '.state == "MERGED" or .autoMergeRequest != null or .mergeQueueEntry != null' >/dev/null
 }
 pr_state() {
-    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f query='
-query($owner: String!, $name: String!, $number: Int!) {
+    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f branch="$base" -f query='
+query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) { configuration { maximumEntriesToMerge mergingStrategy } }
     pullRequest(number: $number) {
       state autoMergeRequest { enabledAt } mergeQueueEntry { state }
     }
   }
-}' --jq '.data.repository.pullRequest'
+}' --jq '.data.repository | .pullRequest + {queueConfiguration: .mergeQueue.configuration}'
 }
 
 publish_branch() {

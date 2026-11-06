@@ -333,11 +333,19 @@ fn recommended_action_surface_for_user_decision_round_trips() {
 /// `superseded` and `superseded-by:<new>` tags, and leaves the active tier.
 /// A handoff of another role is untouched.
 #[tokio::test]
-async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
+async fn a_new_handoff_supersedes_only_its_machine_cas_a042() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
 
     test_env.remove("CAS_AGENT_ROLE");
+    let peer_store = open_store(&temp.path().join(".cas")).unwrap();
+    peer_store.add(&cas::types::Entry {
+        id: "peer-handoff".into(),
+        tags: vec!["handoff".into(), "role:supervisor".into(), "host:peer-machine".into()],
+        created: chrono::Utc::now(),
+        content: "Peer machine current handoff".into(),
+        ..Default::default()
+    }).unwrap();
 
     let body = |which: &str| {
         format!(
@@ -428,6 +436,9 @@ async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
         second.tags
     );
     assert_eq!(second.valid_until, None);
+
+    assert!(store.get("peer-handoff").unwrap().valid_until.is_none(), "another machine's current handoff survives");
+    assert!(second.tags.contains(&format!("host:{}", cas::types::Agent::get_or_generate_machine_id())));
 
     let worker = store.get(&worker_id).expect("worker");
     assert!(

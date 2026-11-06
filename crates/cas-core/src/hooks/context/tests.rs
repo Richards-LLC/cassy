@@ -771,10 +771,11 @@ fn session_start_memory_injection_is_a_pull_pointer_under_budget_cas_71b2() {
 /// session's role, in full, and never ranks a handoff among ordinary
 /// memories, so an older "CURRENT handoff" cannot resurface.
 #[test]
-fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339() {
+fn session_start_uses_local_handoff_and_labels_peer_cas_a042() {
     let now = chrono::Utc::now();
     let entry = |id: &str, minutes_ago: i64, tags: &[&str], content: &str| Entry {
         id: id.to_string(),
+        session_id: Some("local-author".into()),
         content: content.to_string(),
         entry_type: EntryType::Learning,
         tags: tags.iter().map(|tag| tag.to_string()).collect(),
@@ -785,7 +786,15 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
     let (_temp, ks) = knowledge_fixture(&[]);
     let store = SqliteStore::open(_temp.path()).expect("open entry store");
     store.init().expect("init entry store");
+    use cas_store::AgentStore;
+    let agents = cas_store::SqliteAgentStore::open(_temp.path()).unwrap();
+    agents.init().unwrap();
+    let mut author = cas_types::Agent::new_with_role("local-author".into(), "author".into(), AgentRole::Supervisor);
+    author.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+    agents.register(&author).unwrap();
+    agents.unregister(&author.id).unwrap();
     for memory in [
+        entry("handoff-peer", 0, &["handoff", "role:supervisor", "host:peer-machine"], "PEER BODY MUST NOT BE INJECTED"),
         entry(
             "handoff-old",
             600,
@@ -817,6 +826,7 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
     let build_as = |role: &str| {
         let stores = ContextStores {
             project_store: Some(&store),
+            agent_store: Some(&agents),
             knowledge_store: Some(&ks),
             ..ContextStores::empty()
         };
@@ -858,16 +868,27 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
         "the current handoff appears once, not also under Helpful Memories: {supervisor}"
     );
 
-    let worker = build_as("worker");
-    assert!(
-        worker.contains("## 🔁 Current Handoff (worker)"),
-        "{worker}"
-    );
-    assert!(
-        worker.contains("Worker handoff: resume cas-0339"),
-        "{worker}"
-    );
-    assert!(!worker.contains("CURRENT handoff NEW"), "{worker}");
+    assert!(supervisor.contains("Peer handoff (peer-machine)"), "{supervisor}");
+    assert!(supervisor.contains("handoff-peer"), "{supervisor}");
+    assert!(!supervisor.contains("PEER BODY MUST NOT BE INJECTED"), "{supervisor}");
+}
+
+#[test]
+fn session_start_omits_other_worker_handoff_cas_a042() {
+    let (_temp, ks) = knowledge_fixture(&[]);
+    let store = SqliteStore::open(_temp.path()).unwrap();
+    store.init().unwrap();
+    store.add(&Entry {
+        id: "other-worker-handoff".into(),
+        tags: vec!["handoff".into(), "role:worker".into(), format!("host:{}", cas_types::Agent::get_or_generate_machine_id())],
+        content: "Other worker: resume unrelated task cas-unrelated".into(),
+        created: chrono::Utc::now(),
+        ..Default::default()
+    }).unwrap();
+    let input = HookInput { agent_role: Some("worker".into()), ..session_start_input() };
+    let context = build_with_config(&ks, Some(&store), &DefaultHooksConfig::new().with_session_start_memories(), &input);
+    assert!(!context.contains("Other worker:"), "{context}");
+    assert!(!context.contains("Current Handoff"), "{context}");
 }
 
 /// WP2 (audit cas-1660 M34): the usage reminder is paid on every SessionStart,

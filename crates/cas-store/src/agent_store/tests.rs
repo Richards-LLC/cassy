@@ -1790,3 +1790,16 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
         .unwrap();
     assert_eq!(renewals, 1);
 }
+
+#[test]
+fn handoff_author_machine_survives_retirement_cas_a042() {
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_temp, store) = create_test_store(&mut env);
+    let mut author = Agent::new_with_role("handoff-author".into(), "author".into(), AgentRole::Supervisor);
+    author.machine_id = Some("local-machine".into());
+    store.register(&author).unwrap();
+    assert_eq!(store.session_machine(&author.id).unwrap().as_deref(), Some("local-machine"));
+    store.unregister(&author.id).unwrap();
+    assert_eq!(store.session_machine(&author.id).unwrap().as_deref(), Some("local-machine"));
+    assert_eq!(store.session_machine("unknown").unwrap(), None);
+}

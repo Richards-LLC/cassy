@@ -204,6 +204,11 @@ pub trait AgentStore: Send + Sync {
     /// Remove an agent (and release all its leases)
     fn unregister(&self, id: &str) -> Result<()>;
 
+    /// Machine that authored a session, including retained retirement provenance.
+    fn session_machine(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self.get(session_id).ok().and_then(|agent| agent.machine_id))
+    }
+
     /// List all agents with optional status filter
     fn list(&self, status: Option<AgentStatus>) -> Result<Vec<Agent>>;
 

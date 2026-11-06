@@ -220,8 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn a_new_handoff_supersedes_only_current_handoffs_of_its_role() {
-        let entries = vec![
+    fn new_handoff_does_not_supersede_peer_machine_cas_a042() {
+        let mut entries = vec![
             handoff("sup-a", 60, &["handoff"], "untagged, so supervisor"),
             handoff(
                 "sup-b",
@@ -230,8 +230,10 @@ mod tests {
                 "tagged supervisor",
             ),
             handoff("wrk", 20, &["handoff", "role:worker"], "worker"),
-            handoff("sup-new", 0, &["handoff", "role:supervisor"], "the new one"),
+            handoff("peer", 1, &["handoff", "role:supervisor", "host:peer-machine"], "peer"),
+            handoff("sup-new", 0, &["handoff", "role:supervisor", "host:local-machine"], "the new one"),
         ];
+        for entry in &mut entries[..3] { entry.tags.push("host:local-machine".into()); }
         let ids: Vec<_> = handoffs_superseded_by(&entries, "sup-new", "supervisor")
             .into_iter()
             .map(|entry| entry.id.as_str())

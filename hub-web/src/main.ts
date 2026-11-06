@@ -152,6 +152,7 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
+let pendingReload: { machineId: string; session: string; birth?: string } | undefined;
 let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
@@ -167,7 +168,7 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
         }
       },
       send: message => connections.get(machineId)?.send(session, message) ?? false,
-      changed: () => updateConversationViews(),
+      changed: () => { updateConversationViews(); renderConversationList(); },
     });
     supervisorCommands.set(key, commands);
   }
@@ -181,6 +182,35 @@ function supervisorCommandUnavailable(machineId: string, session: string): strin
   if (!machine.scopes.includes("pane-input")) return "This browser was paired without command control. Pair again with pane:input.";
   if (conversationConnection(machineId, session)?.phase !== "live") return "Commands work once the conversation is connected.";
   return undefined;
+}
+/** A card click attaches its own supervisor, then uses the existing command
+ * controller. A new selection or session birth cannot inherit that intent. */
+async function reloadCassy(row: ConversationRow): Promise<void> {
+  const item = sessions.get(row.machineId)?.find(item => item.name === row.session);
+  if (!item || item.ended) return;
+  pendingReload = { machineId: row.machineId, session: row.session, birth: item.started_at };
+  renderConversationList();
+  try {
+    if (selectedMachineId !== row.machineId || selectedSession !== row.session || conversationConnection(row.machineId, row.session)?.phase !== "live") await openSession(row.machineId, row.session);
+    runPendingReload(row.machineId, row.session);
+  } catch (error) {
+    if (pendingReload?.machineId === row.machineId && pendingReload.session === row.session) pendingReload = undefined;
+    toast(String(error)); renderConversationList();
+  }
+}
+function runPendingReload(machineId: string, session: string): void {
+  const intent = pendingReload;
+  if (!intent || intent.machineId !== machineId || intent.session !== session) return;
+  const current = sessions.get(machineId)?.find(item => item.name === session);
+  if (selectedMachineId !== machineId || selectedSession !== session || !current || current.ended || current.started_at !== intent.birth) {
+    pendingReload = undefined; renderConversationList(); return;
+  }
+  if (conversationConnection(machineId, session)?.phase !== "live") return;
+  pendingReload = undefined;
+  if (current.harness !== "claude") { toast("Reload Cassy requires Claude Code."); renderConversationList(); return; }
+  void supervisorCommandSession(machineId, session).run("mcp", false)
+    .then(() => countUsage("supervisor.command"))
+    .catch(error => { toast(String(error)); renderConversationList(); });
 }
 function bindSlashCommands(input: HTMLTextAreaElement): void {
   const machineId = selectedMachineId; const session = selectedSession;
@@ -585,7 +615,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
-      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandReceipts: () => supervisorCommandSession(threadMachineId, threadSession).visibleReceipts,
+      commandDismiss: ref => supervisorCommandSession(threadMachineId, threadSession).dismiss(ref),
       commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
@@ -726,6 +757,7 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (pendingReload && (next?.machineId !== pendingReload.machineId || next.session !== pendingReload.session)) pendingReload = undefined;
   if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
     releasePaneControl(selectedMachineId, selectedSession);
   }
@@ -950,6 +982,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase !== "live") liveSendApprovals.delete(key);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
+      if (state.phase === "live") queueMicrotask(() => runPendingReload(machine.id, session));
+      else if ((state.phase === "failed" || state.phase === "backoff") && pendingReload?.machineId === machine.id && pendingReload.session === session) {
+        pendingReload = undefined; toast("Reload Cassy was not sent. Try again once connected."); renderConversationList();
+      }
       // cas-ff22: answers in flight on the old socket never come; a live
       // attach re-reads the newest work of whatever shows it.
       if (attachWasLive && state.phase !== "live") workPicture.disconnected(machine.id, session);
@@ -1130,7 +1166,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onSupervisorCommandSupport: (session, supported) => { supervisorCommandSession(machine.id, session).supported = supported; slashCommands?.palette.sync(); },
-    onSupervisorCommandReceipt: (session, receipt) => supervisorCommandSession(machine.id, session).receive(receipt),
+    onSupervisorCommandReceipt: (session, receipt) => {
+      const commands = supervisorCommandSession(machine.id, session);
+      const requested = commands.receipts.get(receipt.client_ref)?.command === "mcp";
+      commands.receive(receipt);
+      if (requested && receipt.command === "mcp" && receipt.phase === "observed") void connections.get(machine.id)?.refreshSessions();
+    },
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
@@ -4882,7 +4923,7 @@ function renderConversationList(): void {
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4898,7 +4939,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { reload: row => { void reloadCassy(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
@@ -5854,7 +5895,7 @@ function bindEvents(): void {
   const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
   if (commands) commands.onclick = () => {
     const input = document.querySelector<HTMLTextAreaElement>("#message-text");
-    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(commands); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };

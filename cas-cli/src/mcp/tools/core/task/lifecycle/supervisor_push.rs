@@ -1452,6 +1452,7 @@ pub fn emit_verification_dispatch_handoff(
         bound_head,
         approved_verdict_id,
     );
+    let body = format!("{body}{}", crate::finding_triage::focus_brief(cas_root));
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}{dispatch_id}");
     let summary = format!("Verification required: {task_id} (dispatch {dispatch_id})");
@@ -1482,6 +1483,7 @@ pub(crate) fn emit_candidate_verification_handoff(
     let rows = agents.list(None).map_err(|error| error.to_string())?;
     let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
     let body = crate::prompt_revalidation::candidate_verification_dispatch_envelope(dispatch, worker, reason);
+    let body = format!("{body}{}", crate::finding_triage::focus_brief(cas_root));
     if recipient.id == "operator" {
         return crate::supervisor_notices::enqueue(cas_root, &recipient, "candidate_verification_required", &body, &dispatch.id)
             .map_err(|error| error.to_string());

@@ -87,8 +87,8 @@ pub(super) fn validated_started_delivery(
         let restored_start = task.status == TaskStatus::AwaitingMerge
             && !git_commit_is_ancestor(repo, &start.base_sha, anchor)
             && git_commit_is_ancestor(repo, &start.base_sha, &tip)
-            && parked_anchor_advance_with_target_is_attributable(
-                repo, anchor, &tip, &task.id, None, &target,
+            && parked_anchor_advance_for_task_is_attributable(
+                repo, anchor, &tip, task, None, &target,
             );
         if !restored_start {
             if !git_commit_is_ancestor(repo, &start.base_sha, anchor)
@@ -109,7 +109,7 @@ pub(super) fn validated_started_delivery(
     }
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
-    let upstream = released_upstream_refs(repo, &target);
+    let upstream = upstream_refs(repo, &target, task);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -177,8 +177,11 @@ pub(super) fn validated_started_delivery(
         }
         let parents: Vec<String> = metadata.map(str::to_owned).collect();
         let merged = parents.get(1..).unwrap_or_default();
-        if is_target_sync_merge(repo, merged, &target)
-            || upstream.iter().any(|reference| is_target_sync_merge(repo, merged, &reference[1..]))
+        if !merged.is_empty() && merged.iter().all(|parent| {
+            git_commit_is_ancestor(repo, parent, &target)
+                || upstream.iter().any(|reference|
+                    git_commit_is_ancestor(repo, parent, &reference[1..]))
+        })
         {
             continue;
         }
@@ -464,14 +467,20 @@ fn merge_brings_foreign_work(
     false
 }
 
-/// cas-985f: exclusions (`^ref`) for the repository's released trunk. Empty
-/// when the trunk is the target itself or unresolvable, so a delivery to the
-/// trunk keeps its existing attribution.
-fn released_upstream_refs(repo: &Path, target: &str) -> Vec<String> {
-    released_trunk_ref(repo, target)
+/// Exclusions (`^ref`) for released trunk and immutable task-scoped imports
+/// recorded by request_changes. Never infer authority from ordinary notes.
+pub(super) fn upstream_refs(repo: &Path, target: &str, task: &Task) -> Vec<String> {
+    let mut refs: Vec<String> = released_trunk_ref(repo, target)
         .map(|reference| format!("^{reference}"))
         .into_iter()
-        .collect()
+        .collect();
+    refs.extend(task.deliverables.authorized_merge_sources.iter().filter(|source| {
+        Some(&source.work_target) == task.deliverables.work_target.as_ref()
+            && !source.supervisor_id.trim().is_empty()
+            && matches!(source.commit.len(), 40 | 64)
+            && source.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }).map(|source| format!("^{}", source.commit)));
+    refs
 }
 
 /// The ref whose history counts as released upstream for a lane bound to

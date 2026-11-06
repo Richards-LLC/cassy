@@ -110,7 +110,7 @@ report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_
 
 Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
 above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is
-missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Findings stay in your verdict unless they are a reproduced, observable defect affecting someone today.
+missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Every finding records severity × reach, journey and runtime repro in its triage. Code-read-only findings are theoretical P4 backlog; only money/data loss on a declared main journey gets a P2 exception. Reproduced main-journey FAILs come first. Honor the inherited operator focus.
 
 ## Boundaries
 

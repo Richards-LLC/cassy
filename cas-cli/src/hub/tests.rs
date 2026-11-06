@@ -6766,8 +6766,10 @@ async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_wind
     assert!(auth.grant_own_scope(&read, Scope::SessionLaunch, now).is_err());
     // The window ends: no authentication, and no refresh that extends it.
     let after = until + Duration::seconds(1);
-    assert!(super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&preview_key, &preview_device, preview, "GET", after), "GET", "/v1/probe").is_err());
+    let authenticate = |key: &SigningKey, credential: &DeviceCredential, origin: &str, jti: &str| auth.authenticate_dpop(
+        &format!("DPoP {}", credential.credential), &sign_dpop(key, &credential.credential, "GET", "/v1/probe", after, jti), origin, "GET", "/v1/probe", after);
+    assert!(authenticate(&preview_key, &preview_device, preview, "preview-after").is_err());
     let refresh = sign_dpop(&preview_key, &preview_device.credential, "POST", "/v1/auth/refresh", after, "refresh-after-preview");
     assert!(auth.refresh_device_credential(&format!("DPoP {}", preview_device.credential), &refresh, preview, "POST", "/v1/auth/refresh", after).is_err());
-    assert!(super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&live_key, &live_device, "https://controller.example", "GET", after), "GET", "/v1/probe").is_ok());
+    assert!(authenticate(&live_key, &live_device, "https://controller.example", "live-after").is_ok());
 }

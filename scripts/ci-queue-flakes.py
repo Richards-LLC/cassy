@@ -117,14 +117,35 @@ def write_json(path, data):
 
 def quarantine(api):
     tests = []
-    seen = set()
-    for issue in api.issues('flaky-quarantine'):
-        data = issue_state(issue)
-        entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
-        key = identity(entry)
-        if key in seen or not entry['issue'].startswith(f'https://github.com/{api.repo}/issues/'):
-            raise ValueError('quarantine entries need unique test identities and linked fix issues')
-        seen.add(key)
+    seen = {}
+    try:
+        issues = list(api.issues('flaky-quarantine'))
+    except Exception as error:
+        print(f'WARNING: quarantine read failed for {api.repo}: {error}; running without exclusions',file=sys.stderr)
+        return tests
+    for issue in issues:
+        number = issue.get('number','unknown') if isinstance(issue,dict) else 'unknown'
+        try:
+            data = issue_state(issue)
+            entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
+            key = identity(entry)
+            expected = f'https://github.com/{api.repo}/issues/{number}'
+            if not isinstance(entry['issue'],str) or entry['issue'].casefold() != expected.casefold():
+                raise ValueError('invalid linked fix issue URL')
+            fields = {'rust':('binary','name'),'playwright':('project','file'),'step':('name',)}[entry['runner']]
+            if any(not isinstance(entry.get(field),str) or not entry[field] for field in fields):
+                raise ValueError('test identity fields must be nonempty strings')
+            if entry['runner']=='playwright':
+                titles = entry.get('titles')
+                if not isinstance(titles,list) or not titles or not all(isinstance(t,str) and t for t in titles):
+                    raise ValueError('test titles must be nonempty strings')
+                playwright_list([entry])
+            if key in seen:
+                raise ValueError(f'duplicate test identity already linked to issue #{seen[key]}: {key}')
+        except Exception as error:
+            print(f'WARNING: quarantine issue #{number} skipped: {error}',file=sys.stderr)
+            continue
+        seen[key] = number
         tests.append(entry)
     return tests
 
@@ -283,7 +304,12 @@ def run(args):
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('queue tests require a clean tracked tree')
     recovering = queued or train
-    active = quarantine(GitHub(args.issues_repo)) if recovering else []
+    active = []
+    if recovering:
+        try:
+            active = quarantine(GitHub(args.issues_repo))
+        except (OSError,ValueError) as error:
+            print(f'WARNING: quarantine read unavailable for {args.issues_repo}: {error}; running without exclusions',file=sys.stderr)
     excluded = [t for t in active if t['runner']==args.runner]
     summary = f'Queue quarantine: {len(excluded)} {args.runner} test(s)\n'+''.join(f'- {identity(t)} — {t["issue"]}\n' for t in excluded)
     print(summary,flush=True)

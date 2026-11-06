@@ -22351,7 +22351,7 @@ fn render_epic_status_report_with_stack_and_view(
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
     retained_tasks: &[String],
-    _retained_inventory_partial: bool,
+    retained_inventory_partial: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -22530,6 +22530,8 @@ fn render_epic_status_report_with_stack_and_view(
         ));
     } else if !retained_tasks.is_empty() {
         out.push_str("\n⚠️ Retained worker local work needs review; historical delivery proofs do not account for it.\n");
+    } else if retained_inventory_partial || view.is_some_and(|view| view.budget_exhausted) {
+        out.push_str("\n⚠️ Inventory incomplete; merge state is not fully known.\n");
     } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
     } else {

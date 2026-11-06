@@ -43,12 +43,12 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .filter(|task| task.task_type == cas_types::TaskType::Epic)
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
     tasks.retain(|task| {
-        if peer_tasks.contains(&task.id) {
-            return false;
-        }
         // An old delivery anchor cannot hide a worker's new local work.
         if task.status != TaskStatus::AwaitingMerge {
             return true;
+        }
+        if peer_tasks.contains(&task.id) {
+            return false;
         }
         let parent = store.get_parent_epic(&task.id).ok().flatten();
         if parent.as_ref().is_some_and(|epic| peer_tasks.contains(&epic.id)) {
@@ -169,7 +169,7 @@ mod tests {
             local_agent_id: "local-supervisor".into(), peer_agent_id: "peer-supervisor".into(),
             peer_name: "peer".into(), peer_machine: "other-host".into(),
             direction: SplitDirection::Outgoing, mine: vec![],
-            theirs: vec!["cas-c1fb-peer-handoff".into(), peer_epic.id.clone()],
+            theirs: vec!["cas-c1fb-peer-handoff".into(), "cas-c1fb-local-work".into(), peer_epic.id.clone()],
             state: SplitState::Accepted, reason: None, message_id: None,
             expires_at: now + chrono::Duration::days(1), created_at: now,
             decided_at: Some(now), decided_by: Some("local-supervisor".into()),
@@ -223,7 +223,7 @@ mod tests {
             let rows = queue.peek_all(100).unwrap();
             let pages = rows.iter().filter(|row| row.target == "operator" && row.prompt.contains(&task.id)).count();
             assert_eq!(pages, usize::from(page), "{case}: wrong operator escalation");
-            let wakes = rows.iter().filter(|row| row.target == "supervisor" && row.prompt.contains(&task.id)).count();
+            let wakes = rows.iter().filter(|row| row.target == supervisor.name && row.prompt.contains(&task.id)).count();
             assert_eq!(wakes, usize::from(page), "{case}: wrong local stall wake");
         }
         // A cancelled handoff restores local responsibility and starts a

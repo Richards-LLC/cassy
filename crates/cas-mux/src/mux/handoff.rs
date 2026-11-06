@@ -20,18 +20,33 @@ pub struct MuxHandoff {
 impl Mux {
     /// No delayed submit or interrupted injection may cross an exec boundary.
     pub fn handoff_ready(&self) -> bool {
-        self.pending_injects.is_empty() && self.panes.values().all(|pane| !pane.inject_submit_pending())
+        self.pending_injects.is_empty()
+            && self
+                .panes
+                .values()
+                .all(|pane| !pane.inject_submit_pending())
     }
 
     pub async fn prepare_handoff(&mut self) -> Result<MuxHandoff> {
-        if !self.handoff_ready() { return Err(Error::pty("A pane injection is still settling; retry reexec")); }
+        if !self.handoff_ready() {
+            return Err(Error::pty(
+                "A pane injection is still settling; retry reexec",
+            ));
+        }
         let mut panes = Vec::new();
-        for pane in self.panes.values_mut() { panes.push(pane.prepare_handoff().await?); }
+        for pane in self.panes.values_mut() {
+            panes.push(pane.prepare_handoff().await?);
+        }
         Ok(MuxHandoff {
-            panes, focused: self.focused.clone(), rows: self.rows, cols: self.cols,
-            default_worker_spec: self.default_worker_spec.clone(), worker_specs: self.worker_specs.clone(),
+            panes,
+            focused: self.focused.clone(),
+            rows: self.rows,
+            cols: self.cols,
+            default_worker_spec: self.default_worker_spec.clone(),
+            worker_specs: self.worker_specs.clone(),
             worker_startup_prompts: self.worker_startup_prompts.clone(),
-            supervisor_cli: self.supervisor_cli, factory_session: self.factory_session.clone(),
+            supervisor_cli: self.supervisor_cli,
+            factory_session: self.factory_session.clone(),
             supervisor_launch: self.supervisor_launch.clone(),
         })
     }
@@ -44,13 +59,19 @@ impl Mux {
         mux.supervisor_cli = state.supervisor_cli;
         mux.factory_session = state.factory_session.clone();
         mux.supervisor_launch = state.supervisor_launch.clone();
-        for pane in &state.panes { mux.add_pane(Pane::from_handoff(pane)?); }
-        if let Some(focus) = &state.focused { mux.focus(focus); }
+        for pane in &state.panes {
+            mux.add_pane(Pane::from_handoff(pane)?);
+        }
+        if let Some(focus) = &state.focused {
+            mux.focus(focus);
+        }
         Ok(mux)
     }
 
     pub fn resume_after_handoff(&mut self) -> Result<()> {
-        for pane in self.panes.values_mut() { pane.resume_after_handoff()?; }
+        for pane in self.panes.values_mut() {
+            pane.resume_after_handoff()?;
+        }
         Ok(())
     }
 }

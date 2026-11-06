@@ -2670,6 +2670,7 @@ pub struct Pty {
     _reader_handle: Option<std::thread::JoinHandle<()>>,
     #[cfg(unix)]
     reader_wake: Option<std::os::unix::net::UnixStream>,
+    reader_activation: Option<std::sync::mpsc::Sender<()>>,
     process_group: Option<u32>,
     /// Child process handle
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -3011,17 +3012,25 @@ impl Pty {
             id, writer, input, event_rx, _reader_handle: None,
             #[cfg(unix)]
             reader_wake: None,
-            process_group, child, master, is_codex, exit_signal: None,
+            reader_activation: None, process_group, child, master, is_codex, exit_signal: None,
             exit_status_pending: false,
             _worker_startup_prompt_file: worker_startup_prompt_file,
         };
-        if start_reader { pty.resume()?; } else { pty.input().pause(); }
+        if start_reader { pty.resume()?; } else { pty.start_reader(false)?; pty.input().pause(); }
         Ok(pty)
     }
 
     /// Resume a staged pane, or recover from an exec that returned an error.
     pub fn resume(&mut self) -> Result<()> {
+        if let Some(activate) = self.reader_activation.take() {
+            self.input().resume();
+            activate.send(()).map_err(|_| Error::pty("Staged PTY reader exited"))?;
+        }
         if self._reader_handle.is_some() { return Ok(()); }
+        self.start_reader(true)
+    }
+
+    fn start_reader(&mut self, active: bool) -> Result<()> {
         // Get reader and writer
         let reader = self.master
             .try_clone_reader()
@@ -3043,8 +3052,12 @@ impl Pty {
         let (wake_tx, wake_rx) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| Error::pty(e.to_string()))?;
         let input = self.input().clone();
-        self.input().resume();
-        self._reader_handle = Some(std::thread::spawn(move || {
+        if active { self.input().resume(); }
+        let (activate, ready) = std::sync::mpsc::channel();
+        self._reader_handle = Some(std::thread::Builder::new().name(format!("pty-reader-{}", self.id)).spawn(move || {
+            // Stage all reader threads before committing adoption. A failed
+            // constructor drops its activation sender without consuming output.
+            if !active && ready.recv().is_err() { return; }
             Self::reader_loop(reader, Box::new(move |reply| {
                 let _ = input.write_control_then(reply, None);
             }), event_tx,
@@ -3053,7 +3066,8 @@ impl Pty {
                 #[cfg(unix)]
                 Some(wake_rx),
             );
-        }));
+        }).map_err(|e| Error::pty(format!("Could not stage PTY reader: {e}")))?);
+        if !active { self.reader_activation = Some(activate); }
         #[cfg(unix)]
         { self.reader_wake = Some(wake_tx); }
         self.event_rx = event_rx;
@@ -3064,6 +3078,7 @@ impl Pty {
     /// The daemon holds exclusive control and accepts no new input during this.
     #[cfg(unix)]
     pub async fn quiesce(&mut self) -> Result<Vec<PtyEvent>> {
+        self.reader_activation.take();
         if let Some(wake) = self.reader_wake.as_mut() {
             wake.write_all(&[1]).map_err(|e| Error::pty(e.to_string()))?;
         }

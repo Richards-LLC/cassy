@@ -186,3 +186,6 @@ pub fn set_terminal_title(project_dir: &Path, epic_title: Option<&str>) {
     let title = build_terminal_title(project_dir, epic_title);
     let _ = execute!(io::stdout(), SetTitle(title));
 }
+
+pub(crate) use protocol::{FRAME_HEADER_SIZE, decode_length};
+pub(crate) use session::gui_socket_path;

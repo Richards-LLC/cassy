@@ -40,6 +40,7 @@ pub struct PaneHandoff {
     pub has_hyperlinks: bool,
     pub partial_esc: Vec<u8>,
     pub partial_osc8: Vec<u8>,
+    paste_tracker: crate::input_stream::BracketedPasteTracker,
 }
 
 impl Pane {
@@ -50,9 +51,15 @@ impl Pane {
             PaneBackend::Pty(pty) => {
                 let events = pty.quiesce().await?;
                 let state = PtyHandoff {
-                    master_fd: pty.master_fd().ok_or_else(|| Error::pty("PTY master unavailable"))?,
-                    child_pid: pty.child_pid().ok_or_else(|| Error::pty("PTY child unavailable"))?,
-                    pgid: pty.process_group_id().ok_or_else(|| Error::pty("PTY process group unavailable"))?,
+                    master_fd: pty
+                        .master_fd()
+                        .ok_or_else(|| Error::pty("PTY master unavailable"))?,
+                    child_pid: pty
+                        .child_pid()
+                        .ok_or_else(|| Error::pty("PTY child unavailable"))?,
+                    pgid: pty
+                        .process_group_id()
+                        .ok_or_else(|| Error::pty("PTY process group unavailable"))?,
                     startup_brief: pty.startup_brief_path(),
                 };
                 (events, Some(state))
@@ -72,25 +79,48 @@ impl Pane {
             pty.flush_input().await?;
         }
         let snapshot = self.get_full_snapshot()?;
-        let terminal = self.terminal.handoff_bytes().map_err(|e| Error::terminal(e.to_string()))?;
+        let terminal = self
+            .terminal
+            .handoff_bytes()
+            .map_err(|e| Error::terminal(e.to_string()))?;
         let recording_path = self.stop_recording().await?;
         self.handoff_recording_path = recording_path.clone();
         Ok(PaneHandoff {
-            id: self.id.clone(), kind: self.kind.clone(), harness: self.harness,
-            title: self.title.clone(), color: self.color.clone(), focused: self.focused,
-            rows: self.rows, cols: self.cols, pty,
-            snapshot, terminal,
-            scroll_offset: self.scroll_offset(), recording_path,
-            exited: self.exited, exit_code: self.exit_code, exit_signal: self.exit_signal.clone(),
+            id: self.id.clone(),
+            kind: self.kind.clone(),
+            harness: self.harness,
+            title: self.title.clone(),
+            color: self.color.clone(),
+            focused: self.focused,
+            rows: self.rows,
+            cols: self.cols,
+            pty,
+            snapshot,
+            terminal,
+            scroll_offset: self.scroll_offset(),
+            recording_path,
+            exited: self.exited,
+            exit_code: self.exit_code,
+            exit_signal: self.exit_signal.clone(),
             total_bytes_received: self.total_bytes_received,
             turn_in_flight: self.turn_in_flight.load(Ordering::Acquire),
             harness_session_id: self.harness_session_id(),
-            turn_events_byte_offset: *self.turn_events_byte_offset.lock().unwrap_or_else(|p| p.into_inner()),
+            turn_events_byte_offset: *self
+                .turn_events_byte_offset
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
             composer_dirty: self.composer_dirty.load(Ordering::Acquire),
             draft_chars: self.draft_chars.load(Ordering::Acquire),
-            in_alt_screen: self.in_alt_screen, mouse_modes: self.mouse_modes,
+            in_alt_screen: self.in_alt_screen,
+            mouse_modes: self.mouse_modes,
             has_hyperlinks: self.has_hyperlinks,
-            partial_esc: self.partial_esc.clone(), partial_osc8: self.partial_osc8.clone(),
+            partial_esc: self.partial_esc.clone(),
+            partial_osc8: self.partial_osc8.clone(),
+            paste_tracker: self
+                .paste_tracker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone(),
         })
     }
 
@@ -105,7 +135,9 @@ impl Pane {
         let backend = match &state.pty {
             Some(pty) => {
                 let fd = unsafe { libc::fcntl(pty.master_fd, libc::F_DUPFD_CLOEXEC, 3) };
-                if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
                 let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                 let mut pty = Pty::adopt_paused(fd, pty.child_pid, pty.pgid)?;
                 pty.set_codex(state.harness == SupervisorCli::Codex);
@@ -113,10 +145,20 @@ impl Pane {
             }
             None => PaneBackend::None,
         };
-        let mut pane = Self::new_with_backend(&state.id, &state.title, state.kind.clone(),
-            backend, state.rows, state.cols, state.harness)?;
-        pane.terminal.feed(&state.terminal).map_err(|e| Error::terminal(e.to_string()))?;
-        pane.terminal.scroll(-(state.scroll_offset.min(i32::MAX as u32) as i32))
+        let mut pane = Self::new_with_backend(
+            &state.id,
+            &state.title,
+            state.kind.clone(),
+            backend,
+            state.rows,
+            state.cols,
+            state.harness,
+        )?;
+        pane.terminal
+            .feed(&state.terminal)
+            .map_err(|e| Error::terminal(e.to_string()))?;
+        pane.terminal
+            .scroll(-(state.scroll_offset.min(i32::MAX as u32) as i32))
             .map_err(|e| Error::terminal(e.to_string()))?;
         pane.handoff_recording_path = state.recording_path.clone();
         pane.focused = state.focused;
@@ -125,23 +167,34 @@ impl Pane {
         pane.exit_code = state.exit_code;
         pane.exit_signal = state.exit_signal.clone();
         pane.total_bytes_received = state.total_bytes_received;
-        pane.turn_in_flight.store(state.turn_in_flight, Ordering::Release);
-        *pane.harness_session_id.lock().unwrap_or_else(|p| p.into_inner()) = state.harness_session_id.clone();
-        *pane.turn_events_byte_offset.lock().unwrap_or_else(|p| p.into_inner()) = state.turn_events_byte_offset;
-        pane.composer_dirty.store(state.composer_dirty, Ordering::Release);
+        pane.turn_in_flight
+            .store(state.turn_in_flight, Ordering::Release);
+        *pane
+            .harness_session_id
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = state.harness_session_id.clone();
+        *pane
+            .turn_events_byte_offset
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = state.turn_events_byte_offset;
+        pane.composer_dirty
+            .store(state.composer_dirty, Ordering::Release);
         pane.draft_chars.store(state.draft_chars, Ordering::Release);
         pane.in_alt_screen = state.in_alt_screen;
         pane.mouse_modes = state.mouse_modes;
         pane.has_hyperlinks = state.has_hyperlinks;
         pane.partial_esc = state.partial_esc.clone();
         pane.partial_osc8 = state.partial_osc8.clone();
+        *pane.paste_tracker.lock().unwrap_or_else(|p| p.into_inner()) = state.paste_tracker.clone();
         pane.user_scrolled = state.scroll_offset != 0;
         Ok(pane)
     }
 
     pub async fn resume_recording_after_handoff(&mut self) -> Result<()> {
         if let Some(path) = self.handoff_recording_path.clone() {
-            let writer = RecordingWriter::resume(path).await.map_err(|e| Error::recording(e.to_string()))?;
+            let writer = RecordingWriter::resume(path)
+                .await
+                .map_err(|e| Error::recording(e.to_string()))?;
             self.recorder = Some(Arc::new(Mutex::new(writer)));
             self.handoff_recording_path = None;
         }
@@ -150,7 +203,8 @@ impl Pane {
 
     pub fn commit_startup_brief(&mut self, state: &PaneHandoff) {
         if let (PaneBackend::Pty(pty), Some(state)) = (&mut self.backend, &state.pty)
-            && let Some(path) = &state.startup_brief {
+            && let Some(path) = &state.startup_brief
+        {
             pty.adopt_startup_brief(path.clone());
         }
     }

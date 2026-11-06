@@ -78,4 +78,4 @@ mod supervisor_single_turn_tests;
 pub(crate) mod supervisor_commands;
 
 #[cfg(test)]
-mod reexec_tests;
+pub(super) mod reexec_tests;

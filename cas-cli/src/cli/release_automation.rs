@@ -88,10 +88,6 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
     let (repo, integration) =
         repo_context::integration_branch(root).context("no integration branch")?;
     let store = open_task_store(root)?;
-    let train = release_train::open_trains(store.as_ref(), &integration)
-        .into_iter()
-        .next()
-        .context("no open release train; create work on the train first")?;
     // The project store can live in the main checkout while the cut runs in
     // a train worktree. Validate repository identity, then use the caller's tree.
     let caller = PathBuf::from(git(
@@ -108,6 +104,12 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         )?,
         "release checkout belongs to another repository"
     );
+    let branch = git(&caller, &["branch", "--show-current"])?;
+    let train = release_train::active_trains(store.as_ref(), &integration)
+        .into_iter()
+        .find(|train| train.effective_epic_branch() == Some(branch.as_str()))
+        .or_else(|| release_train::open_trains(store.as_ref(), &integration).into_iter().next())
+        .context("no open release train; create work on the train first")?;
     Ok((caller, train))
 }
 fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
@@ -173,6 +175,9 @@ fn track_on_train(
     train: &cas_types::Task,
 ) -> Result<()> {
     let mut expected = new_context(repo, train)?;
+    let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let canonical_repo = operations.canonical_repo_key()?;
+    let _target_lock = crate::worktree::target_lock::lock_delivery_target(root, &canonical_repo, &expected.branch)?;
     ensure!(
         git(&repo, &["branch", "--show-current"])? == expected.branch,
         "release must be cut on the train branch"
@@ -220,87 +225,102 @@ fn track_on_train(
             Some(git(&repo, &["show", "-s", "--format=%ct", &args.first_child])?.parse()?);
         expected.first_child_commit = Some(args.first_child.clone());
     }
-    let agents = open_agent_store(root)?.list(None)?;
-    let recipient =
-        crate::supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
-    if train.epic_verification_owner.is_none() {
-        expected.owner = recipient.id.clone();
+    // This is the cut boundary, before push/enqueue and independent of
+    // reminder availability. New tasks must not join the frozen lane.
+    let tasks = open_task_store(root)?;
+    let mut cut = tasks.get(&train.id)?;
+    if !crate::mcp::tools::core::task::release_train::is_cut_train(&cut) {
+        cut.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_CUT_LABEL.into());
+        cut.updated_at = chrono::Utc::now();
+        tasks.update(&cut).context("could not persist release train cut marker")?;
     }
-    let reminders = open_reminder_store(root)?;
-    cancel_superseded_watches(root, &expected.train_id, &args.version, reminders.as_ref())?;
-    let mut existing = reminders.list_all_pending()?;
-    if previous_commit
-        .as_deref()
-        .is_some_and(|sha| sha != args.commit)
-    {
-        if let Some(old) = existing
-            .iter()
-            .find(|r| Some(r.id) == expected.landing_reminder)
+    let tracking = (|| -> Result<()> {
+        let agents = open_agent_store(root)?.list(None)?;
+        let recipient =
+            crate::supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
+        if train.epic_verification_owner.is_none() {
+            expected.owner = recipient.id.clone();
+        }
+        let reminders = open_reminder_store(root)?;
+        cancel_superseded_watches(root, &expected.train_id, &args.version, reminders.as_ref())?;
+        let mut existing = reminders.list_all_pending()?;
+        if previous_commit
+            .as_deref()
+            .is_some_and(|sha| sha != args.commit)
         {
-            reminders.cancel(old.id, &old.owner_id)?;
+            if let Some(old) = existing
+                .iter()
+                .find(|r| Some(r.id) == expected.landing_reminder)
+            {
+                reminders.cancel(old.id, &old.owner_id)?;
+            }
+            expected.landing_reminder = None;
         }
-        expected.landing_reminder = None;
-    }
-    existing.extend(reminders.list_recently_fired(7 * 24 * 3600)?);
-    // Save between effects; a crashed retry also recognizes the durable reminder row.
-    save(&path, &expected)?;
-    if recipient.id == "operator" {
+        existing.extend(reminders.list_recently_fired(7 * 24 * 3600)?);
+        // Save between effects; a crashed retry also recognizes the durable reminder row.
+        save(&path, &expected)?;
+        if recipient.id == "operator" {
+            println!(
+                "Release v{} tracking skipped: no reachable train supervisor; cut can continue",
+                args.version
+            );
+            return Ok(());
+        }
+        let landing = serde_json::json!({"commit": args.commit, "target_branch": expected.integration});
+        let publish = serde_json::json!({"tag": format!("v{}", args.version)});
+        for (event, filter, slot) in [
+            (
+                "branch_contained_in",
+                landing,
+                &mut expected.landing_reminder,
+            ),
+            ("tag_exists", publish, &mut expected.publish_reminder),
+        ] {
+            // A repaired train tip has its own landing condition; publication remains one version.
+            if slot.is_some() {
+                continue;
+            }
+            let found = existing.iter().find(|r| {
+                r.task_id.as_deref() == Some(&train.id)
+                    && r.message
+                        .starts_with(&format!("Release v{}:", args.version))
+                    && r.trigger_event.as_deref() == Some(event)
+                    && r.trigger_filter.as_ref() == Some(&filter)
+            });
+            *slot = Some(if let Some(reminder) = found {
+                reminder.id
+            } else {
+                reminders.create_with_scope(
+                    &recipient.id,
+                    None,
+                    &format!(
+                        "Release v{}: {event}; continue the release and inspect its receipt",
+                        args.version
+                    ),
+                    cas_store::ReminderTriggerType::Event,
+                    None,
+                    Some(event),
+                    Some(&filter),
+                    0,
+                    recipient.session.as_deref(),
+                    None,
+                    true,
+                    Some(&train.id),
+                )?
+            });
+        }
+        save(&path, &expected)?;
         println!(
-            "Release v{} tracking skipped: no reachable train supervisor; cut can continue",
-            args.version
+            "Release v{} tracked: cross-session landing #{} and publication #{}",
+            args.version,
+            expected.landing_reminder.unwrap(),
+            expected.publish_reminder.unwrap()
         );
-        return Ok(());
+        Ok(())
+    })();
+    if let Err(error) = tracking {
+        eprintln!("Release train {} is frozen; reminder tracking unavailable: {error:#}. The cut can continue.", expected.branch);
     }
-    let landing = serde_json::json!({"commit": args.commit, "target_branch": expected.integration});
-    let publish = serde_json::json!({"tag": format!("v{}", args.version)});
-    for (event, filter, slot) in [
-        (
-            "branch_contained_in",
-            landing,
-            &mut expected.landing_reminder,
-        ),
-        ("tag_exists", publish, &mut expected.publish_reminder),
-    ] {
-        // A repaired train tip has its own landing condition; publication remains one version.
-        if slot.is_some() {
-            continue;
-        }
-        let found = existing.iter().find(|r| {
-            r.task_id.as_deref() == Some(&train.id)
-                && r.message
-                    .starts_with(&format!("Release v{}:", args.version))
-                && r.trigger_event.as_deref() == Some(event)
-                && r.trigger_filter.as_ref() == Some(&filter)
-        });
-        *slot = Some(if let Some(reminder) = found {
-            reminder.id
-        } else {
-            reminders.create_with_scope(
-                &recipient.id,
-                None,
-                &format!(
-                    "Release v{}: {event}; continue the release and inspect its receipt",
-                    args.version
-                ),
-                cas_store::ReminderTriggerType::Event,
-                None,
-                Some(event),
-                Some(&filter),
-                0,
-                recipient.session.as_deref(),
-                None,
-                true,
-                Some(&train.id),
-            )?
-        });
-    }
-    save(&path, &expected)?;
-    println!(
-        "Release v{} tracked: cross-session landing #{} and publication #{}",
-        args.version,
-        expected.landing_reminder.unwrap(),
-        expected.publish_reminder.unwrap()
-    );
     Ok(())
 }
 

@@ -10,8 +10,8 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { epicTabs, type EpicSessionProgress } from "./progress-model";
-import { renderEpicTabs } from "./epic-tabs";
+import { projectEpics, type EpicSessionProgress } from "./progress-model";
+import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
@@ -23,7 +23,7 @@ import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
-import { ProjectNavigation } from "./project-navigation";
+import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
@@ -253,6 +253,8 @@ const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairin
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const statusReceivedAt = new Map<string, number>();
+/** Wall-clock receipt, for a peer's "last known" time. */
+const statusReceivedWall = new Map<string, number>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
 const statusFailures = new Set<string>();
@@ -1057,9 +1059,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // A peer's retained events refresh the catalog too (cas-c4b7). Only a
       // new or revived destination needs status here; existing sessions keep
       // their own event invalidations and the independent health heartbeat.
+      // Only the selected project's sessions feed Live epics (cas-9b99).
+      const project = epicSessions().filter(entry => entry.machineId === machine.id).map(entry => entry.session.name);
       for (const item of items) {
         const before = previous.get(item.name);
-        if (sessionReachable(item) && (!before || !sessionReachable(before) || before.started_at !== item.started_at)) {
+        if (project.includes(item.name) && sessionReachable(item) && (!before || !sessionReachable(before) || before.started_at !== item.started_at)) {
           void loadStatus(machine.id, item.name);
         }
       }
@@ -1081,9 +1085,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
-      // The epic strip reads peer sessions without attaching their output.
-      // Only the event's session is invalidated, and overlapping reads coalesce.
-      if (typeof event.session === "string" && sessions.get(machine.id)?.some(item => item.name === event.session && sessionRunning(item))) {
+      // Live epics read the selected project's peer sessions without
+      // attaching their output. Only the event's session is invalidated, other
+      // projects' sessions are never read, and overlapping reads coalesce.
+      if (typeof event.session === "string" && epicSessions().some(item => item.machineId === machine.id && item.session.name === event.session)) {
         void loadStatus(machine.id, event.session);
       }
       // A retained peer-session burst does not change this conversation's
@@ -1985,6 +1990,8 @@ async function attachSelectedSession(machineId: string, session: string): Promis
   render();
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return;
   renderTerminalConnecting(machineId, session);
+  // The project's peer sessions feed Live epics beside this conversation.
+  for (const id of machines.keys()) refreshEpicSessions(id, true);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
   // cas-4646: a newer tap has moved on while these loaded; this open is stale
   // and must not attach over the conversation now showing.
@@ -2257,9 +2264,23 @@ const statusRefresh = new StatusRefresh();
 // event burst must not recreate the old unbounded signed HTTP fan-out.
 const epicStatusReads = new Map<string, Promise<void>>();
 const epicStatusAgain = new Set<string>();
-function refreshEpicSessions(machineId: string): void {
-  for (const session of sessions.get(machineId) ?? []) {
-    if (sessionRunning(session) && !session.dormant && !session.unreachable) void loadStatus(machineId, session.name);
+/** The selected conversation's project key, as the conversation list groups it. */
+function selectedProjectKey(): string | undefined {
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  return session && selectedMachineId ? epicProjectKey(selectedMachineId, session) : undefined;
+}
+function epicProjectKey(machineId: string, session: HubSession): string {
+  return sessionProjectKey({ project: session.project, projectDir: session.project_dir, key: sessionKey(machineId, session.name) });
+}
+/** Running sessions of the selected project on every machine: Live epics' only sources. */
+function epicSessions(): { machineId: string; session: HubSession }[] {
+  const running = new Map([...sessions].map(([machineId, roster]) => [machineId, roster.filter(item => sessionRunning(item) && !item.dormant)] as const));
+  return projectSessions(running, selectedProjectKey(), epicProjectKey);
+}
+function refreshEpicSessions(machineId: string, peersOnly = false): void {
+  for (const { session } of epicSessions().filter(item => item.machineId === machineId)) {
+    if (peersOnly && machineId === selectedMachineId && session.name === selectedSession) continue;
+    if (!session.unreachable) void loadStatus(machineId, session.name);
   }
 }
 
@@ -2280,6 +2301,7 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     statusFailures.delete(key);
     statuses.set(sessionKey(machineId, session), status);
     statusReceivedAt.set(key, performance.now());
+    statusReceivedWall.set(key, Date.now());
     statusPending.delete(key);
     render();
   }, () => {
@@ -4701,7 +4723,6 @@ function renderRegions(context: RegionContext): void {
   renderConversationList();
   renderAttention();
   renderStatus(context.status);
-  syncEpicTabs();
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
   syncTeamView(context.status, context.liveRegions.staleNotice);
@@ -5569,42 +5590,35 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
   teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
 }
 
-// A tab choice belongs to the browser, never to factory focus_epic.
-let epicChoice: string | undefined;
-let epicSheetOpen = false;
-function syncEpicTabs(): void {
-  const root = document.getElementById("epic-tabs");
-  if (!root) return;
+/** Live epics: the selected project's epics from its sessions on every machine. */
+function liveEpicsModel(train: string | undefined) {
+  const project = selectedProjectKey();
   const sources: EpicSessionProgress[] = [];
-  const unavailable = new Set<string>();
-  for (const [machineId, roster] of sessions) {
+  const pending = new Set<string>();
+  const failed = new Map<string, number | undefined>();
+  const labels = new Set<string>();
+  for (const { machineId, session } of epicSessions()) {
     const machine = machines.get(machineId);
     if (!machine) continue;
-    for (const session of roster.filter(item => sessionRunning(item) && !item.dormant)) {
-      const key = sessionKey(machineId, session.name);
-      const status = statuses.get(key);
-      if (statusFailures.has(key)) unavailable.add(machine.label);
-      if (!status) continue;
-      sources.push({ project: session.cloud_project_id ?? session.project ?? session.project_dir ?? key,
-        machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
-        roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
-        tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
-        epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0,
-        stale: statusFailures.has(key) || session.stale === true || session.unreachable === true
-          || connectionStates.get(machineId)?.phase !== "live" || connectionStates.get(machineId)?.degraded === true,
-      });
-    }
+    labels.add(machine.label);
+    const key = sessionKey(machineId, session.name);
+    const status = statuses.get(key);
+    const stale = statusFailures.has(key) || session.stale === true || session.unreachable === true
+      || connectionStates.get(machineId)?.phase !== "live" || connectionStates.get(machineId)?.degraded === true;
+    // The selected conversation's own state is the rail's; only peers get notices.
+    const peer = machineId !== selectedMachineId;
+    if (peer && !status && statusPending.has(key)) pending.add(machine.label);
+    if (peer && stale) failed.set(machine.label, Math.max(failed.get(machine.label) ?? 0, statusReceivedWall.get(key) ?? 0) || undefined);
+    if (!status) continue;
+    sources.push({ project: epicProjectKey(machineId, session),
+      machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
+      roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
+      tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
+      epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0, stale,
+    });
   }
-  const tabs = epicTabs(sources);
-  if (epicChoice && !tabs.some(tab => tab.key === epicChoice)) epicChoice = undefined;
-  renderEpicTabs(root, tabs, { choice: epicChoice, phone: phoneLayout(), sheetOpen: epicSheetOpen,
-    notice: unavailable.size ? `Epic status unavailable on ${[...unavailable].join(", ")}.` : undefined,
-    retry: () => { for (const machineId of machines.keys()) refreshEpicSessions(machineId); },
-    select: key => { epicChoice = key; epicSheetOpen = true; syncEpicTabs(); },
-    close: () => { epicSheetOpen = false; syncEpicTabs();
-      root.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
-    },
-  });
+  const { live, quiet } = project ? projectEpics(sources, project, train) : { live: [], quiet: 0 };
+  return { project: project ?? "", live, quiet, multiMachine: labels.size > 1, pending: [...pending], failed: [...failed].map(([label, at]) => ({ label, at })) };
 }
 
 function renderStatus(status?: Record<string, unknown>): void {
@@ -5612,7 +5626,13 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
+  const statusEpics = ((status?.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const statusAgents = (status?.agents as FleetAgent[]) ?? [];
+  const statusTasks = [...new Map([...((status?.tasks_in_progress as ProgressTask[]) ?? []), ...((status?.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  const train = status ? releaseProgress(statusEpics, typeof status.focused_epic === "string" ? status.focused_epic : null, statusTasks,
+    [session?.supervisor, ...statusAgents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))) : undefined;
+  const liveEpics = liveEpicsModel(train?.id);
+  const signature = JSON.stringify([liveEpics, phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5707,14 +5727,22 @@ function renderStatus(status?: Record<string, unknown>): void {
     row.innerHTML = `<span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description">${escapeHtml(summary.description)}</small>`;
     container.append(row);
   }
-  const agents = ((status.agents as FleetAgent[]) ?? []);
-  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
-  const epics = ((status.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const agents = statusAgents;
+  const tasks = statusTasks;
+  const epics = statusEpics;
   const focusedEpic = typeof status.focused_epic === "string" ? status.focused_epic : null;
   const supervisorNames = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
-  const release = releaseProgress(epics, focusedEpic, tasks, supervisorNames);
-  container.prepend(releaseHeader(document, release));
+  const release = train;
   const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
+  // Release train, then Live epics, then Workers and the task groups.
+  const trainTasks = release ? tasks.filter(task => task.epic_id === release.id && task.delivery_state !== "merged") : [];
+  const trainState = (label: string) => trainTasks.filter(task => statusLabel(task.status) === label).length;
+  const lead: HTMLElement[] = [releaseHeader(document, release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
+    workers: workers.filter(worker => trainTasks.some(task => task.id === worker.currentTask)).length } : undefined)];
+  const epicSection = liveEpicsSection(document, { ...liveEpics, explorerHref: explorerBase ? explorerUrl(explorerBase, session?.cloud_project_id) : null,
+    retry: () => { for (const id of machines.keys()) refreshEpicSessions(id, true); } });
+  if (epicSection) lead.push(epicSection);
+  container.prepend(...lead);
   const identifier = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
     span.className = "status-identifier";

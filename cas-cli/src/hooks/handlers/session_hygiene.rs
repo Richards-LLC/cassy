@@ -688,9 +688,8 @@ pub fn build_session_start_stale_reference_banner_sized(
     Some(render_stale_reference_banner(&skipped))
 }
 
-/// cas-3199: managed-file conflicts that made the last `cas update` skip this
-/// project's whole skill sync. The update summary used to count such a project
-/// as refreshed, so 17 projects ran 27 releases stale with nothing visible.
+/// Managed-file conflicts retained by the last update. Other paths can now
+/// refresh independently; keep these preserved files visible until resolved.
 pub fn build_session_start_managed_conflict_banner_sized(
     cas_root: &Path,
 ) -> Option<SessionStartBanner> {
@@ -699,20 +698,20 @@ pub fn build_session_start_managed_conflict_banner_sized(
         return None;
     }
     let compact = format!(
-        "⚠ Cassy skills are NOT syncing into this project: {} managed file conflict(s) block \
-         `cas update`. Run `cas update --sync --json` for the paths.\n",
+        "⚠ Cassy preserved {} conflicting managed file(s). Other files can sync independently. \
+         Run `cas update --sync --json` for the paths.\n",
         conflicts.len()
     );
     let mut full = format!(
-        "⚠ Cassy skills are NOT syncing into this project: the last `cas update` found {} \
-         managed file conflict(s) and skipped the whole sync, so builtin skills here are stale.\n",
+        "⚠ The last `cas update` reported {} conflicting managed file(s), preserved below. \
+         Other files can sync independently.\n",
         conflicts.len()
     );
     for path in &conflicts {
         full.push_str(&format!("  ! {path}\n"));
     }
     full.push_str(
-        "  Resolve or commit each file (it differs from what Cassy wrote), then rerun \
+        "  Review and resolve each preserved file, then rerun \
          `cas update --sync`.\n",
     );
     Some(SessionStartBanner { full, compact })
@@ -938,16 +937,26 @@ pub(crate) fn render_issues_target_banner() -> SessionStartBanner {
 
 /// Full + compact renderings of the orphan/stale-server banner (cas-b114).
 pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
+    let retained = crate::worktree::retained::scan(cas_root);
     let report = crate::ui::factory::orphan_gc::scan(
         cas_root,
         &live_factory_session_names(),
         &live_worker_pgids(cas_root),
         &std::collections::HashSet::new(),
     );
-    if report.is_empty() {
+    if report.is_empty() && !retained.needs_attention() {
         return None;
     }
-    Some(render_orphan_banner(&report))
+    let mut banner = if report.is_empty() {
+        SessionStartBanner { full: String::new(), compact: String::new() }
+    } else {
+        render_orphan_banner(&report)
+    };
+    if retained.needs_attention() {
+        banner.full.push_str(&retained.render());
+        banner.compact.push_str(&retained.compact());
+    }
+    Some(banner)
 }
 
 /// Pure renderer for the orphan banner — separated from the process scan so the

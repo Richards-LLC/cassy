@@ -253,7 +253,7 @@ impl CasCore {
                 Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
-                        "{conflict}. Coordinate with that owner. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
+                        "{conflict}. Ask the owner to hand off using factory action=release_claim resource_id=<GitHub URL>. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
                     ),
                 ))
             }

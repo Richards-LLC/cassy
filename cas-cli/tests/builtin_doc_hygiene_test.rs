@@ -657,6 +657,21 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "agents/task-verifier.md",
+        "journey",
+        "Names declared product user flows and the severity/reach/journey triage field used in verification findings.",
+    ),
+    (
+        "skills/cas-supervisor/SKILL.md",
+        "journey",
+        "Names declared product user flows in the two-axis severity/reach triage policy.",
+    ),
+    (
+        "skills/cas-supervisor/references/epic-flow-walk.md",
+        "journey",
+        "Names declared main product user flows whose reproduced failures take staffing priority.",
+    ),
+    (
         "skills/cas-tdd/SKILL.md",
         "journey",
         "cas-97c4: the operator-approved proof-ownership sentence names the registry-backed QA journeys walked once per release batch.",

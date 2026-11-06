@@ -142,6 +142,9 @@ fn validate_verification_authority_with_conn(
 /// Re-exported via `cas_store::VERIFICATION_SCHEMA` so the migration runner in
 /// `cas-cli` can bootstrap the base tables before applying ALTER migrations.
 /// See cas-bdb9 / EPIC cas-9fdb.
+pub const VERIFICATION_ISSUE_TRIAGE_STATEMENT: &str =
+    "ALTER TABLE verification_issues ADD COLUMN triage TEXT NOT NULL DEFAULT '{}'";
+
 pub const VERIFICATION_DURATION_SOURCE_STATEMENT: &str =
     "ALTER TABLE verifications ADD COLUMN duration_source TEXT";
 
@@ -181,6 +184,7 @@ CREATE TABLE IF NOT EXISTS verification_issues (
     code TEXT NOT NULL DEFAULT '',
     problem TEXT NOT NULL,
     suggestion TEXT,
+    triage TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (verification_id) REFERENCES verifications(id) ON DELETE CASCADE
 );
 
@@ -371,7 +375,7 @@ impl SqliteVerificationStore {
         verification_id: &str,
     ) -> Result<Vec<VerificationIssue>> {
         let mut stmt = conn.prepare_cached(
-            "SELECT file, line, severity, category, code, problem, suggestion
+            "SELECT file, line, severity, category, code, problem, suggestion, triage
              FROM verification_issues WHERE verification_id = ?1
              ORDER BY id",
         )?;
@@ -382,6 +386,7 @@ impl SqliteVerificationStore {
                 let severity = IssueSeverity::from_str(&severity_str).unwrap_or_default();
 
                 Ok(VerificationIssue {
+                    triage: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                     file: row.get(0)?,
                     line: row.get::<_, Option<i32>>(1)?.map(|v| v as u32),
                     severity,
@@ -410,7 +415,7 @@ impl SqliteVerificationStore {
             .map(|i| format!("?{}", i + 1))
             .collect();
         let query = format!(
-            "SELECT verification_id, file, line, severity, category, code, problem, suggestion
+            "SELECT verification_id, file, line, severity, category, code, problem, suggestion, triage
              FROM verification_issues WHERE verification_id IN ({})
              ORDER BY id",
             placeholders.join(", ")
@@ -430,6 +435,7 @@ impl SqliteVerificationStore {
             Ok((
                 vid,
                 VerificationIssue {
+                    triage: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
                     file: row.get(1)?,
                     line: row.get::<_, Option<i32>>(2)?.map(|v| v as u32),
                     severity,
@@ -471,8 +477,8 @@ impl SqliteVerificationStore {
         // Insert new issues
         let mut stmt = conn.prepare_cached(
             "INSERT INTO verification_issues
-             (verification_id, file, line, severity, category, code, problem, suggestion)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (verification_id, file, line, severity, category, code, problem, suggestion, triage)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
 
         for issue in &verification.issues {
@@ -485,6 +491,7 @@ impl SqliteVerificationStore {
                 issue.code,
                 issue.problem,
                 issue.suggestion,
+                serde_json::to_string(&issue.triage)?,
             ])?;
         }
 
@@ -706,8 +713,8 @@ pub fn save_verification_issues_with_conn(
 
     let mut stmt = conn.prepare_cached(
         "INSERT INTO verification_issues
-         (verification_id, file, line, severity, category, code, problem, suggestion)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (verification_id, file, line, severity, category, code, problem, suggestion, triage)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?;
 
     for issue in &verification.issues {
@@ -720,6 +727,7 @@ pub fn save_verification_issues_with_conn(
             issue.code,
             issue.problem,
             issue.suggestion,
+            serde_json::to_string(&issue.triage)?,
         ])?;
     }
 
@@ -2292,7 +2300,8 @@ fn correct_parked_delivery_proof_scope_inner(
     })
 }
 
-/// Record a supervisor's negative review of a parked AwaitingMerge delivery.
+/// Record a negative review of a parked AwaitingMerge delivery. Review text
+/// never grants import authority, including when it quotes command markers.
 ///
 /// This is deliberately separate from generic task updates: the delivery proof
 /// lock must not prevent recording a negative verdict — recording a failed
@@ -2311,6 +2320,21 @@ pub fn request_changes_for_parked_delivery(
     task_id: &str,
     supervisor_agent_id: &str,
     reason: &str,
+) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_with_merge_sources(
+        cas_dir, task_id, supervisor_agent_id, reason, &[],
+    )
+}
+
+/// The authenticated supervisor adapter supplies explicit immutable import
+/// grants. Other review/rejection callers use the text-inert wrapper above.
+/// Never derive authority from `reason`: it can contain quoted findings.
+pub fn request_changes_for_parked_delivery_with_merge_sources(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -2386,6 +2410,22 @@ pub fn request_changes_for_parked_delivery(
         })?;
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    // Typed grants come only from the supervisor adapter, never review prose.
+    for source in source_commits {
+        if !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StoreError::Parse("merge_source requires a full immutable commit SHA".into()));
+        }
+        let work_target = deliverables.work_target.clone().ok_or_else(||
+            StoreError::Parse("merge_source requires a declared task work target".into()))?;
+        let commit = source.to_ascii_lowercase();
+        if !deliverables.authorized_merge_sources.iter().any(|known|
+            known.commit == commit && known.work_target == work_target)
+        {
+            deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                commit, supervisor_id: supervisor_agent_id.to_string(), work_target,
+            });
+        }
+    }
     let blocked_parked = status == TaskStatus::Blocked.to_string()
         && (deliverables.parked_branch.is_some()
             || deliverables.factory_branch_anchor.is_some()
@@ -3331,6 +3371,12 @@ impl VerificationStore for SqliteVerificationStore {
             conn.execute_batch(VERIFICATION_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
+                "verification_issues",
+                "triage",
+                VERIFICATION_ISSUE_TRIAGE_STATEMENT,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
                 "verifications",
                 "status_detail",
                 VERIFICATION_STATUS_DETAIL_STATEMENT,
@@ -3823,7 +3869,7 @@ mod tests {
     fn test_verification_with_issues() {
         let (store, _dir) = create_test_store();
 
-        let issues = vec![
+        let mut issues = vec![
             VerificationIssue::blocking(
                 "src/main.rs".to_string(),
                 Some(42),
@@ -3839,6 +3885,13 @@ mod tests {
             ),
         ];
 
+        issues[0].triage = cas_types::FindingTriage {
+            severity: cas_types::FindingSeverity::Money,
+            reach: cas_types::FindingReach::Main,
+            journey: Some("save".into()),
+            repro: Some("Saving an idea charged twice".into()),
+        };
+        let expected = issues[0].triage.clone();
         let verification = Verification::rejected(
             "ver-test".to_string(),
             "cas-1234".to_string(),
@@ -3858,6 +3911,9 @@ mod tests {
         assert_eq!(first_issue.file, "src/main.rs");
         assert_eq!(first_issue.line, Some(42));
         assert!(first_issue.is_blocking());
+        assert_eq!(first_issue.triage, expected, "single reads retain finding reach");
+        let batch = store.get_for_task("cas-1234").unwrap();
+        assert_eq!(batch[0].issues[0].triage, expected, "batch reads retain finding reach");
     }
 
     #[test]

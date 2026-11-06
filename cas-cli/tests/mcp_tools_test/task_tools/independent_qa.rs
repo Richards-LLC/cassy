@@ -738,53 +738,77 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
         {"id":"F12", "scope":"pre-existing"}
     ])))).await.unwrap());
     assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
-    assert!(result.contains("below the spawn threshold (no repro or affected): F12"), "{result}");
+    assert!(result.contains("Theoretical backlog (P4): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
         .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
-    assert_eq!(follow_ups.len(), 1, "F10 already has a task; only F11 is filed");
-    assert!(follow_ups[0].title.contains("Strict contrast capture instability"));
-    assert!(follow_ups[0].description.contains("Problem: Strict contrast capture instability."));
-    assert!(!follow_ups[0].description.contains("(not described)"));
+    assert_eq!(follow_ups.len(), 2, "F10 is linked; F11 and theoretical F12 are retained");
+    let observed = follow_ups.iter().find(|t| t.title.contains("Strict contrast")).unwrap();
+    let theoretical = follow_ups.iter().find(|t| t.id != observed.id).unwrap();
+    assert_eq!(theoretical.priority.0, 4);
+    assert!(observed.title.contains("Strict contrast capture instability"));
+    assert!(observed.description.contains("Problem: Strict contrast capture instability."));
+    assert!(!observed.description.contains("(not described)"));
     assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
         .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
 }
 
-/// cas-0ad8: through the real task tool. A follow-up naming a verifier finding is
-/// refused until it says how to reproduce it and who it affects.
+/// Replay the visible failures and code-read findings from the Nov 4–5
+/// gabber board through real finding intake and the supervisor ready queue.
 #[tokio::test]
-async fn task_create_applies_the_review_spawn_threshold_cas_0ad8() {
+async fn gabber_findings_derive_priority_and_ready_order() {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, core, repo, _task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"),
+        "version: 1\nmain_journeys: [save, chat]\njourneys:\n- id: save\n  status: active\n- id: chat\n  status: active\n").unwrap();
     let service = CasService::new(core, None);
-    let create = |extra: serde_json::Value| {
-        let mut request = serde_json::json!({
-            "action": "create", "title": "Tighten a check", "risk": "none", "task_type": "task",
-            "description": "Non-blocking verifier findings on the delivery (ver-7e87d441000d).",
-        });
-        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        serde_json::from_value::<cas_mcp::types::TaskRequest>(request).unwrap()
-    };
-    let refused = service
-        .task(Parameters(create(serde_json::json!({}))))
-        .await
-        .expect_err("a follow-up from a finding without repro or affected is refused");
-    assert!(refused.message.contains("SPAWN THRESHOLD"), "{}", refused.message);
-
-    let created = extract_text(
-        service
-            .task(Parameters(create(serde_json::json!({
-                "repro": "run cas x; it prints y", "affected": "the supervisor reading it",
-            }))))
-            .await
-            .unwrap(),
-    );
-    let id = extract_task_id(&created).unwrap().to_string();
-    let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
-    assert!(task.labels.iter().any(|label| label == "from-finding"), "{:?}", task.labels);
-    assert!(task.notes.contains("Finding origin: verification:ver-7e87d441000d"), "{}", task.notes);
-    assert!(task.notes.contains("Affected: the supervisor reading it"), "{}", task.notes);
+    let mut visible = Vec::new();
+    let mut corners = Vec::new();
+    // The board's manual P0 marks must not survive derived triage.
+    for (title, severity, reach, journey, repro, expected) in [
+        ("Canned writer lines", "broken", "main", "save", true, 1),
+        ("Dead-end save question", "broken", "main", "save", true, 1),
+        ("Prompt text leaked into options", "broken", "main", "save", true, 1),
+        ("Chat Enter does not send", "broken", "main", "chat", true, 1),
+        ("Crash window between DB writes", "data_loss", "theoretical", "save", false, 2),
+        ("Contradictory reader output", "broken", "theoretical", "save", false, 4),
+        ("Doubtful correction at confidence 0.2", "broken", "theoretical", "save", false, 4),
+        ("Unreachable resumed pending voice", "broken", "main", "save", false, 4),
+        ("Failed paid step mid-run", "money", "theoretical", "save", false, 2),
+        ("Undeclared journey is not main", "broken", "main", "unknown", true, 4),
+    ] {
+        let result = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "create", "title": title, "risk": "none", "task_type": "bug",
+            "priority": 0, "finding_origin": "verification:ver-7e87d441000d",
+            "labels": format!("severity:{severity},reach:{reach},journey:{journey}{}",
+                if title == "Unreachable resumed pending voice" { ",runtime-repro" } else { "" }),
+            "repro": repro.then_some("Run the journey; observe the broken output"),
+            "affected": "the person using save or chat",
+        })).unwrap())).await.expect("findings remain recordable even without a runtime repro");
+        let text = extract_text(result);
+        let id = extract_task_id(&text).unwrap().to_string();
+        let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
+        assert_eq!(task.priority.0, expected, "{title}: {:?}", task.labels);
+        assert!(task.labels.iter().any(|label| label == "from-finding"));
+        if title == "Contradictory reader output" {
+            service.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"update", "id":id, "priority":0,
+            })).unwrap())).await.unwrap();
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&id).unwrap().priority.0, 4,
+                "manual priority cannot promote a theoretical finding");
+        }
+        if expected == 1 { visible.push(id); } else { corners.push(id); }
+    }
+    let ready = extract_text(service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "ready", "limit": 100,
+    })).unwrap())).await.unwrap());
+    for main in &visible {
+        for corner in &corners {
+            assert!(ready.find(main).unwrap() < ready.find(corner).unwrap(), "{ready}");
+        }
+    }
 }
 
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {

@@ -78,6 +78,23 @@ def test_workflow_command():
         )
         self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
 
+    def test_rust_assert_diagnostics_are_not_text_pins_cas_cae5(self):
+        message = '"preserve original content and routing instructions"'
+        cases = [
+            (f'assert_eq!(&row.prompt, body, {message});', False),
+            (f'assert_ne!(prompt, render((left, right), [a, b]), {message}, prompt);', False),
+            (f'debug_assert!(\n source.contains("marker"),\n {message}\n);', False),
+            ('assert!(valid, r#"The prompt must preserve the original content, routing, and useful context."#);', False),
+            (f'assert_eq!(prompt, {message}, "unexpected value");', True),
+            (f'assert_eq!({message}, prompt, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), {message}, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), body, {message});', False),
+        ]
+        for assertion, expected_pin in cases:
+            with self.subTest(assertion=assertion):
+                hits = self.hits('#[test] fn preserve_payload() {\n' + assertion + '\n}')
+                self.assertEqual(bool(hits), expected_pin, hits)
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',

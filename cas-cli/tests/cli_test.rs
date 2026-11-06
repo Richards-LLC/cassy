@@ -3364,6 +3364,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
     git(&["init", "-q", "-b", "main"]);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -3374,7 +3375,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
     git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed"]);
     let cas_root = cas::store::init_cas_dir(root).unwrap();
     let artifacts = root.join("artifacts");
-    std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root={:?}\n", artifacts.display().to_string())).unwrap();
+    std::fs::write(cas_root.join("config.toml"), format!("[project]\ncanonical_id=\"ledger-fixture\"\n[factory]\nartifacts_root={:?}\n", artifacts.display().to_string())).unwrap();
     let mut task = cas::types::Task::new("cas-ledger-cli".into(), "Review src/flow.ts".into());
     task.execution_note = Some("no-code".into());
     cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
@@ -3386,6 +3387,8 @@ fn qa_ledger_init_check_and_no_overwrite() {
     assert_eq!(init["rows"][0]["id"], "FLOW-J1");
     let path = std::path::Path::new(init["path"].as_str().unwrap());
     let original = std::fs::read(path).unwrap();
+    let primary_head = git(&["rev-parse", "HEAD"]);
+    assert!(String::from_utf8_lossy(&original).contains(&format!("build: {primary_head}")));
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
     assert_eq!(std::fs::read(path).unwrap(), original);
@@ -3395,6 +3398,56 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
     assert_eq!(report["ok"], false);
     assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["row_id"] == "FLOW-J1" && d["field"] == "verdict"));
+
+    // cas-6e4a: the source is the persisted task branch, independent of the
+    // primary checkout, stale parked receipt, tag ambiguity or caller cwd.
+    let worker = root.join("worker checkout");
+    let source = "factory/ledger-worker-cas-ledger-source";
+    git(&["worktree", "add", "-qb", source, worker.to_str().unwrap()]);
+    std::fs::write(worker.join("src/flow.ts"), "changed by worker").unwrap();
+    git(&["-C", worker.to_str().unwrap(), "add", "src/flow.ts"]);
+    git(&["-C", worker.to_str().unwrap(), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "worker delivery"]);
+    let source_head = git(&["rev-parse", &format!("refs/heads/{source}")]);
+    assert_ne!(source_head, primary_head);
+    git(&["tag", source, &primary_head]);
+    let target = cas::types::WorkTarget { repo_selector: "project:ledger-fixture".into(), target_branch: "main".into() };
+    for (suffix, cwd, start_branch, parked, succeeds) in [
+        ("worker", worker.as_path(), Some(source), "main", true),
+        ("primary", root, Some(source), "main", true),
+        ("parked", root, None, source, true),
+        ("missing", root, Some("factory/missing-source"), "main", false),
+        ("blank", root, Some(""), "main", false),
+    ] {
+        let mut sourced = task.clone();
+        sourced.id = format!("cas-ledger-source-{suffix}");
+        sourced.assignee = Some("ledger-worker".into());
+        sourced.deliverables.work_target = Some(target.clone());
+        sourced.deliverables.factory_branch_anchor = Some(primary_head.clone());
+        sourced.deliverables.parked_branch = Some(parked.into());
+        sourced.deliverables.factory_branch_start = start_branch.map(|branch| cas::types::FactoryBranchStart {
+            work_target: target.clone(), assignee: "ledger-worker".into(), branch: branch.into(), base_sha: primary_head.clone(),
+        });
+        cas::store::open_task_store_local(&cas_root).unwrap().add(&sourced).unwrap();
+        let output = cas_cmd(root).current_dir(cwd).env("CAS_ROOT", &cas_root)
+            .args(["qa", "ledger", "init", "--task", &sourced.id, "--json"]).output().unwrap();
+        assert_eq!(output.status.success(), succeeds, "{suffix}: {}", String::from_utf8_lossy(&output.stderr));
+        if succeeds {
+            let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(init["rows"][0]["id"], "FLOW-J1", "target registry remains authoritative");
+            let body = std::fs::read_to_string(init["path"].as_str().unwrap()).unwrap();
+            assert!(body.contains(&format!("build: {source_head}")), "{suffix} used another checkout's HEAD: {body}");
+            assert!(!body.contains(&format!("build: {primary_head}")));
+        } else {
+            if let Some(branch) = start_branch.filter(|branch| !branch.is_empty()) {
+                assert!(String::from_utf8_lossy(&output.stderr).contains(branch), "{suffix}: {output:?}");
+            }
+            let project_dir = cas::config::project_factory_artifacts_root(&cas_root, &artifacts);
+            assert!(!project_dir.join(&sourced.id).exists());
+        }
+    }
+    assert_eq!(git(&["rev-parse", "HEAD"]), primary_head, "init leaves primary HEAD untouched");
+    let unchanged_source = git(&["rev-parse", &format!("refs/heads/{source}")]);
+    assert_eq!(unchanged_source, source_head);
 
     #[cfg(unix)]
     {

@@ -29,7 +29,7 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
    surface fixed by one child must not contradict another child's. Map
    conflicting claims to child IDs and captures in Contradictions.
 6. At the deadline, mark unrun cells `NOT EXERCISED: <reason>` as owed work.
-   List each defect in the ledger; file a task only under the [spawn threshold](workflow.md#phase-1-plan).
+   List each finding with severity and reach; keep theoretical findings in the backlog and staff main-journey FAILs first ([triage](workflow.md#phase-1-plan)).
    Finish the ledger with status `complete` and add exactly one epic note headed
    `Epic flow walk` with tip, child coverage, ledger path, counts and label
    split. Stop registered QA servers. A complete pass may still hold FAIL or

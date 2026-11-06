@@ -158,7 +158,7 @@ impl CasCore {
         // inspecting one-time authority, or applying expiry transitions.
         // This makes malformed issues failure-atomic even when the named
         // capability or dispatch is expired.
-        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
+        let mut issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
             parse_verification_issues(issues_json).map_err(|message| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(message),
@@ -178,6 +178,9 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+        for issue in &mut issues {
+            crate::finding_triage::normalize_finding(&self.cas_root, &mut issue.triage);
+        }
         let mut authored_content = Verification::new(String::new(), req.task_id.clone());
         authored_content.summary = req.summary.clone();
         authored_content.issues = issues;
@@ -746,7 +749,7 @@ impl CasCore {
                     let retry_note = if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some()
                     {
-                        self.continue_premerge_after_verdict(&proof_dispatch, existing.status).unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+                        self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
                         && proof_dispatch.delivery_transaction_id.is_none()
@@ -1108,7 +1111,7 @@ impl CasCore {
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let close_retry = if candidate.is_some() {
-            self.continue_premerge_after_verdict(&proof_dispatch, verification.status).unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
+            self.continue_premerge_after_verdict(&proof_dispatch, verification.status).await.unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
         } else if verification.status == VerificationStatus::SupervisorCall {
             format!(
                 "\nSupervisor decision required. Answer on this dispatch: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<answer and final verdict>\". No re-dispatch is needed.",
@@ -1266,6 +1269,7 @@ impl CasCore {
                     "\n{} [{}] {}\n",
                     severity_icon, issue.category, location
                 ));
+                output.push_str(&format!("   Reach: {:?}; impact: {:?}; journey: {}\n", issue.triage.reach, issue.triage.severity, issue.triage.journey.as_deref().unwrap_or("undeclared")));
                 output.push_str(&format!("   Problem: {}\n", issue.problem));
                 if !issue.code.is_empty() {
                     output.push_str(&format!("   Code: {}\n", issue.code));

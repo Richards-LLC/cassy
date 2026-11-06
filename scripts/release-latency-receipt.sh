@@ -242,12 +242,15 @@ queue_runs=unavailable
 queue_run_ids=unavailable
 if [[ "$main_landed_epoch" =~ ^[0-9]+$ ]]; then
     main_to_published=$((end - main_landed_epoch))
+    queue_since_epoch=$((main_landed_epoch - 7 * 86400))
     if [[ "$first_child_epoch" =~ ^[0-9]+$ && "$first_child_epoch" -le "$main_landed_epoch" ]]; then
         first_child_to_main=$((main_landed_epoch - first_child_epoch))
+        queue_since_epoch="$first_child_epoch"
     fi
     # Count all CI attempts for this PR, including failed/ejected older trees.
-    # Pagination prevents a busy repository from quietly understating the count.
-    queue_evidence="$("$gh_bin" api "repos/$repo/actions/runs?event=merge_group&per_page=100" --paginate --slurp 2>/dev/null || true)"
+    # Bound pagination to the first child date, or the prior week if unknown.
+    queue_since="$(jq -nr --argjson epoch "$queue_since_epoch" '$epoch | strftime("%Y-%m-%d")')"
+    queue_evidence="$("$gh_bin" api "repos/$repo/actions/runs?event=merge_group&created=%3E%3D$queue_since&per_page=100" --paginate --slurp 2>/dev/null || true)"
     queue_attempts="$(jq -c --arg pr "$pr_number" --arg merged "$main_landed_at" '
         [if type == "array" then .[] else . end | .workflow_runs[]? |
          select(.event == "merge_group" and .name == "CI" and .updated_at <= $merged and

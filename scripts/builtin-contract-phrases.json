@@ -1965,6 +1965,14 @@
         {
           "text": "cas qa ledger check <path> --task <id>",
           "reason": "Keep the executable scaffold/preflight commands as the sole machine-grammar authority; shared qa_ledger parser and CLI/gate regression tests own row validation."
+        },
+        {
+          "text": "Matching server read-back with no visible product defect: record `PASS` for the\n  product, retain the original timeout/selector/settle failure capture and the\n  read-back in the row, and link a harness defect task. This harness-only red does\n  not block promotion or require a product fix or whole-sweep rerun.",
+          "reason": "#1551: matching read-back with no visible product defect grades the product PASS; retained harness-only red must not block promotion."
+        },
+        {
+          "text": "Read-back mismatch or a visible product defect: record `FAIL` with a product\n  defect task, even if a success toast appeared or server state otherwise matches.\n  These failures block promotion under the existing batch fix/re-walk policy.",
+          "reason": "#1551: read-back mismatch or a visible product defect grades FAIL and blocks promotion, including success-toast or otherwise matching server-state cases."
         }
       ],
       "absent": [],

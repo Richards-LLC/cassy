@@ -729,6 +729,13 @@ pub struct KillAllArgs {
 /// `cas factory train` actions (cas-dcc9).
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
+    /// Merge this train's parked deliveries in order; the daemon resumes
+    /// automatically after candidate verification or pending CI.
+    Merge {
+        epic: String,
+        /// Explicit order; omit to select parked deliveries by updated time.
+        tasks: Vec<String>,
+    },
     /// Revert children's merges off their release train in one batch, return
     /// each task to its worker and re-enqueue the train PR once. One repair
     /// cycle per train.
@@ -1306,6 +1313,14 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::CiWatchDryRun { minutes, session } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("ci-watch-dry-run requires a Cassy project"))?;
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
+                Ok(())
+            }
+            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks } } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()))?;
+                if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
+                else { println!("{receipt}"); }
                 Ok(())
             }
             FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {

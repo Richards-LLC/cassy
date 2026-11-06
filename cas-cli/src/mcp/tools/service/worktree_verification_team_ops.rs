@@ -61,17 +61,18 @@ impl CasService {
         let id = req.id.ok_or_else(|| {
             Self::error(ErrorCode::INVALID_PARAMS, "id is required for merge action")
         })?;
-        self.inner
-            .worktree_merge(
-                &id,
-                req.force.unwrap_or(false),
-                req.task_id.as_deref(),
-                req.allow_trunk.unwrap_or(false),
-                req.cleanup,
-                req.supervisor_override.unwrap_or(false),
-                req.reason.as_deref(),
-            )
-            .await
+        // Git, close gates and store follow-up are synchronous. Keep the
+        // response timer free to observe publication while they continue.
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.worktree_merge(
+                &id, req.force.unwrap_or(false), req.task_id.as_deref(),
+                req.allow_trunk.unwrap_or(false), req.cleanup,
+                req.supervisor_override.unwrap_or(false), req.reason.as_deref(),
+            ).await
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("worktree merge handler ended abnormally: {error}"),
+        )))
     }
 
     pub(super) async fn worktree_status(

@@ -1,0 +1,4 @@
+title: Supervisor exit and successor diagnostics preserve unfinished worker work and inventory uncertainty
+tasks: [cas-affc, cas-7772d, cas-a7369]
+invariants: [HUB-J27-EXIT-WORKER-RECOVERY]
+journeys: [HUB-J27]

@@ -920,6 +920,17 @@ impl PeerClaims {
         self.coordinator(agent_id)?.release_expecting(&key, lock.epoch, lock.renewal_count)
     }
 
+    /// Explicitly hand back a GitHub source, including its heartbeat registration.
+    pub(crate) fn release_source_for_handoff(
+        &self, root: &Path, agent_id: &str, key: &str,
+    ) -> Result<bool, String> {
+        let _fence = lock_task_claim_release(root, key).map_err(|error| error.to_string())?;
+        self.remaining().map_err(|error| error.to_string())?;
+        let released = self.release_own(key, agent_id).map_err(|error| error.to_string())?;
+        forget_source_claim(root, agent_id, key)?;
+        Ok(released)
+    }
+
     /// The holder as Cassy Cloud lists it: whether it is live, and its
     /// name and machine from registration.
     fn listed_holder(&self, held_by: &str) -> Listed {
@@ -1165,6 +1176,13 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         let mut source_task = None;
         let _source_fence = if task_id.starts_with("ask-") {
             let Ok(fence) = lock_task_claim_release(cas_root, &task_id) else { report.failed += 1; continue; };
+            // A handoff may have removed this registration after the heartbeat
+            // snapshot. Re-check under the same fence before renewing/reclaiming.
+            let Ok(current) = agents.get(agent_id) else { report.failed += 1; continue; };
+            if !current.metadata.get(META_SOURCE_CLAIMS)
+                .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .is_some_and(|keys| keys.contains(&task_id))
+            { continue; }
             match active_source_task(cas_root, &task_id) {
                 Ok(Some(task)) => source_task = Some(task),
                 Ok(None) => {
@@ -2415,11 +2433,23 @@ mod tests {
             retired_local: HashMap::new(), budget: None,
         };
         tokio::task::spawn_blocking(move || {
-            for (holder_session, same_session) in [(Some("session-a"), true), (Some("session-b"), false), (None, false)] {
+            // A reset changes the harness registration, but preserves the
+            // canonical worker/task owner (GH #1563, cas-9aa1).
+            for (holder_session, reader_name, reader_task, retired, same_owner) in [
+                (Some("session-a"), "reader-worker", "cas-reader", false, false),
+                (Some("session-b"), "reader-worker", "cas-reader", false, false),
+                (None, "reader-worker", "cas-reader", false, false),
+                (Some("session-a"), "holder-worker", "cas-other-task", false, false),
+                (Some("session-a"), "reader-worker", "cas-real-task", false, false),
+                (Some("session-a"), "holder-worker", "cas-real-task", false, true),
+                (Some("session-b"), "holder-worker", "cas-real-task", false, true),
+                (Some("session-a"), "holder-worker", "cas-real-task", true, true),
+            ] {
+                let same_session = holder_session == Some("session-a");
                 let dir = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(dir.path()).unwrap();
                 let agents = crate::store::open_agent_store(&root).unwrap();
-                for (id, name, session) in [("reader", "reader-worker", Some("session-a")), ("holder", "holder-worker", holder_session)] {
+                for (id, name, session) in [("reader", reader_name, Some("session-a")), ("holder", "holder-worker", holder_session)] {
                     let Some(session) = session else { continue };
                     let mut agent = crate::types::Agent::new(id.into(), name.into());
                     agent.factory_session = Some(session.into());
@@ -2427,11 +2457,23 @@ mod tests {
                 }
                 let path = "web/DESIGN.md";
                 assert_eq!(claim_with(&claims, &root, "holder", "holder-worker", "cas-real-task", path), FileLease::Mine);
-                let FileLease::HeldBy(holder) = claim_with(&claims, &root, "reader", "reader-worker", "cas-reader", path) else {
+                let mut resumed_claims = claims.clone();
+                if retired {
+                    agents.unregister("holder").unwrap();
+                    resumed_claims.retired_local = retired_local_agents(&root);
+                }
+                let answer = claim_with(&resumed_claims, &root, "reader", reader_name, reader_task, path);
+                if same_owner {
+                    assert_eq!(answer, FileLease::Mine,
+                        "reset/re-take must not report self collision: {holder_session:?}, retired={retired}");
+                    assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+                    continue;
+                }
+                let FileLease::HeldBy(holder) = answer else {
                     panic!("expected a contended file for {holder_session:?}");
                 };
                 let note = collision_note(path, &holder);
-                assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
+                assert!(notify_worker_of_holder(&root, "reader", reader_name, Some("session-a"), path, &holder));
                 let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
                 // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");

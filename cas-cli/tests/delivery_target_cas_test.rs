@@ -385,6 +385,73 @@ async fn run_merge(fixture: &DeliveryFixture) -> String {
     }
 }
 
+/// A release train owns trunk even when a supervisor explicitly allows it.
+/// Drive both stored (System A) and inferred (System B) merge targets.
+#[tokio::test]
+async fn open_release_train_refuses_trunk_even_with_allow_trunk() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = arm_delivery("train-guard", "train-guard", &mut env).await;
+    env.set_current_dir(&fixture.repo.root);
+    let tasks = open_task_store(&fixture.cas_root).unwrap();
+    let mut train = Task::new("cas-train".into(), "Release train vNEXT".into());
+    train.task_type = TaskType::Epic;
+    train.labels = vec!["release-train".into()];
+    train.branch = Some("epic/train".into());
+    train.deliverables.work_target = Some(WorkTarget {
+        repo_selector: fixture.receipt.repo_selector.clone(),
+        target_branch: "main".into(),
+    });
+    // cas-ed1d: the prior train stays open while its cut waits to land, but
+    // accepts no more merges. Guidance must name the fresh accepting train.
+    let mut cut = train.clone();
+    cut.id = "cas-cut".into();
+    cut.branch = Some("epic/cut-train".into());
+    cut.created_at -= chrono::Duration::minutes(1);
+    cut.labels.push("release-train-cut".into());
+    tasks.add(&cut).unwrap();
+    tasks.add(&train).unwrap();
+    let service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
+    for system_a in [false, true] {
+        if system_a {
+            cas::store::open_worktree_store(&fixture.cas_root).unwrap().add(
+                &cas::types::Worktree::new(
+                    "stored-train-worker".into(), fixture.receipt.source_branch.clone(),
+                    "main".into(), fixture.cas_root.join("worktrees/train-guard"),
+                ),
+            ).unwrap();
+        }
+        for allow_trunk in [false, true] {
+            let mut merge = coord_req("worktree_merge");
+            merge.id = Some(fixture.receipt.source_branch.clone());
+            merge.task_id = Some(fixture.task_id.clone());
+            merge.allow_trunk = Some(allow_trunk);
+            merge.cleanup = Some(false);
+            let error = service.factory(Parameters(merge)).await
+                .expect_err("an open train must refuse direct trunk merges");
+            let message = error.to_string();
+            assert!(message.contains("RELEASE TRAIN OPEN") && message.contains(&train.id)
+                && message.contains("epic/train") && message.contains("scripts/release.sh --hotfix"),
+                "System A={system_a}, allow_trunk={allow_trunk}: {message}");
+            assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+            assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+        }
+    }
+    train.status = TaskStatus::Closed;
+    tasks.update(&train).unwrap();
+    let cut_only = run_merge(&fixture).await;
+    assert!(cut_only.contains("RELEASE TRAIN OPEN") && cut_only.contains(&cut.id)
+        && cut_only.contains("cut and accepts no further merges")
+        && cut_only.contains("Wait for it to land or open the next train")
+        && !cut_only.contains("scripts/release.sh --hotfix"), "{cut_only}");
+    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+    cut.status = TaskStatus::Closed;
+    tasks.update(&cut).unwrap();
+    let merged = run_merge(&fixture).await;
+    assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),
+        "with no train open the existing merge must work: {merged}");
+}
+
 fn delivery_state(fixture: &DeliveryFixture) -> WorkerDeliveryState {
     cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
         .expect("delivery lookup")
@@ -1157,17 +1224,19 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     merge.task_id = Some(fixture.task_id.clone());
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
+    let started = std::time::Instant::now();
     let answer = get_text(
         &supervisor
             .factory_with_budget_for_testing(
                 merge,
-                std::time::Duration::from_secs(50),
+                std::time::Duration::from_secs(20),
                 std::time::Duration::ZERO,
             )
             .await
             .expect("transactional merge"),
     );
-    assert!(answer.contains("COMMITTED"), "{answer}");
+    assert!(answer.contains("COMMITTED"), "response took {:?}: {answer}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "response exceeded 20 seconds: {answer}");
     assert!(answer.contains("local-only target"), "{answer}");
     assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
     assert_eq!(

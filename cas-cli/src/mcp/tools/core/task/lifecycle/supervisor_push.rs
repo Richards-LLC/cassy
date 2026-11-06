@@ -1342,6 +1342,14 @@ pub(crate) fn reconcile_blocked_task_alert(
         }
         return Ok(());
     }
+    if let Some(dependencies) = super::super::block_hold::recorded_dependency_wait(tasks.as_ref(), task_id, start) {
+        if dependencies.iter().all(|dependency| matches!(dependency.status, TaskStatus::Closed | TaskStatus::Cancelled)) {
+            let resolved = dependencies.iter().map(|dependency| format!("{} {}", dependency.id, dependency.status))
+                .collect::<Vec<_>>().join(", ");
+            emit(true, Some(&format!("Dependencies resolved: {resolved}; restart the blocked task when its hold is cleared.")))?;
+        }
+        return Ok(());
+    }
     if super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
         || worker_owns_task_reminder(root, agents.as_ref(), actor, task_id, now)
     {

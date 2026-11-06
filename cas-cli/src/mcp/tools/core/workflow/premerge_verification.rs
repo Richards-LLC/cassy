@@ -75,6 +75,8 @@ fn is_regenerated_output(path: &str) -> bool {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let _phase = (args.first() == Some(&"merge-tree"))
+        .then(|| crate::mcp::tools::service::mutation_receipt::phase("merge-tree"));
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -777,6 +779,7 @@ impl CasCore {
         task: &Task,
         dispatch: &VerificationDispatch,
     ) -> Result<Option<std::thread::JoinHandle<()>>, McpError> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("dispatch");
         if self.daemon.is_some() {
             return match automatic::launch(self, task, dispatch) {
                 Ok(handle) => Ok(handle),

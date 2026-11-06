@@ -1224,17 +1224,19 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     merge.task_id = Some(fixture.task_id.clone());
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
+    let started = std::time::Instant::now();
     let answer = get_text(
         &supervisor
             .factory_with_budget_for_testing(
                 merge,
-                std::time::Duration::from_secs(50),
+                std::time::Duration::from_secs(20),
                 std::time::Duration::ZERO,
             )
             .await
             .expect("transactional merge"),
     );
-    assert!(answer.contains("COMMITTED"), "{answer}");
+    assert!(answer.contains("COMMITTED"), "response took {:?}: {answer}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "response exceeded 20 seconds: {answer}");
     assert!(answer.contains("local-only target"), "{answer}");
     assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
     assert_eq!(

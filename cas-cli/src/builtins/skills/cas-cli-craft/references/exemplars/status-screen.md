@@ -11,7 +11,7 @@ session moving, and if not, what do I do.
 | Scannable | Four labelled rows with a fixed 10-cell label column; an agents ledger whose last column is right-aligned age. |
 | Readable | Nothing — every value is a count, a name, or an age. |
 | Machine output | `--json`: one object with `session`, `prompt_queue_pending`, `tasks_ready`, `tasks_in_progress`, `epics`, `agents`, `activity`. |
-| Omitted | The queue peek and the activity feed; both are in `--json` and the receipt says so. |
+| Omitted | Queue peek and activity feed; both are in `--json` and the receipt says so. |
 
 ## Render at 80 columns
 

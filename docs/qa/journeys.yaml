@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  image-viewer-reload-readiness:
+    title: Image-viewer recovery waits for the restored turn after reload without racing the transient conversation list
+    tasks: [cas-4acf]
+    invariants: [HUB-J4-IMAGE-INSPECTION]
+    journeys: [HUB-J4]
   recorded-blocker-dependency-wait:
     title: A dependency recorded during a blocker hold owns the next supervisor wake until all blockers resolve
     tasks: [cas-f8c7]

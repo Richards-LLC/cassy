@@ -561,14 +561,14 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             let path = cas_root.join("no-checks-ci-gh");
             cas::test_paths::warm_stub(
                 &path,
-                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nif [ \"$1 $2\" = 'api graphql' ]; then printf '%s\\n' '{\"data\":{\"repository\":{\"mergeQueue\":null}}}'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
             );
             path
         } else if conclusion == "pending" {
             let path = cas_root.join("pending-ci-gh");
             cas::test_paths::warm_stub(
                 &path,
-                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"in_progress\",\"conclusion\":null}]}\\n'\n",
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nif [ \"$1 $2\" = 'api graphql' ]; then printf '%s\\n' '{\"data\":{\"repository\":{\"mergeQueue\":null}}}'; exit 0; fi\nprintf '{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"in_progress\",\"conclusion\":null}]}\\n'\n",
             );
             path
         } else {
@@ -1413,7 +1413,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let home = TempDir::new().expect("temp HOME");
     let fake_bin = TempDir::new().expect("fake gh dir");
     let gh = fake_bin.path().join("gh");
-    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\nif [ \"$1 $2\" = 'api graphql' ]; then printf '%s\\n' '{\"data\":{\"repository\":{\"mergeQueue\":null}}}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
@@ -1622,7 +1622,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
     let home = TempDir::new().expect("temp HOME");
     let fake_bin = TempDir::new().expect("fake gh dir");
     let gh = fake_bin.path().join("gh");
-    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\nif [ \"$1 $2\" = 'api graphql' ]; then printf '%s\\n' '{\"data\":{\"repository\":{\"mergeQueue\":null}}}'; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
@@ -1893,6 +1893,7 @@ async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
         std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null}]}"#).unwrap();
         cas::test_paths::warm_stub(&gh, r#"#!/bin/sh
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
+if [ "$1 $2" = 'api graphql' ]; then printf '%s\n' '{"data":{"repository":{"mergeQueue":null}}}'; exit 0; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = missing-commit ]; then echo 'HTTP 422: no commit found' >&2; exit 1; fi
 cat "$CAS_CI_RETRY_TEST_RESPONSE"

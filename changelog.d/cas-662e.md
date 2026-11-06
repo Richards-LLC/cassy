@@ -1,0 +1,3 @@
+### Fixed — Factory
+
+- **Merges to a queued main no longer fall back to a local merge** — Was: when `worktree_merge` could not check main's merge queue, it treated that as "no queue" and tried a local merge. That happened when the queue check failed or the GitHub repository lookup failed. The local merge then refused over unrelated edits in the main checkout, or merged locally and was rejected on push. Now: either failure refuses before anything changes, says the queue state is unknown and asks for a retry. A repository with no merge queue, or whose origin is not GitHub, still merges locally. A GitHub origin needs a working `gh` to merge into main.

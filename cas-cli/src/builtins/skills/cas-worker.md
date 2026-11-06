@@ -7,8 +7,7 @@ metadata:
 
 # Factory Worker
 
-Workers close their own tasks; never ask the supervisor to close
-your task on their behalf.
+Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 
 SILENT EXECUTION: results, errors and return contract only.
 
@@ -19,18 +18,18 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 1. `task action=start` before editing; success accepts the assignment. With
    nothing from `task action=mine`, tell the supervisor once you are ready.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
-2. Scaffold proof with `cas qa ledger init --task <id>`; validate with
+2. Only when task start's close checks list a Ledger or `Adversarial probe` line,
+   scaffold proof with `cas qa ledger init --task <id>` and validate with
    `cas qa ledger check <path> --task <id>`. Follow [close-gate.md](references/close-gate.md) and
    [verify-before-claim](../verify-before-claim/SKILL.md), then close with
    `task action=close reason="PASS <sha>: <proof>"`.
-3. If close returns VERIFICATION REQUIRED naming a dispatch, forward it once to
-   the supervisor, wait blocked with the one-line note in
-   [Verification-required close](references/recovery.md#verification-required-close),
-   and retry close after the verdict.
-4. For MERGE REQUIRED, drain `inbox_poll`, act on unread supervisor messages,
-   capture the current factory-branch tip SHA, and send one `merge_request=true` message;
-   its body is the request, so do not send a separate prose summary or ACK before
-   or after it. The verdict closes or reopens the task. Don't re-close or block on it.
+3. If close returns VERIFICATION REQUIRED naming a dispatch, its verdict closes the
+   task; follow [Verification-required close](references/recovery.md#verification-required-close).
+4. A park reads `PARKED … awaiting merge verdict; nothing more to do`.
+   The park relay is the completion signal; send merge_request=true only for local_merge.
+   The verdict wakes you once. Don't re-close or block on it. For a MERGE REQUIRED
+   refusal, drain `inbox_poll`, act on unread supervisor messages, capture
+   the current factory-branch tip SHA, then follow [recovery.md](references/recovery.md).
 
 One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
@@ -41,15 +40,16 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
   visibility, not authorization.
 
 - One integration per release: fixes merge to the train, the train goes through the gate once.
-- One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close.
+- One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
 - Worker peer lane: collision warnings only, within the same factory session
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.
-- `kind=status` (actionable, work continues) and `kind=ready` (done, awaiting
-  coordination) request a typed action wake; FYIs use `kind=receipt` or `wake=false`.
+- The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
+- `kind=status` (actionable, work continues) requests a typed action wake; FYIs
+  use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Checkpoint, never compact: at ~80% context, follow
-  [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
+- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+  See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 
 ## Phase references
 
@@ -72,20 +72,16 @@ call the resolved tool next, not another ToolSearch.
 
 ## Return contract
 
-Status, ready and close-failure messages use this block:
+Status and blocker messages use this block; fix close refusals silently:
 
 ```text
-status: <in_progress|ready|blocked|partial>
+status: <in_progress|blocked|partial>
 tip: <sha> on factory/<name>; worktree: <clean|dirty>
-ci: <run id + result | not started>
+pushed: <sha | not pushed>
 proof: <tests run with pass count | artifact path>
-deferred: <one line or none>
+blocker: <cause or none>
 need: <what the supervisor must do, one line, or none>
 ```
-
-A `kind=ready` message with `task_id` and first line `status: ready` claims
-completion; the supervisor may merge that pushed tip at once, so never send it
-for a red or partial tip.
 
 Coordination uses the literal string `supervisor` and both `summary` and `message`.
 The send result says whether it woke the recipient.

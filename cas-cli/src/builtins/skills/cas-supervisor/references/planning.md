@@ -18,7 +18,7 @@ Before finalizing EPIC scope, a multi-task plan or an architectural decision, as
 - **Six-month direction** — does this move toward or away from where the project is heading?
 - **Known traps** — check memories and prior incidents for a pattern this repeats.
 
-State the assessment in-line even when the answer is "no concerns"; small decisions accumulate into architecture.
+Surface a trajectory concern in-line; record nothing when there is none. Small decisions accumulate into architecture, so never skip this gate for them.
 
 ## Spec Requirements
 
@@ -103,7 +103,7 @@ Prefer tracer-bullet vertical slices (adapted from mattpocock/skills `to-tickets
 
 For a mechanical, codebase-wide change that cannot land green as a slice, use **expand–contract**: add the new form beside the old, migrate call sites in blast-radius-sized batches blocked by the expansion, then remove the old form after every batch lands. Keep the dependencies in Cassy tasks.
 
-- **Demo statements** — every subtask has a `demo_statement`, e.g. `demo_statement="User types a query and results filter live"`. A task with nothing to demo is probably a horizontal slice; restructure it.
+- **Demo statements** — give a `demo_statement` only to user-facing work (`qa.user_facing_labels`), e.g. `demo_statement="User types a query and results filter live"`.
 - **Spikes** — when the output is understanding, use `task_type=spike` with question-based acceptance criteria and a decision as the deliverable. Compare competing approaches in a spike before implementing one.
 - **Gates** — a promotion, rollout, flag flip or sign-off you own is `task_type=gate`: start it, record the outcome with `task action=notes note_type=decision`, then close it without commit evidence.
 - **Model lane** — tag each task's lane at breakdown; see [model-selection.md](model-selection.md). Search before planning: [workflow.md Phase 1](workflow.md#phase-1-plan).

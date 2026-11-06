@@ -1,5 +1,5 @@
 /** Fixed semantic controls; the hub and daemon independently enforce this list. */
-export type SupervisorCommand = "compact" | "clear" | "model" | "usage" | "exit" | "finish";
+export type SupervisorCommand = "compact" | "clear" | "model" | "usage" | "exit" | "finish" | "mcp";
 export type CommandKey = "previous" | "next" | "select" | "cancel";
 export interface CommandReceipt {
   client_ref: string;
@@ -13,12 +13,13 @@ const commands: { id: SupervisorCommand; label: string; effect: string; confirm?
   { id: "compact", label: "Compact", effect: "Summarize the supervisor's context" },
   { id: "usage", label: "Usage", effect: "Read usage from the supervisor's harness" },
   { id: "model", label: "Model", effect: "Open the harness's model chooser" },
+  { id: "mcp", label: "Reload Cassy", effect: "Reconnect Claude's Cassy server and read its new process and version" },
   { id: "clear", label: "Clear", effect: "Start a fresh conversation context", confirm: "Clear this supervisor's conversation context? Existing messages remain in Commander." },
   { id: "finish", label: "Finish", effect: "Run the supervisor's Finish skill", confirm: "Run Finish? The supervisor will wrap up its work and may end this session." },
   { id: "exit", label: "Exit", effect: "End the supervisor's harness", confirm: "Exit this supervisor? Its harness will end. Check its handoff before leaving." },
 ];
 export function commandsForHarness(harness: string | undefined): typeof commands {
-  return harness === "claude" || harness === "codex" ? commands : [];
+  return harness === "claude" ? commands : harness === "codex" ? commands.filter(command => command.id !== "mcp") : [];
 }
 interface Options {
   harness(): string | undefined;
@@ -89,7 +90,9 @@ export class SlashCommands {
     const unavailable = this.options.unavailable();
     if (unavailable) { this.notice(unavailable); return; }
     const shown = commandsForHarness(this.options.harness()).filter(command => command.id.startsWith(query));
-    if (!shown.length) this.notice("No supported command. Choose a listed command without arguments.");
+    if (!shown.length) this.notice(query === "mcp"
+      ? `Reload Cassy is unavailable for ${this.options.harness() ?? "unknown"}. It requires Claude Code.`
+      : "No supported command. Choose a listed command without arguments.");
     for (const command of shown) {
       const button = document.createElement("button"); button.type = "button"; button.dataset.supervisorCommand = command.id;
       const name = document.createElement("span"); name.textContent = `/${command.id} · ${command.label}`;

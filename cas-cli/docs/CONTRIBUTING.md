@@ -1080,6 +1080,17 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 
 Factory deliveries requiring a task verifier prepare a disposable candidate before publication. Candidate preparation binds to the fetched published `origin/<target>` tip, including when the local target carries an unpublished merge; a local-only repository uses its local target. Rolling back an unpublished local merge therefore cannot invalidate a review of an unchanged delivery when the published target advances. The merge queue still checks CI for interactions with other deliveries. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
 
+A server-bound task verifier may finish a pre-merge review after its dispatch
+work deadline, including a TimedOut dispatch, when the same source, candidate
+tree, plan and proof remain current and no newer dispatch supersedes it. The
+record transaction rechecks that exact boundary and consumes the original
+one-time handoff. The original deadline remains in the audit; it drives missing
+verdict alerts and recovery, not the validity of completed work. Raw bearer
+capabilities and unbound handoffs retain their expiry rules. Official server
+credentials keep the existing hard 30-minute lifetime, independently of the
+10-minute dispatch work deadline; expired credentials always refuse. Changed
+or superseded candidates cannot reuse late authority.
+
 A merge queue need not publish the synthetic premerge candidate commit itself.
 Close validates that candidate's immutable task/proof and exact target/source
 parents, requires the bound delivery source in the authoritative target history,
@@ -1107,7 +1118,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
 
 Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -2137,6 +2148,19 @@ for setup, doctor and release-preflight diagnostics and manual repair.
 
 ## Build, assembly and CI policy
 
+Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
+managed `cas` MCP server. It preserves the conversation and confirms a new
+live server PID and its recorded version. A command echo is not success.
+The exact native `/mcp reconnect cas` interaction was verified against a
+healthy, isolated stdio server on Claude Code **2.1.311, 2.1.316 and 2.1.318**.
+The minimum supported version is **2.1.311**. Older or unknown running Claude
+versions are refused as unverified; the current session's
+transcript supplies the version, rather than a potentially newer installation.
+The owning factory daemon must already run a build containing this action;
+an old daemon requires its normal update/relaunch before Commander can use it.
+Codex, Grok and unknown harnesses are refused by name. This action does not
+replace the factory daemon or implement automatic in-place server updates.
+
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
 that its follow-up, release publication, or installation on another host completed.
@@ -2656,9 +2680,9 @@ lane spanning that release's three epics ran every fast row in about 25 seconds.
   may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
   archive shards lack.
 - `version-literals`: fast mode also refuses the next patch, minor and major
-  version in the lane's changed files, comments included. The release gate
-  scans for the bumped version. Pre-existing next-version literals elsewhere
-  are printed as a NOTE.
+  version in the lane's added lines, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals, including
+  unchanged lines in touched files, are printed as a NOTE.
 - `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
 - `test-env` and `fixture-paths-src`: the environment failures.
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It
@@ -3729,7 +3753,11 @@ verdict while integration proof still blocks close; an approval never waives
 missing delivery content. After a failed review, a supervisor can use
 `task action=request_changes` from AwaitingMerge or Blocked with a recorded
 parked delivery. It preserves the assignee and historical merge facts and
-invalidates the declined proof before the next implementation cycle.
+invalidates the declined proof before the next implementation cycle. The assignee
+receives a waking notice with the decision and branch handling. The response
+names the queued prompt, or explicitly reports why no worker was notified so
+the supervisor can contact it. A worker start surfaces any unread correction
+before acquiring the task; the worker reads it, then retries start.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

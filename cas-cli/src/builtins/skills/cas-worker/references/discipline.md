@@ -74,16 +74,13 @@ in the close reason.
 Read the diff and trace callers, struct literals and match arms across
 consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests).
-Full Rust builds and suites, cargo test, clippy and scoped-test scripts stay
-supervisor-owned; do not record a scoped `--proof`, `SCOPED_PROOF:` or
-`loaded_proof` receipt. If the installed runtime predates the targeted-test
-exception, park and name the unverified crates.
+Never run cargo test, clippy, rustc or scoped-test scripts. Rust: never record a
+scoped `--proof`, `SCOPED_PROOF:` or `loaded_proof` receipt. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-For a supervisor's integrated run, record
-`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child closes reference the epic's integration proof; final-gate
-failures return as follow-up tasks.
+After a CI failure, a worker reruns only the failing spec. Without a queue, the
+supervisor's run records `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>`
+on the epic.
 
 ## Capacity waits
 
@@ -95,7 +92,8 @@ Report an actual need for supervisor action through the ordinary blocker path.
 
 ## Browser checks
 
-Workers and independent QA run vitest, tsc and source-impact-selected journeys.
+Workers run touched vitest files and tsc; journeys run in the batch QA round,
+or per task only in qa.mode=per_task.
 <!-- cas-src:begin -->
 Where available, use `scripts/journey-eval.sh <task-artifact-dir>`, which picks
 the affected journeys and writes an explicit empty receipt when none are;

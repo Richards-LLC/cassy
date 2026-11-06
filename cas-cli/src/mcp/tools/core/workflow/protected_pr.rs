@@ -92,8 +92,8 @@ fn find_pr(
     }
 }
 
-/// Unknown queue metadata leaves the existing merge/publication path in force.
-/// The caller has already enforced review, CI, target and source admission.
+/// A confirmed absent queue leaves the existing merge/publication path in
+/// force. The caller has already enforced review, CI, target and source admission.
 pub(super) fn prepare(
     repo: &Path,
     slug: &str,
@@ -103,8 +103,18 @@ pub(super) fn prepare(
     task: Option<&Task>,
 ) -> Result<Option<PullRequest>, String> {
     let binary = crate::github_repo::gh_binary();
-    if crate::github_repo::merge_queue_enabled(slug, target, repo, &binary, PROBE) != Ok(true) {
-        return Ok(None);
+    match crate::github_repo::merge_queue_enabled(slug, target, repo, &binary, PROBE) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        // cas-662e: a failed probe is not "no queue". Treating it as one
+        // merged locally into a queued main, or refused over the operator's
+        // edits in its checkout. Refuse before any target mutation.
+        Err(error) => {
+            tracing::warn!(%slug, %target, %error, "merge queue probe failed; merge refused before any local merge");
+            return Err(format!(
+                "merge queue state unknown for {target} ({error}); no merge was attempted, retry worktree_merge"
+            ));
+        }
     }
     let body = crate::review_body::delivery_body(
         repo,

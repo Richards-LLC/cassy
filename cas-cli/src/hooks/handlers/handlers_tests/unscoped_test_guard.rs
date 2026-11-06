@@ -157,7 +157,7 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
             "{command:?}: {reason}"
         );
         assert!(reason.contains("cas-4cbb"), "{reason}");
-        assert!(reason.contains("assembly"), "{reason}");
+        assert!(reason.contains("landing tree"), "{reason}");
     }
     // The complete provider profile does not admit identity/build overrides.
     for extra in ["-u CAS_SESSION_ID", "CAS_AGENT_ROLE=supervisor", "CARGO_BUILD_JOBS=64"] {

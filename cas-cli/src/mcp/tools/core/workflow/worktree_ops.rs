@@ -5476,7 +5476,21 @@ impl CasCore {
             }
             // A confirmed default-branch queue requires a PR. Route it before
             // target mutation, after the same review/CI/source admission as a merge.
-            if worktree.parent_branch == manager.git().detect_default_branch()
+            let default_target = worktree.parent_branch == manager.git().detect_default_branch();
+            // cas-662e: no slug is "not GitHub" only when origin says so. A
+            // GitHub origin whose canonical lookup (or the CI walk before it)
+            // failed never asked the queue; merging locally hit GH013.
+            if default_target
+                && branch_ci_lookup.repo.is_none()
+                && !matches!(crate::github_repo::origin_slug(&cwd, BRANCH_CI_LOOKUP_TIMEOUT), Ok(None))
+            {
+                tracing::warn!(target = %worktree.parent_branch, "GitHub repository unresolved; merge refused before any local merge");
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "{ci_prefix}PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: merge queue state unknown for {} (GitHub repository unresolved); no merge was attempted, retry worktree_merge. Local target and source retained.",
+                    worktree.parent_branch,
+                )));
+            }
+            if default_target
                 && let Some(slug) = branch_ci_lookup.repo.as_deref()
             {
                 if !force && source_worktree_live {

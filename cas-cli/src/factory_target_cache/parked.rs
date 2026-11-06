@@ -53,6 +53,16 @@ pub(crate) fn park(
     retention: usize,
     expected_head: Option<&str>,
 ) -> io::Result<()> {
+    park_at(cas_root, worktree, retention, expected_head, Path::new("/proc"))
+}
+
+fn park_at(
+    cas_root: &Path,
+    worktree: &Path,
+    retention: usize,
+    expected_head: Option<&str>,
+    proc_root: &Path,
+) -> io::Result<()> {
     let Some(mut current) = identity(cas_root, worktree) else {
         return Ok(());
     };
@@ -83,6 +93,10 @@ pub(crate) fn park(
         serde_json::to_vec(&current).map_err(io::Error::other)?,
     )?;
     fs::rename(temporary, path)?;
+    // cas-49163: the retained warm cache keeps its compiled dependencies but
+    // not incremental state or per-commit test executables, which otherwise
+    // grow without bound across every task the worker takes.
+    trim_debug(&current.worktree, proc_root);
     drop(lane);
 
     let gc = OpenOptions::new()
@@ -105,6 +119,11 @@ pub(crate) fn park(
         })
         .filter_map(|entry| {
             let record: ParkedCache = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            // cas-49163: a removed worktree's marker can never resume; drop it.
+            if !record.worktree.exists() {
+                let _ = fs::remove_file(entry.path());
+                return None;
+            }
             let now = identity(cas_root, &record.worktree)?;
             if record.generation.is_empty()
                 || now.admin != record.admin
@@ -136,10 +155,17 @@ pub(crate) fn park(
         {
             continue;
         }
-        prune_debug(&parked.worktree)?;
+        if let Err(error) = prune_debug(&parked.worktree, proc_root) {
+            tracing::warn!(%error, worktree = %parked.worktree.display(), "parked worker cache prune failed");
+        }
         drop(lane);
     }
     FileExt::unlock(&gc)?;
+    // cas-49163: also reclaim idle targets of gone workers and resolved review
+    // walks now, instead of only once admission is already refusing lanes.
+    if let Err(error) = super::reclaim_idle_at(cas_root, proc_root) {
+        tracing::warn!(%error, "idle target reclaim after park deferred");
+    }
     Ok(())
 }
 
@@ -151,24 +177,45 @@ fn marker_is_current(path: &Path, recorded: &ParkedCache) -> bool {
             .is_some_and(|current| current == *recorded)
 }
 
-fn prune_debug(worktree: &Path) -> io::Result<()> {
+/// cas-49163: the lane lock and this `.cargo-lock` are held, so the guarded
+/// probe applies. Positive evidence on `old` or `path` (cwd, executable, argv,
+/// mapping or open file of a cargo, rustc, nextest or test process) preserves
+/// the cache; a process whose details are unreadable (another user's) does
+/// not. Only this process's `.cargo-lock` descriptor is exempt.
+fn in_use(proc_root: &Path, old: &Path, path: &Path, cargo: &fs::File) -> bool {
+    #[cfg(unix)]
+    let descriptors = {
+        use std::os::fd::AsRawFd;
+        vec![cargo.as_raw_fd()]
+    };
+    #[cfg(not(unix))]
+    let descriptors = {
+        let _ = cargo;
+        Vec::new()
+    };
+    process_block_at(old, path, &descriptors, true, proc_root).is_some()
+}
+
+/// Lock `target/debug` for exclusive removal; `None` when it is absent,
+/// symlinked, contended or in use.
+fn lock_debug(worktree: &Path, proc_root: &Path) -> io::Result<Option<(PathBuf, PathBuf, fs::File)>> {
     // cas-3f93: follow a target relocated under `[factory] scratch_root`.
     let target = crate::factory_scratch::worker_target_dir(worktree);
     let debug = target.join("debug");
     if !debug.exists() {
-        return Ok(());
+        return Ok(None);
     }
     // Refuse symlinks at both roots; neither source nor output may escape.
     if fs::symlink_metadata(&target)?.file_type().is_symlink()
         || fs::symlink_metadata(&debug)?.file_type().is_symlink()
         || debug.canonicalize()?.parent() != Some(target.canonicalize()?.as_path())
     {
-        return Ok(());
+        return Ok(None);
     }
     if fs::symlink_metadata(debug.join(".cargo-lock"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
-        return Ok(());
+        return Ok(None);
     }
     let cargo = OpenOptions::new()
         .create(true)
@@ -176,20 +223,22 @@ fn prune_debug(worktree: &Path) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(debug.join(".cargo-lock"))?;
-    if cargo.try_lock_exclusive().is_err() {
-        return Ok(());
+    if cargo.try_lock_exclusive().is_err() || in_use(proc_root, &debug, &debug, &cargo) {
+        return Ok(None);
     }
-    // Ignore only this process's own lock handle. An unrelated open artifact
-    // (including a still-running test binary) preserves the complete cache.
-    if output_in_use(&debug, &cargo) {
+    Ok(Some((target, debug, cargo)))
+}
+
+fn prune_debug(worktree: &Path, proc_root: &Path) -> io::Result<()> {
+    let Some((target, debug, cargo)) = lock_debug(worktree, proc_root)? else {
         return Ok(());
-    }
+    };
     let quarantine = target.join(format!(".cas-parked-debug-{}", std::process::id()));
     if quarantine.exists() {
         return Ok(());
     }
     fs::rename(&debug, &quarantine)?;
-    if output_in_use(&quarantine, &cargo) || output_in_use(&debug, &cargo) {
+    if in_use(proc_root, &debug, &quarantine, &cargo) {
         if !debug.exists() {
             fs::rename(&quarantine, &debug)?;
         }
@@ -197,7 +246,78 @@ fn prune_debug(worktree: &Path) -> io::Result<()> {
     }
     let result = fs::remove_dir_all(quarantine);
     FileExt::unlock(&cargo)?;
+    if result.is_ok() {
+        tracing::info!(worktree = %worktree.display(), "parked worker cache pruned");
+    }
     result
+}
+
+/// cas-49163: drop regenerable per-build state from the retained cache and
+/// keep compiled dependencies: `incremental/` and the test executables in
+/// `deps/` (regular files with an execute bit and no extension). A symlinked
+/// `incremental/` or `deps/` is refused; one failed removal is logged and the
+/// trim continues.
+fn trim_debug(worktree: &Path, proc_root: &Path) {
+    let (debug, cargo) = match lock_debug(worktree, proc_root) {
+        Ok(Some((_, debug, cargo))) => (debug, cargo),
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, worktree = %worktree.display(), "retained cache trim skipped");
+            return;
+        }
+    };
+    let real_dir = |path: &Path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+    let mut freed = 0u64;
+    let incremental = debug.join("incremental");
+    if real_dir(&incremental) {
+        let bytes: u64 = WalkDir::new(&incremental)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .sum();
+        let quarantine = debug.join(format!(".cas-trim-incremental-{}", std::process::id()));
+        match fs::rename(&incremental, &quarantine) {
+            // Descriptors now resolve through the quarantine; a user that
+            // appeared during the rename gets the directory back.
+            Ok(()) if in_use(proc_root, &incremental, &quarantine, &cargo) => {
+                if !incremental.exists() {
+                    let _ = fs::rename(&quarantine, &incremental);
+                }
+            }
+            Ok(()) => match fs::remove_dir_all(&quarantine) {
+                Ok(()) => freed += bytes,
+                Err(error) => tracing::warn!(%error, path = %quarantine.display(), "incremental trim failed"),
+            },
+            Err(error) => tracing::warn!(%error, path = %incremental.display(), "incremental trim failed"),
+        }
+    }
+    #[cfg(unix)]
+    if real_dir(&debug.join("deps")) {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in fs::read_dir(debug.join("deps")).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 || path.extension().is_some() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => freed += metadata.len(),
+                Err(error) => tracing::warn!(%error, path = %path.display(), "test executable trim failed"),
+            }
+        }
+    }
+    let _ = FileExt::unlock(&cargo);
+    if freed > 0 {
+        tracing::info!(
+            worktree = %worktree.display(),
+            gb_freed = format!("{:.1}", freed as f64 / f64::from(1u32 << 30)),
+            "retained worker cache trimmed"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -217,6 +337,76 @@ mod tests {
         super::super::tests::git(&repo, &["commit", "-qm", "fixture"]);
         fs::create_dir_all(repo.join(".cas/worktrees")).unwrap();
         (temp, repo.join(".cas"))
+    }
+
+    /// Parking holds the lane and Cargo locks, so it uses the guarded probe:
+    /// only unavailable process inventory (not unreadable details) preserves.
+    fn guarded_reclaim_available() -> bool {
+        let probe = tempfile::tempdir().unwrap();
+        let path = probe.path().join("nonexistent-output");
+        process_block_at(&path, &path, &[], true, Path::new("/proc")).is_none()
+    }
+
+    /// cas-49163: parking trims the retained cache to its compiled
+    /// dependencies, prunes the cache beyond retention and sweeps a removed
+    /// worktree's marker, despite an unreadable process and an MCP server in
+    /// the checkout. A test binary running from a cache keeps all of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn park_trims_and_prunes_despite_unreadable_and_checkout_processes_cas_49163() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (temp, root) = fixture();
+        let [older, retained, busy] = ["older", "retained", "busy"].map(|name| worker(&root, name));
+        for path in [&retained, &busy] {
+            let debug = path.join("target/debug");
+            fs::create_dir_all(debug.join("incremental/cas-1")).unwrap();
+            fs::write(debug.join("incremental/cas-1/query.bin"), "state").unwrap();
+            fs::write(debug.join("deps/libcas-1.rlib"), "dependency").unwrap();
+            fs::write(debug.join("deps/cas-1.d"), "depinfo").unwrap();
+            let binary = debug.join("deps/integration_factory-1");
+            fs::write(&binary, "executable").unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let stale = root.join("worker-target-parks/stale.json");
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, r#"{"worktree":"/nonexistent/removed","admin":"/x","head":"y","generation":"z"}"#).unwrap();
+        let proc_root = temp.path().join("proc");
+        let process = |pid: u32, cwd: Option<&Path>, exe: Option<&Path>| {
+            let process = proc_root.join(pid.to_string());
+            fs::create_dir_all(process.join("fd")).unwrap();
+            fs::write(process.join("stat"), format!("{pid} (fixture) S 0 0 0 0 0 0")).unwrap();
+            fs::write(process.join("cmdline"), b"fixture\0").unwrap();
+            fs::write(process.join("maps"), b"").unwrap();
+            for (link, path) in [("cwd", cwd), ("exe", exe)] {
+                match path {
+                    Some(path) => symlink(path, process.join(link)).unwrap(),
+                    None => fs::create_dir(process.join(link)).unwrap(),
+                }
+            }
+        };
+        process(4_000_001, None, None);
+        for (pid, path) in [(4_000_002, &older), (4_000_003, &retained)] {
+            process(pid, Some(path), Some(Path::new("/usr/bin/cas")));
+        }
+
+        park_at(&root, &older, 1, None, &proc_root).unwrap();
+        park_at(&root, &retained, 1, None, &proc_root).unwrap();
+
+        assert!(!older.join("target/debug").exists(), "cache beyond retention is pruned");
+        let debug = retained.join("target/debug");
+        assert!(!debug.join("incremental").exists());
+        assert!(!debug.join("deps/integration_factory-1").exists());
+        for kept in ["deps/libcas-1.rlib", "deps/cas-1.d", "deps/output"] {
+            assert!(debug.join(kept).exists(), "{kept}");
+        }
+        assert!(!stale.exists(), "a removed worktree's marker is swept");
+        assert!(older.join("target/worker-check.log").exists());
+
+        let binary = busy.join("target/debug/deps/integration_factory-1");
+        process(4_000_004, Some(Path::new("/")), Some(&binary));
+        park_at(&root, &busy, 1, None, &proc_root).unwrap();
+        assert!(binary.exists() && busy.join("target/debug/incremental").exists());
+        assert!(!debug.exists(), "the previously retained cache is pruned");
     }
 
     fn worker(root: &Path, name: &str) -> PathBuf {
@@ -263,7 +453,7 @@ mod tests {
     #[test]
     fn bounded_parked_targets_preserve_logs_sources_and_independent_lanes_cas_29b0() {
         let (_temp, root) = fixture();
-        let reclaim = super::super::tests::reclamation_available();
+        let reclaim = guarded_reclaim_available();
         let first = worker(&root, "first");
         let second = worker(&root, "second");
         let sources: Vec<_> = [&first, &second]
@@ -318,7 +508,7 @@ mod tests {
     #[test]
     fn scratch_root_parked_targets_prune_relocated_debug() {
         let (temp, root) = fixture();
-        let reclaim = super::super::tests::reclamation_available();
+        let reclaim = guarded_reclaim_available();
         let scratch = temp.path().canonicalize().unwrap().join("rewind");
         fs::write(
             root.join("config.toml"),
@@ -393,7 +583,7 @@ mod tests {
         park(&root, &worker, 0, None).unwrap();
         assert!(worker.join("target/debug/deps/output").exists());
         drop(output);
-        let reclaim = super::super::tests::reclamation_available();
+        let reclaim = guarded_reclaim_available();
         // prune_debug holds its own .cargo-lock descriptor during inspection.
         // That exact descriptor alone must not keep every cache permanently warm.
         park(&root, &worker, 0, None).unwrap();
@@ -427,7 +617,7 @@ mod tests {
         child.wait().unwrap();
         result.unwrap();
         assert!(preserved);
-        let reclaim = super::super::tests::reclamation_available();
+        let reclaim = guarded_reclaim_available();
         park(&root, &worker, 0, None).unwrap();
         assert_eq!(worker.join("target/debug").exists(), !reclaim);
     }

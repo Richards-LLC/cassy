@@ -130,7 +130,7 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
     if !repo.join(".git").exists() {
         return report;
     }
-    let agents = crate::store::open_agent_store(cas_root).and_then(|store| store.list(None));
+    let agents = crate::store::open_agent_store(cas_root).and_then(|store| Ok(store.list(None)?));
     let agents = match agents {
         Ok(agents) => agents,
         Err(error) => {
@@ -140,7 +140,7 @@ pub(crate) fn scan_until(cas_root: &Path, deadline: Instant) -> RetainedInventor
             Vec::new()
         }
     };
-    let tasks = crate::store::open_task_store(cas_root).and_then(|store| store.list(None));
+    let tasks = crate::store::open_task_store(cas_root).and_then(|store| Ok(store.list(None)?));
     let tasks = match tasks {
         Ok(tasks) => tasks,
         Err(error) => {

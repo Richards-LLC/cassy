@@ -342,7 +342,8 @@ fn names_ask(body: &str, id: &str) -> bool {
 
 /// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
 /// `sender_agent_id` in the last `window_secs` that no delivered peer reply
-/// answers. Explicit replies retain legacy kind handling; unlinked typed
+/// answers. Explicit reply IDs remain authoritative across peer succession;
+/// unlinked typed
 /// answers need an ask id in their body or exactly one open ask to that peer.
 /// Replay in arrival order so an ambiguous answer cannot later answer another
 /// question when the first is resolved. Abandoned sends never reached the peer.
@@ -400,13 +401,19 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         {
             continue;
         }
+        // Preserve the existing Cloud reply-link contract, including a live
+        // successor answering mail routed from its retired predecessor.
+        if let Some(id) = reply.in_reply_to.as_deref()
+            && let Some(ask) = asks.iter_mut().find(|ask| ask.ask.cloud_id.as_deref() == Some(id))
+        {
+            ask.answered = true;
+            continue;
+        }
         let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
             (!ask.answered && ask.created_at <= arrived_at && ask.from_peer(&reply)
                 && (target == ask.sender_name || target == sender_agent_id)).then_some(i)
         }).collect();
-        let answer = if let Some(id) = reply.in_reply_to.as_deref() {
-            candidates.iter().copied().find(|&i| asks[i].ask.cloud_id.as_deref() == Some(id))
-        } else if reply.kind == Some(PeerMessageKind::Answer) {
+        let answer = if reply.in_reply_to.is_none() && reply.kind == Some(PeerMessageKind::Answer) {
             let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
             let named: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
                 ask.ask.cloud_id.as_deref().is_some_and(|id| names_ask(body, id)).then_some(i)

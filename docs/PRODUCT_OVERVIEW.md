@@ -13,6 +13,9 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 disabled MCP server, listing record IDs and file locations for review while
 preserving the original rules, skills, memories and brief templates.
 
+Managed project updates recognize the owned content Cassy previously wrote, including uncommitted generated settings. A genuine conflict preserves only that path in the working tree and index while other settings and skills refresh. The update summary and SessionStart name the preserved files for review.
+
+
 ## Personas
 
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.

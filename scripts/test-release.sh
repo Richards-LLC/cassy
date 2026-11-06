@@ -149,6 +149,9 @@ git -C "$tmp/seed" remote add origin "$tmp/origin.git"
 git -C "$tmp/seed" push --quiet origin main
 git -C "$tmp/seed" tag -a v9.99.0 -m v9.99.0
 git -C "$tmp/seed" push --quiet origin v9.99.0
+# The train starts above a newer main commit than a stale local origin/main.
+git -C "$tmp/seed" commit --quiet --allow-empty -m 'unrelated main work'
+git -C "$tmp/seed" push --quiet origin main
 
 # An epic branch with its own entries and draft.
 clone_epic() {
@@ -164,6 +167,7 @@ clone_epic() {
 
 clone_epic "$tmp/epic" epic/alpha alpha
 epic="$tmp/epic"
+epic_first_child="$(git -C "$epic" rev-parse HEAD)"
 run() { (cd "$1" && shift && ./scripts/release.sh "$@"); }
 
 missing_fragment_delivery_stops_release() {
@@ -377,6 +381,7 @@ printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipp
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
+git -C "$epic" update-ref refs/remotes/origin/main "$(git -C "$tmp/seed" rev-parse HEAD^)"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
 head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
@@ -398,6 +403,7 @@ check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
 check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
 check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
+check 'grep -q -- "--first-child $epic_first_child$" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a

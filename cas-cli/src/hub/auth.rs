@@ -532,6 +532,25 @@ impl DeviceSession {
     fn preview_ended(&self, now: DateTime<Utc>) -> bool {
         self.preview_until.is_some_and(|until| until <= now)
     }
+
+    /// The request context this device authenticates as. A preview device
+    /// never carries more than the read-only scopes.
+    fn request_context(&self) -> AuthContext {
+        AuthContext {
+            device_id: self.device_id.clone(),
+            credential_id: self.credential_id.clone(),
+            device_label: self.device_label.clone(),
+            operator_label: self.operator_label.clone(),
+            controller_origin: self.controller_origin.clone(),
+            scopes: if self.preview_until.is_some() {
+                self.scopes.intersection(&Scope::default_read_only()).copied().collect()
+            } else {
+                self.scopes.clone()
+            },
+            request_id: uuid::Uuid::new_v4().to_string(),
+            preview: self.preview_until.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1184,21 +1203,7 @@ impl AuthStore {
             .find(|device| constant_time_eq(&device.credential_hash, &credential_hash))
             .cloned()
             .ok_or(AuthRefusal::UnknownCredential)?;
-        let context = AuthContext {
-            device_id: device.device_id.clone(),
-            credential_id: device.credential_id.clone(),
-            device_label: device.device_label.clone(),
-            operator_label: device.operator_label.clone(),
-            controller_origin: device.controller_origin.clone(),
-            // A preview device never carries more than the read-only scopes.
-            scopes: if device.preview_until.is_some() {
-                device.scopes.intersection(&Scope::default_read_only()).copied().collect()
-            } else {
-                device.scopes.clone()
-            },
-            request_id: uuid::Uuid::new_v4().to_string(),
-            preview: device.preview_until.is_some(),
-        };
+        let context = device.request_context();
         // cas-d636: each credential refusal names itself, so the client can
         // tell a revocation (re-pair) from an expiry (refresh).
         let standing = if device.revoked_at.is_some() || device.preview_ended(now) {

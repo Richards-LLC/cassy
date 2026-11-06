@@ -4529,7 +4529,7 @@ async fn release_lease<R: SessionReadModel>(
 #[error("scope denied")]
 struct ScopeDenied;
 
-fn authorize<R: SessionReadModel>(
+pub(super) fn authorize<R: SessionReadModel>(
     state: &HubState<R>,
     action: HubAction,
     scope: Scope,

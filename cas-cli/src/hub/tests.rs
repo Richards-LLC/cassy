@@ -6708,3 +6708,66 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
         }
     }
 }
+
+/// cas-93d1: a `cas hub preview` origin reads live data, but its device holds
+/// only read scopes, every mutation class is refused (including mutation
+/// routes that name a read scope, self-grant and pane input), and the device
+/// stops authenticating, refresh included, when the preview window ends. A
+/// live-origin device on the same hub is unaffected.
+#[tokio::test]
+async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_window_ends_cas_93d1() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let until = now + Duration::hours(1);
+    let every: std::collections::BTreeSet<Scope> = [
+        Scope::MachineRead, Scope::SessionRead, Scope::SessionLaunch, Scope::PaneRead, Scope::PaneInput,
+        Scope::MessageSend, Scope::PaneInterrupt, Scope::FactoryOperate, Scope::FactoryManage, Scope::HubAdmin,
+    ].into_iter().collect();
+    let pair = |origin: &str, preview: bool, scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = if preview { auth.mint_preview_pairing(origin, until, now) } else { auth.mint_pairing(origin, scopes.clone(), now) }.unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", origin, scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        auth.exchange_pairing(exchange, now).map(|credential| (signing, credential))
+    };
+    let preview = "http://127.0.0.1:4999";
+    assert!(pair(preview, true, every.clone()).is_err(), "a preview invitation never yields a mutating scope");
+    let (preview_key, preview_device) = pair(preview, true, Scope::default_read_only()).unwrap();
+    let (live_key, live_device) = pair("https://controller.example", false, every.clone()).unwrap();
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth.clone());
+    let headers = |key: &SigningKey, credential: &DeviceCredential, origin: &str, method: &str, at| {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", origin.parse().unwrap());
+        headers.insert("authorization", format!("DPoP {}", credential.credential).parse().unwrap());
+        headers.insert("dpop", sign_dpop(key, &credential.credential, method, "/v1/probe", at, &uuid::Uuid::new_v4().to_string()).parse().unwrap());
+        headers
+    };
+    let read = super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&preview_key, &preview_device, preview, "GET", now), "GET", "/v1/probe")
+        .unwrap().unwrap();
+    assert!(read.preview);
+    assert_eq!(read.scopes, Scope::default_read_only());
+    for scope in every.iter().copied() {
+        assert!(super::server::authorize(&state, HubAction::Mutation, scope, &headers(&preview_key, &preview_device, preview, "POST", now), "POST", "/v1/probe").is_err(),
+            "preview mutation with {scope:?} must be refused");
+        assert!(super::server::authorize(&state, HubAction::Mutation, scope, &headers(&live_key, &live_device, "https://controller.example", "POST", now), "POST", "/v1/probe").is_ok(),
+            "a live device holding {scope:?} is unaffected");
+    }
+    let input = ClientMessage::Input { pane_id: "worker-1".into(), data: b"x".to_vec() };
+    assert!(!read.has(required_scope(&input).unwrap()), "pane input over the socket needs a scope the preview never holds");
+    assert!(auth.grant_own_scope(&read, Scope::SessionLaunch, now).is_err());
+    // The window ends: no authentication, and no refresh that extends it.
+    let after = until + Duration::seconds(1);
+    assert!(super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&preview_key, &preview_device, preview, "GET", after), "GET", "/v1/probe").is_err());
+    let refresh = sign_dpop(&preview_key, &preview_device.credential, "POST", "/v1/auth/refresh", after, "refresh-after-preview");
+    assert!(auth.refresh_device_credential(&format!("DPoP {}", preview_device.credential), &refresh, preview, "POST", "/v1/auth/refresh", after).is_err());
+    assert!(super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&live_key, &live_device, "https://controller.example", "GET", after), "GET", "/v1/probe").is_ok());
+}

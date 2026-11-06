@@ -37,14 +37,34 @@ case "$1 $2" in
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
-  "pr merge") exit "${FAKE_MERGE_EXIT:-0}" ;;
+  "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
-  "api graphql") cat "${FAKE_PR_STATE_JSON:?}" ;;
+  "api graphql")
+    if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
+    elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
+    else echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}'; fi | jq --argjson config "${FAKE_QUEUE_CONFIG:-$(printf '%s' '{"maximumEntriesToMerge":1,"mergingStrategy":"ALLGREEN"}')}" '. + {queueConfiguration: $config}' ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+
+cat >"$tmp/bin/cas" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
+case "$1 $2" in
+  "release context")
+    case "${FAKE_CONTEXT_MODE:-}" in
+      no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
+      different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
+    esac
+    printf '{"branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
+  "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
+  *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/bin/cas"
+export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
 
 export GH_BIN="$tmp/bin/gh"
 export FAKE_GH_LOG="$tmp/gh.log"
@@ -82,7 +102,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -133,6 +153,9 @@ git -C "$tmp/seed" remote add origin "$tmp/origin.git"
 git -C "$tmp/seed" push --quiet origin main
 git -C "$tmp/seed" tag -a v9.99.0 -m v9.99.0
 git -C "$tmp/seed" push --quiet origin v9.99.0
+# The train starts above a newer main commit than a stale local origin/main.
+git -C "$tmp/seed" commit --quiet --allow-empty -m 'unrelated main work'
+git -C "$tmp/seed" push --quiet origin main
 
 # An epic branch with its own entries and draft.
 clone_epic() {
@@ -148,6 +171,7 @@ clone_epic() {
 
 clone_epic "$tmp/epic" epic/alpha alpha
 epic="$tmp/epic"
+epic_first_child="$(git -C "$epic" rev-parse HEAD)"
 run() { (cd "$1" && shift && ./scripts/release.sh "$@"); }
 
 missing_fragment_delivery_stops_release() {
@@ -361,6 +385,7 @@ printf '### Fixed — Fragments\n\n- **Third fragment** — third fragment shipp
 git -C "$epic" add "$original_notes" changelog.d
 git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
+git -C "$epic" update-ref refs/remotes/origin/main "$(git -C "$tmp/seed" rev-parse HEAD^)"
 run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
 head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ' -)"
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
@@ -380,33 +405,22 @@ check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$
 check '[[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$(git -C "$epic" rev-parse HEAD)" ]]' 'the release commit is pushed'
 check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.0: epic/alpha" "$FAKE_GH_LOG"' 'the PR to main is opened'
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
-checked="$(grep -n "^pr checks 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1 || true)"
-merged="$(grep -n "^pr merge 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1)"
-check '[[ -n "$checked" && -n "$merged" && "$checked" -lt "$merged" ]]' 'the PR CI is green before auto-merge is enabled (cas-2aef)'
+check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
+check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
+check 'grep -q -- "--first-child $epic_first_child$" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
-
-# 3b. cas-2aef: a red PR CI is reported with its failing tests, and the PR never
-# gets auto-merge, so it never enters the queue.
-echo '[{"name":"Scoped Validation (fast)","bucket":"fail","link":"https://example.test/actions/runs/2/job/21"},{"name":"Scoped Validation (factory/PR)","bucket":"pass","link":"https://example.test/actions/runs/2/job/22"}]' >"$tmp/checks-red.json"
-printf 'Scoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.1234567Z         FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.2Z test release::tests::bumps ... FAILED\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:04.0Z      FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\n' >"$tmp/red.log"
-: >"$FAKE_GH_LOG"
-set +e
-out="$(cd "$epic" && FAKE_PR_CHECKS_JSON="$tmp/checks-red.json" FAKE_RUN_LOG="$tmp/red.log" ./scripts/release.sh --no-watch 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 5 && "$out" == *"CI is red (Scoped Validation (fast))"* ]]' 'a red PR CI stops with exit 5 and names the failing check'
-check '[[ "$out" == *"Failing tests: cas-mux opencode::tests::projection_config_is_deterministic; release::tests::bumps"* ]]' 'the failing tests are named once, in one message'
-check '! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -q "^run view --job 21 --log-failed" "$FAKE_GH_LOG"' 'a red PR gets no auto-merge'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a
 # later day. Both the original (now removed) and renamed notes paths work.
 rerun_after_repair() {
     local before notes out status
+    rm -f "$FAKE_GH_STATE/admitted"
     echo repaired >"$epic/alpha.txt"
     git -C "$epic" commit --quiet -am 'repair queue failure'
     before="$(git -C "$epic" rev-parse HEAD)"
     for notes in "$original_notes" docs/release-notes/2026-10-15-v9.100.0-slack.md ''; do
         : >"$FAKE_GH_LOG"
+        rm -f "$FAKE_GH_STATE/admitted"
         out="$(cd "$epic" && RELEASE_DATE=2026-10-16 ./scripts/release.sh --no-watch ${notes:+--notes "$notes"} 2>&1)" || { echo "$out"; return 1; }
         [[ "$(git -C "$epic" rev-parse HEAD)" == "$before" && -z "$(git -C "$epic" status --porcelain)" ]] || return 1
         [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$before" ]] || return 1
@@ -415,6 +429,7 @@ rerun_after_repair() {
             ! grep -q '^pr create' "$FAKE_GH_LOG" || return 1
     done
     status=0
+    rm -f "$FAKE_GH_STATE/admitted"
     out="$(cd "$epic" && FAKE_MERGE_EXIT=42 ./scripts/release.sh --no-watch 2>&1)" || status=$?
     [[ $status -eq 42 && "$out" == *"error:"* && "$out" == *"42"* && "$out" == *'pr merge'* ]]
 }
@@ -426,10 +441,10 @@ clone_epic "$tmp/beta" epic/beta beta
 git -C "$tmp/beta" rm --quiet hub-web/dist/app.css
 git -C "$tmp/beta" commit --quiet -m 'drop obsolete generated styles'
 write_valid_draft "$tmp/beta-draft.md"
-rm -f "$FAKE_GH_STATE/pr"
+rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"
 run "$tmp/beta" --no-watch --notes "$tmp/beta-draft.md" 2>/dev/null
 git -C "$tmp/beta" push --quiet origin epic/beta:main
-rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
+rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
@@ -461,33 +476,49 @@ check '[[ $status -eq 4 && "$out" == *"conflicts outside the release files"* && 
 check '[[ -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'a code conflict leaves no merge in progress'
 git -C "$epic" reset --quiet --hard HEAD^
 
-# 7. Watch: an ejected PR stops with exit 3; a merged PR ends with exit 0.
+# 7. A queued rerun is one read, no duplicate admission and no polling.
 git -C "$tmp/seed" revert --no-edit HEAD >/dev/null
 git -C "$tmp/seed" push --quiet origin main
 run "$epic" --no-watch 2>/dev/null
-echo '{"state":"OPEN","mergeable":"MERGEABLE","autoMergeRequest":null,"mergeQueueEntry":null,"mergeCommit":null}' >"$tmp/ejected.json"
-set +e
-out="$(cd "$epic" && RELEASE_WATCH_INTERVAL=0 FAKE_PR_STATE_JSON="$tmp/ejected.json" ./scripts/release.sh 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 3 && "$out" == *"no auto-merge and no merge-queue entry"* ]]' 'an ejected PR stops the watch with exit 3'
-echo '{"state":"OPEN","mergeable":"MERGEABLE","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"},"mergeCommit":null}' >"$tmp/queued.json"
-echo '{"state":"MERGED","mergeable":"UNKNOWN","autoMergeRequest":null,"mergeQueueEntry":null,"mergeCommit":{"oid":"abc123"}}' >"$tmp/merged.json"
-cat >"$tmp/bin/gh-seq" <<EOF
-#!/usr/bin/env bash
-if [[ "\$1 \$2" == "api graphql" ]]; then
-  n="\$(cat "$tmp/seq" 2>/dev/null || echo 0)"; n=\$((n + 1)); echo "\$n" >"$tmp/seq"
-  if [[ "\$n" -lt 3 ]]; then cat "$tmp/queued.json"; else cat "$tmp/merged.json"; fi
-  exit 0
-fi
-exec "$tmp/bin/gh" "\$@"
-EOF
-chmod +x "$tmp/bin/gh-seq"
-set +e
-out="$(cd "$epic" && GH_BIN="$tmp/bin/gh-seq" RELEASE_WATCH_INTERVAL=0 ./scripts/release.sh 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 0 && "$out" == *"merged as abc123"* ]]' 'a queued then merged PR ends the watch with exit 0'
+: >"$FAKE_GH_LOG"
+run "$epic" 2>"$tmp/event-driven.err"
+check '! grep -q "^pr merge\|^pr checks" "$FAKE_GH_LOG" && [[ "$(grep -c "^api graphql" "$FAKE_GH_LOG")" == 1 ]]' 'cas-61e0: an admitted train reuses its PR and returns after one enqueue smoke check'
+# Auto-merge must really be enabled; a successful command with no admission is refused.
+echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}' >"$tmp/not-enqueued.json"
+status=0
+(cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
+check '[[ "$status" == 3 ]] && grep -q "no auto-merge and no merge-queue entry" "$tmp/not-enqueued.err"' 'cas-61e0: a missing enqueue is reported immediately after admission'
+
+# cas-d637: replay a release beside other queued PRs. Never enable admission
+# when GitHub can batch the release, skip per-entry checks, or hide its config.
+for config in '{"maximumEntriesToMerge":5,"mergingStrategy":"ALLGREEN"}' '{"maximumEntriesToMerge":1,"mergingStrategy":"HEADGREEN"}' null; do
+    rm -f "$FAKE_GH_STATE/admitted"
+    : >"$FAKE_GH_LOG"
+    status=0
+    (cd "$epic" && FAKE_QUEUE_CONFIG="$config" ./scripts/release.sh --no-watch) >"$tmp/unsafe-queue.err" 2>&1 || status=$?
+    check '[[ "$status" == 3 ]] && ! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -qi "singleton" "$tmp/unsafe-queue.err"' "cas-d637: unsafe release queue config $config refuses before enqueue"
+done
+
+# A hotfix remains an explicit exception, including actual CLI refusal shapes.
+hotfix_fallback() {
+    local mode="$1" fixture="$tmp/hotfix-$1" status=0
+    clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
+    mkdir -p "$tmp/state-$mode"
+    write_valid_draft "$tmp/hotfix-$mode.md"
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
+        run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
+    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log"
+}
+check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
+check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
+check 'hotfix_fallback tracking_unavailable 1' 'cas-61e0: a tracking failure cannot prevent a hotfix push and enqueue'
+
+echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}' >"$tmp/pending-auto.json"
+echo '[{"name":"required CI","bucket":"fail"}]' >"$tmp/checks-red.json"
+status=0
+(cd "$epic" && FAKE_PR_STATE_JSON="$tmp/pending-auto.json" FAKE_PR_CHECKS_JSON="$tmp/checks-red.json" ./scripts/release.sh --no-watch) >"$tmp/pending-red.err" 2>&1 || status=$?
+check '[[ "$status" != 0 ]] && grep -qi "not admitted" "$tmp/pending-red.err" && ! grep -q "admission verified" "$tmp/pending-red.err"' 'cas-61e0: pending auto-merge with failed required checks is not admission'
 
 # 8. cas-ea62: git exports GIT_DIR to hooks. A fixture
 # test that creates bare repositories must leave the repository those name

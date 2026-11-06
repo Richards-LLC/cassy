@@ -46,10 +46,46 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
         status=1
         continue
     fi
-    # The CI push base: the tip this push replaces, or the default branch for a
-    # new branch (release-gate.sh falls back itself when the base is missing).
+    # Compare a first push with its task target, not unrelated changes on main.
+    # Existing branches still compare with the tip this push replaces.
     base="$remote_sha"
-    [[ "$base" != "$zero" ]] || base="${ZERO_BASE_REF:-origin/main}"
+    if [[ "$base" == "$zero" ]]; then
+        base="${ZERO_BASE_REF:-}"
+        if [[ -z "$base" ]]; then
+            target="$(python3 - "$common" "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+root = Path(os.environ.get("CAS_ROOT") or Path(sys.argv[1]).parent / ".cas").expanduser().resolve()
+try:
+    with sqlite3.connect((root / "cas.db").as_uri() + "?mode=ro", uri=True) as db:
+        targets = set()
+        for (raw,) in db.execute("SELECT deliverables FROM tasks WHERE status='in_progress'"):
+            data = json.loads(raw or "{}")
+            if (data.get("factory_branch_start") or {}).get("branch") == sys.argv[2]:
+                target = (data.get("work_target") or {}).get("target_branch")
+                if target:
+                    targets.add(target)
+        if len(targets) == 1:
+            print(targets.pop())
+except (OSError, sqlite3.Error, ValueError):
+    pass  # No readable task context: retain the default-branch fallback.
+PY
+)" || target=''
+            if [[ -n "$target" ]]; then
+                for ref in "origin/$target" "$target"; do
+                    if git rev-parse --verify --quiet --end-of-options "$ref^{commit}" >/dev/null; then
+                        base="$ref"
+                        break
+                    fi
+                done
+            fi
+        fi
+        base="${base:-origin/main}"
+    fi
     printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "${base:0:12}" >&2
     # The gate's guardian removes its scratch tree on exit. Keep each push
     # attempt's complete diagnostics outside that tree, even if the gate exits

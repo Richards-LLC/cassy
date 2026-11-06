@@ -20,6 +20,7 @@ pub(super) struct PullRequest {
     pub head: String,
 }
 
+#[track_caller]
 fn gh(repo: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(crate::github_repo::gh_binary());
     command

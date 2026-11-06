@@ -125,3 +125,8 @@ printf 'LINUX_ASSET=%s\n' "$linux_asset"
 printf 'LINUX_SHA256=%s\n' "$linux_sha"
 printf 'MACOS_ASSET=%s\n' "$macos_asset"
 printf 'MACOS_SHA256=%s\n' "$macos_sha"
+
+# Keep rule-176 timings visible beside the existing published-byte receipt.
+if [[ -r "$workdir/release-latency.receipt" ]]; then
+    grep -E '^(FIRST_CHILD_|MAIN_TO_|QUEUE_)' "$workdir/release-latency.receipt" || true
+fi

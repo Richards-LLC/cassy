@@ -67,6 +67,8 @@
 
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
+- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices.
+- `cas-cli/src/gh_budget.rs`, `cas-cli/src/gh_budget_tests.rs` - GitHub API budget: per-call caller/endpoint log for every `gh` run through `bounded_process`, `cas doctor` top callers, and the machine-wide rate-limit backoff stamp.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
@@ -75,7 +77,7 @@
 - `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection, typed missing/version/probe failures and bounded minimum-version checks shared by the hub and PTY.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
-- `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, verification expiry sweeps and shutdown cleanup.
+- `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - no-progress watchdog: supervisor wake at 45 min, operator page at 90.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - prompt readiness, attributed director queue envelopes with immutable delivery-tip context, queued input and recipient receipts.
@@ -99,6 +101,11 @@
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
 
+## GitHub health
+
+- `cas-cli/src/github_repo.rs` - explicit origin binding and bounded, report-only default-branch queue health shared by setup/doctor; one query reads canonical identity and applicable active rules.
+- `scripts/github-queue-health.graphql`, `scripts/github_queue_health.py` - shared embedded query and advisory release preflight; warns on drift/unavailable access without writing settings or failing release.
+
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
@@ -110,11 +117,12 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - delivery attribution, proof/upkeep gates and reviewed corrections; `gate_preflight.rs` snapshots park requirements. `verified_delivery.rs` binds synthetic premerge approvals to the task's landed source and mechanically checks its complete patch at the first authoritative landing, allowing later ordinary edits. `merge_queue_proof.rs` discovers queue receipts from recorded default-branch landings and verifies workflow, tree and delivery containment for scoped-proof reuse.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/rule_references.rs` - immutable-tip rule coverage, declared causal anchors and stakeholder-scope checks; contract in `docs/RULE_REFERENCES.md`.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs` - merge/close reconciliation and guarded Git delivery operations.
-- `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable merge candidates, plan/evidence binding, managed review scratch, pre-publication dispatch and candidate-to-landed promotion. Reviewed and no-dispatch refusals share guarded unpublished-merge restoration. Late bound-child verdicts revalidate the exact current source/tree and consume their original one-time authority atomically.
+- `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable merge candidates, plan/evidence binding, managed review scratch, pre-publication dispatch, unchanged-patch-id verdict rebinding after target moves and candidate-to-landed promotion. Reviewed and no-dispatch refusals share guarded unpublished-merge restoration. Late bound-child verdicts revalidate the exact current source/tree and consume their original one-time authority atomically.
 - `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - portable proof boundaries and durable authenticated peer approvals.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs` - confirmed-publication receipts over authenticated peer mail, durable import into existing dispatch/verdict records, local Git rebinding and exact close validation; queue retention carries no proof authority.
 - `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - exact-source PR creation/reuse and expected-head auto-merge for confirmed default-branch queues, before local merge mutation.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
+- `cas-cli/src/mcp/tools/core/task/release_train.rs` - release train as the default work target: a task created with no epic or target joins the open `release-train` epic cut from the integration branch; a landed train closes and the next opens on the next create.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cas-cli/src/cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators (including durable rule-projection deletion reconciliation in `store/syncing.rs` and the active-rule cut in `store/detect.rs`), numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
@@ -162,7 +170,7 @@
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/analysis/` and `docs/qa/bug-families/`.
 - `docs/status-words.md` - tool/CLI status definitions, observation boundaries, producer checks and named regressions.
-- **Release:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-integration-gates.py`, `scripts/deploy-hub-release.py`, `docs/release-notes/`, `docs/release-reports/`.
+- **Release:** `cas-cli/src/cli/release_automation.rs` (canonical train context, durable SHA/tag reminders, installed-release notice), `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-integration-gates.py`, `scripts/deploy-hub-release.py`, `docs/release-notes/`, `docs/release-reports/`.
 - **CI:** `.github/workflows/ci.yml`, `.github/actions/run-script-suite-tests/`, `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` and script regression tests.
 - **Release reuse:** `scripts/release-cache-key.py`, `scripts/find-release-prebuild.sh`, `.github/workflows/release-prebuild.yml`, `.github/workflows/release.yml` - dependency keys, queue archives, advisory main-cache priming and publication.
 - **Host tooling:** `scripts/install-on-publish.sh`, `scripts/qa-rig/commander-two-machine/`, `ops/systemd/` and `docs/ci/`.

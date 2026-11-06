@@ -877,6 +877,12 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_local_gate: Option<String>,
 
+    /// cas-d9d3c: the command that cuts or promotes a release from the
+    /// release train, named in the "train ready to cut" notice; never run by
+    /// Cassy. Unset names `scripts/release.sh` when the repository has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_command: Option<String>,
+
     /// Operator-only automatic supervisor replies in local history. Terminal
     /// questions and explicit operator messages are recorded separately. This
     /// does not enroll a cloud audience. Set false to opt out; re-enabling
@@ -901,6 +907,10 @@ pub struct FactoryConfig {
     /// Rolling report window for the epic design-review trigger.
     #[serde(default = "default_design_review_window_hours")]
     pub design_review_window_hours: u32,
+    /// cas-dcc9: hours after a release train's first child merge before the
+    /// supervisor gets one "train ready to cut" notice regardless of work in flight.
+    #[serde(default = "default_release_train_max_age_hours")]
+    pub release_train_max_age_hours: u32,
 
     /// Seconds to collect directed supervisor messages into one submitted turn.
     #[serde(default = "default_supervisor_message_debounce_secs")]
@@ -1090,6 +1100,13 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_base_branch: Option<String>,
 
+    /// One integration per release: a task created with no epic and no
+    /// explicit target joins the repository's open release-train epic, cut
+    /// from the integration branch, instead of targeting it directly. Off
+    /// restores per-task trunk targets.
+    #[serde(default = "default_true")]
+    pub release_train: bool,
+
     /// Refuse to silently fall back when a resolved worker/supervisor spec
     /// requests Codex but Codex is unavailable — bail with an actionable
     /// error instead of rewriting to Claude (cas-7199 / cas-a487). OR'd
@@ -1241,6 +1258,7 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
 
 fn default_design_review_bug_threshold() -> u32 { 5 }
 fn default_design_review_window_hours() -> u32 { 48 }
+fn default_release_train_max_age_hours() -> u32 { 3 }
 
 fn default_supervisor_message_debounce_secs() -> u64 { 20 }
 
@@ -1322,9 +1340,11 @@ impl Default for FactoryConfig {
             artifacts_root: None,
             scratch_root: None,
             worker_local_gate: None,
+            release_command: None,
             commander_mirror_enabled: true,
             design_review_bug_threshold: default_design_review_bug_threshold(),
             design_review_window_hours: default_design_review_window_hours(),
+            release_train_max_age_hours: default_release_train_max_age_hours(),
             write_roots: Vec::new(),
             supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
             supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),
@@ -1354,6 +1374,7 @@ impl Default for FactoryConfig {
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
+            release_train: true,
             strict_cli: false,
             target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),

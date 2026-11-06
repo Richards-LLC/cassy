@@ -1080,6 +1080,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.worker_local_gate", " pnpm ci:local ", "pnpm ci:local"),
+        ("factory.release_command", " scripts/promote.sh staging ", "scripts/promote.sh staging"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
@@ -1087,6 +1088,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.worker_denied_mcp_tools", " *vercel*, mcp__neon__* ", "*vercel*,mcp__neon__*"),
         ("factory.design_review_bug_threshold", "3", "3"),
         ("factory.design_review_window_hours", "24", "24"),
+        ("factory.release_train_max_age_hours", "5", "5"),
         ("factory.supervisor_message_debounce_secs", "12", "12"),
         ("factory.supervisor_message_wakes_per_hour", "4", "4"),
         ("factory.message_max_chars", "3000", "3000"),
@@ -1123,6 +1125,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.delivery_stalled_priority_secs", "120", "120"),
         ("factory.delivery_stalled_normal_secs", "240", "240"),
         ("factory.strict_cli", "true", "true"),
+        ("factory.release_train", "false", "false"),
         ("factory.target_cache_high_watermark_percent", "90", "90"),
         ("factory.target_cache_low_watermark_percent", "70", "70"),
         ("factory.target_cache_min_idle_secs", "7200", "7200"),
@@ -1235,6 +1238,7 @@ fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
         scratch_root: Some("/mnt/rewind/cas".into()),
         epic_base_branch: Some("main".into()),
         write_roots: vec!["/mnt/operator-approved".into()],
+        release_command: Some("scripts/release.sh".into()),
         ..FactoryConfig::default()
     };
     let config = Config { factory: Some(factory.clone()), ..Config::default() };

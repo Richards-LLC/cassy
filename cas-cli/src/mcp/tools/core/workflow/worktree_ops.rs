@@ -707,10 +707,12 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
 }
 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
+#[track_caller]
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
     gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
 }
 
+#[track_caller]
 fn gh_api_get(endpoint: &str, cwd: &Path, binary: &Path) -> GhApiOutput {
     let mut command = Command::new(binary);
     command

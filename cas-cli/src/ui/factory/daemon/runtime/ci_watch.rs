@@ -42,6 +42,8 @@ pub(crate) fn ci_watch_interval(ci_wake_pending: bool, tracked_pr_queued: bool) 
 }
 const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// One open-PR merge-queue listing per repo per minute, machine-wide.
+const MERGE_QUEUE_PROBE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
 pub(crate) const DELIVERY_MERGE_CLOSE_GRACE: Duration = Duration::from_secs(5 * 60);
 
@@ -122,6 +124,11 @@ pub(crate) trait CiTransport {
     }
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError>;
+    /// The listing read from GitHub now, never a shared cached snapshot: the
+    /// confirming poll of a held queue exit must see whether the PR merged.
+    fn merge_queue_pull_requests_fresh(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        self.merge_queue_pull_requests()
+    }
     fn delivery_pull_requests(
         &self,
         branch: &str,
@@ -384,6 +391,52 @@ pub(crate) struct MergeQueueEjection {
     pub pr_number: u64,
     pub failed_run_id: Option<u64>,
     pub occurrence: String,
+    /// The PR head at the exit; a repair cycle is keyed on run and head.
+    pub head_sha: String,
+    /// cas-25ce: the merge-group entry this run was built on (GitHub names
+    /// its commit in `pr-<n>-<base sha>`), which may be the real cause.
+    pub ahead: AheadEntry,
+}
+
+/// cas-f2ea: what the merge-group entry ahead of a failed run shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AheadEntry {
+    /// No entry ahead, or it did not fail.
+    Clear,
+    /// The entry ahead failed in this run.
+    Failed(u64),
+    /// The entry ahead is still running or could not be read.
+    Unknown,
+}
+
+/// cas-f2ea: every run of the entry ahead, whatever its status, so a red
+/// entry ahead still running is not mistaken for this PR's own failure.
+fn ahead_entry(transport: &dyn CiTransport, failed: &CiRun, pr_number: u64) -> AheadEntry {
+    let Some(base) = failed
+        .head_branch
+        .rsplit_once("/pr-")
+        .and_then(|(_, suffix)| suffix.split_once('-'))
+        .map(|(_, base)| base)
+    else {
+        return AheadEntry::Clear;
+    };
+    let Ok(runs) = transport.runs_for_sha(base) else {
+        return AheadEntry::Unknown;
+    };
+    let ahead: Vec<_> = runs
+        .iter()
+        .filter(|run| {
+            run.event == "merge_group"
+                && merge_group_pr_number(&run.head_branch).is_some_and(|number| number != pr_number)
+        })
+        .collect();
+    if let Some(run) = ahead.iter().find(|run| run.conclusion.as_deref() == Some("failure")) {
+        AheadEntry::Failed(run.id)
+    } else if ahead.iter().any(|run| run.status != "completed") {
+        AheadEntry::Unknown
+    } else {
+        AheadEntry::Clear
+    }
 }
 
 /// cas-e369: a supervisor-owned PR (an open epic's `epic/` branch) that the
@@ -880,6 +933,8 @@ pub(crate) struct GhCiTransport {
     repo: String,
     cwd: PathBuf,
     gh_binary: PathBuf,
+    /// cas-c24e: one completed-runs read per poll; two collectors share it.
+    completed: std::sync::OnceLock<Vec<CiRun>>,
 }
 
 impl GhCiTransport {
@@ -892,10 +947,19 @@ impl GhCiTransport {
             repo,
             cwd: project.to_path_buf(),
             gh_binary,
+            completed: std::sync::OnceLock::new(),
         })
     }
 
+    #[track_caller]
     fn gh_json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T, CiWatchError> {
+        let stdout = self.gh_bytes(args)?;
+        serde_json::from_slice(&stdout)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+    }
+
+    #[track_caller]
+    fn gh_bytes(&self, args: &[String]) -> Result<Vec<u8>, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
         let output = run_command(
@@ -921,10 +985,40 @@ impl GhCiTransport {
                 .to_string();
             return Err(CiWatchError::Unavailable(detail));
         }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+        Ok(output.stdout)
     }
 
+    fn merge_queue_listing(&self, fresh: bool) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
+            .ok_or_else(|| {
+                CiWatchError::Unavailable(
+                    "invalid GitHub repository for merge-queue watcher".to_string(),
+                )
+            })?;
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let args = [
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={query}"),
+            "-F".to_string(),
+            format!("owner={}", repo.owner),
+            "-F".to_string(),
+            format!("name={}", repo.repo),
+        ];
+        // cas-c24e: every daemon on this machine shares one listing per repo
+        // per minute instead of each polling it every 30 s.
+        let bytes = crate::gh_budget::shared_read(
+            &format!("merge-queue-{}", self.repo),
+            if fresh { Duration::ZERO } else { MERGE_QUEUE_PROBE_TTL },
+            || self.gh_bytes(&args),
+        )?;
+        let response: MergeQueueGraphqlResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid merge-queue JSON: {e}")))?;
+        Ok(response.data.repository.pull_requests.nodes)
+    }
+
+    #[track_caller]
     fn gh_text(&self, args: &[String]) -> Result<String, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
@@ -943,6 +1037,9 @@ impl GhCiTransport {
 
 impl CiTransport for GhCiTransport {
     fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+        if let Some(runs) = self.completed.get() {
+            return Ok(runs.clone());
+        }
         let response: RunsResponse = self.gh_json(&[
             "api".to_string(),
             "-X".to_string(),
@@ -953,6 +1050,7 @@ impl CiTransport for GhCiTransport {
             "-f".to_string(),
             "per_page=100".to_string(),
         ])?;
+        let _ = self.completed.set(response.workflow_runs.clone());
         Ok(response.workflow_runs)
     }
 
@@ -1055,24 +1153,11 @@ impl CiTransport for GhCiTransport {
     }
 
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
-        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
-            .ok_or_else(|| {
-                CiWatchError::Unavailable(
-                    "invalid GitHub repository for merge-queue watcher".to_string(),
-                )
-            })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
-        let response: MergeQueueGraphqlResponse = self.gh_json(&[
-            "api".to_string(),
-            "graphql".to_string(),
-            "-f".to_string(),
-            format!("query={query}"),
-            "-F".to_string(),
-            format!("owner={}", repo.owner),
-            "-F".to_string(),
-            format!("name={}", repo.repo),
-        ])?;
-        Ok(response.data.repository.pull_requests.nodes)
+        self.merge_queue_listing(false)
+    }
+
+    fn merge_queue_pull_requests_fresh(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+        self.merge_queue_listing(true)
     }
 
     fn delivery_pull_requests(
@@ -1180,6 +1265,56 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
     )
 }
 
+/// One CI-watch poll's GitHub reads, without persisting anything.
+pub(crate) struct GithubPoll {
+    pub failures: Vec<CiFailure>,
+    pub queue_poll: MergeQueuePoll,
+    /// Each ejection with its failing job and whether the entry ahead of it
+    /// may be the cause (cas-25ce/cas-f2ea).
+    pub ejections: Vec<(MergeQueueEjection, Option<String>, bool)>,
+    pub delivery_pr_observations: Vec<DeliveryPrObservation>,
+    pub ci_wakes: (Vec<CiWake>, bool),
+}
+
+/// cas-c24e: the daemon's poll and `cas factory ci-watch-dry-run` share this
+/// read, so the dry run spends exactly what one daemon poll spends.
+pub(crate) fn read_github(
+    cas_dir: &Path,
+    project: &Path,
+    session_name: &str,
+    watched_branches: &BTreeSet<String>,
+    previously_queued: &BTreeSet<u64>,
+    previously_armed: &BTreeSet<u64>,
+    previously_held: &BTreeSet<u64>,
+    lookups: &super::merge_queue_ejection::FailedRunLookups,
+) -> Result<GithubPoll, CiWatchError> {
+    let deliveries = super::merge_queue_ejection::awaiting_merge_deliveries(cas_dir);
+    let supervisor_prs = super::merge_queue_ejection::supervisor_prs(cas_dir);
+    let transport = GhCiTransport::from_project(project)?;
+    let candidates = super::queue_and_events::ci_completed_candidates(cas_dir, session_name);
+    let ci_wakes = (collect_ci_wakes(&transport, &candidates), !candidates.is_empty());
+    let failures = mark_merged_failures(project, collect_failures(&transport, watched_branches)?);
+    let mut queue_poll = collect_tracked_merge_queue_ejections(
+        &transport,
+        &deliveries,
+        &supervisor_prs,
+        previously_queued,
+        previously_armed,
+        previously_held,
+    )?;
+    // cas-fd0a: name each ejection's failing job for the wake.
+    let ejections = std::mem::take(&mut queue_poll.ejections)
+        .into_iter()
+        .map(|ejection| {
+            let job = lookups.failing_job(&transport, ejection.failed_run_id);
+            let group_mate = lookups.ahead_may_be_cause(&transport, ejection.failed_run_id, ejection.ahead);
+            (ejection, job, group_mate)
+        })
+        .collect();
+    let delivery_pr_observations = collect_delivery_pr_observations(&transport, &deliveries)?;
+    Ok(GithubPoll { failures, queue_poll, ejections, delivery_pr_observations, ci_wakes })
+}
+
 /// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
 /// that leaves the queue unmerged wakes the supervisor exactly like a parked
 /// delivery does; it has no worker to instruct.
@@ -1191,7 +1326,13 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     previously_armed: &BTreeSet<u64>,
     previously_held: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
-    let pulls = transport.merge_queue_pull_requests()?;
+    // cas-c24e: a held exit's confirming poll reads GitHub itself; a shared
+    // snapshot from before the PR merged would report a false ejection.
+    let pulls = if previously_held.is_empty() {
+        transport.merge_queue_pull_requests()?
+    } else {
+        transport.merge_queue_pull_requests_fresh()?
+    };
     let runs = transport.completed_runs()?;
     let mut failed_runs = BTreeMap::<u64, &CiRun>::new();
     for run in &runs {
@@ -1239,7 +1380,8 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             poll.queued_prs.insert(pr.number);
             continue;
         }
-        let failed_run_id = failed_runs.get(&pr.number).map(|run| run.id);
+        let failed_run = failed_runs.get(&pr.number);
+        let failed_run_id = failed_run.map(|run| run.id);
         let arm_vanished = pr.head_branch.starts_with("factory/")
             && previously_armed.contains(&pr.number)
             && !pr.auto_merge_armed()
@@ -1261,6 +1403,14 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             poll.queued_prs.insert(pr.number);
             continue;
         }
+        let ahead = failed_run.map_or(AheadEntry::Clear, |run| ahead_entry(transport, run, pr.number));
+        // cas-f2ea: an entry ahead still running gets one confirming poll
+        // before this exit is judged; still unknown then, it is not counted.
+        if ahead == AheadEntry::Unknown && !previously_held.contains(&pr.number) {
+            poll.held_exits.insert(pr.number);
+            poll.queued_prs.insert(pr.number);
+            continue;
+        }
         let occurrence = if disarmed {
             format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
         } else {
@@ -1272,6 +1422,8 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             pr_number: pr.number,
             failed_run_id,
             occurrence,
+            head_sha: pr.head_sha.clone(),
+            ahead,
         });
     }
     poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
@@ -1449,12 +1601,20 @@ pub(crate) fn mark_merged_failures(project: &Path, mut failures: Vec<CiFailure>)
 /// Extract the common Rust/nextest failure shape without treating log parsing
 /// as authoritative.  Missing or unfamiliar logs simply omit the test name.
 pub(crate) fn first_failing_test(log: &str) -> Option<String> {
-    log.lines().find_map(|line| {
-        let line = line.trim();
-        let test = line.strip_prefix("test ")?;
-        let (name, outcome) = test.rsplit_once(" ... ")?;
-        (outcome.contains("FAILED")).then(|| name.trim().to_string())
-    })
+    failing_tests(log).next()
+}
+
+/// Every failing test in log order, each once (cas-25ce).
+pub(crate) fn failing_tests(log: &str) -> impl Iterator<Item = String> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    log.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let test = line.strip_prefix("test ")?;
+            let (name, outcome) = test.rsplit_once(" ... ")?;
+            (outcome.contains("FAILED")).then(|| name.trim().to_string())
+        })
+        .filter(move |name| seen.insert(name.clone()))
 }
 
 pub(crate) fn relay_body(failure: &CiFailure) -> String {
@@ -1711,6 +1871,7 @@ mod tests {
                 repo: "org/repo".to_string(),
                 cwd: temp.path().to_path_buf(),
                 gh_binary: gh,
+                completed: Default::default(),
             };
             let condition = CiCompleted { sha: sha.to_string(), workflow: Some("CI".to_string()) };
             let runs = ci_completed_runs(&transport, &condition).unwrap();
@@ -1894,6 +2055,7 @@ mod tests {
             repo: "org/repo".to_string(),
             cwd: temp.path().to_path_buf(),
             gh_binary: gh,
+            completed: Default::default(),
         };
 
         let pulls = transport
@@ -1902,6 +2064,79 @@ mod tests {
         assert_eq!(pulls.len(), 1);
         assert_eq!(pulls[0].number, 932);
         assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
+    }
+
+    #[test]
+    fn two_daemons_share_one_merge_queue_listing_per_repo_per_minute_cas_c24e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let temp = tempfile::TempDir::new().unwrap();
+        let gh = temp.path().join("gh");
+        let calls = temp.path().join("calls");
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\necho x >> '{}'\nprintf '%s' '{{\"data\":{{\"repository\":{{\"pullRequests\":{{\"nodes\":[{{\"number\":5,\"headRefName\":\"epic/train\",\"headRefOid\":\"tip\",\"isInMergeQueue\":true,\"updatedAt\":\"2026-11-06T01:00:00Z\"}}]}}}}}}}}'\n",
+                calls.display()
+            ),
+        );
+        let daemon = || GhCiTransport {
+            repo: "org/repo".to_string(),
+            cwd: temp.path().to_path_buf(),
+            gh_binary: gh.clone(),
+            completed: Default::default(),
+        };
+        for transport in [daemon(), daemon()] {
+            let pulls = transport.merge_queue_pull_requests().unwrap();
+            assert!(pulls[0].is_in_merge_queue);
+        }
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_held_exit_confirms_against_github_not_the_shared_snapshot_cas_c24e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let temp = tempfile::TempDir::new().unwrap();
+        let (gh, listing) = (temp.path().join("gh"), temp.path().join("listing.json"));
+        crate::test_paths::warm_stub(
+            &gh,
+            &format!(
+                "#!/bin/sh\ncase \"$2\" in graphql) cat '{}' ;; *) printf '%s' '{{\"workflow_runs\":[]}}' ;; esac\n",
+                listing.display()
+            ),
+        );
+        let open = |nodes: &str| {
+            std::fs::write(&listing, format!(r#"{{"data":{{"repository":{{"pullRequests":{{"nodes":[{nodes}]}}}}}}}}"#)).unwrap()
+        };
+        let daemon = || GhCiTransport {
+            repo: "org/repo".to_string(),
+            cwd: temp.path().to_path_buf(),
+            gh_binary: gh.clone(),
+            completed: Default::default(),
+        };
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-held".to_string(),
+            worker: "w".to_string(),
+            branch: "factory/w".to_string(),
+            branch_tip: None,
+            pr_number: Some(5),
+        };
+        // GitHub is merging PR 5: it looks dequeued for one poll, so it is held.
+        open(r#"{"number":5,"headRefName":"factory/w","headRefOid":"tip","isInMergeQueue":false,"updatedAt":"2026-11-06T01:00:00Z"}"#);
+        let empty = BTreeSet::new();
+        let held = collect_tracked_merge_queue_ejections(
+            &daemon(), std::slice::from_ref(&delivery), &[], &BTreeSet::from([5]), &empty, &empty,
+        )
+        .unwrap();
+        assert_eq!(held.held_exits, BTreeSet::from([5]));
+        // It merged within the shared listing's lifetime: no longer open.
+        open("");
+        let confirmed = collect_tracked_merge_queue_ejections(
+            &daemon(), std::slice::from_ref(&delivery), &[], &held.queued_prs, &empty, &held.held_exits,
+        )
+        .unwrap();
+        assert!(confirmed.ejections.is_empty(), "a merged PR is never ejected: {:?}", confirmed.ejections);
     }
 
     #[test]
@@ -2349,8 +2584,10 @@ mod tests {
             Some("failure"),
         );
         failed.event = "merge_group".to_string();
+        let mut ahead = run_with("gh-readonly-queue/main/pr-555-trunk", "base", 900, Some("failure"));
+        ahead.event = "merge_group".to_string();
         let ejected = FakeTransport {
-            runs: vec![failed.clone()],
+            runs: vec![failed.clone(), ahead],
             pulls: vec![pull(556, &delivery.branch, false, "2026-08-20T15:32:03Z")],
             delivery_pulls: Vec::new(),
             job: String::new(),
@@ -2365,6 +2602,23 @@ mod tests {
         .unwrap();
         assert_eq!(first.ejections.len(), 1);
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
+        // cas-25ce: a failed group entry ahead (the run whose head is this
+        // entry's `pr-556-<base>`) is named as the possible cause.
+        assert_eq!(first.ejections[0].ahead, AheadEntry::Failed(900));
+        // cas-f2ea: an entry ahead still running holds the exit for one
+        // confirming poll, then reports Unknown (never this PR's own failure).
+        let mut running = run_with("gh-readonly-queue/main/pr-555-trunk", "base", 900, None);
+        (running.event, running.status) = ("merge_group".to_string(), "in_progress".to_string());
+        let pending = FakeTransport {
+            runs: vec![failed.clone(), running], pulls: ejected.pulls.clone(), delivery_pulls: Vec::new(),
+            job: String::new(), log: None, calls: Cell::new(0),
+        };
+        let held = collect_tracked_merge_queue_ejections(&pending, std::slice::from_ref(&delivery), &[],
+            &BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new()).unwrap();
+        assert!(held.ejections.is_empty() && held.held_exits.contains(&556));
+        let confirmed = collect_tracked_merge_queue_ejections(&pending, std::slice::from_ref(&delivery), &[],
+            &BTreeSet::new(), &BTreeSet::new(), &held.held_exits).unwrap();
+        assert_eq!(confirmed.ejections[0].ahead, AheadEntry::Unknown);
         assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z");
 
         let observed_exit = collect_merge_queue_ejections(

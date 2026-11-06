@@ -31,10 +31,14 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
-        // The whole team fits above the fold, and the release block has one home.
+        // The persistent epic strip keeps its place while Team scrolls to any worker.
+        const stripTop = (await page.locator("#epic-tabs").boundingBox())!.y;
+        await panel.locator(".team-lane").last().scrollIntoViewIfNeeded();
+        expect((await page.locator("#epic-tabs").boundingBox())!.y).toBe(stripTop);
         const lastLane = await panel.locator(".team-lane").last().boundingBox();
         expect(lastLane!.y + lastLane!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         await expect(page.locator(".conversation-context .release-progress")).toBeHidden();
+        await panel.evaluate(element => { element.scrollTop = 0; });
         if (width === 1280) {
           // The rail stays a working control list, and the lanes out-weigh it.
           const card = page.locator(".conversation-context .status-agent").first();

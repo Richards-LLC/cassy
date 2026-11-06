@@ -515,10 +515,13 @@ class FastRows(unittest.TestCase):
             with self.subTest(row=row, files=sorted(files)):
                 self.refused_at_park(row, files, fix)
 
-    def test_next_version_literal_elsewhere_is_noted_not_refused_cas_7bce(self):
+    def test_preexisting_next_version_literals_are_not_refused_cas_c3fa(self):
         self.write("crates/cas-core/src/lib.rs", "// SQLite 9.99.8 fixed it.\n")
+        fixture = '#[test]\nfn sample() {\n    let fixture = r#"{"dependencies":{"vite":"^10.0.0"}}"#;\n}\n'
+        self.write("cas-cli/tests/sample.rs", fixture)
         self.commit()
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("cas-cli/tests/sample.rs", "// unrelated lane change\n" + fixture)
         self.write("scripts/example.py", "# unrelated lane\n")
         self.commit()
         result = self.fast()
@@ -527,6 +530,7 @@ class FastRows(unittest.TestCase):
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
         self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
+        self.assertIn("cas-cli/tests/sample.rs:4:", log)
 
     def test_a_call_shape_error_in_a_builtin_skill_is_refused_with_its_line_cas_043b(self):
         # cas-0f05's CI red: a spaced placeholder hid the reminder's message.

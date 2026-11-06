@@ -2656,9 +2656,9 @@ lane spanning that release's three epics ran every fast row in about 25 seconds.
   may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
   archive shards lack.
 - `version-literals`: fast mode also refuses the next patch, minor and major
-  version in the lane's changed files, comments included. The release gate
-  scans for the bumped version. Pre-existing next-version literals elsewhere
-  are printed as a NOTE.
+  version in the lane's added lines, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals, including
+  unchanged lines in touched files, are printed as a NOTE.
 - `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
 - `test-env` and `fixture-paths-src`: the environment failures.
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It

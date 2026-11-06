@@ -14647,6 +14647,29 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+const REFERENCE_HISTORY_REGEN_SUBJECT: &str = "build(builtins): regenerate reference-history from merged history";
+
+/// The required post-merge ledger refresh cites its generator's task, rather
+/// than the worker's. Bind that exception to the actual merge and ledger-only
+/// diff; ordinary source commits cannot borrow the generator's attribution.
+fn is_reference_history_regeneration(repo: &std::path::Path, commit: &str) -> bool {
+    let Ok(metadata) = git_stdout_lines(repo, &["show", "-s", "--format=%P%x1f%B", commit]) else {
+        return false;
+    };
+    let metadata = metadata.join("\n");
+    let Some((parents, message)) = metadata.split_once('\u{1f}') else {
+        return false;
+    };
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [merged] = parents.as_slice() else { return false; };
+    if message != format!("{REFERENCE_HISTORY_REGEN_SUBJECT}\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9]) {
+        return false;
+    }
+    git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", merged])
+        .is_ok_and(|lines| lines.len() == 1 && lines[0].split_whitespace().count() == 3)
+        && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", merged, commit, "--"])
+            .is_ok_and(|paths| paths == [REFERENCE_HISTORY_LEDGER])
+}
 #[derive(serde::Deserialize)]
 struct ReferenceHistory {
     version: u64,
@@ -22663,11 +22686,22 @@ fn own_lane_subjects(
         excluded.push("refs/remotes/origin/HEAD".to_string());
     }
     let range = format!("{recorded}..{tip}");
-    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let mut args = vec!["log", "--no-merges", "--format=%H%x1f%s", range.as_str()];
     let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
     args.extend(negated.iter().map(String::as_str));
     args.push("--");
-    git_stdout_lines(repo_path, &args)
+    let mut subjects = Vec::new();
+    for record in git_stdout_lines(repo_path, &args)? {
+        let (commit, subject) = record.split_once('\u{1f}')
+            .ok_or_else(|| "cannot read authored commit subject".to_string())?;
+        if subject == REFERENCE_HISTORY_REGEN_SUBJECT
+            && is_reference_history_regeneration(repo_path, commit)
+        {
+            continue;
+        }
+        subjects.push(subject.to_string());
+    }
+    Ok(subjects)
 }
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
@@ -25212,7 +25246,7 @@ fn parked_anchor_advance_with_target_is_attributable(
         .args([
             "log",
             "--first-parent",
-            "--format=%P%x1f%ct%x1f%B%x1e",
+            "--format=%H%x1f%P%x1f%ct%x1f%B%x1e",
             &format!("{recorded}..{candidate}"),
             "--",
         ])
@@ -25229,9 +25263,11 @@ fn parked_anchor_advance_with_target_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (commit, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (parents, rest) = rest.split_once('\u{1f}')?;
             let (epoch, message) = rest.split_once('\u{1f}')?;
             Some((
+                commit,
                 parents.split_whitespace().collect::<Vec<_>>(),
                 epoch.trim().parse::<i64>().ok()?,
                 message,
@@ -25245,11 +25281,11 @@ fn parked_anchor_advance_with_target_is_attributable(
     // under the same rule cas-985f applies before park.
     let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
-    commits.last().is_some_and(|(parents, _, _)| {
+    commits.last().is_some_and(|(_, parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
-    }) && commits.iter().all(|(parents, epoch, message)| {
+    }) && commits.iter().all(|(commit, parents, epoch, message)| {
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
@@ -25258,7 +25294,10 @@ fn parked_anchor_advance_with_target_is_attributable(
                     })
             });
         (target_import
-            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            || (parents.len() == 1
+                && (!message_claims_other_task(message, Some(task_id))
+                    || (message.starts_with(REFERENCE_HISTORY_REGEN_SUBJECT)
+                        && is_reference_history_regeneration(repo_path, commit)))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })

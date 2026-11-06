@@ -2587,7 +2587,7 @@ impl CasCore {
             let now = chrono::Utc::now();
             let parked_branch = task.deliverables.parked_branch.as_deref()
                 .unwrap_or("the parked factory branch");
-            let audit = audit::merge_recovery_note(now, parked_branch);
+            let audit = audit::merge_recovery_note(now, parked_branch, task.delivery_mode);
             task.notes = if task.notes.is_empty() {
                 audit
             } else {

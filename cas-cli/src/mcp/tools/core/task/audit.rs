@@ -1,5 +1,5 @@
 //! Canonical lifecycle audit writers. Replication consumes these same prefixes.
-use cas_types::{Agent, TaskStatus};
+use cas_types::{Agent, DeliveryMode, TaskStatus};
 use chrono::{DateTime, Utc};
 
 pub(crate) const REOPENED: &str = "Reopened:";
@@ -51,10 +51,24 @@ pub(crate) fn proof_scope_fix_note(
     )
 }
 
-pub(crate) fn merge_recovery_note(at: DateTime<Utc>, branch: &str) -> String {
+pub(crate) fn merge_recovery_guidance(mode: DeliveryMode) -> String {
+    let completion = match mode {
+        DeliveryMode::PushBranch => "Resolve conflicts, push, then re-park with `task close`; the supervisor owns the merge.".to_string(),
+        DeliveryMode::LocalMerge => format!(
+            "Resolve conflicts, keep the branch local, and re-park with `task close`. {}",
+            super::lifecycle::close_ops::gate_text::PARK_SIGNAL,
+        ),
+    };
     format!(
-        "[{}] {MERGE_RECOVERY}{branch} was flagged with a merge conflict or its conflict preflight could not be evaluated, so the task is back in_progress for the assigned worker to inspect from inside the worker worktree. Rebase {branch} onto the current integration target tip, push the rebased factory branch, and re-park it with merge_request=true.",
-        at.format("%Y-%m-%d %H:%M")
+        "Merge the current integration target tip into the parked factory branch; never rebase its recorded delivery anchor. {completion}"
+    )
+}
+
+pub(crate) fn merge_recovery_note(at: DateTime<Utc>, branch: &str, mode: DeliveryMode) -> String {
+    format!(
+        "[{}] {MERGE_RECOVERY}{branch} was flagged with a merge conflict or its conflict preflight could not be evaluated, so the task is back in_progress for the assigned worker to inspect from inside the worker worktree. {}",
+        at.format("%Y-%m-%d %H:%M"),
+        merge_recovery_guidance(mode),
     )
 }
 

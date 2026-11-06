@@ -465,11 +465,11 @@ impl CasCore {
         CassyMergeClose::Closed { notice }
     }
 
-    /// cas-f497: close one delivery a release verdict covers. The verdict bound
-    /// its anchor to a staging commit on the target, so that commit is the merge
+    /// Close one receipt-covered delivery, retaining optional review authority.
+    /// The receipt binds its anchor to staging on the target, which is the merge
     /// evidence for a delivery merged outside `worktree_merge`. An override merge
     /// stays a manual close, and work that has left its park is not closed.
-    async fn close_after_release_verdict(&self, task_id: &str, verdict: &cas_store::QaBatchReceipt) -> CassyMergeClose {
+    async fn close_after_batch_receipt(&self, task_id: &str, receipt: &cas_store::QaBatchReceipt, verification_id: Option<&str>) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
@@ -477,9 +477,9 @@ impl CasCore {
             return CassyMergeClose::NotEligible;
         };
         let outcome = if task.deliverables.green_merge_commit.is_some() {
-            self.close_green_merged_delivery_after_verdict(task_id, Some(&verdict.id)).await
+            self.close_green_merged_delivery_after_verdict(task_id, verification_id).await
         } else if task.status == TaskStatus::AwaitingMerge {
-            self.close_merged_delivery(store.as_ref(), task, &verdict.staging_sha, Some(&verdict.id)).await
+            self.close_merged_delivery(store.as_ref(), task, &receipt.staging_sha, verification_id).await
         } else {
             CassyMergeClose::NotEligible
         };
@@ -500,7 +500,7 @@ impl CasCore {
                 &actor,
                 Some(&actor),
                 None,
-                Some(&verdict.staging_sha),
+                Some(&receipt.staging_sha),
                 None,
             ) {
                 notice.push_str(&format!("; NOT RECORDED: delivery completion ({error})"));
@@ -570,13 +570,13 @@ impl CasCore {
                 }
             };
             let outcome = if let Some(verdict) = verdict.as_ref() {
-                self.close_after_release_verdict(task_id, verdict).await
+                self.close_after_batch_receipt(task_id, verdict, Some(&verdict.id)).await
             } else if task.status == TaskStatus::AwaitingMerge
                 && task.deliverables.effective_merge_ci_admission() != cas_types::MergeCiAdmission::Override
             {
                 // QA attests the walk, never the review. Ordinary close may
                 // finish a dedicated review or report the missing release verdict.
-                self.close_merged_delivery(store.as_ref(), task.clone(), &receipt.staging_sha, None).await
+                self.close_after_batch_receipt(task_id, receipt, None).await
             } else {
                 CassyMergeClose::NotEligible
             };

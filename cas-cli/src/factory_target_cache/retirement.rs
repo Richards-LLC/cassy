@@ -179,8 +179,17 @@ fn retire(
     };
     // cas-3f93: follow a target relocated under `[factory] scratch_root`.
     let target = crate::factory_scratch::worker_target_dir(&worktree);
+    let temporary = crate::factory_scratch::test_tmp_dir(cas_root, &worktree);
+    let in_use = |old: &Path, new: &Path, descriptors: &[i32]| {
+        probe(old, new, descriptors)
+            || (temporary.exists() && probe(&temporary, &temporary, descriptors))
+    };
     match fs::symlink_metadata(&target) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if temporary.exists() && probe(&temporary, &temporary, &[]) { return Ok(false); }
+            crate::factory_scratch::reclaim_test_tmp(cas_root, &worktree)?;
+            return Ok(true);
+        },
         Err(error) => return Err(error),
         Ok(metadata) if metadata.file_type().is_symlink() => return Ok(false),
         Ok(_) => {}
@@ -245,7 +254,7 @@ fn retire(
     };
     #[cfg(not(unix))]
     let descriptors: Vec<i32> = Vec::new();
-    if probe(&target, &target, &descriptors) {
+    if in_use(&target, &target, &descriptors) {
         let bytes: u64 = WalkDir::new(&target)
             .follow_links(false)
             .into_iter()
@@ -289,7 +298,7 @@ fn retire(
         return Ok(false);
     }
     if registry(cas_root, &worktree)?
-        || probe(&target, &target, &descriptors)
+        || in_use(&target, &target, &descriptors)
         || !list_validated_git_worktrees(repo).iter().any(|tree| {
             tree.path.canonicalize().ok().as_ref() == Some(&worktree)
                 && tree.commit.as_deref() == Some(head)
@@ -298,6 +307,7 @@ fn retire(
     {
         return Ok(false);
     }
+    crate::factory_scratch::reclaim_test_tmp(cas_root, &worktree)?;
     // A sibling keeps the rename on the target's filesystem; in-tree that
     // sibling is the checkout itself.
     let quarantine = target
@@ -310,7 +320,7 @@ fn retire(
         fs::rename(&quarantine, &target)?;
         return Ok(false);
     }
-    if probe(&target, &quarantine, &descriptors) {
+    if in_use(&target, &quarantine, &descriptors) {
         if !target.exists() {
             fs::rename(&quarantine, &target)?;
         }

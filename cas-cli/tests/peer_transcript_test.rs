@@ -25,6 +25,21 @@ fn text(result: rmcp::model::CallToolResult) -> String {
 
 #[tokio::test]
 async fn own_account_peer_transcript_is_bounded_redacted_and_daemon_served_cas_02c5() {
+    use clap::Parser;
+    let cli = cas::cli::Cli::try_parse_from([
+        "cas",
+        "peers",
+        "--peer",
+        "remote-sup@remote",
+        "--transcript",
+        "/mcp",
+        "--session-id",
+        "current",
+        "--context",
+        "2",
+    ])
+    .unwrap();
+    assert!(matches!(cli.command, Some(cas::cli::Commands::Peers(_))));
     let env = TestEnvGuard::temp_home();
     let server = MockServer::start().await;
     let local = tempfile::tempdir().unwrap();

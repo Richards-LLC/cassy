@@ -2930,26 +2930,48 @@ impl Pty {
         // Drop slave - the child process owns it now
         drop(pair.slave);
 
+        Self::from_handles(id, pair.master, child, is_codex, worker_startup_prompt_file)
+    }
+
+    /// Adopt a PTY inherited from this process's previous daemon image.
+    /// Ownership of the master moves into the PTY; the child remains our direct
+    /// child because exec preserves the parent PID. Never use a borrowed fd here.
+    #[cfg(unix)]
+    pub fn adopt(master_fd: std::os::fd::OwnedFd, child_pid: u32, pgid: u32) -> Result<Self> {
+        if child_pid == 0 || child_pid > i32::MAX as u32 || pgid == 0 || pgid > i32::MAX as u32 {
+            return Err(Error::pty("Invalid inherited PTY child or process group"));
+        }
+        let master = crate::adopt::InheritedMaster(master_fd, pgid);
+        portable_pty::MasterPty::get_size(&master)
+            .map_err(|e| Error::pty(format!("Invalid inherited PTY master: {e}")))?;
+        Self::from_handles(format!("adopted-{child_pid}"), Box::new(master),
+            Box::new(crate::adopt::InheritedChild { pid: child_pid, status: None }), false, None)
+    }
+
+    fn from_handles(
+        id: String,
+        master: Box<dyn portable_pty::MasterPty + Send>,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        is_codex: bool,
+        worker_startup_prompt_file: Option<tempfile::TempPath>,
+    ) -> Result<Self> {
         // Get reader and writer
-        let reader = pair
-            .master
+        let reader = master
             .try_clone_reader()
             .map_err(|e| Error::pty(format!("Failed to clone reader: {e}")))?;
         #[cfg(unix)]
         let idle_read_fd = {
-            let fd = pair
-                .master
+            let fd = master
                 .as_raw_fd()
                 .ok_or_else(|| Error::pty("Native PTY has no pollable output descriptor"))?;
-            // SAFETY: pair.master owns this live descriptor during the clone.
+            // SAFETY: master owns this live descriptor during the clone.
             // The owned duplicate is CLOEXEC and lives with the reader thread;
             // borrowing the master's raw number could race drop/FD reuse.
             unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
                 .try_clone_to_owned()
                 .map_err(|e| Error::pty(format!("Failed to clone PTY poll descriptor: {e}")))?
         };
-        let writer = pair
-            .master
+        let writer = master
             .take_writer()
             .map_err(|e| Error::pty(format!("Failed to get writer: {e}")))?;
 
@@ -3012,7 +3034,7 @@ impl Pty {
             event_rx,
             _reader_handle: reader_handle,
             child,
-            master: pair.master,
+            master,
             is_codex,
             exit_signal: None,
             exit_status_pending: false,

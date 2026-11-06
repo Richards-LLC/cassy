@@ -937,6 +937,7 @@ dependencies = [
 name = "cas-pty"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cas-types",
  "dirs",
  "fs2",

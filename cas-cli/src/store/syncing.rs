@@ -5,7 +5,9 @@
 //! and the rule passes the T1 filter policy, the write is dual-enqueued
 //! to both the personal queue and the team queue.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
@@ -14,7 +16,7 @@ use crate::store::share_policy::{
     eligible_for_team_rule, origin_is_foreign_or_unknown, resolve_team_id,
 };
 use crate::store::{Result, RuleStore};
-use crate::types::Rule;
+use crate::types::{Rule, RuleStatus};
 use cas_core::Syncer;
 use cas_store::RuleVersion;
 
@@ -114,17 +116,162 @@ impl SyncingRuleStore {
             .is_some()
     }
 
-    fn try_sync(&self, rule: &Rule) {
+    // Keep receipts outside the generated directory: removing that entire
+    // directory must still withdraw its previously projected policy.
+    fn receipt_path(project_root: &Path, id: &str) -> PathBuf {
+        let filename: String = id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        project_root.join(".cas/rule-projections").join(filename)
+    }
+
+    /// Shared by wrapped and raw openers, before a pull can add any rules.
+    /// Only active rules at this one-time cut are legacy HOLD candidates.
+    pub(crate) fn start_receipts(cas_dir: &Path, inner: &dyn RuleStore) -> Result<()> {
+        let directory = cas_dir.join("rule-projections");
+        let path = directory.join("started.json");
+        match std::fs::metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // Existing, corrupt or unreadable markers are never re-snapshotted.
+            // Reads below interpret unavailable evidence as an empty cut.
+            _ => return Ok(()),
+        }
+        let ids: HashSet<String> = inner.list()?.into_iter()
+            .filter(Self::live).map(|rule| rule.id).collect();
+        let bytes = serde_json::to_vec(&ids)
+            .map_err(|error| cas_store::StoreError::Parse(error.to_string()))?;
+        std::fs::create_dir_all(&directory)?;
+        let mut marker = tempfile::NamedTempFile::new_in(&directory)?;
+        marker.write_all(&bytes)?;
+        match marker.persist_noclobber(path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.error.into()),
+        }
+    }
+
+    fn predates_receipts(&self, id: &str) -> bool {
+        self.project_root.as_deref()
+            .and_then(|root| std::fs::read(root.join(".cas/rule-projections/started.json")).ok())
+            .and_then(|bytes| serde_json::from_slice::<HashSet<String>>(&bytes).ok())
+            .is_some_and(|ids| ids.contains(id))
+    }
+
+    fn receipt(&self, id: &str) -> Option<String> {
+        let root = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty())?;
+        let bytes = std::fs::read(Self::receipt_path(root, id)).ok()?;
+        let (state, target): (String, PathBuf) = serde_json::from_slice(&bytes).ok()?;
+        // Unreadable/invalid metadata is missing evidence, not a reason to
+        // break all rule injection. A held source still needs a keep decision.
+        (matches!(state.as_str(), "held" | "projected" | "unprojected")
+            && (state == "held" || target == self.syncer.target_dir())).then_some(state)
+    }
+
+    fn record_projection(&self, id: &str, state: &str) -> Result<()> {
+        if let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) {
+            let path = Self::receipt_path(root, id);
+            let data = serde_json::to_vec(&(state, self.syncer.target_dir()))
+                .map_err(|error| cas_store::StoreError::Parse(error.to_string()))?;
+            if std::fs::read(&path).is_ok_and(|existing| existing == data) {
+                return Ok(());
+            }
+            let parent = path.parent().expect("receipt parent");
+            std::fs::create_dir_all(parent)?;
+            let mut receipt = tempfile::NamedTempFile::new_in(parent)?;
+            receipt.write_all(&data)?;
+            receipt.persist(path).map_err(|error| error.error)?;
+        }
+        Ok(())
+    }
+
+    /// A held source remains visible in rule listing, but is not active policy.
+    pub(crate) fn is_held(project_root: &Path, id: &str) -> bool {
+        std::fs::read(Self::receipt_path(project_root, id)).ok()
+            .and_then(|bytes| serde_json::from_slice::<(String, PathBuf)>(&bytes).ok())
+            .is_some_and(|(state, _)| state == "held")
+    }
+
+    fn live(rule: &Rule) -> bool {
+        rule.status == RuleStatus::Proven || rule.is_active_operator_hard_rule()
+    }
+
+    fn reconcile(&self, mut rule: Rule) -> Result<Rule> {
+        if self.project_root.as_deref().is_none_or(|p| p.as_os_str().is_empty())
+            || !Self::live(&rule) || self.names_foreign_project(&rule)
+        {
+            return Ok(rule);
+        }
+        let receipt = self.receipt(&rule.id);
+        let file = self.syncer.target_dir().join(format!("{}.md", rule.id));
+        if file.is_file() && receipt.as_deref() != Some("held") {
+            // Adopt an existing pre-receipt projection without re-writing it.
+            self.record_projection(&rule.id, "projected")?;
+            return Ok(rule);
+        }
+        if receipt.as_deref() == Some("unprojected")
+            || (receipt.is_none() && !self.predates_receipts(&rule.id))
+        {
+            // Known new writes and post-marker Cloud arrivals are new policy,
+            // not unknown legacy absence; projection must not re-enqueue pull.
+            self.record_projection(&rule.id, "unprojected")?;
+            self.try_sync(&rule)?;
+            return Ok(rule);
+        }
+        let deleted = receipt.as_deref() == Some("projected");
+        let reason = if deleted {
+            "retired: previously projected rule file was removed"
+        } else {
+            self.record_projection(&rule.id, "held")?;
+            "held: file absent; use rule action=restore to keep, or delete to retire"
+        };
+        rule.status = if deleted { RuleStatus::Retired } else { RuleStatus::Stale };
+        self.inner.update_with_metadata(&rule, Some("rule projection reconciliation"), Some(reason))?;
+        // A legacy hold is local uncertainty, never a speculative Cloud change.
+        if deleted { self.queue_upsert(&rule); }
+        Ok(rule)
+    }
+
+    fn try_sync(&self, rule: &Rule) -> Result<()> {
         if self.names_foreign_project(rule) {
             self.try_remove(&rule.id);
-            return;
+            return Ok(());
         }
-        // Ignore sync errors - syncing is best-effort
-        let _ = self.syncer.sync_rule(rule);
+        // A held rule cannot be revived by helpful/update or a remote replay.
+        if self.receipt(&rule.id).as_deref() == Some("held") {
+            return Ok(());
+        }
+        // File sync remains best-effort; never claim a projection on failure.
+        match self.syncer.sync_rule(rule) {
+            Ok(true) => self.record_projection(&rule.id, "projected")?,
+            Ok(false) if Self::live(rule) => self.record_projection(&rule.id, "unprojected")?,
+            Ok(false) => self.forget_projection(&rule.id),
+            Err(_) => {} // No new projection was successfully written.
+        }
+        Ok(())
+    }
+
+    fn forget_projection(&self, id: &str) {
+        if let Some(root) = self.project_root.as_deref().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::remove_file(Self::receipt_path(root, id));
+        }
     }
 
     fn try_remove(&self, rule_id: &str) {
         let _ = self.syncer.remove_rule(rule_id);
+        self.forget_projection(rule_id);
+    }
+
+    fn prepare_update(&self, id: &str) -> Result<bool> {
+        let before = self.get(id)?;
+        // A draft promoted through the explicit write path is new policy;
+        // an already active/held rule must respect its missing projection.
+        Ok(!Self::live(&before) && self.receipt(id).is_none())
+    }
+
+    fn after_write(&self, id: &str, new_projection: bool) -> Result<()> {
+        let stored = self.inner.get(id)?;
+        let stored = if new_projection { stored } else { self.reconcile(stored)? };
+        self.try_sync(&stored)?;
+        if self.receipt(id).as_deref() != Some("held") { self.queue_upsert(&stored); }
+        Ok(())
     }
 
     fn queue_upsert(&self, rule: &Rule) {
@@ -197,22 +344,17 @@ impl RuleStore for SyncingRuleStore {
 
     fn add(&self, rule: &Rule) -> Result<()> {
         self.inner.add(rule)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, true)
     }
 
     fn get(&self, id: &str) -> Result<Rule> {
-        self.inner.get(id)
+        self.reconcile(self.inner.get(id)?)
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
+        let new_projection = self.prepare_update(&rule.id)?;
         self.inner.update(rule)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, new_projection)
     }
 
     fn update_with_metadata(
@@ -221,12 +363,9 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner
-            .update_with_metadata(rule, changed_by, change_note)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        let new_projection = self.prepare_update(&rule.id)?;
+        self.inner.update_with_metadata(rule, changed_by, change_note)?;
+        self.after_write(&rule.id, new_projection)
     }
 
     fn update_clearing_stakeholder(
@@ -235,11 +374,9 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
+        let new_projection = self.prepare_update(&rule.id)?;
         self.inner.update_clearing_stakeholder(rule, changed_by, change_note)?;
-        let stored = self.inner.get(&rule.id)?;
-        self.try_sync(&stored);
-        self.queue_upsert(&stored);
-        Ok(())
+        self.after_write(&rule.id, new_projection)
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {
@@ -309,24 +446,35 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner
-            .restore_version(id, version, changed_by, change_note)?;
-        let restored = self.inner.get(id)?;
-        self.try_sync(&restored);
-        self.queue_upsert(&restored);
-        Ok(())
+        // Reconcile first so a legacy row's original state is in history.
+        self.get(id)?;
+        let version = if version.is_none() && self.receipt(id).as_deref() == Some("held") {
+            // Repeated edits/votes while held may record additional Stale
+            // snapshots; the keep decision restores the newest live source.
+            self.inner.list_versions(id)?.into_iter().find_map(|version| {
+                serde_json::from_str::<Rule>(&version.snapshot_json).ok()
+                    .filter(Self::live).map(|_| version.version)
+            })
+        } else { version };
+        self.inner.restore_version(id, version, changed_by, change_note)?;
+        self.forget_projection(id);
+        self.after_write(id, true)
     }
 
     fn list(&self) -> Result<Vec<Rule>> {
-        self.inner.list()
+        self.inner.list()?.into_iter().map(|rule| self.reconcile(rule)).collect()
     }
 
     fn list_proven(&self) -> Result<Vec<Rule>> {
-        self.inner.list_proven()
+        Ok(self.inner.list_proven()?.into_iter().map(|rule| self.reconcile(rule))
+            .collect::<Result<Vec<_>>>()?.into_iter()
+            .filter(|rule| rule.status == RuleStatus::Proven).collect())
     }
 
     fn list_critical(&self) -> Result<Vec<Rule>> {
-        self.inner.list_critical()
+        Ok(self.inner.list_critical()?.into_iter()
+            .map(|rule| self.reconcile(rule)).collect::<Result<Vec<_>>>()?
+            .into_iter().filter(|rule| matches!(rule.status, RuleStatus::Proven | RuleStatus::Draft)).collect())
     }
 
     fn close(&self) -> Result<()> {
@@ -368,6 +516,170 @@ mod tests {
         r.scope = scope;
         r.content = format!("rule {id}");
         r
+    }
+
+    #[test]
+    fn deleting_projected_rule_files_retires_their_store_source_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = Arc::new(SqliteRuleStore::open(&root).unwrap());
+        inner.init().unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let store = SyncingRuleStore::new(inner.clone(), target.clone(), 1)
+            .with_project_root(temp.path().to_path_buf());
+        let mut rule = make_rule("rule-deleted", Scope::Project);
+        rule.status = cas_types::RuleStatus::Proven;
+        rule.helpful_count = 1;
+        store.add(&rule).unwrap();
+        assert!(target.join("rule-deleted.md").exists());
+        let mut hard = make_rule("rule-hard-deleted", Scope::Project);
+        hard.content = "HARD RULE: operator policy".into();
+        hard.authorize_operator_hard_rule("operator:fixture");
+        store.add(&hard).unwrap();
+        assert!(target.join("rule-hard-deleted.md").exists());
+        // Generated files need not be tracked: deleting the whole rules
+        // directory must still withdraw the policy from prompt injection.
+        std::fs::remove_dir_all(&target).unwrap();
+        // A fresh wrapper must discover the deletion from durable receipts.
+        let store = SyncingRuleStore::new(inner, target.clone(), 1)
+            .with_project_root(temp.path().to_path_buf());
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|rule| rule.status == cas_types::RuleStatus::Retired));
+        cas_core::Syncer::new(target.clone(), 1).sync_all(&rows).unwrap();
+        assert!(!target.join("rule-deleted.md").exists());
+        assert!(store.list_proven().unwrap().is_empty());
+        assert_eq!(store.get("rule-deleted").unwrap().content, rule.content,
+                   "retirement preserves the source and history");
+    }
+
+    #[test]
+    fn legacy_missing_rules_are_held_until_explicit_restore_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = Arc::new(SqliteRuleStore::open(&root).unwrap());
+        inner.init().unwrap();
+        let mut rule = make_rule("rule-legacy", Scope::Project);
+        rule.status = cas_types::RuleStatus::Proven;
+        rule.helpful_count = 1;
+        inner.add(&rule).unwrap();
+        let mut inactive = Vec::new();
+        for (id, status) in [("rule-later-draft", RuleStatus::Draft), ("rule-later-retired", RuleStatus::Retired)] {
+            let mut row = make_rule(id, Scope::Project);
+            row.status = status;
+            inner.add(&row).unwrap();
+            inactive.push(row);
+        }
+        // Opening the base store takes the cut before later arrivals.
+        let inner = crate::store::open_rule_store_local(&root).unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner.clone(), target.clone(), 1, queue.clone())
+            .with_project_root(temp.path().to_path_buf());
+        assert!(store.list_proven().unwrap().is_empty(), "legacy missing files must not inject");
+        assert_eq!(inner.get(&rule.id).unwrap().status, cas_types::RuleStatus::Stale);
+        assert!(!target.join("rule-legacy.md").exists());
+        assert!(store.list_critical().unwrap().is_empty());
+        // A helpful/update write cannot silently adopt the held source.
+        store.update(&rule).unwrap();
+        assert!(store.list_proven().unwrap().is_empty());
+        assert!(!target.join("rule-legacy.md").exists());
+        assert!(queue.pending(100, 5).unwrap().is_empty(), "a local hold must not propagate to Cloud");
+        // The original version is retained; restore is the explicit keep decision.
+        store.restore_version(&rule.id, None, Some("operator"), Some("keep this rule")).unwrap();
+        assert_eq!(store.list_proven().unwrap().len(), 1);
+        assert!(target.join("rule-legacy.md").exists());
+        let moved = SyncingRuleStore::new(inner.clone(), temp.path().join("custom-rules"), 1)
+            .with_project_root(temp.path().to_path_buf());
+        assert_eq!(moved.get(&rule.id).unwrap().status, RuleStatus::Stale,
+            "changing the configured target is not proof of repository deletion");
+        for mut row in inactive {
+            row.status = RuleStatus::Proven;
+            row.helpful_count = 1;
+            inner.update(&row).unwrap();
+            assert_eq!(store.get(&row.id).unwrap().status, RuleStatus::Proven,
+                "inactive rows at the cut must not be legacy HOLD candidates");
+            assert!(target.join(format!("{}.md", row.id)).is_file());
+        }
+    }
+
+    #[test]
+    fn post_marker_local_arrivals_project_and_bad_receipts_do_not_disable_rules_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let inner = crate::store::open_rule_store_local(&root).unwrap();
+        let target = temp.path().join(".claude/rules/cas");
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner.clone(), target.clone(), 1, queue.clone())
+            .with_project_root(temp.path().to_path_buf());
+        assert!(store.list().unwrap().is_empty()); // Fresh project has no policy.
+        drop(store);
+        // Cloud pull uses this unwrapped store; remote creation time may be old.
+        let mut incoming = make_rule("rule-from-peer", Scope::Project);
+        incoming.created = chrono::Utc::now() - chrono::Duration::days(30);
+        incoming.status = RuleStatus::Proven;
+        incoming.helpful_count = 1;
+        inner.add(&incoming).unwrap();
+        let store = SyncingRuleStore::with_cloud_queue(inner, target.clone(), 1, queue.clone())
+            .with_project_root(temp.path().to_path_buf());
+        assert_eq!(store.get(&incoming.id).unwrap().status, RuleStatus::Proven);
+        assert!(target.join("rule-from-peer.md").is_file());
+        assert!(queue.pending(100, 5).unwrap().is_empty(), "pull projection must not echo into the push queue");
+        for bytes in [b"not JSON".to_vec(), vec![0xff]] {
+            std::fs::write(SyncingRuleStore::receipt_path(temp.path(), &incoming.id), bytes).unwrap();
+            assert_eq!(store.list_proven().unwrap().len(), 1, "bad metadata must not break rule injection");
+            assert!(target.join("rule-from-peer.md").is_file());
+        }
+    }
+
+    #[test]
+    fn second_machine_init_pull_then_session_keeps_rules_active_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        // No wrapped rule operation occurs between init and Cloud/hub pull.
+        let local = crate::store::open_rule_store_local(&root).unwrap();
+        let mut incoming = make_rule("rule-second-machine", Scope::Project);
+        incoming.created = chrono::Utc::now() - chrono::Duration::days(30);
+        incoming.status = RuleStatus::Proven;
+        incoming.helpful_count = 1;
+        local.add(&incoming).unwrap();
+        let session = crate::store::open_rule_store(&root).unwrap();
+        assert_eq!(session.get(&incoming.id).unwrap().status, RuleStatus::Proven);
+        assert!(temp.path().join(".claude/rules/cas/rule-second-machine.md").is_file());
+    }
+
+    #[test]
+    fn unreadable_start_marker_is_an_empty_cut_cas_83c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let marker = root.join("rule-projections/started.json");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        for (index, bytes) in [b"not JSON".to_vec(), Vec::new(), vec![0xff]].into_iter().enumerate() {
+            std::fs::write(&marker, bytes).unwrap();
+            let local = crate::store::open_rule_store_local(&root).unwrap();
+            let mut rule = make_rule(&format!("rule-corrupt-start-{index}"), Scope::Project);
+            rule.status = RuleStatus::Proven;
+            rule.helpful_count = 1;
+            local.add(&rule).unwrap();
+            let session = crate::store::open_rule_store(&root).unwrap();
+            assert!(session.list_proven().unwrap().iter().any(|row| row.id == rule.id));
+            assert!(temp.path().join(format!(".claude/rules/cas/{}.md", rule.id)).is_file());
+        }
+        // An actual read I/O error has the same harmless empty-cut meaning.
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        let session = crate::store::open_rule_store(&root).unwrap();
+        assert_eq!(session.list_proven().unwrap().len(), 3);
     }
 
     /// cas-caae (skills audit M27): a proven rule naming another registered

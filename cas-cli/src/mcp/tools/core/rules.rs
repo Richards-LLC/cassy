@@ -422,18 +422,21 @@ impl CasCore {
             data: None,
         })?;
 
-        let proven_rules: Vec<_> = rules
-            .iter()
-            .filter(|r| r.status == RuleStatus::Proven)
-            .collect();
-
-        if proven_rules.is_empty() {
-            return Ok(Self::success("No proven rules."));
-        }
-
-        let mut output = format!("Active Rules ({}):\n\n", proven_rules.len());
-        for rule in proven_rules {
-            output.push_str(&format!("- [{}] {}\n", rule.id, rule.preview(80)));
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        let config = self.load_config();
+        let target = project_root.join(&config.sync.target);
+        let mut output = String::from("Rule sources:\n\n");
+        for rule in &rules {
+            let held = crate::store::SyncingRuleStore::is_held(project_root, &rule.id)
+                && rule.status == RuleStatus::Stale;
+            if rule.status != RuleStatus::Proven && !rule.is_active_operator_hard_rule() && !held {
+                continue;
+            }
+            output.push_str(&format!("- [{}] {}\n  source: store (.cas; projection: {})\n",
+                rule.id, rule.preview(80), config.sync.target));
+            if held {
+                output.push_str("  held: file absent; excluded from prompts and sync. Use rule action=restore to keep, or delete to retire.\n");
+            }
             if !rule.paths.is_empty() {
                 output.push_str(&format!("  Paths: {}\n", rule.paths));
             }
@@ -442,6 +445,19 @@ impl CasCore {
                 rule.surface_count, rule.helpful_count, rule.harmful_count
             ));
         }
+        // Repo-authored files are policy too. A stored rule's generated file
+        // is one projection of that source, not a duplicate repository rule.
+        let generated: HashSet<_> = rules.iter().map(|rule| target.join(format!("{}.md", rule.id))).collect();
+        let repo_rules = project_root.join(".claude/rules");
+        let mut files: Vec<_> = walkdir::WalkDir::new(&repo_rules).into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md"))
+            .map(|entry| entry.into_path()).filter(|path| !generated.contains(path)).collect();
+        files.sort();
+        for file in files {
+            output.push_str(&format!("- source: repo ({})\n", file.strip_prefix(project_root).unwrap_or(&file).display()));
+        }
+        if output == "Rule sources:\n\n" { output.push_str("No active or held project rules.\n"); }
 
         Ok(Self::success(output))
     }
@@ -594,6 +610,10 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<RuleCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if req.scope != "project" {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Project rule creation requires scope=project; personal rules use the unified rule action=create scope=global with operator provenance"));
+        }
         let tags: Vec<String> = req
             .tags
             .map(|t| {
@@ -723,7 +743,7 @@ impl CasCore {
     /// cas-5372: who may authorise an operator hard rule — a registered
     /// supervisor, or the operator's own registered session outside a
     /// factory. Returns the author label, or why this caller may not.
-    fn operator_hard_rule_author(&self) -> Result<String, String> {
+    pub(crate) fn operator_hard_rule_author(&self) -> Result<String, String> {
         let unregistered = || {
             "the operator hard-rule fast path is only for the operator or a registered supervisor, and this caller is not registered".to_string()
         };
@@ -1415,6 +1435,33 @@ mod tests {
         core.open_rule_store().unwrap().init().unwrap();
         core.open_task_store().unwrap().init().unwrap();
         (temp, core)
+    }
+
+    #[tokio::test]
+    async fn rule_list_labels_store_repo_and_held_sources_cas_83c3() {
+        use crate::store::RuleStore as _;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        let raw = crate::store::SqliteRuleStore::open(&root).unwrap();
+        raw.init().unwrap();
+        let mut rule = Rule::new("rule-source".into(), "Stored instruction".into());
+        rule.status = RuleStatus::Proven;
+        rule.helpful_count = 1;
+        let mut legacy = rule.clone();
+        legacy.id = "rule-held".into();
+        // A legacy source must exist before projection receipts start.
+        raw.add(&legacy).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+        std::fs::write(temp.path().join(".claude/rules/team.md"), "Repository instruction").unwrap();
+        let result = core.cas_rules_list().await.unwrap();
+        let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<Vec<_>>().join("\n");
+        for expected in ["source: store", "source: repo", "team.md", "rule-held", "held: file absent"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert_eq!(text.matches("rule-source").count(), 1, "generated projection is not a second rule");
     }
 
     fn update_rule(id: &str, tags: Option<&str>, sources: Option<&str>) -> RuleUpdateRequest {

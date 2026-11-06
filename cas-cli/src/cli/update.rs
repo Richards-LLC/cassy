@@ -2028,6 +2028,16 @@ fn finish_project_refresh(
         skipped_unregistered,
     } = results;
 
+    let daemon_outcomes = if hub_restart.is_some() && !args.dry_run && args.render_fixture.is_none() {
+        super::factory::reexec::update_live_daemons()
+    } else { Vec::new() };
+    if !cli.json {
+        for outcome in &daemon_outcomes {
+            println!("Factory {}: {}{}", outcome.session, outcome.status,
+                outcome.error.as_ref().map(|error| format!(" — {error}")).unwrap_or_default());
+        }
+    }
+
     let mut config_cleanup = findings::ConfigCleanup::default();
     for maintenance in receipts
         .iter()
@@ -2049,6 +2059,8 @@ fn finish_project_refresh(
         ),
         first_launch_ms,
     );
+    receipt["daemon_reexec"] = serde_json::to_value(&daemon_outcomes)?;
+    receipt["daemon_reexec_status"] = serde_json::json!(if daemon_outcomes.iter().any(|outcome| outcome.error.is_some()) { "partial" } else { "complete" });
     // cas-be05: what the user-level phase printed, by kind.
     if !user_documents.is_empty() {
         let (migration, builtins): (Vec<_>, Vec<_>) = user_documents
@@ -4383,39 +4395,11 @@ fn running_factory_sessions() -> Vec<(String, bool)> {
         .collect()
 }
 
-/// cas-cef2: what a binary update means for factory sessions already running.
-/// A daemon keeps its own build until relaunched; one that pinned its
-/// executable keeps spawning workers with it, and an older one cannot spawn.
+/// Say how already running factories pick up the installed build.
 fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> Option<String> {
-    if sessions.is_empty() {
-        return None;
-    }
-    let names = |pinned: bool| {
-        sessions
-            .iter()
-            .filter(|(_, is_pinned)| *is_pinned == pinned)
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut notice = format!(
-        "{} running factory session(s) keep their current build until relaunched.",
-        sessions.len()
-    );
-    let pinned = names(true);
-    if !pinned.is_empty() {
-        notice.push_str(&format!(" {pinned} keep spawning workers with that build."));
-    }
-    let unpinned = names(false);
-    if !unpinned.is_empty() {
-        notice.push_str(&format!(
-            " {unpinned} started before build pinning and cannot spawn new workers until relaunched."
-        ));
-    }
-    notice.push_str(&format!(
-        " To move a session to {version}, run `cas factory kill <session>` and relaunch `cas factory`; this stops its workers."
-    ));
-    Some(notice)
+    if sessions.is_empty() { return None; }
+    Some(format!("{} running factory session(s): {}. After the hub step, cas update requests an in-place daemon update to {version} for each session. To retry one, run `cas factory reexec --session <session>`; panes and the daemon PID survive. Older daemons without handoff support refuse and keep running.",
+        sessions.len(), sessions.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")))
 }
 
 /// Pre-swap failures have no refresh receipt. Preserve their original error

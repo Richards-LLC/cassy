@@ -8,6 +8,18 @@ use std::process::ExitCode;
 use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
+    // Preflight has no configuration, telemetry or store side effects.
+    let preflight_args: Vec<_> = std::env::args_os().collect();
+    if preflight_args.len() == 5 && preflight_args[1] == "factory"
+        && preflight_args[2] == "handoff-check" && preflight_args[3] == "--schema" {
+        return match preflight_args[4].to_str().and_then(|value| value.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid handoff schema"))
+            .and_then(cas::ui::factory::daemon::reexec::handoff_check) {
+                Ok(reply) => { println!("{reply}"); ExitCode::SUCCESS }
+                Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
+            };
+    }
+
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-factory-build-id"))
     {

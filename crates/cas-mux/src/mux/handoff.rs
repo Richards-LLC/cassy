@@ -45,7 +45,7 @@ impl Mux {
         mux.factory_session = state.factory_session.clone();
         mux.supervisor_launch = state.supervisor_launch.clone();
         for pane in &state.panes { mux.add_pane(Pane::from_handoff(pane)?); }
-        if let Some(focus) = &state.focused { mux.focus(focus)?; }
+        if let Some(focus) = &state.focused { mux.focus(focus); }
         Ok(mux)
     }
 

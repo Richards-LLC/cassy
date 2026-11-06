@@ -2607,7 +2607,7 @@ fn factory_provision_build_compatibility(
             FactoryProvisionBuildCheck::Compatible
         } else {
             FactoryProvisionBuildCheck::Mismatch(format!(
-                "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from its pinned provisioner build {pinned}. Restart this factory session before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+                "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from its pinned provisioner build {pinned}. Update this factory daemon before spawning: run `cas factory reexec --session <session>`."
             ))
         };
     }

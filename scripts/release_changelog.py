@@ -25,10 +25,17 @@
   release_changelog.py section <file> <version>
       Print the body of the <version> section.
 
-  release_changelog.py verify-deliveries <base-ref>
-      Refuse fragment/commit-subject claims whose delivery is absent from HEAD.
+  release_changelog.py verify-deliveries <base-ref> [--notes <draft>] [--report <json>]
+      Refuse missing claims and late code on declared constituent epics; print
+      task_ids ready for batch_receipt. Inputs come from CAS_RELEASE_CONTEXT_JSON
+      or a draft comment: <!-- CAS_RELEASE_INPUTS {"epic_refs":["origin/epic/name"],
+      "deferred_tasks":{"cas-xxxx":"reason for excluding this delivery"}} -->.
 """
+import argparse
+import json
+import os
 import re
+import sqlite3
 import sys
 import subprocess
 from pathlib import Path
@@ -197,7 +204,7 @@ def section(text, version):
     return '\n'.join(tidy(body)) + '\n'
 
 
-def verify_deliveries(base_ref):
+def verify_deliveries(base_ref, notes=None):
     """Require a non-red delivery in Git history for each explicit task claim."""
     def git(*args):
         result = subprocess.run(['git', *args], capture_output=True, text=True)
@@ -216,10 +223,8 @@ def verify_deliveries(base_ref):
     tasks.update(match[1] for subject in git('log', f'{base_ref}..HEAD', '--no-merges',
                                             '--format=%s').splitlines()
                  if (match := owner.search(subject)))
-    if not tasks:
-        return
     deliveries, red = {}, set()
-    for line in git('log', '--all', '--no-merges', '--format=%H%x09%s').splitlines():
+    for line in (git('log', '--all', '--no-merges', '--format=%H%x09%s').splitlines() if tasks else []):
         commit, _, subject = line.partition('\t')
         if match := owner.search(subject):
             if match[2]:
@@ -241,6 +246,88 @@ def verify_deliveries(base_ref):
     if missing:
         raise ChangelogError('release is missing task deliveries:\n' + '\n'.join(missing))
 
+    context = json.loads(os.environ.get('CAS_RELEASE_CONTEXT_JSON') or '{}')
+    if not isinstance(context, dict) or not isinstance(context.get('release_inputs') or {}, dict):
+        raise ChangelogError('release context and release_inputs must be JSON objects')
+    inputs = dict(context.get('release_inputs') or {})
+    if notes:
+        blocks = re.findall(r'<!--\s*CAS_RELEASE_INPUTS\s+(.*?)-->', Path(notes).read_text(), re.S)
+        if len(blocks) > 1:
+            raise ChangelogError('declare release inputs once in the draft')
+        if blocks:
+            declared = json.loads(blocks[0])
+            if not isinstance(declared, dict) or set(declared) - {'epic_refs', 'deferred_tasks'}:
+                raise ChangelogError('draft inputs accept only epic_refs and deferred_tasks')
+            inputs.update(declared)
+    refs = inputs.get('epic_refs', [])
+    deferred = inputs.get('deferred_tasks', {})
+    if not isinstance(refs, list) or not all(isinstance(ref, str) and ref.strip() for ref in refs):
+        raise ChangelogError('release epic_refs must be a list of explicit Git refs')
+    if not isinstance(deferred, dict) or not all(re.fullmatch(r'cas-[0-9a-f]+', task)
+            and isinstance(reason, str) and reason.strip() for task, reason in deferred.items()):
+        raise ChangelogError('each deferred task needs a task ID and a non-empty reason')
+    refs = sorted(set(refs))
+    def branch(ref):
+        return re.sub(r'^(?:refs/remotes/[^/]+/|refs/heads/|origin/)', '', ref)
+    epic_history = {}
+    for ref in refs:
+        git('check-ref-format', '--branch', ref)
+        resolved = git('rev-parse', '--symbolic-full-name', '--verify', ref)
+        if not resolved.startswith(('refs/heads/', 'refs/remotes/')):
+            raise ChangelogError(f'constituent epic must be a branch ref: {ref}')
+        if resolved.startswith('refs/remotes/'):
+            _, _, remote, name = resolved.split('/', 3)
+            git('fetch', '--quiet', '--no-tags', remote, f'+refs/heads/{name}:{resolved}')
+        epic_history.setdefault(branch(resolved), set()).update(git('rev-list', resolved).splitlines())
+    try:
+        floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', base_ref)
+    except ChangelogError:
+        floor = base_ref  # Legacy/local fixture without release tags.
+    previous = set(git('rev-list', floor).splitlines())
+    included = {match[1] for subject in git('log', f'{floor}..HEAD', '--no-merges', '--format=%s').splitlines()
+                if (match := owner.search(subject)) and not match[2]}
+    included.update(Path(path).stem for path in git('log', f'{floor}..HEAD', '--format=',
+        '--diff-filter=A', '--name-only', '--', 'changelog.d/').splitlines()
+        if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name))
+    common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
+    root = Path(os.environ.get('CAS_ROOT') or common.parent / '.cas').expanduser().resolve()
+    rows = []
+    try:
+        with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
+            rows = db.execute('SELECT id, task_type, deliverables FROM tasks').fetchall()
+    except sqlite3.Error as error:
+        if refs:
+            raise ChangelogError(f'cannot audit declared epics without the project task store ({root}): {error}') from error
+    missing = []
+    for task, kind, raw in rows:
+        data = json.loads(raw or '{}')
+        if isinstance(data, str):
+            data = json.loads(data)
+        if kind == 'epic' or not isinstance(data, dict):
+            continue
+        anchor = data.get('factory_branch_anchor')
+        target = branch((data.get('work_target') or {}).get('target_branch') or '')
+        if not anchor or not (anchor in contained or anchor in epic_history.get(target, set())):
+            continue
+        if anchor in previous:
+            continue
+        if anchor in contained:
+            included.add(task)
+            continue
+        start = (data.get('factory_branch_start') or {}).get('base_sha')
+        paths = (git('diff', '--name-only', start, anchor) if start else
+                 git('diff-tree', '--root', '-m', '--no-commit-id', '--name-only', '-r', anchor)).splitlines()
+        code = any(not path.endswith('.md') and not path.startswith(('docs/', 'changelog.d/', '.cas/')) for path in paths)
+        if code and anchor not in contained and f'- {anchor}' in git('cherry', 'HEAD', anchor).splitlines():
+            included.add(task)
+            continue
+        if code and task not in deferred:
+            missing.append(f'{task}: late delivery {anchor} on declared epic {target}; merge it or add a reasoned deferred_tasks entry')
+    if missing:
+        raise ChangelogError('release omits declared constituent deliveries:\n' + '\n'.join(sorted(missing)))
+    return {'checked_sha': git('rev-parse', 'HEAD'), 'inventory_base': git('rev-parse', floor),
+            'epic_refs': refs, 'deferred_tasks': deferred, 'included_task_ids': sorted(included)}
+
 
 def main(argv):
     try:
@@ -254,14 +341,25 @@ def main(argv):
         elif len(argv) == 5 and argv[0] == 'rebase':
             Path(argv[4]).write_text(
                 rebase(Path(argv[1]).read_text(), Path(argv[2]).read_text(), argv[3]))
-        elif len(argv) == 2 and argv[0] == 'verify-deliveries':
-            verify_deliveries(argv[1])
+        elif argv and argv[0] == 'verify-deliveries':
+            parser = argparse.ArgumentParser()
+            parser.add_argument('base_ref')
+            parser.add_argument('--notes')
+            parser.add_argument('--report', type=Path)
+            args = parser.parse_args(argv[1:])
+            report = verify_deliveries(args.base_ref, args.notes)
+            if args.report:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                temporary = args.report.with_suffix('.tmp')
+                temporary.write_text(json.dumps(report, indent=2) + '\n')
+                temporary.replace(args.report)
+            print('task_ids=' + json.dumps(report['included_task_ids']))
         elif len(argv) == 3 and argv[0] == 'section':
             sys.stdout.write(section(Path(argv[1]).read_text(), argv[2]))
         else:
             sys.stderr.write(__doc__)
             return 2
-    except ChangelogError as error:
+    except (ChangelogError, ValueError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 1
     return 0

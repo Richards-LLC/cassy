@@ -239,13 +239,23 @@ mod tests {
             }).await.unwrap();
         assert_ne!(response.is_error, Some(true));
         assert!(!finished.load(Ordering::Acquire), "the response must precede background completion");
-        // The front's candidate switch uses this bounded idle handshake after
-        // the client has received its early answer. It must defer retirement.
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(45), backend.wait_idle()).await.is_err(),
-            "a new install must not retire the backend while promised tool work is still running");
+        // The front times out in another process. Its abandoned idle request
+        // stays alive in this backend, including after the45s switch budget.
+        let idle_backend = backend.clone();
+        let idle = tokio::spawn(async move { idle_backend.wait_idle().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(46)).await;
+        assert!(!idle.is_finished(), "background work still prevents retirement");
+        let fresh = tokio::time::timeout(std::time::Duration::from_secs(1),
+            service.call_with_deadline_and_grace("task", Some(&serde_json::Map::new()),
+                std::time::Duration::from_secs(55), std::time::Duration::ZERO,
+                async { Ok(rmcp::model::CallToolResult::success(Vec::new())) })).await
+            .expect("an idle wait past the front timeout must not block a new tool before its budget starts")
+            .unwrap();
+        assert_ne!(fresh.is_error, Some(true));
+        assert!(!idle.is_finished(), "the fresh call cannot release the unfinished background work");
         finish.notify_one();
-        tokio::time::timeout(std::time::Duration::from_secs(1), backend.wait_idle()).await
-            .expect("the same backend can retire once background work completes");
+        idle.await.expect("backend idle completes once background work finishes");
         assert!(finished.load(Ordering::Acquire));
     }
 

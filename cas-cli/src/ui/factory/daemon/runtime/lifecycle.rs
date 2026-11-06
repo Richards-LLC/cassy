@@ -4130,6 +4130,21 @@ impl FactoryDaemon {
                             &previously_armed,
                             &previously_held,
                         )?;
+                        // cas-dcc9: one "train ready to cut" notice per train
+                        // state, from this same queue read; never an auto-cut.
+                        let queued_trains = queue_poll
+                            .observed_prs
+                            .iter()
+                            .filter(|pr| pr.in_merge_queue)
+                            .map(|pr| pr.branch.clone())
+                            .collect();
+                        if let Err(error) = crate::train_guardrails::notify_train_cuts(
+                            &watch_cas_dir,
+                            &queued_trains,
+                            chrono::Utc::now(),
+                        ) {
+                            tracing::warn!(%error, "release-train cut notice check failed");
+                        }
                         // Reuse this existing bounded background read. Presence
                         // publishes the local snapshot; the control loop does
                         // no inventory I/O and adds no GitHub request.

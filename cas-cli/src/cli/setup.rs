@@ -639,6 +639,26 @@ fn viktor_step(args: &SetupArgs) -> SetupStep {
 }
 
 fn project_step(args: &SetupArgs) -> SetupStep {
+    let mut step = initialize_project_step(args);
+    if !args.dry_run && let Some(project) = args.project.as_deref() {
+        let timeout = std::time::Duration::from_secs(5);
+        let report = match crate::github_repo::origin_slug(project, timeout) {
+            Ok(Some(origin)) => match crate::github_repo::repository_health(
+                &origin, project, &crate::github_repo::gh_binary(), timeout,
+            ) {
+                Ok((_, queue)) => queue.message,
+                Err(error) => error,
+            },
+            Ok(None) => "merge queue unavailable: no GitHub origin".into(),
+            Err(error) => format!("merge queue unavailable: {error}"),
+        };
+        // Advisory only; drift never changes project setup success or writes rules.
+        step.detail.push_str(&format!("; {report}"));
+    }
+    step
+}
+
+fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     let Some(project) = args.project.as_deref() else {
         return SetupStep::new(
             6,

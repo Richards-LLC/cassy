@@ -37,8 +37,10 @@ this skill tells you where each of those lands in a report.
    provenance, design language) and `references/presentation-rules.md` (encodings, scales, numbers).
    Chart construction follows `cas-dataviz`.
 5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`) and append the
-   table to the brief under `## Critique`. A report ships only when it meets that rubric's floor,
-   with its visual-QA receipt, a print preview, and a JS-disabled reload as evidence; then run
+   table to the brief under `## Critique`. A visual-QA `--strict` PASS is necessary but not
+   sufficient: it proves mechanics, not the argument or the brand. The report is done only when that
+   `## Critique` table meets the floor (distinctiveness, fit and hierarchy each ≥ 4, no 0), with its
+   visual-QA receipt, a print preview, and a JS-disabled reload as evidence; then run
    `references/review-checklist.md`. A grep for expected tags is not a review.
 6. **Commit all three files together**: markdown, concept brief, HTML. An HTML artifact without its
    markdown source is a provenance failure; a markdown report whose HTML is stale is worse than no

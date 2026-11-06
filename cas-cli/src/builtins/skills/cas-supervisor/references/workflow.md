@@ -1,6 +1,6 @@
 # Workflow — Worker Modes, Phases, Blockers
 
-Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy) · [Phase 1: Plan](#phase-1-plan) · [Phase 2: Coordinate](#phase-2-coordinate) · [Brief fields](#brief-fields-no-spawn-without-them) · [Phase 3: Merge and sync](#phase-3-merge-and-sync-isolated-mode) · [Re-verify after a rebase](#re-verify-a-rebased-lane-by-patch-id) · [Blockers](#handling-blockers) · [Phase 4: Complete](#phase-4-complete)
+Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy) · [Phase 1: Plan](#phase-1-plan) · [Phase 2: Coordinate](#phase-2-coordinate) · [Brief fields](#brief-fields-no-spawn-without-them) · [Report deliverables](#report-deliverables) · [Phase 3: Merge and sync](#phase-3-merge-and-sync-isolated-mode) · [Re-verify after a rebase](#re-verify-a-rebased-lane-by-patch-id) · [Blockers](#handling-blockers) · [Phase 4: Complete](#phase-4-complete)
 
 ## Worker Modes
 
@@ -47,6 +47,14 @@ For rule-driven work, cite each rule id and its verbatim stakeholder scope. Decl
 Tasks with `qa.user_facing_labels` need a `demo_statement` (`As a <user>, I <do X> and see <Y>`). Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md); name the target project only when it is not the worker's checkout, and review the close's `design:` line against the output.
 
 A worker's close reason starts `PASS`, or `ISSUES` with the known defects, then the commit SHA and the check it ran. A report without the SHA or the named check is a gap: ask once, and a second miss goes through the [retry policy](worker-recovery.md#retry-policy-by-failure-mode).
+
+### Report deliverables
+
+Apply this when the operator asks for a report or a task delivers one; a brief written from memory drops the report contract.
+
+1. Load `cas-html-reports` and `cas-ui-craft` before writing the brief.
+2. Name the workflow steps in the brief: markdown first, the `<basename>.brief.md` concept brief, the target's DESIGN.md brand, and the critique-rubric floor (distinctiveness, fit and hierarchy each ≥ 4, no 0). Spec the argument and its hero figure; never spec a row per case or item in the body, because that brief produces a data dump.
+3. Before relaying, open the rendered screenshot and score the rubric yourself. A worker's visual-QA PASS is mechanical (contrast, clipping, overflow) and is not approval; below the floor, return the report with the failing dimensions.
 
 ## Phase 2: Coordinate
 

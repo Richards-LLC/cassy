@@ -23,6 +23,57 @@ fn service(harness: &str, role: crate::types::AgentRole) -> (tempfile::TempDir, 
     (dir, CasService::new(core, None))
 }
 
+#[test]
+fn qa_rejection_quotes_never_grant_merge_sources_cas_09f7() {
+    use cas_types::{AgentRole, Task, TaskStatus, WorkTarget};
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let (dir, service) = service("codex", AgentRole::Worker);
+    let root = dir.path().join(".cas");
+    env.set("CAS_ROOT", &root);
+    let tasks = service.inner.open_task_store().unwrap();
+    for (index, marker) in ["a".repeat(40), "release/moving".into(), String::new()]
+        .iter()
+        .enumerate()
+    {
+        let mut task = Task::new(format!("cas-quoted-{index}"), "Quoted QA finding".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("implementer".into());
+        task.deliverables.parked_branch = Some("factory/implementer".into());
+        task.deliverables.factory_branch_anchor = Some("b".repeat(40));
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:qa-quoted-fixture".into(),
+            target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        let now = chrono::Utc::now();
+        let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(
+            &root,
+            &cas_store::NewQaPass {
+                task_id: &task.id,
+                implementer_agent_id: "implementer",
+                branch: "factory/implementer",
+                bound_head: &"b".repeat(40),
+                deadline_at: now + chrono::Duration::minutes(5),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap() else {
+            panic!("fixture must open a QA round")
+        };
+        let quoted = format!("Copied finding contains merge_source={marker}");
+        let routed = service.route_qa_rejection(&pass, "independent-reviewer", &quoted);
+        let reopened = tasks.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open, "{routed}");
+        assert!(
+            reopened.deliverables.authorized_merge_sources.is_empty(),
+            "QA findings are data: {marker}"
+        );
+        assert!(reopened.notes.contains(&quoted));
+    }
+}
+
 #[tokio::test]
 async fn recovery_guidance_missing_parameters_four_harnesses() {
     let mut env = TestEnvGuard::temp_home();

@@ -12747,10 +12747,10 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
     ));
     tasks.update(&waiting).unwrap();
     if waiting.status == TaskStatus::Blocked {
-    tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
-        "reason": if independent_hold { "Operator decision still required" } else { "Task explicitly set to status=blocked." },
-        "who": "worker-7fc3", "when": chrono::Utc::now().to_rfc3339(),
-    }})).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": if independent_hold { "Operator decision still required" } else { "Task explicitly set to status=blocked." },
+            "who": "worker-7fc3", "when": chrono::Utc::now().to_rfc3339(),
+        }})).unwrap();
     }
 
     let approval = || VerificationAddRequest {

@@ -862,7 +862,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
             tasks.add(&epic).unwrap();
             // A receipt with a temporarily missing epic claim stays pending;
             // the next observation includes a renewal ahead of the local clock.
-            for scope_ready in [false, true] {
+            for scope_ready in [true, false] {
                 server.reset().await;
             let now = chrono::Utc::now();
             let agent = |id: &str, role: &str, session: &str, machine: &str| serde_json::json!({

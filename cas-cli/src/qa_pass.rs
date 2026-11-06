@@ -2713,4 +2713,63 @@ mod tests {
         assert_eq!(source_patch_id(repo, &reviewed, "main"), source_patch_id(repo, &same_source, "main"));
         assert!(carry_verdict(cas.path(), repo, &task, &failed, &same_source, "main").is_none());
     }
+
+    /// Open and approve a QA round for `head`.
+    fn approve(cas: &Path, head: &str) -> Vec<QaPass> {
+        dispatch(cas, head);
+        let now = chrono::Utc::now();
+        cas_store::claim_qa_pass(cas, "cas-ui1", "reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(cas, "cas-ui1", "reviewer",
+            cas_types::QaVerdict::Approved, "ok", None, "/l/LEDGER.md", now).unwrap();
+        cas_store::list_qa_passes(cas, "cas-ui1").unwrap()
+    }
+
+    /// GH #1476 replay: the reviewed tip gets a follow-up commit changing
+    /// middleware outside the directory the merge runs from. The verdict
+    /// used to carry, because both patches were cut to that directory.
+    #[test]
+    fn a_follow_up_source_commit_never_carries_the_qa_verdict_gh_1476() {
+        let (dir, git) = dist_repo();
+        let root = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let passes = approve(cas.path(), &reviewed);
+        std::fs::create_dir_all(root.join("server/middleware")).unwrap();
+        std::fs::write(root.join("server/middleware/auth.ts"), "export const open = true;\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "middleware"]);
+        let follow_up = git(&["rev-parse", "HEAD"]);
+        for repo in [root.to_path_buf(), root.join("hub-web")] {
+            assert!(
+                carry_verdict(cas.path(), &repo, &parked(&reviewed), &passes, &follow_up, "main").is_none(),
+                "{}: a source change opens a new QA round",
+                repo.display()
+            );
+        }
+    }
+
+    /// GH #1476: `patch-id --stable` ignores whitespace, so a whitespace-only
+    /// change, as a follow-up commit or an amended tip, kept the verdict.
+    #[test]
+    fn a_whitespace_only_change_never_carries_the_qa_verdict_gh_1476() {
+        let (dir, git) = dist_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let passes = approve(cas.path(), &reviewed);
+        let composer = repo.join("hub-web/src/composer.ts");
+        std::fs::write(&composer, "export const gap  = 8;\n").unwrap();
+        git(&["commit", "-q", "-am", "follow-up spacing"]);
+        let follow_up = git(&["rev-parse", "HEAD"]);
+        git(&["reset", "-q", "--hard", &reviewed]);
+        std::fs::write(&composer, "export const gap\t= 8;\n").unwrap();
+        git(&["commit", "-q", "-a", "--amend", "-m", "composer spacing, amended"]);
+        let amended = git(&["rev-parse", "HEAD"]);
+        for tip in [follow_up, amended] {
+            assert!(
+                carry_verdict(cas.path(), repo, &parked(&reviewed), &passes, &tip, "main").is_none(),
+                "@{tip}: whitespace is reviewed content"
+            );
+        }
+    }
 }

@@ -12,7 +12,21 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-NATIVE-IDLE-COMMANDS]
+  native-claude-command-receipts:
+    title: Completed Claude turns accept commands while local command transcript receipts remain compact
+    tasks: [cas-99e7]
+    invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
+    journeys: [HUB-J27]
+  card-reload-and-command-follow-through:
+    title: Reload Cassy is visible on skewed supervisor cards; header commands open beside their button and stale busy receipts resolve or dismiss
+    tasks: [cas-fd9ff]
+    invariants: [HUB-J27-CARD-RELOAD]
+    journeys: [HUB-J27]
+  registered-run-director-stall:
+    title: Live registered capped runs suppress director stall nudges and completion restores ordinary stall detection
+    tasks: [cas-54f2]
+    invariants: [HUB-J26-REGISTERED-RUN-STALL]
+    journeys: [HUB-J26]
   peer-ask-merge-scope:
     title: Only explicit asks hold related merges and later messages from that peer clear them
     tasks: [cas-5ec1]

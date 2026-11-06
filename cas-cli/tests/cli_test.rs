@@ -3442,11 +3442,11 @@ fn qa_ledger_init_check_and_no_overwrite() {
                 assert!(String::from_utf8_lossy(&output.stderr).contains(branch), "{suffix}: {output:?}");
             }
             let paths = cas::config::resolved_factory_artifact_paths(&cas_root, Some(artifacts.to_str().unwrap()));
-            assert!(!paths.project_root.join(&sourced.id).exists(), "refused source must not create evidence");
+            assert!(!paths.project_root.join(&sourced.id).exists());
         }
     }
     assert_eq!(git(&["rev-parse", "HEAD"]), primary_head, "init leaves primary HEAD untouched");
-    assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head, "init leaves worker ref untouched");
+    assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head);
 
     #[cfg(unix)]
     {

@@ -7368,6 +7368,10 @@ impl CasService {
             .iter()
             .filter(|wt| !Path::new(&wt.path).exists())
             .collect();
+        let retained = crate::worktree::retained::scan_until(
+            &self.inner.cas_root,
+            report_deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2)),
+        );
 
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let trace_archive =
@@ -7443,6 +7447,7 @@ impl CasService {
                 &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
             )
         ));
+        out.push_str(&retained.render());
         match agent_store.list(None) {
             Ok(agents) => out.push_str(&serve_memory_report(&agents)),
             Err(error) => out.push_str(&format!("\nServe memory: agent inventory unavailable: {error}\n")),
@@ -7790,6 +7795,30 @@ impl CasService {
             &close_project_root,
             status_options,
         );
+        // This is a read projection only. A landed immutable delivery receipt
+        // cannot account for later local work in its retained worker checkout.
+        // Close continues to use its original task-scoped content proof.
+        let mut retained = crate::worktree::retained::scan(&self.inner.cas_root);
+        retained.entries.retain(|entry| subtasks.iter().any(|task| entry.matches_task(task)));
+        for status in &mut collection.statuses {
+            let entries: Vec<_> = retained.entries.iter().filter(|entry| {
+                entry.task.as_deref() == Some(status.task_id.as_str())
+                    || entry.branch.as_deref().is_some_and(|branch| {
+                        status.factory_branch.as_deref() == Some(branch)
+                            || status.additional_factory_branches.iter().any(|b| b == branch)
+                    })
+            }).collect();
+            if !entries.is_empty() {
+                status.merge_evidence_note = None;
+                status.content_evolution_note = None;
+                let note = format!("retained worker local work is outside the recorded delivery proof: {}",
+                    entries.iter().map(|entry| entry.summary()).collect::<Vec<_>>().join("; "));
+                status.content_check_error = Some(match status.content_check_error.take() {
+                    Some(existing) => format!("{existing}; {note}"),
+                    None => note,
+                });
+            }
+        }
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
         // merge order, rather than only in the creation message that scrolled
@@ -7841,6 +7870,7 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        report.push_str(&retained.render());
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());
         }

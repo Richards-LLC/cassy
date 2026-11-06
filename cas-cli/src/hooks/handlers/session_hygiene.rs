@@ -938,16 +938,26 @@ pub(crate) fn render_issues_target_banner() -> SessionStartBanner {
 
 /// Full + compact renderings of the orphan/stale-server banner (cas-b114).
 pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
+    let retained = crate::worktree::retained::scan(cas_root);
     let report = crate::ui::factory::orphan_gc::scan(
         cas_root,
         &live_factory_session_names(),
         &live_worker_pgids(cas_root),
         &std::collections::HashSet::new(),
     );
-    if report.is_empty() {
+    if report.is_empty() && !retained.needs_attention() {
         return None;
     }
-    Some(render_orphan_banner(&report))
+    let mut banner = if report.is_empty() {
+        SessionStartBanner { full: String::new(), compact: String::new() }
+    } else {
+        render_orphan_banner(&report)
+    };
+    if retained.needs_attention() {
+        banner.full.push_str(&retained.render());
+        banner.compact.push_str(&retained.compact());
+    }
+    Some(banner)
 }
 
 /// Pure renderer for the orphan banner — separated from the process scan so the

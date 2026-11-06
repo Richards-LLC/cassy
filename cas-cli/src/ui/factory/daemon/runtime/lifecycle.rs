@@ -829,6 +829,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             id,
             prompt_delivered: true,
         }) if supervisor.id != "operator" => {
+            // A run can be listed after the run-less exit was relayed. The
+            // notice is already delivered, but its repair may still be new.
+            let Ok(task) = task_store.get(task_id) else {
+                return WorkerAttentionRelayOutcome::Pending;
+            };
+            if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
+                return WorkerAttentionRelayOutcome::Pending;
+            }
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
             };

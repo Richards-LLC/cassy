@@ -2549,19 +2549,24 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         })))).await.unwrap();
         let text = get_text(&closed);
         let parked = tasks.get(&task.id).unwrap();
-        if continuation != "generated" {
-            assert_eq!(parked.status, TaskStatus::InProgress, "foreign continuation must refuse before park: {text}");
-            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
-            continue;
-        }
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
-        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()),
-            "cas-9533: first park must bind the pushed, validated HEAD, not the earlier attributed merge: {text}");
         env.set_current_dir(&f.repo.root);
         let mut merge = coord_req("worktree_merge");
         merge.id = Some(f.branch.clone());
         merge.task_id = Some(task.id.clone());
         merge.cleanup = Some(false);
+        if continuation != "generated" {
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            let local_before = git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]);
+            let remote_before = git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+            let refused = f.service.factory(Parameters(merge)).await.expect_err("foreign continuation must never land");
+            assert!(refused.message.contains("PARKED DELIVERY SOURCE MOVED"), "{continuation}: {refused}");
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()),
+            "cas-9533: first park must bind the pushed, validated HEAD, not the earlier attributed merge: {text}");
         let merged = f.service.factory(Parameters(merge)).await.expect("the first parked HEAD must merge without a re-park");
         assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
         assert_eq!(git_stdout(&f.repo.root, &["show", &format!("epic/rebound:{generated}")]), "{}");

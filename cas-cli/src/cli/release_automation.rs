@@ -392,10 +392,11 @@ mod tests {
         .unwrap();
         let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
         git(repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+        git(repo, &["remote", "add", "origin", "https://github.com/Example/Repo.git"]).unwrap();
         let root = crate::store::init_cas_dir(repo).unwrap();
         fs::write(
             root.join("config.toml"),
-            "[project]\ncanonical_id = \"github.com/example/repo\"\n",
+            "[project]\ncanonical_id = \"release-fixture\"\n",
         )
         .unwrap();
         let mut train = Task::new("cas-a001".into(), "Train".into());

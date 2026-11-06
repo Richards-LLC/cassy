@@ -22317,6 +22317,7 @@ pub(crate) fn render_epic_status_report_with_stack(
         statuses,
         stacked_on,
         None,
+        &[],
     )
 }
 
@@ -22328,6 +22329,7 @@ pub(crate) fn render_epic_status_collection(
     parent_branch: &str,
     collection: &EpicStatusCollection,
     stacked_on: &[String],
+    retained_tasks: &[String],
 ) -> String {
     render_epic_status_report_with_stack_and_view(
         epic_id,
@@ -22335,6 +22337,7 @@ pub(crate) fn render_epic_status_collection(
         &collection.statuses,
         stacked_on,
         Some(collection),
+        retained_tasks,
     )
 }
 
@@ -22344,6 +22347,7 @@ fn render_epic_status_report_with_stack_and_view(
     statuses: &[EpicChildBranchStatus],
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
+    retained_tasks: &[String],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -22423,6 +22427,8 @@ fn render_epic_status_report_with_stack_and_view(
             "content dropped".to_string()
         } else if s.content_check_error.is_some() {
             "content unknown".to_string()
+        } else if retained_tasks.contains(&s.task_id) {
+            "retained local work".to_string()
         } else if s.content_evolution_note.is_some() {
             "merged (content evolved)".to_string()
         } else if s.merge_evidence_note.is_some() {
@@ -22451,6 +22457,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let reconciled = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.merge_evidence_note.as_deref())
         .collect::<Vec<_>>();
     if !reconciled.is_empty() {
@@ -22461,6 +22468,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let evolved = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.content_evolution_note.as_deref())
         .collect::<Vec<_>>();
     if !evolved.is_empty() {
@@ -22516,6 +22524,8 @@ fn render_epic_status_report_with_stack_and_view(
             "\n⚠️  {stranded} child task(s) carry stranded factory commits. \
              Epic close will be hard-blocked until they are merged.\n",
         ));
+    } else if !retained_tasks.is_empty() {
+        out.push_str("\n⚠️ Retained worker local work needs review; historical delivery proofs do not account for it.\n");
     } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
     } else {
@@ -39516,7 +39526,7 @@ mod epic_status_gate_tests {
         assert!(collection.statuses[0].merge_evidence_note.is_none());
         assert!(collection.statuses[0].content_check_error.is_none());
 
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
         assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
         assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
     }
@@ -39542,7 +39552,7 @@ mod epic_status_gate_tests {
 
         assert!(collection.statuses.is_empty());
         assert!(collection.budget_exhausted);
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
     }
@@ -39634,7 +39644,7 @@ mod epic_status_gate_tests {
             started.elapsed()
         );
         if collection.budget_exhausted {
-            let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }

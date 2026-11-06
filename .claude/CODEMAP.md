@@ -100,6 +100,7 @@
 - `cas-cli/src/supervisor_message_wakes.rs` - typed wake limits and ask/answer/blocker exemptions; runtime queue selection rechecks declined wakes.
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
+- `cas-cli/src/worktree/retained.rs` - bounded read-only Git worktree inventory shared by supervisor startup, GC reports and epic-status recovery warnings; includes retired workers outside the active worktree store.
 
 ## GitHub health
 

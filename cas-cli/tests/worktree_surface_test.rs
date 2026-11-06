@@ -2205,7 +2205,7 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 }
 
 #[tokio::test]
-async fn test_worktree_merge_holds_a_cut_train_until_it_lands_cas_2b8d() {
+async fn test_worktree_merge_keeps_cut_trains_frozen_after_landing_cas_2b8d() {
     let repo = GitRepo::new();
     let mut env = test_env();
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
@@ -2242,8 +2242,14 @@ async fn test_worktree_merge_holds_a_cut_train_until_it_lands_cas_2b8d() {
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "the cut lane stays frozen");
     assert!(worker.join("late.txt").is_file(), "source work is preserved");
     run_git(&["merge", "--no-ff", "epic/cut", "-m", "release lands"], &repo.root);
-    let result = svc.factory(Parameters(request())).await.unwrap();
-    assert!(get_text(&result).contains("Merged worktree"), "{}", get_text(&result));
+    for status in [TaskStatus::Open, TaskStatus::Closed] {
+        epic.status = status;
+        tasks.update(&epic).unwrap();
+        let held = svc.factory(Parameters(request())).await.unwrap_err();
+        assert!(held.message.contains("RELEASE TRAIN CUT") && held.message.contains("next train"), "{status:?}: {held:?}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "a landed cut lane stays frozen even after closure");
+        assert!(worker.join("late.txt").is_file(), "late work remains available for retargeting");
+    }
 }
 
 #[tokio::test]

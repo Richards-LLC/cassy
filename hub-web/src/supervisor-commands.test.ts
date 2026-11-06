@@ -9,7 +9,7 @@ describe("supervisor slash commands", () => {
       const input = document.querySelector("textarea")!;
       const run = vi.fn().mockResolvedValue(undefined);
       const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
-      input.value = "/mcp";
+      input.value = " /mcp \n";
       expect(commands.submit()).toBe(true);
       if (harness === "claude") {
         await Promise.resolve();

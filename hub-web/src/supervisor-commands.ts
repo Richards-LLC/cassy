@@ -102,6 +102,9 @@ export class SlashCommands {
   }
   /** Claim only exact supported command tokens; other text uses the normal send. */
   submit(): boolean {
+    // The normal composer trims chat text; /mcp must stay semantic even
+    // when pasted with surrounding whitespace, rather than open Claude's menu.
+    if (this.input.value.trim() === "/mcp") this.input.value = "/mcp";
     const token = this.input.value.split(/\s/, 1)[0];
     const command = commands.find(item => `/${item.id}` === token);
     if (!command) return false;

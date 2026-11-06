@@ -6,6 +6,7 @@ import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
 import { supervisorVersion } from "./machine-version";
+import type { CommandReceipt } from "./supervisor-commands";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -59,6 +60,9 @@ export interface ConversationRow {
   machine_online?: boolean;
   mcp_version?: string;
   installed_version?: string;
+  reloadReceipt?: CommandReceipt;
+  reloadPending?: boolean;
+  reloadUnavailable?: string;
   workerCount?: number;
   mergesPerHour?: number;
   needsYou?: boolean;
@@ -352,7 +356,7 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
-  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
    * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
@@ -372,8 +376,8 @@ export class ConversationList {
   private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
   /** The document whose pointer events this list follows. */
   private watched?: Document;
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
-    this.latest = { container, rows, open, end };
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, reload?: (row: ConversationRow) => void): void {
+    this.latest = { container, rows, open, end, reload };
     const document = container.ownerDocument;
     this.watch(document);
     const ordered: HTMLElement[] = [];
@@ -427,6 +431,30 @@ export class ConversationList {
       const spoken = conversationRowSpokenName(row);
       if (node.getAttribute("aria-label") !== spoken) node.setAttribute("aria-label", spoken);
       ordered.push(node);
+      if (reload && !row.ended) {
+        const control = extra(`reload:${row.key}`, () => {
+          const node = document.createElement("div"); node.className = "conversation-reload";
+          node.innerHTML = '<button type="button" data-reload-cassy="direct">Reload Cassy</button><details><summary>Session actions</summary><button type="button" data-reload-cassy="menu">Reload Cassy</button><p class="conversation-reload-reason"></p></details><p class="conversation-reload-receipt" role="status"></p>';
+          return node;
+        });
+        const receipt = row.reloadReceipt;
+        const pending = row.reloadPending || receipt?.phase === "queued" || receipt?.phase === "submitted";
+        const unavailable = row.harness !== "claude" ? `Reload Cassy requires Claude Code; this supervisor uses ${row.harness ?? "an unknown harness"}.`
+          : row.reloadUnavailable ?? (row.machine_online === false ? "Reconnect this machine to reload Cassy." : undefined);
+        const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
+        direct.hidden = !rowVersion(row)?.update;
+        for (const action of control.querySelectorAll<HTMLButtonElement>("button")) {
+          action.disabled = Boolean(unavailable || pending);
+          action.onclick = () => reload(row);
+        }
+        control.setAttribute("aria-label", `Cassy controls for ${row.supervisor} on ${machineName(row.host)}`);
+        const reason = control.querySelector<HTMLElement>(".conversation-reload-reason")!;
+        reason.textContent = unavailable ?? ""; reason.hidden = !unavailable;
+        const status = control.querySelector<HTMLElement>(".conversation-reload-receipt")!;
+        status.textContent = receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        status.hidden = !status.textContent;
+        ordered.push(control);
+      }
       if (row.canEnd && end) {
         const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
         this.renderEnd(control, row, end);
@@ -591,7 +619,7 @@ export class ConversationList {
     const container = latest.container.isConnected || !latest.container.id
       ? latest.container
       : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-    this.render(container, latest.rows, latest.open, latest.end);
+    this.render(container, latest.rows, latest.open, latest.end, latest.reload);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */

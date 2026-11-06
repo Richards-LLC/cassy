@@ -12,6 +12,14 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await journey.stage("Reload Cassy from slash input without sending chat text", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        const toggle = page.locator("#conversation-commands");
+        await toggle.click();
+        const palette = page.locator("#supervisor-command-palette");
+        const [buttonBox, paletteBox] = await Promise.all([toggle.boundingBox(), palette.boundingBox()]);
+        if (!buttonBox || !paletteBox) throw new Error("Supervisor command dropdown is not laid out");
+        expect(paletteBox.y).toBeGreaterThanOrEqual(buttonBox.y + buttonBox.height);
+        expect(paletteBox.y - buttonBox.y - buttonBox.height).toBeLessThan(24);
+        await page.keyboard.press("Escape");
         const input = page.locator("#message-text");
         await input.fill("/mcp");
         await expect(page.locator('[data-supervisor-command="mcp"]')).toContainText("Reload Cassy");
@@ -25,6 +33,25 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "observed");
         await expect(receipt).toContainText("PID 2202, version 9.99.2");
+        expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(1);
+      });
+    });
+    test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
+      await journey.stage("Dismiss a refused busy reload without sending chat or retrying it", async () => {
+        await journey.open();
+        await page.locator(".conversation-row").click();
+        await page.locator("#message-text").fill("/mcp");
+        await page.locator("#message-send").click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
+        const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
+        const receipt = page.locator(".supervisor-command-receipt");
+        await expect(receipt).toHaveAttribute("data-phase", "refused");
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect(receipt).toHaveCount(0);
+        expect(hub.sends).toHaveLength(0);
         expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(1);
       });
     });

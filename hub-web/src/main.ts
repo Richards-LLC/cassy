@@ -10,6 +10,8 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
+import { epicTabs, selectedEpicTab, type EpicSessionProgress } from "./progress-model";
+import { renderEpicTabs } from "./epic-tabs";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
@@ -855,7 +857,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Native lifecycle changes need no fleet mutation or Show work reader.
       // The existing health heartbeat refreshes the open session's status,
       // independently of a slow catalog read and without subscribing to output.
-      if (state.phase === "live" && selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
+      if (state.phase === "live") refreshEpicSessions(machine.id);
       // A refused pairing is terminal truth, even between animation frames.
       // Clear stale working ink with the same state change as Needs pairing.
       if (state.authFailure) {
@@ -1015,6 +1017,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);
       sessions.set(machine.id, items);
+      refreshEpicSessions(machine.id);
       const stoppedSelection = selectedMachineId === machine.id && selectedSession !== undefined
         && !items.some(item => item.name === selectedSession && sessionRunning(item));
       if (stoppedSelection) commitSelection({ machineId: machine.id });
@@ -1033,12 +1036,17 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
+      // The epic strip reads peer sessions without attaching their output.
+      // Only the event's session is invalidated, and overlapping reads coalesce.
+      if (typeof event.session === "string" && sessions.get(machine.id)?.some(item => item.name === event.session && sessionRunning(item))) {
+        void loadStatus(machine.id, event.session);
+      }
       // A retained peer-session burst does not change this conversation's
       // controls. Reading them for each peer event floods the signed HTTP lane
       // (cas-c971). Events without a session still invalidate machine-wide state.
       if (selectedMachineId === machine.id && selectedSession &&
           (typeof event.session !== "string" || event.session === selectedSession)) {
-        void loadStatus(machine.id, selectedSession);
+        if (typeof event.session !== "string") refreshEpicSessions(machine.id);
         void loadLease(machine.id, selectedSession);
       }
     },
@@ -2195,6 +2203,15 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
 }
 
 const statusRefresh = new StatusRefresh();
+// One in-flight status read plus one trailing invalidation per session. A peer
+// event burst must not recreate the old unbounded signed HTTP fan-out.
+const epicStatusReads = new Map<string, Promise<void>>();
+const epicStatusAgain = new Set<string>();
+function refreshEpicSessions(machineId: string): void {
+  for (const session of sessions.get(machineId) ?? []) {
+    if (sessionRunning(session) && !session.dormant && !session.unreachable) void loadStatus(machineId, session.name);
+  }
+}
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
   const connection = connections.get(machineId);
@@ -2202,7 +2219,11 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
   const key = sessionKey(machineId, session);
   if (!connection || !machine) { if (statusPending.delete(key)) render(); return; }
   if (!statuses.has(key)) statusPending.add(key);
-  await statusRefresh.request(key, () => connection.status(session), (status) => {
+  if (epicStatusReads.has(key)) {
+    epicStatusAgain.add(key);
+    return epicStatusReads.get(key);
+  }
+  const read = statusRefresh.request(key, () => connection.status(session), (status) => {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
@@ -2217,7 +2238,12 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     statusFailures.add(key);
     statusPending.delete(key);
     render();
+  }).finally(() => {
+    epicStatusReads.delete(key);
+    if (epicStatusAgain.delete(key)) void loadStatus(machineId, session);
   });
+  epicStatusReads.set(key, read);
+  await read;
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
@@ -4625,6 +4651,7 @@ function renderRegions(context: RegionContext): void {
   renderConversationList();
   renderAttention();
   renderStatus(context.status);
+  syncEpicTabs();
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
   syncTeamView(context.status, context.liveRegions.staleNotice);
@@ -5490,6 +5517,45 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
     if (!panel.querySelector("[data-team-retry]")) { retry.dataset.teamRetry = ""; panel.append(retry); }
   }
   teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
+}
+
+// A tab choice belongs to the browser, never to factory focus_epic.
+let epicChoice: string | undefined;
+let epicSheetOpen = false;
+function syncEpicTabs(): void {
+  const root = document.getElementById("epic-tabs");
+  if (!root) return;
+  const sources: EpicSessionProgress[] = [];
+  const unavailable = new Set<string>();
+  for (const [machineId, roster] of sessions) {
+    const machine = machines.get(machineId);
+    if (!machine) continue;
+    for (const session of roster.filter(item => sessionRunning(item) && !item.dormant)) {
+      const key = sessionKey(machineId, session.name);
+      const status = statuses.get(key);
+      if (statusFailures.has(key)) unavailable.add(machine.label);
+      if (!status) continue;
+      sources.push({ project: session.cloud_project_id ?? session.project ?? session.project_dir ?? key,
+        machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
+        roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
+        tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
+        epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0,
+        stale: statusFailures.has(key) || session.stale === true || session.unreachable === true
+          || connectionStates.get(machineId)?.phase !== "live" || connectionStates.get(machineId)?.degraded === true,
+      });
+    }
+  }
+  const tabs = epicTabs(sources);
+  if (epicChoice && !tabs.some(tab => tab.key === epicChoice)) epicChoice = undefined;
+  renderEpicTabs(root, tabs, { choice: epicChoice, phone: phoneLayout(), sheetOpen: epicSheetOpen,
+    notice: unavailable.size ? `Epic status unavailable on ${[...unavailable].join(", ")}.` : undefined,
+    retry: () => { for (const machineId of machines.keys()) refreshEpicSessions(machineId); },
+    select: key => { epicChoice = key; epicSheetOpen = true; syncEpicTabs(); },
+    close: () => { epicSheetOpen = false; syncEpicTabs();
+      const selected = selectedEpicTab(tabs, epicChoice);
+      root.querySelector<HTMLElement>(`#epic-tab-${tabs.findIndex(tab => tab.key === selected)}`)?.focus();
+    },
+  });
 }
 
 function renderStatus(status?: Record<string, unknown>): void {

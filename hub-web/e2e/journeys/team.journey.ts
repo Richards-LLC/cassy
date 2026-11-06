@@ -1,6 +1,7 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { FleetWorld } from "./hub-double";
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
@@ -123,6 +124,84 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         if (width === 1280) await expect(page.locator(".conversation-context .release-progress")).toBeVisible();
         await expect(page.locator("#conversation-composer-slot")).toBeVisible();
         await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("Keep my draft while checking the team");
+      });
+    });
+  });
+}
+
+for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
+  test.describe(`Epic strip ${width}`, () => {
+    test.use({ viewport: { width, height: width === 1280 ? 800 : 844 }, colorScheme });
+    test(`HUB-J26 epic tabs across machines ${width}`, journeyPart, async ({ page, journey }) => {
+      const train: FleetWorld = {
+        agents: ["builder", "reviewer"].map((name, i) => ({ name, generation: 1, status: "active", current_task: `train-${i}`, liveness: "executing" })),
+        tasks: ["Build the epic strip", "Check the release"].map((title, i) => ({ id: `train-${i}`, title, status: "in_progress", epic_id: "train", assignee: i ? "reviewer" : "builder", updated_at: new Date(journeyNow()).toISOString() })),
+        epics: [{ id: "train", title: "Release train", status: "inprogress", progress: { merged: 9, total: 14, merges_per_hour: 2 } }], focused_epic: null, spawnNames: [],
+      };
+      const follow: FleetWorld = {
+        agents: [{ name: "remote-worker", generation: 1, status: "active", current_task: "follow-1", liveness: "waiting_for_input" }],
+        tasks: [{ id: "follow-1", title: "Follow up on the release", epic_id: "follow-ups", status: "awaiting_merge", assignee: "remote-worker", updated_at: new Date(journeyNow()).toISOString() }],
+        epics: [{ id: "follow-ups", title: "Follow-ups", status: "open", progress: { merged: 2, total: 23, merges_per_hour: 1 } }], focused_epic: null, spawnNames: [],
+      };
+      const remote = { id: "prowl", label: "prowl", sessions: [{ name: "remote-session", supervisor: "remote-supervisor", project_dir: "/projects/follow-ups", workers: ["remote-worker"], liveness: "live" as const }] };
+      const local = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, workers: ["builder", "reviewer"] })) };
+      const hub = await journey.hub({ machines: [local, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: train, "remote-session": follow } });
+      await journey.stage("Read every epic above the conversation without opening progress", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
+        const strip = page.getByRole("tablist", { name: "Live epics across machines" });
+        await expect(strip).toBeVisible();
+        const busiest = strip.getByRole("tab", { name: /Release train/ });
+        await expect(busiest).toHaveAttribute("aria-selected", "true");
+        await expect(busiest).toContainText("9/14");
+        await expect(busiest.getByRole("img", { name: "2 live workers" })).toBeVisible();
+        await expect(strip.getByRole("tab", { name: /Follow-ups/ })).toContainText("prowl");
+        await expect(page.locator("#team-panel")).toBeHidden();
+        if (width === 390) await busiest.click();
+        await expect(page.locator("#epic-tab-panel")).toContainText("Build the epic strip");
+        await expect(page.locator("#epic-tab-panel")).toContainText("Building");
+        if (process.env.EPIC_TABS_QA) {
+          mkdirSync(process.env.EPIC_TABS_QA, { recursive: true });
+          const html = await page.evaluate(async () => {
+            const css = await Promise.all([...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].map(async link => {
+              let text = await (await fetch(link.href)).text();
+              const assets = [...text.matchAll(/url\(["']?([^)'"\s]+\.woff2)["']?\)/g)];
+              for (const asset of assets) {
+                const bytes = new Uint8Array(await (await fetch(new URL(asset[1], link.href))).arrayBuffer());
+                let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
+                text = text.replace(asset[0], `url(data:font/woff2;base64,${btoa(binary)})`);
+              }
+              return text;
+            }));
+            const root = document.documentElement.cloneNode(true) as HTMLElement;
+            root.querySelectorAll("script, link").forEach(node => node.remove());
+            return `<!doctype html>${root.outerHTML}`.replace("</head>", `<style>${css.join("\n")}</style></head>`);
+          });
+          writeFileSync(`${process.env.EPIC_TABS_QA}/epic-tabs-${width}.html`, html);
+        }
+        if (width === 390) await page.getByRole("button", { name: "Close epic tasks" }).click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
+      });
+      await journey.stage("Choose the peer epic and keep the choice through a lifecycle update", async () => {
+        const strip = page.getByRole("tablist", { name: "Live epics across machines" });
+        const remoteTab = strip.getByRole("tab", { name: /Follow-ups/ });
+        await remoteTab.focus(); await page.keyboard.press("Enter");
+        await expect(remoteTab).toHaveAttribute("aria-selected", "true");
+        await expect(page.locator("#epic-tab-panel")).toContainText("remote-worker");
+        await expect(page.locator("#epic-tab-panel")).toContainText("Parking");
+        follow.tasks[0].delivery_state = "merged";
+        follow.epics[0].progress!.merged = 3;
+        await hub.announceCatalog("prowl");
+        await expect(page.locator("#epic-tab-panel")).toContainText("Merged");
+        await expect(remoteTab).toHaveAttribute("aria-selected", "true");
+        if (width === 390) {
+          await page.keyboard.press("Escape"); await expect(remoteTab).toBeFocused();
+          await expect(page.getByRole("dialog", { name: "Follow-ups tasks" })).toBeHidden();
+        }
+        await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+        await expect(remoteTab).toBeVisible();
+        if (width === 390) await remoteTab.click();
+        await expect(page.locator("#epic-tab-panel")).toContainText("Merged");
       });
     });
   });

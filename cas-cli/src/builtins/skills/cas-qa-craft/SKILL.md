@@ -39,7 +39,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    verdict `qa_record` accepts ([journey rows](references/journeys.md#journey-rows)); score the
    experience. Upkeep refusals and their escape tokens are in the
    [escape vocabulary](references/journeys.md#escape-vocabulary). Reuse the project's pinned
-   `scripts/qa/walk-kit.mjs` ([kit](references/verify-harness.md)); adapters are shared, never per-worker.
+   `scripts/qa/walk-kit.mjs` ([kit](references/verify-harness.md)); adapters are shared, never per-worker ([maintenance](references/maintain.md)).
 4. Run `cas qa ledger init --task <id>` and edit the printed project-scoped
    ledger ([evidence guidance](references/evidence-ledger.md)). Drive every cell against the real
    build: Playwright CLI by default (MCP for long exploratory walks); use project/`cas-playwright-debug` 1.64 recording and healer guards for rendered web/hub surfaces,

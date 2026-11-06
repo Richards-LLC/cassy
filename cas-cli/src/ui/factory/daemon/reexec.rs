@@ -423,6 +423,14 @@ fn resume(fd: String, fallback: bool, adopted: &std::cell::Cell<bool>) -> Result
             bail!("Daemon adoption failed: {reason}");
         }
     };
+    // A reconnecting raw client gets its initial replay from pane_buffers,
+    // independently of the restored server terminal. Seed it before accepting
+    // clients so a quiet adopted pane cannot reconnect with an empty screen.
+    for pane in &manifest.app.mux.panes {
+        let mut replay = runtime::relay::PaneBuffer::default();
+        replay.replace_with(pane.terminal.clone());
+        daemon.pane_buffers.insert(pane.id.clone(), replay);
+    }
     // All terminals and handles now exist. Commit custody before readers start;
     // no fallback can replay consumed PTY output after this point.
     runtime.block_on(async {

@@ -146,12 +146,20 @@ def rust_assertion_diagnostics(source):
         close = ps[i + 2]
         operands = 1 if token.value in ('assert', 'debug_assert') else 2
         j = i + 3
+        arg_start, angles = j, 0
         while j < close:
-            if not ts[j].string and ts[j].value == ',':
-                operands -= 1
-                if operands == 0:
-                    yield ts[j].end, ts[close].start
-                    break
+            if not ts[j].string:
+                # Type arguments can contain commas outside (), [] and {}.
+                if ts[j].value == '<' and (angles or j == arg_start or ts[j - 1].value == '::'):
+                    angles += 1
+                elif ts[j].value == '>' and angles and ts[j - 1].value != '-':
+                    angles -= 1
+                elif ts[j].value == ',' and not angles:
+                    operands -= 1
+                    arg_start = j + 1
+                    if operands == 0:
+                        yield ts[j].end, ts[close].start
+                        break
             if j in ps:
                 j = ps[j]
             j += 1

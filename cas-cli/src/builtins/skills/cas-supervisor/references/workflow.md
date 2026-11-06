@@ -262,6 +262,8 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    <!-- cas-src:end -->
 5. Put every review, precheck and QA finding that needs worker action into one batch: a bounded epic-child fix-round task per worker, started together, each description carrying the finding, fix, acceptance criteria and proof command.
 6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR.
+
+   Never pipe the test run to `tail`; retain the complete output and the test command's exit status.
 7. Once the gate passes, reclaim each lane's worktree:
 
    ```text

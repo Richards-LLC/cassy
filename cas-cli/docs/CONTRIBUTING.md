@@ -1485,6 +1485,15 @@ creation and cleanup. Cassy does not migrate existing caches or restart servers.
 
 ## Testing
 
+New QA ledgers use `schema: 2`. Graded runtime expectations cite a spec
+`path:line`; PASS observations include captured `visible:`, `terminal:` or
+`http:` output. Database-only PASSes and uncited verdicts are refused by the
+shared CLI/close/verifier parser. Schema 1 receipts remain valid; fixture
+labels remain weaker evidence. The shipped `cas-qa-craft/scripts/walk-kit.mjs`
+is copied and pinned once per project under `scripts/qa/`, with project adapters
+for selectors, actual served builds and cleanup. Every generated row identifies
+the kit version. Run its regressions with `node --test scripts/test-walk-kit.mjs`.
+
 ### Duplicate-task warnings
 
 Task creation excludes common planning words and prose such as `NOT` and

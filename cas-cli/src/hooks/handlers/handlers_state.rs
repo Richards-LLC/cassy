@@ -1293,6 +1293,7 @@ mod supervisor_handoff_tests {
     #[test]
     fn gated_operator_and_violet_messages_survive_supervisor_exit() {
         let mut env = crate::test_support::TestEnvGuard::new();
+        let next_session = "new-session";
         for successor in ["successor", "ending"] {
             let temp = tempfile::TempDir::new().unwrap();
             let root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -1343,14 +1344,14 @@ mod supervisor_handoff_tests {
                 reason: Some("prompt_input_exit".into()), ..Default::default() }, Some(&root)).unwrap();
             env.set("CAS_AGENT_ROLE", "supervisor");
             env.set("CAS_AGENT_NAME", successor);
-            env.set("CAS_FACTORY_SESSION", "new-session");
+            env.set("CAS_FACTORY_SESSION", next_session);
             let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
             handle_session_start(&start, Some(&root)).unwrap();
             handle_session_start(&start, Some(&root)).unwrap();
             for (id, body) in &carried {
                 let row = queue.queued_prompt(*id).unwrap().unwrap();
                 assert_eq!((row.target.as_str(), row.factory_session.as_deref()),
-                    (successor, Some("new-session")), "row {id} must survive the ended recipient");
+                    (successor, Some(next_session)), "row {id} must survive the ended recipient");
                 assert_eq!(&row.prompt, body, "preserve original content and routing instructions");
                 assert!(row.processed_at.is_none(), "retargeting is not delivery");
             }
@@ -1359,12 +1360,12 @@ mod supervisor_handoff_tests {
                 assert_eq!((row.target, row.factory_session), (target, Some(session)),
                     "already-read, foreign-session or unstamped lookalike row {id} must not move");
             }
-            let delivered = queue.poll_unseen_for_recipient(successor, Some("new-session"), 100).unwrap();
+            let delivered = queue.poll_unseen_for_recipient(successor, Some(next_session), 100).unwrap();
             for (id, body) in &carried {
                 assert!(delivered.iter().any(|row| row.id == *id && row.prompt == *body),
                     "the successor's normal inbox must surface gated row {id}");
             }
-            let again = queue.poll_unseen_for_recipient(successor, Some("new-session"), 100).unwrap();
+            let again = queue.poll_unseen_for_recipient(successor, Some(next_session), 100).unwrap();
             assert!(!again.iter().any(|row| carried.iter().any(|(id, _)| *id == row.id)),
                 "a repeated succession or drain must never copy/redeliver a carried row");
         }

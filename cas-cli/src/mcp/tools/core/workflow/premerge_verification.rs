@@ -44,6 +44,7 @@ struct Promotion {
 }
 
 mod peer;
+mod automatic;
 pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
@@ -776,6 +777,13 @@ impl CasCore {
         task: &Task,
         dispatch: &VerificationDispatch,
     ) -> Result<(), McpError> {
+        if self.daemon.is_some() {
+            if let Err(error) = automatic::launch(self, task, dispatch) {
+                automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
+                    .map_err(fail)?;
+            }
+            return Ok(());
+        }
         let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(fail)?;
         let location = dispatch.repository.as_ref().map(|proof| format!(
             "Review the disposable candidate at {} (head {}). PASS continues this merge; no worker close retry or second verifier is needed.",
@@ -788,7 +796,7 @@ impl CasCore {
         Ok(())
     }
 
-    pub(crate) fn continue_premerge_after_verdict(
+    pub(crate) async fn continue_premerge_after_verdict(
         &self,
         dispatch: &VerificationDispatch,
         status: VerificationStatus,
@@ -803,10 +811,16 @@ impl CasCore {
                 "\nThe delivery is already complete; its original approval is retained.".into(),
             );
         }
+        if status == VerificationStatus::Approved && automatic::owns(&self.cas_root, dispatch) {
+            return automatic::approved(self, dispatch).await;
+        }
         let agents = self.open_agent_store()?;
         let rows = agents.list(None).map_err(fail)?;
         let recipient =
             crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+        let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?;
+        let findings = verdict.as_ref().map(|verdict| format!("\n{}\nFindings: {}", verdict.summary,
+            serde_json::to_string(&verdict.issues).unwrap_or_default())).unwrap_or_default();
         let action = if status == VerificationStatus::Approved {
             "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed."
         } else {
@@ -817,7 +831,7 @@ impl CasCore {
             &recipient,
             "premerge_verification",
             &format!(
-                "Task {} dispatch {}: {status}. {action}",
+                "Task {} dispatch {}: {status}. {action}{findings}",
                 dispatch.task_id, dispatch.id
             ),
             &format!("{}:{status}", dispatch.id),
@@ -1297,11 +1311,11 @@ impl CasCore {
 mod tests {
     use super::*;
 
-    fn run(repo: &Path, args: &[&str]) -> String {
+    pub(super) fn run(repo: &Path, args: &[&str]) -> String {
         git(repo, &["-c", "user.name=t", "-c", "user.email=t@example.invalid"].iter().chain(args).copied().collect::<Vec<_>>()).unwrap()
     }
 
-    fn commit_file(repo: &Path, path: &str, body: &str, message: &str) -> String {
+    pub(super) fn commit_file(repo: &Path, path: &str, body: &str, message: &str) -> String {
         let file = repo.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, body).unwrap();
@@ -1310,8 +1324,8 @@ mod tests {
         run(repo, &["rev-parse", "HEAD"])
     }
 
-    #[test]
-    fn premerge_rejection_notice_carries_findings_cas_381f() {
+    #[tokio::test]
+    async fn premerge_rejection_notice_carries_findings_cas_381f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -1329,7 +1343,7 @@ mod tests {
         verdict.summary = "REJECTED: candidate loses the operator draft".into();
         verdict.dispatch_id = Some(dispatch.id.clone());
         cas_store::add_system_verification(&root, &verdict).unwrap();
-        core.continue_premerge_after_verdict(&dispatch, verdict.status).unwrap();
+        core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
         let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].prompt.contains(&verdict.summary), "supervisor needs the actual findings: {:?}", prompts[0]);

@@ -201,6 +201,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+When the MCP daemon opens a pre-merge candidate dispatch, it launches the
+existing task verifier on the standard harness route. The registered child
+uses the same sealed capability and verification gate as a manually launched
+verifier. Its prompt includes the immutable candidate path, task criteria,
+parent plan and task notes, including receipts and adversarial review notes.
+The subprocess returns verdict arguments; only the daemon submits them with
+the bound task/dispatch identity. No bearer is exposed to the harness.
+
+Approval continues the normal merge admission and leaves a quiet one-line
+receipt. A train queue reservation retains control of that continuation.
+Rejection, a supervisor question, timeout or a failed review transport wakes
+the owning supervisor with findings; none grants a merge override. Review
+prompts, verdict output and harness diagnostics live under
+`.cas/verification-runs/<dispatch>/`. A manually claimed dispatch remains
+with its verifier. Non-daemon callers retain the existing manual handoff.
+
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
 CI and explicit CI overrides finish the intent without requesting automatic

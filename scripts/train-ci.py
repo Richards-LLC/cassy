@@ -58,13 +58,17 @@ def prepared(repo, head):
     if not source or not version or body.splitlines()[0] != f'release: v{version[1]}':
         return None
     parent = git(repo, 'rev-parse', f'{head}^1')
-    if subprocess.run(['git', 'merge-base', '--is-ancestor', source[1], parent], cwd=repo).returncode:
+    if source[1] != parent:
         return None
     paths = git(repo, 'diff', '--name-only', parent, head).splitlines()
+    if 'cas-cli/Cargo.toml' not in paths:
+        return None
     for path in paths:
         if path in MANIFESTS:
             before = tomllib.loads(git(repo, 'show', f'{parent}:{path}'))
             after = tomllib.loads(git(repo, 'show', f'{head}:{path}'))
+            if path == 'cas-cli/Cargo.toml' and before['package']['version'] == version[1]:
+                return None
             before['package']['version'] = version[1]
             if before != after:
                 return None
@@ -172,7 +176,7 @@ def observe(args):
             pending.mkdir()
             command([gh, 'run', 'download', run_id, '--name', ARTIFACT, '--dir', str(pending)], args.repo)
             with (pending/'complete-workflow-logs.zip').open('wb') as log:
-                command([gh, 'api', f'repos/{slug}/actions/runs/{run_id}/logs'], args.repo, log)
+                command([gh, 'api', f'repos/{slug}/actions/runs/{run_id}/attempts/{attempt}/logs'], args.repo, log)
             pending.rename(destination)
     if not (destination/'complete-workflow-logs.zip').is_file():
         raise ValueError('complete workflow log archive is missing')
@@ -201,11 +205,14 @@ def observe(args):
         green = previous.get('last_green')
         state['introducing_merge'] = head if green == receipt['parent'] else None
         state['merge_range'] = []
+        baseline = receipt['parent']
         if green and subprocess.run(['git', 'merge-base', '--is-ancestor', green, head], cwd=args.repo).returncode == 0:
-            for line in git(args.repo, 'log', '--first-parent', '--format=%H %s', f'{green}..{head}').splitlines():
-                sha, title = line.split(' ', 1)
+            baseline = green
+        for record in git(args.repo, 'log', '--first-parent', '--format=%H%x00%s%x00%B%x1e', f'{baseline}..{head}').split('\x1e'):
+            if record.strip():
+                sha, title, body = record.strip().split('\x00', 2)
                 state['merge_range'].append({'sha': sha, 'title': title,
-                                             'tasks': re.findall(r'cas-[a-z0-9]+', title)})
+                                             'tasks': sorted(set(re.findall(r'cas-[a-z0-9]+', body)))})
         state['last_green'] = green
     write(state_path, state)
     return state

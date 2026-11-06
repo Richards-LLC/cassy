@@ -91,7 +91,7 @@ class TrainReceipts(unittest.TestCase):
         self.git('checkout', '-qb', 'factory/cas-b222')
         self.commit('cas-b222 bad change')
         self.git('checkout', '-q', self.env['GITHUB_REF_NAME'])
-        self.git('merge', '--no-ff', '-qm', 'merge cas-b222', 'factory/cas-b222')
+        self.git('merge', '--no-ff', '-qm', 'Merge reviewed delivery\n\nTask: cas-b222', 'factory/cas-b222')
         self.env.update(GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='102')
         self.assertEqual(self.evidence('red', failed=True)['failures'], ['fixture::lib::regression'])
         self.forge('red', conclusion='failure', fanin='failure')
@@ -132,6 +132,33 @@ class TrainReceipts(unittest.TestCase):
         row.write_text(json.dumps(data))
         self.run_cli('collect', '--repo', self.repo, '--evidence', out,
                      '--build-status', 'success', '--shards-status', 'success', expected=1)
+
+    def test_preparation_reuses_only_its_immediate_starting_tip(self):
+        manifest = self.repo/'cas-cli/Cargo.toml'
+        manifest.parent.mkdir()
+        manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'manifest baseline')
+        source = self.git('rev-parse', 'HEAD')
+
+        def preparation():
+            result = subprocess.run([sys.executable, str(SCRIPT), 'prepared', '--repo', str(self.repo)],
+                                    capture_output=True, text=True)
+            return result.returncode, result.stdout.strip()
+
+        trailers = f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}'
+        # Copied release trailers on a docs commit cannot suppress the suite.
+        self.git('commit', '--allow-empty', '-qm', trailers)
+        self.assertEqual(preparation()[0], 1)
+        self.git('reset', '--hard', source)
+        manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', trailers)
+        self.assertEqual(preparation(), (0, source))
+        # A genuine version bump cannot launder an older ancestor's receipt.
+        stale = self.git('rev-parse', f'{source}^')
+        self.git('commit', '--amend', '-qm', trailers.replace(source, stale))
+        self.assertEqual(preparation()[0], 1)
 
 
 if __name__ == '__main__':

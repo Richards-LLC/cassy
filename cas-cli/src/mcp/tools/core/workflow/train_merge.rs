@@ -746,9 +746,9 @@ mod tests {
         .unwrap();
         let approval = service.verification(Parameters(request)).await.unwrap();
         assert_ne!(approval.is_error, Some(true), "{approval:?}");
-        // A later red run is not covered by the earlier override. Green then
+        // A rerun attempt is not covered by the earlier override. Green then
         // releases the same durable position without another override.
-        red["run_id"] = "18".into();
+        red["run_attempt"] = 2.into();
         std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
         resume_pending(&fixture.root, "queue-session")
             .await

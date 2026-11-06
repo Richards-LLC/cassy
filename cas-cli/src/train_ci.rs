@@ -96,16 +96,13 @@ pub(crate) fn notify(root: &Path, epic: &cas_types::Task, state: &Value) -> Resu
     let introducing = state["introducing_merge"]
         .as_str()
         .map(|sha| format!("Introducing merge: {sha}."))
-        .unwrap_or_else(|| {
-            format!(
-                "Introducing merge unproven; last-green→red merge/task range: {}.",
-                state["merge_range"]
-            )
-        });
+        .unwrap_or_else(|| "Introducing merge unproven.".into());
     let detail = format!(
-        "Train {} is red at tested merge {}. {introducing}\nFailing tests: {}\nComplete log: {}. CI artifact {} at {}. train_merge is held until green or a visible supervisor override.",
+        "Train {} is red at tested merge {}. {introducing}\nLast tested green: {}. Observed merge/task range: {}.\nFailing tests: {}\nComplete log: {}. CI artifact {} at {}. train_merge is held until green or a visible supervisor override.",
         epic.id,
         state["head"].as_str().unwrap_or("unknown"),
+        state["last_green"].as_str().unwrap_or("unknown"),
+        state["merge_range"],
         state["failures"],
         state["complete_log"].as_str().unwrap_or("unavailable"),
         state["artifact"],
@@ -170,7 +167,23 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 "train CI observation failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let state: Value = serde_json::from_slice(&output.stdout)?;
+            let mut state: Value = serde_json::from_slice(&output.stdout)?;
+            // Merge subjects are not guaranteed to carry task IDs. Use the
+            // same durable merge observations that release tracking consumes.
+            if let Some(range) = state["merge_range"].as_array_mut() {
+                let observed = cas_store::observed_delivery_merges_into(root, branch)?;
+                for merge in range {
+                    let sha = merge["sha"].as_str().unwrap_or_default().to_owned();
+                    if let Some(tasks) = merge["tasks"].as_array_mut() {
+                        for delivery in observed.iter().filter(|row| row.merge_commit_sha == sha) {
+                            let task = Value::String(delivery.task_id.clone());
+                            if !tasks.contains(&task) {
+                                tasks.push(task);
+                            }
+                        }
+                    }
+                }
+            }
             notify(root, &epic, &state)
         })();
         if let Err(error) = result {

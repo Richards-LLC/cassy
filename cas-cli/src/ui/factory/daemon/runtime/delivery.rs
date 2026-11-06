@@ -706,16 +706,17 @@ pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -
 pub(crate) fn pointer_wake_payload_at(
     source: &str,
     notification_id: Option<i64>,
-    _observed_at: chrono::DateTime<chrono::Utc>,
+    observed_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    let clock = crate::mcp::tools::service::agent_search_system::message::operator_clock_at(observed_at);
     match notification_id {
         Some(id) => format!(
             "CAS wake: message {id} from {source}. CAS shows its body once, in an \
              [incoming messages] block or as its own message, or a note in that block says why \
-             not. If neither is in front of you, run inbox_poll notification_id={id}."
+             not. If neither is in front of you, run inbox_poll notification_id={id}. [{clock}]"
         ),
         None => format!(
-            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll."
+            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll. [{clock}]"
         ),
     }
 }
@@ -2934,10 +2935,10 @@ mod tests {
         let inbox = claude_teams_inbox_text(&text, body, "supervisor", 24508);
         assert!(!inbox.contains(body), "{inbox}");
         assert!(inbox.starts_with("[cas #24508 supervisor-authored 0s first]\n\n"), "{inbox}");
-        assert!(inbox.ends_with(&pointer_wake_payload("supervisor", Some(24508))), "{inbox}");
+        assert!(inbox.contains("CAS wake: message 24508 from supervisor."), "{inbox}");
 
         let bare = claude_teams_inbox_text(body, body, "warm-lark-16", 7);
-        assert_eq!(bare, pointer_wake_payload("warm-lark-16", Some(7)));
+        assert!(bare.starts_with("CAS wake: message 7 from warm-lark-16."), "{bare}");
     }
 
     /// cas-1f0c review item 1: a body no hook can show whole (Claude Code caps

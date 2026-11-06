@@ -2904,12 +2904,12 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
                 let armed = bin.join("merged");
                 let script = format!(r#"#!/bin/sh
 real={real}
-if [ "$PWD" = {target} ] && [ "$1" = merge ]; then
+if [ "$(pwd -P)" = {target} ] && [ "$1" = merge ]; then
   "$real" "$@" || exit $?
   touch {armed}
   exit 0
 fi
-if [ "$PWD" = {target} ] && [ "$1" = rev-parse ] && [ "$2" = HEAD ] && [ -f {armed} ]; then
+if [ "$(pwd -P)" = {target} ] && [ "$1" = rev-parse ] && [ "$2" = HEAD ] && [ -f {armed} ]; then
   rm {armed}
   "$real" "$@" || exit $?
   printf '%s\n' 'third writer owns this commit' > delivery.txt
@@ -2918,7 +2918,7 @@ if [ "$PWD" = {target} ] && [ "$1" = rev-parse ] && [ "$2" = HEAD ] && [ -f {arm
   exit 0
 fi
 exec "$real" "$@"
-"#, real=quote(Path::new(real_git.trim())), target=quote(&target), armed=quote(&armed), tip=quote(&race_tip));
+"#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
                 std::fs::write(bin.join("git"), script).unwrap();
                 std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
                 env.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));

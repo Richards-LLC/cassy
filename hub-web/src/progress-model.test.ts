@@ -71,3 +71,42 @@ it("keeps worker delivery states shared with the rail and never guesses mileston
   ] as const) expect(workerState(workerProgress(["a"], [agent], [task])[0], [task])).toBe(expected);
   expect(workerState(workerProgress(["a"], [{ name: "a", current_task: "t" }], [{ ...task, delivery_state: "merged" }])[0], [{ ...task, delivery_state: "merged" }])).toBe("Merged");
 });
+
+it("joins live epics across machines, ranks in-flight work and retains a manual choice until closure", async () => {
+  const { epicTabs, selectedEpicTab } = await import("./progress-model");
+  const source = (machine: string, overrides: Partial<import("./progress-model").EpicSessionProgress> = {}): import("./progress-model").EpicSessionProgress => ({ project: "shared-project", machine, machineLabel: machine, session: machine, supervisor: "supervisor", roster: ["worker"],
+    agents: [{ name: "worker", status: "active", current_task: "build", liveness: "executing" }],
+    tasks: [{ id: "build", epic_id: "train", title: "Ship the tabs", status: "in_progress", assignee: "worker" }, { id: "build-2", epic_id: "train", status: "in_progress" }],
+    epics: [{ id: "train", title: "Release train", status: "in_progress", progress: { total: 14, merged: 9, merges_per_hour: 2 } }], stale: false, received: 1, ...overrides });
+  const sources = [source("soundwave"), source("prowl", { received: 2, agents: [
+    { name: "worker", status: "active", current_task: "review", liveness: "waiting_for_input" },
+    { name: "offline", status: "active", current_task: "landed", liveness: "dead" },
+  ], roster: ["worker", "offline"], tasks: [
+    { id: "review", epic_id: "follow-ups", title: "Review the delivery", status: "awaiting_merge", assignee: "worker" },
+    { id: "ready", epic_id: "follow-ups", status: "open" },
+    { id: "landed", epic_id: "follow-ups", status: "awaiting_merge", delivery_state: "merged", assignee: "offline" },
+  ], epics: [
+    { id: "train", title: "Release train", status: "in_progress", progress: { total: 14, merged: 10, merges_per_hour: 2 } },
+    { id: "follow-ups", title: "Follow-ups", status: "open" },
+    { id: "closed", status: "closed" },
+  ] }), source("soundwave", { session: "duplicate-session", roster: [], received: 0 })];
+  let tabs = epicTabs(sources);
+  expect(tabs).toHaveLength(2);
+  const train = tabs.find(tab => tab.epic.id === "train")!;
+  const follow = tabs.find(tab => tab.epic.id === "follow-ups")!;
+  expect(train.machines).toEqual(["prowl", "soundwave"]);
+  expect(train.epic.progress).toMatchObject({ merged: 10, total: 14 });
+  expect(train.workers.map(worker => worker.name)).toEqual(["worker"]);
+  expect(train.rows.map(row => row.state)).toEqual(["Building", "In progress"]);
+  expect(follow.workers.map(worker => worker.name)).toEqual(["worker"]);
+  expect(follow.rows.map(row => [row.worker, row.state])).toEqual([["worker", "Parking"], ["offline", "Merged"], ["Unassigned", "Ready"]]);
+  expect(follow.epic.progress).toBeUndefined();
+  expect(selectedEpicTab(tabs)).toBe(train.key);
+  expect(selectedEpicTab([...tabs].reverse(), train.key)).toBe(train.key);
+  tabs = epicTabs(sources.map(item => ({ ...item, epics: item.epics.map(epic => epic.id === "train" ? { ...epic, status: "closed" } : epic) })));
+  expect(selectedEpicTab(tabs, train.key)).toBe(follow.key);
+  expect(epicTabs([source("soundwave"), source("prowl", { received: 3, epics: [{ id: "train", status: "closed" }] })])).toEqual([]);
+  const stale = epicTabs([source("prowl", { stale: true })])[0];
+  expect(stale.stale).toBe(true); expect(stale.workers).toEqual([]);
+  expect(epicTabs([source("soundwave"), source("prowl", { project: "different-project" })])).toHaveLength(2);
+});

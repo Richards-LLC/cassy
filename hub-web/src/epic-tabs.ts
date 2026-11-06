@@ -1,5 +1,7 @@
 import { selectedEpicTab, type EpicTab } from "./progress-model";
 
+const tabId = (key: string): string => `epic-tab-${encodeURIComponent(key)}`;
+
 /** Pure view: status reads and local selection belong to the conversation owner. */
 export function renderEpicTabs(root: HTMLElement, tabs: readonly EpicTab[], options: {
   choice?: string; phone: boolean; sheetOpen: boolean;
@@ -28,7 +30,7 @@ export function renderEpicTabs(root: HTMLElement, tabs: readonly EpicTab[], opti
   }
   for (const [index, tab] of tabs.entries()) {
     const button = document.createElement("button"); button.type = "button"; button.setAttribute("role", "tab");
-    button.id = `epic-tab-${index}`; button.className = "epic-tab";
+    button.id = tabId(tab.key); button.className = "epic-tab";
     button.setAttribute("aria-selected", String(tab.key === selected));
     button.setAttribute("aria-controls", "epic-tab-panel"); button.tabIndex = tab.key === selected ? 0 : -1;
     const name = document.createElement("span"); name.className = "epic-tab-name";
@@ -53,13 +55,13 @@ export function renderEpicTabs(root: HTMLElement, tabs: readonly EpicTab[], opti
       const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : offset ? (index + offset + tabs.length) % tabs.length : undefined;
       if (next === undefined) return;
       event.preventDefault(); options.select(tabs[next].key);
-      root.querySelector<HTMLElement>(`#epic-tab-${next}`)?.focus();
+      root.querySelector<HTMLElement>(`#${CSS.escape(tabId(tabs[next].key))}`)?.focus();
     };
     nav.append(button);
   }
   const tab = tabs.find(tab => tab.key === selected)!;
   const panel = document.createElement("section"); panel.id = "epic-tab-panel"; panel.className = "epic-tab-panel";
-  panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", `epic-tab-${tabs.indexOf(tab)}`); panel.tabIndex = 0;
+  panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", tabId(tab.key)); panel.tabIndex = 0;
   const heading = document.createElement("h2"); heading.textContent = tab.epic.title || tab.epic.id; panel.append(heading);
   const summary = document.createElement("p"); summary.className = "epic-panel-summary";
   summary.textContent = `${tab.inFlight} in flight · ${tab.workers.length} live workers${tab.stale ? " · Last known status" : ""}`; panel.append(summary);

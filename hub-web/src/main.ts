@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { epicTabs, selectedEpicTab, type EpicSessionProgress } from "./progress-model";
+import { epicTabs, type EpicSessionProgress } from "./progress-model";
 import { renderEpicTabs } from "./epic-tabs";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -5552,8 +5552,7 @@ function syncEpicTabs(): void {
     retry: () => { for (const machineId of machines.keys()) refreshEpicSessions(machineId); },
     select: key => { epicChoice = key; epicSheetOpen = true; syncEpicTabs(); },
     close: () => { epicSheetOpen = false; syncEpicTabs();
-      const selected = selectedEpicTab(tabs, epicChoice);
-      root.querySelector<HTMLElement>(`#epic-tab-${tabs.findIndex(tab => tab.key === selected)}`)?.focus();
+      root.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
     },
   });
 }

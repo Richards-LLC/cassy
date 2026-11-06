@@ -3644,3 +3644,6 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .epic-status-notice { margin: var(--space-2) var(--space-3); color: var(--ink-mid); font-size: var(--fs-xs); }
 /* Team already has the detailed staffing view; the epic strip stays visible. */
 .conversation-main.team-open .epic-tabs > .epic-tab-panel { display: none; }
+/* Keep four staffing lanes within the fold after adding the persistent strip. */
+.conversation-main.team-open .team-lane { padding-block: var(--space-2); }
+.conversation-main.team-open .team-panel .release-progress { margin-block: var(--space-2); }

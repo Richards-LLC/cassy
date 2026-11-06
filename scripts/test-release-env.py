@@ -324,7 +324,7 @@ class QueueHealth(Fixture):
         fixture = json.loads((SCRIPTS.parent / "cas-cli/tests/fixtures/merge-queue-health.json").read_text())
         response, log = self.root / "response.json", self.root / "calls"
         gh = make_exe(self.root / "gh", f"#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{log}'\ncat '{response}'\n")
-        for limits, warning in [((1, 1, "ALLGREEN"), True), ((5, 5, "ALLGREEN"), False), ((8, 5, "HEADGREEN"), True), ((5, 1, "ALLGREEN"), True), (None, False)]:
+        for limits, warning in [((1, 1, "ALLGREEN"), True), ((5, 5, "ALLGREEN"), True), ((8, 5, "HEADGREEN"), True), ((5, 1, "ALLGREEN"), False), (None, False)]:
             value = json.loads(json.dumps(fixture))
             if limits:
                 build, merge, grouping = limits
@@ -353,7 +353,7 @@ class QueueHealth(Fixture):
                                  [r for r in original["rules"] if r["type"] != "merge_queue"])
                 params = next(r["parameters"] for r in after["rules"] if r["type"] == "merge_queue")
                 self.assertEqual((params["max_entries_to_build"], params["max_entries_to_merge"], params["grouping_strategy"]),
-                                 (max(build, 5), max(merge, 5), "ALLGREEN"))
+                                 (max(build, 5), 1, "ALLGREEN"))
             calls = log.read_text().splitlines()
             self.assertEqual(len(calls), 1, calls)
             self.assertNotIn("PUT", calls[0])

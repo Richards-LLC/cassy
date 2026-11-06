@@ -7002,7 +7002,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/merge-queue-health.json")).unwrap();
         value["data"]["repository"]["nameWithOwner"] = slug.into();
         value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"]["maxEntriesToBuild"] = 5.into();
-        value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"]["maxEntriesToMerge"] = 5.into();
+        value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"]["maxEntriesToMerge"] = 1.into();
         value
     }
 
@@ -7086,7 +7086,7 @@ mod tests {
         let fixture: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/merge-queue-health.json")).unwrap();
         crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{}'\ncat '{}'\n", log.display(), response.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
-        for (limits, warning) in [(Some((1, 1, "ALLGREEN")), true), (Some((5, 5, "ALLGREEN")), false), (Some((8, 5, "HEADGREEN")), true), (Some((5, 1, "ALLGREEN")), true), (None, false)] {
+        for (limits, warning) in [(Some((1, 1, "ALLGREEN")), true), (Some((5, 5, "ALLGREEN")), true), (Some((8, 5, "HEADGREEN")), true), (Some((5, 1, "ALLGREEN")), false), (None, false)] {
             let mut value = fixture.clone();
             if let Some((build, merge, grouping)) = limits {
                 value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"] = serde_json::json!({"maxEntriesToBuild":build,"maxEntriesToMerge":merge,"groupingStrategy":grouping});

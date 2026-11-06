@@ -196,7 +196,7 @@ fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
 #[test]
 fn peer_wake_intent_round_trips_and_suppresses_receipts_cas_1e7e2() {
     for (kind, blocker, wakes) in [
-        // cas-7dd1d: an untyped peer message is an ask, never a silent receipt.
+        // Untyped peer mail wakes without acquiring an explicit ask intent.
         (None, false, true),
         (Some("status"), false, true),
         (Some("ask"), false, true),

@@ -6,7 +6,7 @@
 //! ask is already recorded in the peer outbox and any reply carries its id, so
 //! no new gate object is needed: `worktree_merge` and a supervisor's raw
 //! `gh pr merge` are refused while the merging supervisor has an unanswered
-//! ask (or blocker) to a peer that names the task or PR being merged.
+//! explicit ask to a peer that names the task or PR being merged.
 //!
 //! Override: a task note `PEER ASK OVERRIDE <ask id>: <reason>`. The merge
 //! then proceeds and the operator receives one line, once per ask; the
@@ -272,8 +272,6 @@ mod tests {
         )
         .unwrap();
         assert!(merge(4251).is_none(), "a peer reply answers the ask");
-
-
     }
 
     fn fixture() -> (crate::test_support::TestEnvGuard, tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {

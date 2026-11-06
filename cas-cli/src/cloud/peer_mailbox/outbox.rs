@@ -311,12 +311,10 @@ pub struct OpenPeerAsk {
     pub body: String,
 }
 
-/// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
-/// `sender_agent_id` in the last `window_secs` that no delivered peer reply
-/// answers: a reply naming it with `in_reply_to` whose kind is not a
-/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
-/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
-/// the peer.
+/// Explicit `kind=ask` sends in the last `window_secs` without a later
+/// message from that peer to this supervisor. Replies, split decisions and
+/// verdicts may arrive without `in_reply_to` (cas-5ec1). Abandoned sends
+/// never reached the peer; queued sends have not been answered yet.
 pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
     let Ok(conn) = connection(root) else {
         return Vec::new();
@@ -326,15 +324,14 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body')
          FROM peer_message_outbox o
          WHERE o.sender_agent_id = ?1 AND o.created_at >= ?2 AND o.state != 'abandoned'
-           AND (json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
-                OR json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"blocker\"/>%')
+           AND json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
            AND (o.cloud_id IS NULL OR NOT EXISTS (
                 SELECT 1 FROM prompt_queue q
                 WHERE q.source LIKE 'peer:%'
-                  AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
+                  AND q.target = o.sender_name
+                  AND unixepoch(q.created_at) >= o.created_at
+                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))),
+                      ' from_agent=\"' || json_extract(o.payload, '$.recipient_agent_id') || '\"') > 0))
          ORDER BY o.id",
     ) else {
         return Vec::new();

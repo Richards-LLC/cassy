@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-ask-merge-scope:
+    title: Only explicit asks hold related merges and later messages from that peer clear them
+    tasks: [cas-5ec1]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
   sandboxed-harness-stall-detection:
     title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
     tasks: [cas-cff4]
@@ -373,8 +378,8 @@ invariants:
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
-    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes without creating a merge hold (cas-5ec1) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run peer_ask_gate::tests for explicit asks, later same-peer messages and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority

@@ -24691,7 +24691,7 @@ fn commits_have_equivalent_patch(repo_path: &std::path::Path, left: &str, right:
     patch_id(left) == patch_id(right)
 }
 
-fn stale_rebased_anchor_rejection(
+pub(crate) fn stale_rebased_anchor_rejection(
     task_id: &str,
     parked_anchor: &str,
     current_tip: Option<&str>,

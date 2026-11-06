@@ -11,7 +11,7 @@ use crate::builtins::{
     BUILTIN_AGENTS, BUILTIN_SKILLS, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS,
     GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, BuiltinFile,
 };
-use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text;
+use crate::mcp::tools::core::task::lifecycle::close_ops::{gate_text, stale_rebased_anchor_rejection};
 use cas_pty::{ContractRole, rendered_contract_surface};
 use regex::Regex;
 
@@ -122,6 +122,7 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
         ("pending dispatch", gate_text::worker_pending_dispatch("cas-0000", "vd-1", "o", "d", "")),
         ("awaiting-merge start", gate_text::awaiting_merge_start_refusal("cas-0000", "mcp__cas__")),
         ("hook blocker recipe", crate::hooks::handlers::handlers_events::blocker_steps("s", "m")),
+        ("stale rebased anchor", stale_rebased_anchor_rejection("cas-0000", "old", Some("abc123"), "main")),
     ];
     let relay = crate::ui::factory::merge_relay_for_parity();
 

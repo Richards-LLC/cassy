@@ -46,6 +46,10 @@ pub struct Config {
     #[serde(default)]
     pub sync: SyncConfig,
 
+    /// Draft rule expiry, applied by the existing maintenance pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RulesConfig>,
+
     /// Optional skill validation sandbox policy. When omitted, validation
     /// uses the degraded fallback if bubblewrap is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +286,7 @@ impl Config {
             };
         }
         merge_option!(accounts);
+        merge_option!(rules);
         merge_option!(cloud);
         merge_option!(skill_validation);
         merge_option!(skills);

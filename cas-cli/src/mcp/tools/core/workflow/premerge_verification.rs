@@ -1351,5 +1351,9 @@ mod tests {
             candidate.verify_landing(&later),
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
+
+        // pin: an empty-stderr ancestry refusal must tell the caller how to recover (cas-c5db).
+        let error = candidate.verify_landing(&candidate.target_sha).unwrap_err();
+        assert!(error.contains("Next step: fetch origin, reconcile the source and target refs, then retry worktree_merge"), "{error}");
     }
 }

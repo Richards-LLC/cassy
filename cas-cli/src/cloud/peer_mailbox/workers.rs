@@ -9,7 +9,7 @@ use super::*;
 
 pub(crate) struct WorkerDirectory {
     workers: Vec<peers_detail::PeerWorkerRef>,
-    epics: BTreeMap<String, BTreeSet<String>>,
+    epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>>,
 }
 
 impl WorkerDirectory {
@@ -33,7 +33,7 @@ impl WorkerDirectory {
                 && a.user_id.as_deref() == Some(owner.as_str()))).collect::<Vec<_>>();
         let locks = coordinator.list_active_locks().map_err(|e| e.to_string())?;
         let tasks = crate::store::open_task_store_local(root).map_err(|e| e.to_string())?;
-        let mut epics: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>> = BTreeMap::new();
         for worker in &workers {
             for lock in locks.iter().filter(|l| l.agent_id == worker.agent_id
                 && l.status == LeaseStatus::Active && l.expires_at > now && l.renewed_at <= now) {
@@ -43,7 +43,9 @@ impl WorkerDirectory {
                 let mut seen = BTreeSet::new();
                 while seen.insert(task.id.clone()) {
                     if task.task_type == TaskType::Epic && !task.is_terminal() {
-                        epics.entry(worker.agent_id.clone()).or_default().insert(task.id.clone());
+                        epics.entry(worker.agent_id.clone()).or_default().entry(task.id.clone())
+                            .and_modify(|expires| *expires = (*expires).max(lock.expires_at))
+                            .or_insert(lock.expires_at);
                     }
                     match tasks.get_parent_epic(&task.id).map_err(|e| e.to_string())? {
                         Some(parent) if !parent.is_terminal() => task = parent,
@@ -79,8 +81,10 @@ impl WorkerDirectory {
         if from.agent_id == to.agent_id || from.supervisor.machine_id == to.supervisor.machine_id {
             return Err("remote worker peers must be on different machines".into());
         }
+        let now = Utc::now();
         if !self.epics.get(sender).is_some_and(|mine| self.epics.get(recipient)
-            .is_some_and(|theirs| !mine.is_disjoint(theirs))) {
+            .is_some_and(|theirs| mine.iter().any(|(epic, expires)| *expires > now
+                && theirs.get(epic).is_some_and(|expires| *expires > now)))) {
             return Err("worker peers require active task claims under the same epic".into());
         }
         Ok((from, to))

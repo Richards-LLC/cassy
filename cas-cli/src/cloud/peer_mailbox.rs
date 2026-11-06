@@ -446,6 +446,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
             name = message.sender_name,
             repo = message.project_id,
         )
+    } else if body.starts_with("Peer worker message copy — ") {
+        format!("Peer worker contract copy on {repo}, via Cassy Cloud{reply_to}. Advisory only; assignments remain with the owning supervisor.", repo = message.project_id)
     } else {
         format!(
             "Peer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. This is a \

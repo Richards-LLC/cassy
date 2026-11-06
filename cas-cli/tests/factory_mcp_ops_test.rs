@@ -10738,13 +10738,11 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         after.notes.contains("inside the worker worktree")
             && after
                 .notes
-                .to_lowercase()
-                .contains("rebase factory/swift-fox")
-            && after.notes.contains("current integration target tip")
-            && after.notes.contains("push")
-            && after.notes.contains("re-park")
-            && after.notes.contains("merge_request=true"),
-        "merge recovery must prescribe worktree-only rebase, push, and re-park: {}",
+                .contains("Merge the current integration target tip into")
+            && after.notes.contains("never rebase")
+            && after.notes.contains("push, then re-park")
+            && !after.notes.contains("merge_request=true"),
+        "merge recovery must preserve the anchor and use the push_branch park signal: {}",
         after.notes
     );
     assert!(
@@ -10942,6 +10940,7 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         let store = env.task_store();
         let mut task = store.get(&conflict_id).expect("task");
         task.deliverables.merge_conflicted = true;
+        task.deliverables.factory_branch_anchor = Some("parked-anchor".to_string());
         task.deliverables.parked_branch = Some("factory/brave-otter".to_string());
         store.update(&task).expect("update");
     }
@@ -10965,27 +10964,44 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         "a clean awaiting_merge must not be flagged as conflicted: {clean_text}"
     );
 
-    let conflict_show = env
-        .service
-        .inner
-        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                ..Default::default()
-            },
-            id: conflict_id.clone(),
-            with_deps: false,
-        }))
-        .await
-        .expect("show conflict");
-    let conflict_text = get_text(&conflict_show);
-    assert!(
-        conflict_text.to_uppercase().contains("MERGE CONFLICT"),
-        "a conflicted awaiting_merge must be visibly flagged in show: {conflict_text}"
-    );
-    assert!(
-        conflict_text.contains("factory/brave-otter"),
-        "parked branch should be surfaced in show: {conflict_text}"
-    );
+    for mode in [DeliveryMode::PushBranch, DeliveryMode::LocalMerge] {
+        let store = env.task_store();
+        let mut task = store.get(&conflict_id).expect("task");
+        task.delivery_mode = mode;
+        store.update(&task).expect("set delivery mode");
+        let conflict_show = env
+            .service
+            .inner
+            .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
+                id: conflict_id.clone(),
+                with_deps: false,
+            }))
+            .await
+            .expect("show conflict");
+        let text = get_text(&conflict_show);
+        assert!(text.contains("MERGE CONFLICT"), "{mode}: {text}");
+        assert!(text.contains("factory/brave-otter"), "{mode}: {text}");
+        // pin: anchored recovery must preserve history and route the completion signal by mode.
+        assert!(
+            text.contains("Merge the current integration target tip into"),
+            "{mode}: {text}"
+        );
+        assert!(text.contains("never rebase"), "{mode}: {text}");
+        assert!(text.contains("`task start`"), "{mode}: {text}");
+        assert_eq!(
+            text.contains("merge_request=true"),
+            mode == DeliveryMode::LocalMerge,
+            "{mode}: {text}"
+        );
+        match mode {
+            DeliveryMode::PushBranch => assert!(text.contains("push, then re-park"), "{text}"),
+            DeliveryMode::LocalMerge => assert!(text.contains("keep the branch local"), "{text}"),
+        }
+    }
 
     let list = env
         .service

@@ -15,6 +15,14 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
         keywords: &["cloud", "team", "scope", "personal", "sync"],
         use_cases: &["Keep a team-owned project out of personal cloud scope"],
     });
+    registry.register(ConfigMeta {
+        key: "rules.draft_ttl_days", section: "rules", name: "Draft Rule Lifetime",
+        description: "Retire rules still in Draft after this many days from creation during maintenance. History is retained; Proven rules are untouched.",
+        value_type: ConfigType::Int, default: "30",
+        constraint: Constraint::Range(1, u32::MAX as i64), advanced: false, requires_feature: None,
+        keywords: &["rules", "draft", "expiry", "retention"],
+        use_cases: &["Keep unpromoted draft rules from surfacing indefinitely"],
+    });
     // ============================================================
     // SYNC SECTION
     // ============================================================

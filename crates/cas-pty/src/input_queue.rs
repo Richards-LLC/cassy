@@ -14,6 +14,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,9 @@ struct State {
     chunks: VecDeque<Chunk>,
     /// Bytes queued or being written.
     buffered: usize,
+    received_bytes: u64,
     closed: bool,
+    paused: bool,
     /// The first write error; the pane takes no more input after it.
     failed: Option<String>,
 }
@@ -52,11 +55,14 @@ struct Shared {
     /// Signalled when a chunk finishes.
     written: Condvar,
     cap: usize,
+    written_bytes: AtomicU64,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -94,6 +100,7 @@ impl PtyInput {
                 queued: Condvar::new(),
                 written: Condvar::new(),
                 cap,
+                written_bytes: AtomicU64::new(0),
             }),
         };
         let shared = Arc::clone(&input.shared);
@@ -120,7 +127,10 @@ impl PtyInput {
     /// unsubmitted, or a child waiting on its reply, for good (cas-786a6
     /// review H1, L2). Still refused once the pane failed or closed.
     pub fn write_control_then(&self, data: &[u8], done: Option<WriteDone>) -> Result<()> {
-        debug_assert!(data.len() <= CONTROL_WRITE_MAX, "control writes are a few bytes");
+        debug_assert!(
+            data.len() <= CONTROL_WRITE_MAX,
+            "control writes are a few bytes"
+        );
         self.enqueue(data, done, true)
     }
 
@@ -129,7 +139,7 @@ impl PtyInput {
         if let Some(error) = &state.failed {
             return Err(Error::pty(format!("Write failed: {error}")));
         }
-        if state.closed {
+        if state.closed || state.paused {
             return Err(Error::pty("PTY input is closed"));
         }
         // An empty buffer takes one chunk of any size (a large paste), so a
@@ -140,6 +150,7 @@ impl PtyInput {
                 cap: self.shared.cap,
             });
         }
+        state.received_bytes = state.received_bytes.saturating_add(data.len() as u64);
         state.buffered += data.len();
         state.chunks.push_back(Chunk {
             bytes: data.to_vec(),
@@ -148,6 +159,20 @@ impl PtyInput {
         drop(state);
         self.shared.queued.notify_one();
         Ok(())
+    }
+
+    /// Freeze producers during daemon handoff; queued writes still drain.
+    pub(crate) fn pause(&self) { self.shared.lock().paused = true; }
+    pub(crate) fn resume(&self) { self.shared.lock().paused = false; }
+
+    /// Total input bytes accepted by this pane's queue, including control replies.
+    pub fn bytes_received(&self) -> u64 {
+        self.shared.lock().received_bytes
+    }
+
+    /// Bytes physically written, including a partial write before an error.
+    pub fn bytes_written(&self) -> u64 {
+        self.shared.written_bytes.load(Ordering::Relaxed)
     }
 
     /// Bytes queued or being written.
@@ -180,6 +205,25 @@ impl PtyInput {
     }
 }
 
+// Keep std::io::Write::write_all's short-write/Interrupted handling while
+// counting each successful OS write, even if a later write or flush fails.
+struct CountedWriter<'a> {
+    writer: &'a mut (dyn Write + Send),
+    written: &'a AtomicU64,
+}
+
+impl Write for CountedWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.writer.write(bytes)?;
+        self.written.fetch_add(count as u64, Ordering::Relaxed);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 fn writer_loop(shared: &Shared, writer: &SharedWriter) {
     loop {
         let chunk = {
@@ -200,9 +244,13 @@ fn writer_loop(shared: &Shared, writer: &SharedWriter) {
         let result = {
             // A fresh OS thread, never a Tokio worker: blocking_lock is safe.
             let mut writer = writer.blocking_lock();
-            writer
+            let mut counted = CountedWriter {
+                writer: &mut **writer,
+                written: &shared.written_bytes,
+            };
+            counted
                 .write_all(&chunk.bytes)
-                .and_then(|()| writer.flush())
+                .and_then(|()| counted.flush())
         };
         let mut failed_chunks = Vec::new();
         {
@@ -293,8 +341,18 @@ mod tests {
         second.unwrap();
         assert!(matches!(refused, Err(Error::InputFull { .. })));
         assert!(full);
+        assert_eq!(
+            input.bytes_received(),
+            16,
+            "refused bytes are not accepted input"
+        );
         assert!(input.wait_drained(Duration::from_secs(5)));
-        assert_eq!(&*out.lock().unwrap(), b"0123456789abcdef", "bytes keep their order");
+        assert_eq!(
+            &*out.lock().unwrap(),
+            b"0123456789abcdef",
+            "bytes keep their order"
+        );
+        assert_eq!(input.bytes_written(), 16);
         input.write(b"!").unwrap();
         assert!(input.wait_drained(Duration::from_secs(5)));
     }
@@ -316,7 +374,10 @@ mod tests {
         assert!(matches!(input.write(b"x"), Err(Error::InputFull { .. })));
         let (tx, rx) = std::sync::mpsc::channel();
         input
-            .write_control_then(b"\r", Some(Box::new(move |result| tx.send(result.is_ok()).unwrap())))
+            .write_control_then(
+                b"\r",
+                Some(Box::new(move |result| tx.send(result.is_ok()).unwrap())),
+            )
             .expect("the submit CR is never refused for a full buffer");
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
@@ -326,23 +387,36 @@ mod tests {
 
     #[test]
     fn a_failed_write_fails_its_followers_and_the_pane_takes_no_more_input() {
-        struct Broken;
+        struct Broken(bool);
         impl Write for Broken {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("EIO"))
+                if std::mem::replace(&mut self.0, false) {
+                    Ok(1)
+                } else {
+                    Err(std::io::Error::other("EIO"))
+                }
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
-        let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(Box::new(Broken)));
+        let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(Box::new(Broken(true))));
         let owner = PtyInput::start("broken", writer, 1024).unwrap();
         let input = owner.input().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         input
-            .write_then(b"a", Box::new(move |result| tx.send(result.is_ok()).unwrap()))
+            .write_then(
+                b"abc",
+                Box::new(move |result| tx.send(result.is_ok()).unwrap()),
+            )
             .unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(false));
         assert!(input.write(b"b").is_err());
+        assert_eq!(input.bytes_received(), 3);
+        assert_eq!(
+            input.bytes_written(),
+            1,
+            "count the successful prefix before EIO"
+        );
     }
 }

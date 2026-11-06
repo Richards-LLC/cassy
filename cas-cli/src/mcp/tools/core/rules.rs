@@ -1226,10 +1226,8 @@ impl CasCore {
         Ok(Self::success(output))
     }
 
-    /// cas-f0a1: a verifier never drafts a rule from one verdict. Its lesson
-    /// joins a rule candidate, which no agent context surfaces; once seen in
-    /// `CANDIDATE_DECISION_TASKS` different tasks, a decision chore asks the
-    /// supervisor and operator whether it becomes a rule.
+    /// A candidate requires completed verdicts from independent tasks before
+    /// anything is persisted. It remains outside active rules until adopted.
     pub async fn cas_rule_observe(
         &self,
         candidate_id: Option<String>,
@@ -1242,28 +1240,30 @@ impl CasCore {
             message: Cow::from(message),
             data: None,
         };
-        let (task_id, verdict_id) = verdict_link.split_once(':').ok_or_else(|| {
-            invalid(format!(
-                "source_ids must link the verdict as <task-id>:<verification-id>, got {verdict_link:?}"
-            ))
-        })?;
-        let candidate = cas_store::observe_rule_candidate(
-            &self.cas_root,
-            candidate_id.as_deref(),
-            &content,
-            &category,
-            task_id,
-            verdict_id,
-        )
-        .map_err(|error| {
-            let mut mapped = invalid(format!("Failed to record the observation: {error}"));
+        let sources: Vec<_> = verdict_link.split(',').map(str::trim).filter(|s| !s.is_empty())
+            .map(|source| source.split_once(':').filter(|(task, verdict)| !task.trim().is_empty() && !verdict.trim().is_empty())
+                .map(|(task, verdict)| (task.trim(), verdict.trim()))
+                .ok_or_else(|| invalid(format!("source_ids needs task:verdict citations, got {source:?}"))))
+            .collect::<Result<_, _>>()?;
+        if sources.iter().map(|(task, _)| *task).collect::<HashSet<_>>().len() < CANDIDATE_DECISION_TASKS {
+            return Err(invalid("Rule candidates require at least two independent incidents from different tasks; keep a single incident in its verdict.".into()));
+        }
+        let store_error = |error: cas_store::StoreError| {
+            let mut mapped = invalid(format!("Failed to record incident evidence: {error}"));
             if matches!(&error, cas_store::StoreError::Database(source)
-                if cas_store::shared_db::is_busy_error(source))
-            {
-                mapped.code = ErrorCode::INTERNAL_ERROR;
-            }
+                if cas_store::shared_db::is_busy_error(source)) { mapped.code = ErrorCode::INTERNAL_ERROR; }
             mapped
-        })?;
+        };
+        let verdicts = self.open_verification_store()?;
+        for (task, id) in &sources {
+            let verdict = verdicts.get(id).map_err(&store_error)?;
+            if verdict.task_id != *task || !matches!(verdict.status,
+                cas_types::VerificationStatus::Approved | cas_types::VerificationStatus::Rejected) {
+                return Err(invalid(format!("Incident {task}:{id} must cite that task's completed verdict")));
+            }
+        }
+        let candidate = cas_store::observe_rule_candidate(&self.cas_root, candidate_id.as_deref(),
+            &content, &category, &sources).map_err(store_error)?;
         let tasks = candidate.distinct_tasks();
         let mut output = format!(
             "Observed rule candidate {} ({tasks}/{CANDIDATE_DECISION_TASKS} tasks). It is not a rule and is never surfaced to agents.",
@@ -1901,10 +1901,19 @@ mod tests {
     async fn a_repeat_observation_counts_against_its_candidate_and_never_becomes_a_rule() {
         let (_temp, core) = isolated_core();
         let lesson = "Every test-first task must add a new test file";
-        for (link, content) in [("cas-7da6:ver-1", lesson), ("cas-dbea:ver-2", "A test-first task must add a new test file")] {
-            core.cas_rule_observe(None, content.into(), "testing".into(), link.into())
-                .await
-                .unwrap();
+        for (task, verdict_id) in [("cas-7da6", "ver-1"), ("cas-7da6", "ver-repeat"), ("cas-dbea", "ver-2")] {
+            let mut verdict = cas_types::Verification::new(verdict_id.into(), task.into());
+            verdict.provenance = cas_types::VerificationProvenance::System;
+            verdict.status = cas_types::VerificationStatus::Rejected;
+            cas_store::add_system_verification(&core.cas_root, &verdict).unwrap();
+        }
+        for links in ["cas-7da6:ver-1", "cas-7da6:ver-1,cas-7da6:ver-repeat", "cas-7da6:ver-1,cas-other:ver-2"] {
+            assert!(core.cas_rule_observe(None, lesson.into(), "testing".into(), links.into()).await.is_err(), "refuse insufficient/forged evidence: {links}");
+            assert!(cas_store::list_rule_candidates(&core.cas_root).unwrap().is_empty());
+        }
+        let links = "cas-7da6:ver-1,cas-dbea:ver-2";
+        for content in [lesson, "A test-first task must add a new test file"] {
+            core.cas_rule_observe(None, content.into(), "testing".into(), links.into()).await.unwrap();
         }
 
         let candidates = cas_store::list_rule_candidates(&core.cas_root).unwrap();
@@ -1929,7 +1938,7 @@ mod tests {
         let held = connection.lock().unwrap();
         let budget = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
         let error = core
-            .cas_rule_observe(None, lesson.into(), "testing".into(), "cas-0ab2:ver-busy".into())
+            .cas_rule_observe(None, lesson.into(), "testing".into(), links.into())
             .await
             .unwrap_err();
         drop(budget);

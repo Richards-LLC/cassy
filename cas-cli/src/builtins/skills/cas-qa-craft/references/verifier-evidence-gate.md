@@ -91,7 +91,7 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 
 ## Rule candidates
 
-On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it.
+Only propose a rule candidate after at least two independent incidents from different tasks support the lesson. One verdict is not enough: retain that finding in the verdict and do not call `rule action=observe`. For a repeated lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>,<other-task-id>:<other-verification-id>"`, adding `id=<candidate-id>` for the same lesson. Cite completed verdicts belonging to those tasks; Cassy validates the links and records the bundle atomically before raising it to the supervisor and operator. Never create or promote the rule yourself.
 
 ## Code review procedure
 

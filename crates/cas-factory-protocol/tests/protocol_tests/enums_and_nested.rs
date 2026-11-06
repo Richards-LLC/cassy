@@ -73,7 +73,14 @@ fn test_all_pane_kind_variants() {
             focused: true,
             title: format!("Test {kind:?}"),
             exited: false,
+            input_bytes_received: 42,
+            input_bytes_written: 14,
         };
+        let mut legacy = serde_json::to_value(&pane).unwrap();
+        legacy.as_object_mut().unwrap().remove("input_bytes_received");
+        legacy.as_object_mut().unwrap().remove("input_bytes_written");
+        let legacy: PaneInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!((legacy.input_bytes_received, legacy.input_bytes_written), (0, 0));
         let msg = ServerMessage::PaneAdded { pane };
         let encoded = codec::encode(&msg).unwrap();
         let decoded: ServerMessage = codec::decode(&encoded).unwrap();
@@ -138,6 +145,8 @@ fn test_full_session_state() {
                 focused: true,
                 title: "Supervisor (zealous-octopus)".to_string(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
             PaneInfo {
                 id: "worker-1".to_string(),
@@ -145,6 +154,8 @@ fn test_full_session_state() {
                 focused: false,
                 title: "Worker (bright-shark)".to_string(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
             PaneInfo {
                 id: "director".to_string(),
@@ -152,6 +163,8 @@ fn test_full_session_state() {
                 focused: false,
                 title: "Director".to_string(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         ],
         epic_id: Some("cas-402d".to_string()),

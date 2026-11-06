@@ -76,8 +76,10 @@ impl FactoryDaemon {
 
                     // Blocking write for the initial Welcome
                     let _ = client.stream.set_nonblocking(false);
-                    if client.stream.write_all(&frame).is_err() {
-                        continue;
+                    if let Err(error) = client.stream.write_all(&frame) {
+                        // A one-shot sender may already have closed. Its inbound
+                        // frames still belong to process_gui_client_input.
+                        tracing::debug!(client_id, %error, "GUI welcome write failed; draining input");
                     }
                     let _ = client.stream.set_nonblocking(true);
 
@@ -173,40 +175,24 @@ impl FactoryDaemon {
 
     /// Flush pending output to all GUI clients.
     pub(super) fn flush_gui_client_output(&mut self) {
-        let mut disconnected = Vec::new();
-
-        for (id, client) in self.gui_clients.iter_mut() {
+        // A failed output write does not imply an empty input half. A sender
+        // can send Input and close after this pass's input read (cas-b235).
+        // Only process_gui_client_input may remove it, after draining frames.
+        for client in self.gui_clients.values_mut() {
             if client.write_buf.is_empty() {
                 continue;
             }
             let (front, back) = client.write_buf.as_slices();
             let chunk = if !front.is_empty() { front } else { back };
-            if chunk.is_empty() {
-                continue;
-            }
             match client.stream.write(chunk) {
-                Ok(0) => disconnected.push(*id),
+                Ok(0) => client.write_buf.clear(),
                 Ok(n) => {
-                    for _ in 0..n {
-                        client.write_buf.pop_front();
-                    }
+                    client.write_buf.drain(..n);
                 }
                 Err(e) => match e.kind() {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {}
-                    _ => disconnected.push(*id),
+                    _ => client.write_buf.clear(),
                 },
-            }
-        }
-
-        for id in disconnected {
-            let had_sizes = self
-                .gui_clients
-                .get(&id)
-                .is_some_and(|c| !c.pane_sizes.is_empty());
-            self.gui_clients.remove(&id);
-            tracing::info!("GUI client {} disconnected (write error)", id);
-            if had_sizes {
-                self.reconcile_after_gui_disconnect();
             }
         }
     }
@@ -232,6 +218,8 @@ impl FactoryDaemon {
         if self.gui_clients.is_empty() && self.ws_clients.is_empty() {
             return;
         }
+        let (input_bytes_received, input_bytes_written) = self.app.mux.get(pane_id)
+            .map(|pane| pane.input_byte_counts()).unwrap_or_default();
         let msg = DaemonMessage::PaneAdded {
             pane: PaneInfo {
                 id: pane_id.to_string(),
@@ -239,6 +227,8 @@ impl FactoryDaemon {
                 focused: false,
                 title: pane_id.to_string(),
                 exited: false,
+                input_bytes_received,
+                input_bytes_written,
             },
         };
         self.broadcast_daemon_message(&msg);
@@ -324,6 +314,20 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::Reexec { binary, version, nonce } => {
+                use std::os::fd::AsRawFd;
+                let reply = self.gui_clients.get(&client_id).map(|client| (
+                    client.stream.as_raw_fd(), client.write_buf.iter().copied().collect(),
+                ));
+                if let Err(error) = self.reexec(&binary, &version, reply, &nonce).await {
+                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                        message: format!("{error:#}"), client_ref: Some(nonce),
+                    }) && let Some(client) = self.gui_clients.get_mut(&client_id) {
+                        queue_frame(client, &frame);
+                    }
+                }
+            }
+
             ClientMessage::BindingIntakePause { request } => {
                 let nonce = request.nonce;
                 let result = (|| {
@@ -597,23 +601,31 @@ impl FactoryDaemon {
         // Add supervisor
         let sup_name = self.app.supervisor_name().to_string();
         let sup_exited = self.app.mux.get(&sup_name).is_some_and(|p| p.has_exited());
+        let (input_bytes_received, input_bytes_written) = self.app.mux.get(&sup_name)
+            .map(|pane| pane.input_byte_counts()).unwrap_or_default();
         panes.push(PaneInfo {
             id: sup_name.clone(),
             kind: PaneKind::Supervisor,
             focused: focused.as_deref() == Some(&sup_name),
             title: sup_name.clone(),
             exited: sup_exited,
+            input_bytes_received,
+            input_bytes_written,
         });
 
         // Add workers
         for name in self.app.worker_names() {
             let exited = self.app.mux.get(name).is_some_and(|p| p.has_exited());
+            let (input_bytes_received, input_bytes_written) = self.app.mux.get(name)
+                .map(|pane| pane.input_byte_counts()).unwrap_or_default();
             panes.push(PaneInfo {
                 id: name.clone(),
                 kind: PaneKind::Worker,
                 focused: focused.as_deref() == Some(name.as_str()),
                 title: name.clone(),
                 exited,
+                input_bytes_received,
+                input_bytes_written,
             });
         }
 

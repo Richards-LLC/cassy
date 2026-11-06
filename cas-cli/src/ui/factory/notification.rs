@@ -27,6 +27,8 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    pub(crate) fn configuration(&self) -> &NotifyConfig { &self.config }
+
     /// Create a new notifier with the given config
     pub fn new(config: NotifyConfig) -> Self {
         Self { config }

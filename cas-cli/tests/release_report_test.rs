@@ -130,6 +130,91 @@ esac
 
 #[cfg(unix)]
 #[test]
+fn pdf_launch_failure_reaches_text_and_json_cas_9988() {
+    let project = TempDir::new().unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "feature/report"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/project.git",
+        ],
+    ] {
+        assert!(
+            ProcessCommand::new("git")
+                .current_dir(project.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(
+        project.path().join("CHANGELOG.md"),
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Fixed\n\n- PDF launch diagnostics.\n",
+    )
+    .unwrap();
+    cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    let fake_gh = install_fake_gh(&project);
+    let module = project.path().join("playwright.cjs");
+    fs::write(&module, r#"
+module.exports = { chromium: {
+  executablePath: () => '/missing/chromium/chrome',
+  async launch() {
+    throw new Error("browserType.launch: Executable doesn't exist at /missing/chromium_headless_shell/headless_shell\nlaunch diagnostic retained");
+  }
+} };
+"#).unwrap();
+    // The launch fails before PDF inspection. Keep that boundary available
+    // without making this diagnostic test require the native PDF checker.
+    let python = project.path().join("test-python");
+    fs::create_dir(&python).unwrap();
+    fs::write(python.join("pymupdf.py"), "").unwrap();
+    for json in [false, true] {
+        let mut command = cas_cmd(&project);
+        command
+            .env("GH_BIN", &fake_gh)
+            .env("PLAYWRIGHT_MODULE", &module)
+            .env("PYTHONPATH", &python);
+        if json {
+            command.arg("--json");
+        }
+        let result = command
+            .args(["release", "report", "3.19.0", "--pdf"])
+            .assert()
+            .code(2);
+        let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+        for message in [
+            "browserType.launch: Executable doesn't exist",
+            "launch diagnostic retained",
+            "install chromium-headless-shell",
+        ] {
+            assert!(stderr.contains(message), "{stderr}");
+        }
+        if json {
+            let value: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+            assert_eq!(value["status"], "error");
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("browserType.launch: Executable doesn't exist"),
+                "{value}"
+            );
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("install chromium-headless-shell"),
+                "{value}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let project = TempDir::new().unwrap();
     for args in [

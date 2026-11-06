@@ -409,14 +409,13 @@ impl CasCore {
         if task.status == TaskStatus::AwaitingMerge {
             if task.deliverables.merge_conflicted {
                 read_status.insert_str(0, "MERGE CONFLICT / REWORK REQUIRED\n");
-                output.push_str(
+                output.push_str(&format!(
                     "⚠️  MERGE CONFLICT / REWORK REQUIRED — this task is NOT complete. \
                      The parked branch is conflicted or its conflict preflight could \
                      not be evaluated; the assigned worker can `task start` it to \
-                     inspect from inside the worker worktree, rebase the parked \
-                     factory branch onto the current integration target tip, push, \
-                     and re-park with merge_request=true.\n",
-                );
+                     inspect from inside the worker worktree. {}\n",
+                    super::audit::merge_recovery_guidance(task.delivery_mode),
+                ));
             } else {
                 output.push_str(
                     "(mergeable — queued for the supervisor to merge the factory branch)\n",

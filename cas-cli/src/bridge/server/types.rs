@@ -213,6 +213,11 @@ pub(crate) struct TaskSummaryJson {
     pub(crate) merge_check_pending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) progress: Option<EpicProgressJson>,
+    /// An epic's child split, as the factory TUI counts it: open (open or
+    /// blocked), in progress (in progress or parked) and merged (delivered
+    /// closures). Unbounded by the delivery-proof budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) counts: Option<EpicCountsJson>,
     pub(crate) branch: Option<String>,
     /// Last update, RFC 3339 (cas-566b): a fleet operation's precondition.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +226,13 @@ pub(crate) struct TaskSummaryJson {
     /// "ask the supervisor to merge" states it saw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tip: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct EpicCountsJson {
+    pub(crate) open: usize,
+    pub(crate) in_progress: usize,
+    pub(crate) merged: usize,
 }
 
 #[derive(Debug, Serialize)]

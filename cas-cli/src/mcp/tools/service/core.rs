@@ -1327,7 +1327,7 @@ mod tests {
         core.open_rule_store().unwrap().init().unwrap();
         core.open_rule_store().unwrap().add(&rule).unwrap();
         core.open_search_index().unwrap().index_rule(&rule).unwrap();
-        cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", "cas-0ab2", "ver-1")
+        cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", &[("cas-0ab2", "ver-1"), ("cas-0ab3", "ver-2")])
             .unwrap();
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);

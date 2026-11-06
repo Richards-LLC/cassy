@@ -225,6 +225,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.release_command",
+        section: "factory",
+        name: "Release Command",
+        description: "Command that cuts or promotes a release from the release train, run from the repository root on the train branch. The \"train ready to cut\" notice names it; Cassy never runs it. Empty names scripts/release.sh when the repository has one.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "release", "train", "promotion", "cut", "staging"],
+        use_cases: &[
+            "Set to the staging-to-main promotion command in a project that releases by promotion",
+            "Leave empty in a repository that has scripts/release.sh",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.supervisor_message_debounce_secs", section: "factory", name: "Supervisor Message Debounce",
         description: "Seconds to collect directed supervisor messages into one submitted turn.", value_type: ConfigType::Int, default: "20",
         constraint: Constraint::Range(0, 300), advanced: false, requires_feature: None,

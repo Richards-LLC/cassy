@@ -200,6 +200,10 @@ impl Config {
                 factory.worker_local_gate.clone().unwrap_or_default(),
             ),
             (
+                "factory.release_command".to_string(),
+                factory.release_command.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.design_review_bug_threshold".to_string(),
                 factory.design_review_bug_threshold.to_string(),
             ),

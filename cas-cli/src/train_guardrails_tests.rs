@@ -1,5 +1,6 @@
-//! cas-dcc9: dropping one child keeps the rest of the train, and the second
-//! ejection goes to the operator; one cut notice per train state.
+//! cas-dcc9, cas-d9d3c: a batch drop keeps the rest of the train, a revert
+//! conflict changes nothing and names its files, the second ejection goes to
+//! the operator; one cut notice per train state, naming the project's command.
 use super::*;
 use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
 use crate::test_support::TestEnvGuard;
@@ -52,11 +53,14 @@ fn train(repo: &Path, children: &[(&str, TaskStatus)]) -> PathBuf {
     cas_dir
 }
 
-/// Merge `factory/<id>`, which adds `<id>.txt`, into the train and record it.
-fn merge_child(repo: &Path, cas_dir: &Path, id: &str) {
+/// Merge `factory/<id>`, which writes `<id>.txt` and each of `also`, into the
+/// train and record it.
+fn merge_child(repo: &Path, cas_dir: &Path, id: &str, also: &[&str]) {
     let branch = format!("factory/{id}");
     run(repo, &["checkout", "-q", "-b", &branch, TRAIN]);
-    std::fs::write(repo.join(format!("{id}.txt")), id).unwrap();
+    for file in std::iter::once(format!("{id}.txt")).chain(also.iter().map(|f| f.to_string())) {
+        std::fs::write(repo.join(file), id).unwrap();
+    }
     run(repo, &["add", "."]);
     run(repo, &["commit", "-q", "-m", id]);
     let source = run(repo, &["rev-parse", "HEAD"]);
@@ -83,15 +87,16 @@ fn repo_with_origin() -> (tempfile::TempDir, tempfile::TempDir) {
 }
 
 #[tokio::test]
-async fn drop_reverts_one_child_keeps_the_rest_and_reenqueues_once_cas_dcc9() {
+async fn batch_drop_reverts_the_bad_children_once_and_a_conflict_changes_nothing_cas_d9d3c() {
     let mut env = TestEnvGuard::temp_home();
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
     let children = [("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::Closed), ("cas-c", TaskStatus::Closed)];
     let cas_dir = train(repo, &children);
-    for (id, _) in children {
-        merge_child(repo, &cas_dir, id);
-    }
+    merge_child(repo, &cas_dir, "cas-a", &[]);
+    merge_child(repo, &cas_dir, "cas-b", &[]);
+    // cas-c also rewrites cas-b's file, so reverting cas-b alone conflicts.
+    merge_child(repo, &cas_dir, "cas-c", &["cas-b.txt"]);
     // The supervisor's shared checkout stays on main; the train is a branch.
     run(repo, &["checkout", "-q", "main"]);
     run(repo, &["push", "-q", "origin", TRAIN]);
@@ -101,38 +106,51 @@ async fn drop_reverts_one_child_keeps_the_rest_and_reenqueues_once_cas_dcc9() {
     let core = CasCore::with_daemon(cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("sup-id".into());
     let queue = FakeQueue::default();
+    let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
 
-    let receipt = drop_child(&core, "cas-b", "merge_group: Rust suite failed in b", &queue).await.unwrap();
+    let error = drop_children(&core, &ids(&["cas-b"]), "merge_group: suite failed", &queue).await.unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("conflicts in cas-b.txt") && error.contains("Nothing changed"), "{error}");
+    assert_eq!(run(repo, &["rev-parse", TRAIN]), before);
+    assert!(queue.0.lock().unwrap().is_empty());
+
+    let receipt = drop_children(&core, &ids(&["cas-b", "cas-c"]), "merge_group: suite failed", &queue).await.unwrap();
 
     let files = run(repo, &["ls-tree", "--name-only", TRAIN]);
-    assert!(files.contains("cas-a.txt") && files.contains("cas-c.txt") && !files.contains("cas-b.txt"), "{files}");
-    assert!(is_ancestor(repo, &before, TRAIN), "a revert commit, never a history rewrite");
-    assert_eq!(run(repo, &["rev-parse", TRAIN]), receipt.revert);
-    assert_eq!(run(repo, &["ls-remote", "origin", TRAIN]).split_whitespace().next(), Some(receipt.revert.as_str()));
+    assert!(files.contains("cas-a.txt") && !files.contains("cas-b.txt") && !files.contains("cas-c.txt"), "{files}");
+    assert!(is_ancestor(repo, &before, TRAIN), "revert commits, never a history rewrite");
+    assert_eq!(receipt.dropped.len(), 2);
+    let tip = run(repo, &["rev-parse", TRAIN]);
+    assert_eq!(run(repo, &["ls-remote", "origin", TRAIN]).split_whitespace().next(), Some(tip.as_str()));
     let tasks = open_task_store(&cas_dir).unwrap();
-    let dropped = tasks.get("cas-b").unwrap();
-    assert_eq!((dropped.status, dropped.assignee.as_deref()), (TaskStatus::Open, Some("worker-cas-b")));
-    assert!(dropped.notes.contains(&format!("git revert {}", receipt.revert)), "{}", dropped.notes);
-    assert_eq!(tasks.get("cas-c").unwrap().status, TaskStatus::Closed);
-    assert_eq!(*queue.0.lock().unwrap(), vec![42]);
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();
-    assert_eq!(sq.peek("worker-cas-b-id", 10).unwrap().len(), 1, "the worker gets the failure");
+    for dropped in &receipt.dropped {
+        let task = tasks.get(&dropped.task_id).unwrap();
+        let worker = format!("worker-{}", dropped.task_id);
+        assert_eq!((task.status, task.assignee.as_deref()), (TaskStatus::Open, Some(worker.as_str())));
+        assert!(task.notes.contains(&format!("git revert {}", dropped.revert)), "{}", task.notes);
+        assert_eq!(sq.peek(&format!("{worker}-id"), 10).unwrap().len(), 1, "each worker gets the failure");
+    }
+    assert_eq!(tasks.get("cas-a").unwrap().status, TaskStatus::Closed);
+    assert_eq!(*queue.0.lock().unwrap(), vec![42], "one re-enqueue for the batch");
 
     // The re-enqueue was the train's one repair cycle (rule-176(5)).
-    let error = drop_child(&core, "cas-c", "ejected again", &queue).await.unwrap_err().to_string();
+    let error = drop_children(&core, &ids(&["cas-a"]), "ejected again", &queue).await.unwrap_err().to_string();
     assert!(error.contains("P0") && error.contains("rule-176(5)"), "{error}");
-    assert_eq!(run(repo, &["rev-parse", TRAIN]), receipt.revert, "nothing reverted");
+    assert_eq!(run(repo, &["rev-parse", TRAIN]), tip, "nothing reverted");
     assert_eq!(*queue.0.lock().unwrap(), vec![42]);
     assert_eq!(sq.peek("operator", 10).unwrap().len(), 1);
 }
 
 #[test]
-fn cut_notice_is_sent_once_when_ready_and_once_at_max_age_cas_dcc9() {
+fn cut_notice_is_sent_once_per_state_and_names_the_project_release_command_cas_d9d3c() {
     let _env = TestEnvGuard::temp_home();
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
     let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::InProgress)]);
-    merge_child(repo, &cas_dir, "cas-a");
+    merge_child(repo, &cas_dir, "cas-a", &[]);
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\n").unwrap();
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();
     let notices = || sq.peek("sup-id", 10).unwrap();
     let none = BTreeSet::new();
@@ -146,6 +164,12 @@ fn cut_notice_is_sent_once_when_ready_and_once_at_max_age_cas_dcc9() {
     }
     assert_eq!(notices().len(), 1, "one max-age notice");
     assert!(notices()[0].payload.contains("max age"), "{}", notices()[0].payload);
+    assert!(notices()[0].payload.contains("run `scripts/release.sh`"), "the repository's own script by default");
+
+    // A project that releases by promotion names its own command.
+    let mut config = crate::config::Config::load(&cas_dir).unwrap();
+    config.set("factory.release_command", "scripts/promote.sh staging main").unwrap();
+    config.save(&cas_dir).unwrap();
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut b = tasks.get("cas-b").unwrap();
@@ -157,7 +181,7 @@ fn cut_notice_is_sent_once_when_ready_and_once_at_max_age_cas_dcc9() {
         notify_train_cuts(&cas_dir, &none, now).unwrap();
     }
     assert_eq!(notices().len(), 2, "one ready notice");
-    assert!(notices()[1].payload.contains("scripts/release.sh"), "{}", notices()[1].payload);
+    assert!(notices()[1].payload.contains(&format!("on {TRAIN}, run `scripts/promote.sh staging main`")), "{}", notices()[1].payload);
     let prompts = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
     assert_eq!(prompts.len(), 2);
     assert!(

@@ -66,30 +66,40 @@ impl TrainQueue for GhTrainQueue {
     }
 }
 
+/// One child reverted off the train.
 #[derive(Debug)]
-pub(crate) struct DropReceipt {
+pub(crate) struct Dropped {
     pub task_id: String,
-    pub train: String,
     pub merge: String,
     pub revert: String,
-    pub pr: Option<u64>,
     pub worker: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DropReceipt {
+    pub train: String,
+    pub dropped: Vec<Dropped>,
+    pub pr: Option<u64>,
 }
 
 impl DropReceipt {
     pub(crate) fn render(&self) -> String {
-        let queue = match self.pr {
-            Some(pr) => format!("Train PR #{pr} re-enqueued."),
-            None => "No train PR is open; nothing to re-enqueue.".into(),
-        };
-        let worker = match &self.worker {
-            Some(worker) => format!("Returned to {worker}."),
-            None => "Reopened with no live assignee; assign it.".into(),
-        };
-        format!(
-            "Dropped {} off {}: merge {} reverted as {}.\n{worker}\n{queue}",
-            self.task_id, self.train, self.merge, self.revert
-        )
+        let mut lines: Vec<String> = self
+            .dropped
+            .iter()
+            .map(|d| {
+                let worker = match &d.worker {
+                    Some(worker) => format!("returned to {worker}"),
+                    None => "reopened with no live assignee; assign it".into(),
+                };
+                format!("Dropped {}: merge {} reverted as {}; {worker}.", d.task_id, d.merge, d.revert)
+            })
+            .collect();
+        lines.push(match self.pr {
+            Some(pr) => format!("Train {} PR #{pr} re-enqueued once.", self.train),
+            None => format!("No PR is open for {}; nothing to re-enqueue.", self.train),
+        });
+        lines.join("\n")
     }
 }
 
@@ -123,10 +133,23 @@ fn introducing_merge(root: &Path, recorded: &str, source: &str) -> Result<String
     bail!("no merge commit near {recorded} brought in {source}")
 }
 
-/// Drop one child off its release train: revert, return, re-enqueue.
-pub(crate) async fn drop_child(
+/// The checkout holding a train's repository.
+fn train_repo_root(cas_root: &Path, epic: &Task) -> Result<PathBuf> {
+    Ok(match &epic.deliverables.work_target {
+        Some(target) => {
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, target)
+                .map_err(anyhow::Error::msg)?
+                .repo_root
+        }
+        None => cas_root.parent().context("project repository missing")?.to_path_buf(),
+    })
+}
+
+/// Drop children off their release train in one batch: revert every one,
+/// return each to its worker, re-enqueue the train once (rule-176(5)).
+pub(crate) async fn drop_children(
     core: &CasCore,
-    task_id: &str,
+    task_ids: &[String],
     reason: &str,
     queue: &dyn TrainQueue,
 ) -> Result<DropReceipt> {
@@ -134,23 +157,37 @@ pub(crate) async fn drop_child(
     if reason.is_empty() {
         bail!("train drop requires a nonempty --reason naming the failure");
     }
+    if task_ids.is_empty() {
+        bail!("train drop requires at least one task");
+    }
     let actor = core
         .resolve_live_supervisor_authority()
         .map_err(|_| anyhow::anyhow!("train drop requires a live registered supervisor"))?;
     let tasks = core.open_task_store().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let task = tasks.get(task_id)?;
-    let epic = tasks
-        .get_parent_epic(task_id)?
-        .context("the task is not on a release train")?;
+    let mut children = Vec::new();
+    let mut epic: Option<Task> = None;
+    for task_id in task_ids {
+        let task = tasks.get(task_id)?;
+        let parent = tasks
+            .get_parent_epic(task_id)?
+            .with_context(|| format!("{task_id} is not on a release train"))?;
+        if epic.as_ref().is_some_and(|epic| epic.id != parent.id) {
+            bail!("{task_id} rides a different train; drop each train's children separately");
+        }
+        children.push(task);
+        epic = Some(parent);
+    }
+    let epic = epic.expect("at least one task");
     let train = train_lane(&epic)
         .with_context(|| format!("{} is not a release-train epic", epic.id))?
         .to_string();
+    let listed = task_ids.join(", ");
 
     // Rule-176(5): the drop that re-enqueued the train was its one repair cycle.
     if epic.notes.lines().any(|line| line.contains(DROP_NOTE) && line.contains(REENQUEUED)) {
         let detail = format!(
             "P0: release train {train} ({}) failed again after its one repair cycle (rule-176(5)). \
-             A second drop was requested for {task_id}: {reason}. Nothing was reverted; you decide.",
+             A second drop was requested for {listed}: {reason}. Nothing was reverted; you decide.",
             epic.id
         );
         let session = actor.factory_session.as_deref().unwrap_or("supervisor-recovery");
@@ -164,62 +201,85 @@ pub(crate) async fn drop_child(
         bail!("{detail} Reported to the operator.");
     }
 
-    let root = match &epic.deliverables.work_target {
-        Some(target) => {
-            crate::mcp::tools::core::task::repo_context::resolve_repo_context(&core.cas_root, target)
-                .map_err(anyhow::Error::msg)?
-                .repo_root
+    let root = train_repo_root(&core.cas_root, &epic)?;
+    let records = cas_store::observed_delivery_merges_into(&core.cas_root, &train)?;
+    let mut merges = Vec::new();
+    for task in &children {
+        let (position, record) = records
+            .iter()
+            .enumerate()
+            .rfind(|(_, merge)| merge.task_id == task.id)
+            .with_context(|| format!("no recorded merge of {} into {train}", task.id))?;
+        let merge = introducing_merge(&root, &record.merge_commit_sha, &record.source_commit_sha)?;
+        if !is_ancestor(&root, &merge, &train) {
+            bail!("merge {merge} of {} is no longer on {train}", task.id);
         }
-        None => core.cas_root.parent().context("project repository missing")?.to_path_buf(),
-    };
-    let record = cas_store::observed_delivery_merges_into(&core.cas_root, &train)?
-        .into_iter()
-        .rfind(|merge| merge.task_id == task_id)
-        .with_context(|| format!("no recorded merge of {task_id} into {train}"))?;
-    let merge = introducing_merge(&root, &record.merge_commit_sha, &record.source_commit_sha)?;
-    if !is_ancestor(&root, &merge, &train) {
-        bail!("merge {merge} is no longer on {train}");
+        merges.push((position, task, merge));
     }
-    let message = format!(
-        "Revert {task_id} off the release train\n\n{reason}\n\nThis reverts merge {merge}."
-    );
-    let revert = crate::worktree::GitOperations::new(root.clone())
-        .revert_merge_via_temp_worktree(&train, &merge, &message)?
+    // Newest first, so a later child's revert never conflicts with an earlier one's.
+    merges.sort_by(|a, b| b.0.cmp(&a.0));
+    let plan: Vec<(String, String)> = merges
+        .iter()
+        .map(|(_, task, merge)| {
+            (
+                merge.clone(),
+                format!("Revert {} off the release train\n\n{reason}\n\nThis reverts merge {merge}.", task.id),
+            )
+        })
+        .collect();
+    let tip = crate::worktree::GitOperations::new(root.clone())
+        .revert_merges_via_temp_worktree(&train, &plan)?
         .context("the revert produced no commit")?;
     if git(&root, &["remote", "get-url", "origin"]).is_ok() {
-        git(&root, &["push", "-q", "origin", &format!("{revert}:refs/heads/{train}")])
-            .with_context(|| format!("revert {revert} is on local {train} but was not pushed"))?;
+        git(&root, &["push", "-q", "origin", &format!("{tip}:refs/heads/{train}")])
+            .with_context(|| format!("reverts up to {tip} are on local {train} but were not pushed"))?;
     }
+    // One revert commit per child, in plan order.
+    let mut reverts: Vec<String> = git(&root, &["rev-list", "--first-parent", "-n", &plan.len().to_string(), &tip])?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    reverts.reverse();
 
     use rmcp::handler::server::wrapper::Parameters;
-    core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
-        id: task_id.to_string(),
-        reason: Some(format!("dropped off the release train: {reason}")),
-    }))
-    .await
-    .map_err(|error| anyhow::anyhow!("revert {revert} landed but reopen failed: {}", error.message))?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M");
-    let instructions = format!(
-        "{task_id} was dropped off the release train {train}: {reason}. Revert {revert} undid merge \
-         {merge}. Start from the {train} tip, run `git revert {revert}` to restore your change, fix \
-         it, then park again with merge_request=true."
-    );
-    tasks.append_trusted_note(task_id, &format!("[{now}] {instructions}"))?;
     let agents = crate::store::open_agent_store(&core.cas_root)?.list(None)?;
-    let worker = task.assignee.as_deref().and_then(|assignee| {
-        agents
-            .iter()
-            .filter(|agent| agent.id == assignee || agent.name == assignee)
-            .max_by_key(|agent| agent.registered_at)
-    });
-    if let Some(worker) = worker {
-        supervisor_notices::enqueue(
-            &core.cas_root,
-            &Recipient::agent(worker),
-            "train_drop",
-            &instructions,
-            &revert,
-        )?;
+    let now = Utc::now().format("%Y-%m-%d %H:%M");
+    let mut dropped = Vec::new();
+    for ((_, task, merge), revert) in merges.iter().zip(reverts) {
+        core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
+            id: task.id.clone(),
+            reason: Some(format!("dropped off the release train: {reason}")),
+        }))
+        .await
+        .map_err(|error| anyhow::anyhow!("revert {revert} landed but reopening {} failed: {}", task.id, error.message))?;
+        let instructions = format!(
+            "{} was dropped off the release train {train}: {reason}. Revert {revert} undid merge \
+             {merge}. Start from the {train} tip, run `git revert {revert}` to restore your change, fix \
+             it, then park again with merge_request=true.",
+            task.id
+        );
+        tasks.append_trusted_note(&task.id, &format!("[{now}] {instructions}"))?;
+        let worker = task.assignee.as_deref().and_then(|assignee| {
+            agents
+                .iter()
+                .filter(|agent| agent.id == assignee || agent.name == assignee)
+                .max_by_key(|agent| agent.registered_at)
+        });
+        if let Some(worker) = worker {
+            supervisor_notices::enqueue(
+                &core.cas_root,
+                &Recipient::agent(worker),
+                "train_drop",
+                &instructions,
+                &revert,
+            )?;
+        }
+        dropped.push(Dropped {
+            task_id: task.id.clone(),
+            merge: merge.clone(),
+            revert,
+            worker: worker.map(|worker| worker.name.clone()),
+        });
     }
 
     let enqueued = queue.open_pr(&train).and_then(|pr| match pr {
@@ -233,17 +293,24 @@ pub(crate) async fn drop_child(
     };
     tasks.append_trusted_note(
         &epic.id,
-        &format!("[{now}] {DROP_NOTE} {task_id} merge {merge} reverted as {revert}; {outcome}"),
+        &format!("[{now}] {DROP_NOTE} {listed} reverted up to {tip}; {outcome}"),
     )?;
-    let pr = enqueued.with_context(|| format!("revert {revert} landed; re-enqueue the train PR by hand"))?;
-    Ok(DropReceipt {
-        task_id: task_id.to_string(),
-        train,
-        merge,
-        revert,
-        pr,
-        worker: worker.map(|worker| worker.name.clone()),
-    })
+    let pr = enqueued.with_context(|| format!("reverts landed at {tip}; re-enqueue the train PR by hand"))?;
+    Ok(DropReceipt { train, dropped, pr })
+}
+
+/// How the notice tells the supervisor to cut: the project's configured
+/// release or promotion command, else `scripts/release.sh` when it exists.
+fn cut_command(configured: Option<&str>, repo_root: Option<&Path>, train: &str) -> String {
+    let script = repo_root
+        .is_some_and(|root| root.join("scripts/release.sh").is_file())
+        .then_some("scripts/release.sh");
+    match configured.or(script) {
+        Some(command) => format!("on {train}, run `{command}`"),
+        None => format!(
+            "run this project's release or promotion from {train} (set factory.release_command to name it here)"
+        ),
+    }
 }
 
 /// Send each due "train ready to cut" notice once. `queued` holds branches
@@ -253,7 +320,8 @@ pub(crate) fn notify_train_cuts(
     queued: &BTreeSet<String>,
     now: DateTime<Utc>,
 ) -> Result<usize> {
-    let max_age_hours = crate::config::Config::load(cas_dir)?.factory().release_train_max_age_hours;
+    let factory = crate::config::Config::load(cas_dir)?.factory();
+    let max_age_hours = factory.release_train_max_age_hours;
     let tasks = crate::store::open_task_store(cas_dir)?;
     let mut sent = 0;
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
@@ -272,7 +340,11 @@ pub(crate) fn notify_train_cuts(
             .filter(|child| matches!(child.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge))
             .count();
         let age = now - first.created_at;
-        let cut = format!("`git switch {train} && scripts/release.sh` (cas-cut-release)");
+        let cut = cut_command(
+            factory.release_command.as_deref(),
+            train_repo_root(cas_dir, &epic).ok().as_deref(),
+            &train,
+        );
         let (occurrence, detail) = if in_flight == 0 {
             (
                 last.merge_commit_sha.clone(),

@@ -1080,6 +1080,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.worker_local_gate", " pnpm ci:local ", "pnpm ci:local"),
+        ("factory.release_command", " scripts/promote.sh staging ", "scripts/promote.sh staging"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
@@ -1236,6 +1237,7 @@ fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
         scratch_root: Some("/mnt/rewind/cas".into()),
         epic_base_branch: Some("main".into()),
         write_roots: vec!["/mnt/operator-approved".into()],
+        release_command: Some("scripts/release.sh".into()),
         ..FactoryConfig::default()
     };
     let config = Config { factory: Some(factory.clone()), ..Config::default() };

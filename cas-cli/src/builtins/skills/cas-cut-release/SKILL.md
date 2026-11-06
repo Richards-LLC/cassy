@@ -39,10 +39,10 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    version and re-enables auto-merge. Exit 4 is a code conflict with
    `main`: resolve it on the branch, push, rerun. Exit 3 means the queue
    ejected the PR: one repair cycle (run every remaining failing check in one
-   batch, fix, push), then rerun the command. When one train child is the
-   cause, `cas factory train drop <task> --reason "<failing job>"` is that
-   cycle: it reverts the child, returns it to its worker and re-enqueues the
-   train. A second ejection goes to the operator as a P0.
+   batch, fix, push), then rerun the command. When train children are the
+   cause, `cas factory train drop <task>... --reason "<failing job>"` is that
+   cycle: it reverts them all, returns each to its worker and re-enqueues the
+   train once. A second ejection goes to the operator as a P0.
 4. The merge queue runs the required checks; Commander journey shards run
    only for `hub-web/` product inputs. The same run starts the optional
    Release Prebuild (Linux `release-fast`, macOS ARM64 without LTO). Wait with

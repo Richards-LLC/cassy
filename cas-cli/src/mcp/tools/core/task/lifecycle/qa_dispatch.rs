@@ -1315,6 +1315,10 @@ impl CasCore {
             .clone()
             .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)));
         let branch_tip = super::close_ops::resolve_branch_sha(repo, &branch);
+        let plain_lane = task.assignee.as_deref().is_some_and(|assignee| {
+            branch.strip_prefix("origin/").unwrap_or(&branch)
+                == crate::factory_isolation::expected_worker_branch(assignee)
+        });
         // cas-de60: target containment proves integration, not ownership. A
         // merged shared lane can still be a different task's old delivery.
         // With no recorded head there is no anchor advance: check this tip
@@ -1322,6 +1326,13 @@ impl CasCore {
         // requests. Recorded anchors and explicit receipts remain authoritative.
         let own_tip = recorded_head.is_some()
             || branch_tip.as_deref().is_some_and(|tip| {
+                // tip..tip has no continuation subjects. On a reusable lane,
+                // older own commits cannot establish ownership of this tip.
+                if plain_lane && !super::close_ops::commit_is_task_attributable(
+                    repo, tip, &super::close_ops::task_commit_identity(task, None),
+                ) {
+                    return false;
+                }
                 self.open_task_store().is_ok_and(|store| {
                     self.tip_is_own_task_lineage(
                         store.as_ref(),

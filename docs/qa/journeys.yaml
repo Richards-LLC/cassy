@@ -104,7 +104,7 @@ bug_families:
     journeys: [HUB-J11, HUB-J12]
   peer-answer-and-timer-wakes:
     title: Untyped peer messages and peer replies wake the idle supervisor and deadlines and work retries remain valid timers
-    tasks: [cas-e4c7, cas-7dd1d]
+    tasks: [cas-e4c7, cas-7dd1d, cas-88a3]
     invariants: [HUB-J5-NO-ACTION-WAKES]
     journeys: [HUB-J5]
   native-background-wait-bound:

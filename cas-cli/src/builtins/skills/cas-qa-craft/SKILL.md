@@ -85,8 +85,8 @@ These hold for every walk, task pass or [independent pass](references/independen
   input early passes while the rest break. Entry paths take the first rows; any past the cap stay
   `NOT EXERCISED: <reason>`.
 - **Read the invariant back** from the system of record (database query, API read, admin view) after
-  the final step, not from the screen: a success message can sit on wrong data. Put the read and its
-  result in the row's `observed`.
+  the final step, not from the screen. Grade paid/account routes and adjudicate harness-only reds
+  using [server read-back](references/evidence-ledger.md#server-read-back-and-harness-failures); put the read and result in `observed`.
 - **Map the build.** For a served app, record the backend and frontend SHAs served at the start and
   end of each walk; disclose a mixed build in the ledger header. A backend-only merge ships no new
   frontend build: prove it with `git diff --stat <served-frontend-sha> <tip> -- <frontend paths>`.

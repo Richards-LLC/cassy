@@ -7862,7 +7862,7 @@ impl CasService {
             }
         }
         let mut report =
-            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on, &retained_tasks);
+            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on, &retained_tasks, retained.is_partial());
         report.push_str(&retained.render());
         if let Some(gain) = crate::mcp::tools::core::task::lifecycle::review_loop::epic_loop_gain(&self.inner.cas_root, epic_id) {
             report.push_str(&gain.status_line());

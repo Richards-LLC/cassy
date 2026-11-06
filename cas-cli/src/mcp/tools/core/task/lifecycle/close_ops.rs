@@ -22318,6 +22318,7 @@ pub(crate) fn render_epic_status_report_with_stack(
         stacked_on,
         None,
         &[],
+        false,
     )
 }
 
@@ -22330,6 +22331,7 @@ pub(crate) fn render_epic_status_collection(
     collection: &EpicStatusCollection,
     stacked_on: &[String],
     retained_tasks: &[String],
+    retained_inventory_partial: bool,
 ) -> String {
     render_epic_status_report_with_stack_and_view(
         epic_id,
@@ -22338,6 +22340,7 @@ pub(crate) fn render_epic_status_collection(
         stacked_on,
         Some(collection),
         retained_tasks,
+        retained_inventory_partial,
     )
 }
 
@@ -22348,6 +22351,7 @@ fn render_epic_status_report_with_stack_and_view(
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
     retained_tasks: &[String],
+    _retained_inventory_partial: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -39526,7 +39530,7 @@ mod epic_status_gate_tests {
         assert!(collection.statuses[0].merge_evidence_note.is_none());
         assert!(collection.statuses[0].content_check_error.is_none());
 
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
         assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
     }
@@ -39552,9 +39556,24 @@ mod epic_status_gate_tests {
 
         assert!(collection.statuses.is_empty());
         assert!(collection.budget_exhausted);
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
+
+        // A failed retained-worktree scan can leave no entries, just like an
+        // exhausted branch-collection budget. Neither proves all work landed.
+        let mut collection = collection;
+        for (budget_exhausted, inventory_partial) in [(true, false), (false, true), (false, false)] {
+            collection.budget_exhausted = budget_exhausted;
+            let report = render_epic_status_collection(
+                "cas-epic", "main", &collection, &[], &[], inventory_partial,
+            );
+            assert_eq!(
+                report.contains("All child factory branches are merged"),
+                !budget_exhausted && !inventory_partial,
+                "unknown inventory must not claim all-clear: {report}",
+            );
+        }
     }
 
     #[test]
@@ -39644,7 +39663,7 @@ mod epic_status_gate_tests {
             started.elapsed()
         );
         if collection.budget_exhausted {
-            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }

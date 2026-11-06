@@ -119,10 +119,10 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
                 }).unwrap();
                 let mut pane = Pane::with_pty(&name, PaneKind::Worker, pty, rows, cols, SupervisorCli::Codex).unwrap();
                 for row in 0..10 { pane.feed(format!("{name} history {row}\r\n").as_bytes()).unwrap(); }
-                daemon.app.mux.add_pane(pane);
+                daemon.app.adopt_worker_pane_for_test(pane);
             }
             let metadata = crate::ui::factory::create_metadata("provision-test", std::process::id(),
-                daemon.app.supervisor_name(), &[], None, Some(root.parent().unwrap().to_str().unwrap()), None);
+                daemon.app.supervisor_name(), daemon.app.worker_names(), None, Some(root.parent().unwrap().to_str().unwrap()), None);
             crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &root).unwrap();
             std::fs::write(root.join("before.json"), serde_json::to_vec(&serde_json::json!({
                 "pid": std::process::id(), "argv": std::env::args_os().collect::<Vec<_>>(), "panes": daemon.app.mux.panes().map(|pane| (pane.id(), pane.process_group_id())).collect::<Vec<_>>()

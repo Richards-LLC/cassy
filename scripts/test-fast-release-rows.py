@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -541,8 +542,10 @@ class FastRows(unittest.TestCase):
                              "cas-cli/src/builtins/skills/example/SKILL.md:6: coordination action=remind: missing remind_message")
 
     def push(self, **env):
+        fixture_env = {key: value for key, value in os.environ.items() if key != "ZERO_BASE_REF"}
         return command(self.repo, "git", "push", "origin", "HEAD:refs/heads/factory/lane",
-                       env=dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"), **env))
+                       env={**fixture_env, "CARGO": str(self.repo / "cargo-tripwire"),
+                            "CAS_ROOT": str(self.repo / ".cas"), **env})
 
     def install_hooks(self, **overrides):
         # The installer is operator-only. Its fixture must not inherit this
@@ -559,6 +562,35 @@ class FastRows(unittest.TestCase):
         for source in (ROOT / ".githooks").glob("*"):
             self.write(".githooks/" + source.name, source.read_text())
             (self.repo / ".githooks" / source.name).chmod(source.stat().st_mode)
+
+    def test_first_push_uses_task_epic_when_main_has_moved_cas_0d8d(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.copy_hook_installer()
+        self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^10.0.0\n')
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^9.99.0\n')
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+        command(self.repo, "git", "checkout", "-qb", "factory/lane", "origin/epic/train")
+        self.assertEqual(self.install_hooks().returncode, 0)
+        self.write("scripts/example.py", "# unrelated lane\n")
+        self.commit()
+        root = self.repo / ".cas"
+        root.mkdir()
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                "work_target": {"target_branch": "epic/train"},
+                "factory_branch_start": {"branch": "factory/lane"},
+            })))
+        pushed = self.push()
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        _, path = self.receipt()
+        # pin: the fast-row receipt records the comparison ref actually used by the push.
+        self.assertIn("base=origin/epic/train ", path.read_text())
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"

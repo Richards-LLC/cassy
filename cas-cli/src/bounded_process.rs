@@ -40,6 +40,7 @@ pub(crate) enum BoundedCommandError {
     Io,
 }
 
+#[track_caller]
 pub(crate) fn run_command(
     command: &mut Command,
     deadline: Deadline,
@@ -50,6 +51,7 @@ pub(crate) fn run_command(
 
 /// The same deadline and process-group cleanup for probes with explicit input.
 /// Callers use a file rather than a pipe so writing input cannot block cleanup.
+#[track_caller]
 pub(crate) fn run_command_with_stdin(
     command: &mut Command,
     deadline: Deadline,
@@ -61,7 +63,29 @@ pub(crate) fn run_command_with_stdin(
 
 /// Cancellation reaps this probe's owned process group before returning, so
 /// background publication cannot install a route after the hub has stopped.
+///
+/// A `gh` run is also counted against the GitHub API budget and refused
+/// without a call while a rate-limit backoff holds (cas-c24e).
+#[track_caller]
 pub(crate) fn run_command_cancellable(
+    command: &mut Command,
+    deadline: Deadline,
+    per_command_cap: Duration,
+    stdin: Stdio,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Output, BoundedCommandError> {
+    let gh = crate::gh_budget::GhCall::start(command, std::panic::Location::caller());
+    if let Some(output) = gh.as_ref().and_then(crate::gh_budget::GhCall::backoff_output) {
+        return Ok(output);
+    }
+    let result = run_bounded(command, deadline, per_command_cap, stdin, cancelled);
+    if let Some(gh) = gh {
+        gh.finish(&result);
+    }
+    result
+}
+
+fn run_bounded(
     command: &mut Command,
     deadline: Deadline,
     per_command_cap: Duration,

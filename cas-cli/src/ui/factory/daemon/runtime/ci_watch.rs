@@ -880,6 +880,8 @@ pub(crate) struct GhCiTransport {
     repo: String,
     cwd: PathBuf,
     gh_binary: PathBuf,
+    /// cas-c24e: one completed-runs read per poll; two collectors share it.
+    completed: std::sync::OnceLock<Vec<CiRun>>,
 }
 
 impl GhCiTransport {
@@ -892,6 +894,7 @@ impl GhCiTransport {
             repo,
             cwd: project.to_path_buf(),
             gh_binary,
+            completed: std::sync::OnceLock::new(),
         })
     }
 
@@ -943,6 +946,9 @@ impl GhCiTransport {
 
 impl CiTransport for GhCiTransport {
     fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+        if let Some(runs) = self.completed.get() {
+            return Ok(runs.clone());
+        }
         let response: RunsResponse = self.gh_json(&[
             "api".to_string(),
             "-X".to_string(),
@@ -953,6 +959,7 @@ impl CiTransport for GhCiTransport {
             "-f".to_string(),
             "per_page=100".to_string(),
         ])?;
+        let _ = self.completed.set(response.workflow_runs.clone());
         Ok(response.workflow_runs)
     }
 
@@ -1711,6 +1718,7 @@ mod tests {
                 repo: "org/repo".to_string(),
                 cwd: temp.path().to_path_buf(),
                 gh_binary: gh,
+                completed: Default::default(),
             };
             let condition = CiCompleted { sha: sha.to_string(), workflow: Some("CI".to_string()) };
             let runs = ci_completed_runs(&transport, &condition).unwrap();
@@ -1894,6 +1902,7 @@ mod tests {
             repo: "org/repo".to_string(),
             cwd: temp.path().to_path_buf(),
             gh_binary: gh,
+            completed: Default::default(),
         };
 
         let pulls = transport

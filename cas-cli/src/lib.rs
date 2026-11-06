@@ -75,6 +75,7 @@ pub(crate) mod supervisor_notices;
 pub(crate) mod supervisor_continuity;
 pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod train_guardrails;
+pub(crate) mod gh_budget;
 pub(crate) mod supervisor_message_wakes;
 pub(crate) mod factory_scratch;
 pub mod factory_review_scratch;

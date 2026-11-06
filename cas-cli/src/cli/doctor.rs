@@ -1078,6 +1078,14 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         checks.push(duplicates);
     }
     checks.push(install_parity_check(&gather_install_parity()));
+    checks.push({
+        let (backoff, message) = crate::gh_budget::doctor_summary();
+        Check::new(
+            "GitHub API budget",
+            if backoff { CheckStatus::Warning } else { CheckStatus::Ok },
+            message,
+        )
+    });
     checks
 }
 

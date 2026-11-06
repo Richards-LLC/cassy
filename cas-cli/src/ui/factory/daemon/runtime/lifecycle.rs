@@ -966,38 +966,6 @@ fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     }
 }
 
-/// Parked deliveries targeting `main`, for the CI watcher. Runs on the
-/// blocking pool with the GitHub calls (GH #1165).
-fn awaiting_merge_deliveries(
-    cas_dir: &std::path::Path,
-) -> Vec<super::ci_watch::AwaitingMergeDelivery> {
-    crate::store::open_task_store_cached(cas_dir)
-        .ok()
-        .and_then(|store| store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|task| {
-            let worker = task.assignee?;
-            let work_target = task.deliverables.work_target.as_ref()?;
-            if work_target.target_branch != "main" {
-                return None;
-            }
-            let branch = task
-                .deliverables
-                .parked_branch
-                .or(task.branch)
-                .unwrap_or_else(|| format!("factory/{worker}"));
-            Some(super::ci_watch::AwaitingMergeDelivery {
-                task_id: task.id,
-                worker,
-                branch,
-                branch_tip: task.deliverables.factory_branch_anchor,
-                pr_number: task.deliverables.delivery_pr_number,
-            })
-        })
-        .collect()
-}
-
 /// Persist one completed CI-watch poll: PR observations, merge timeouts,
 /// merge-queue ejections, PR-lane failures and red-run wakes. Runs on the
 /// daemon's store worker, never on the UI loop (GH #1165).
@@ -3964,7 +3932,8 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
-                        let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
+                        let deliveries =
+                            super::merge_queue_ejection::awaiting_merge_deliveries(&watch_cas_dir);
                         let supervisor_prs =
                             super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;

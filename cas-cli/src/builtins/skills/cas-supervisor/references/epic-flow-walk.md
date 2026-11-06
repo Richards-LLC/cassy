@@ -17,7 +17,9 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
    evidence agent against the assembled build and record its agent ID. This is
    evidence collection, not a close verdict: give it its own prompt with this
    procedure, not the sealed task-verifier close dispatch.
-4. Give the agent `cas-qa-craft` and the ledger context, with one combined
+4. Split each channel/viewport into an independent sub-lane or use the pinned kit's
+   `runSurfaceLanes` jobs; give each its own persona, browser profile and ledger.
+   Give the agent `cas-qa-craft` and the ledger context, with one combined
    matrix time-boxed by `qa.pass_timeout_mins` in place of its per-task
    defaults. Row 1 is the combined demo happy path; map every child demo to
    explicit actions in that row or another cell. Across the matrix: at least

@@ -165,7 +165,7 @@ mod tests {
         }
         #[cfg(unix)] {
             std::os::unix::fs::symlink(tmp.path(), tmp.path().join("escape")).unwrap();
-            assert_eq!(ledgers(tmp.path()), vec![ledger]);
+            assert_eq!(ledgers(&tmp.path().canonicalize().unwrap()), vec![ledger.canonicalize().unwrap()]);
         }
     }
 

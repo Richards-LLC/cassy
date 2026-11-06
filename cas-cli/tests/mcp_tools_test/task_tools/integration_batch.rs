@@ -196,6 +196,10 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
         );
         env.remove("CAS_AGENT_ROLE");
         assert!(report.contains("integration batch squash"), "{report}");
+        let row = report.lines().find(|line| line.starts_with("| cas-b401 |")).unwrap();
+        assert!(row.contains("merged (squash, ancestry lost)"), "{report}");
+        assert!(report.contains("Retained worker local work needs review"), "{report}");
+        assert!(!report.contains("✓ All child factory branches are merged"), "{report}");
         assert_eq!(
             task.deliverables.factory_branch_anchor.as_deref(),
             Some(head.as_str())

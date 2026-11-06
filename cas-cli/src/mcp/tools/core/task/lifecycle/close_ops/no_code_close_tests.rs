@@ -296,6 +296,112 @@ fn claim(f: &Fixture, id: &str) {
         .unwrap();
 }
 
+fn issue_delivery(f: &Fixture, id: &str, target: &str) -> (PathBuf, String) {
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let lane = format!("{LANE}-{id}");
+    git(&checkout, &["checkout", "-q", "-b", &lane, target]);
+    let mut task = assigned(id, TaskType::Bug, target);
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: lane.clone(),
+        base_sha: git(&checkout, &["rev-parse", "HEAD"]),
+    });
+    f.put(&task);
+    claim(f, id);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+    agents.update(&agent).unwrap();
+    (checkout, lane)
+}
+
+#[tokio::test]
+async fn own_contextual_task_mention_can_park_gh1496() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-eddf";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n// collection exemption\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-eddf): own delivery"]);
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["commit", "-qam", "chore: leave cas-3094 typed collection exemptions to epic owner"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Own delivery ready",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+    assert!(!response.contains("foreign commit"), "{response}");
+}
+
+#[tokio::test]
+async fn integrated_squash_receipt_survives_large_source_history_gh1454() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-5a43";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    for _ in 0..201 {
+        git(&checkout, &["commit", "-q", "--allow-empty", "-m", "inherited history"]);
+    }
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-5a43): own delivery"]);
+    let anchor = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--squash", &lane]);
+    git(repo, &["commit", "-qm", "fix(cas-5a43): integrated squash"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let mut task = f.task(id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(lane);
+    task.deliverables.factory_branch_anchor = Some(anchor);
+    f.put(&task);
+    let response = call(&f.supervisor, serde_json::json!({
+        "action": "close", "id": id, "reason": "Recover integrated squash",
+        "commit_receipt": receipt,
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
+}
+
+#[tokio::test]
+async fn explicit_staging_scope_fix_survives_epic_child_close_gh1452() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "staging");
+    let repo = f.dir.path();
+    git(repo, &["branch", "epic/child-target", "staging"]);
+    git(repo, &["push", "-q", "origin", "epic/child-target"]);
+    let id = "cas-ea89";
+    let (checkout, lane) = issue_delivery(&f, id, "epic/child-target");
+    let mut epic = assigned("cas-cca7", TaskType::Epic, "staging");
+    epic.assignee = None;
+    epic.branch = Some("epic/child-target".into());
+    f.put(&epic);
+    open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+        id.into(), epic.id, DependencyType::ParentChild,
+    )).unwrap();
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-ea89): own delivery"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    git(repo, &["checkout", "-q", "staging"]);
+    git(repo, &["merge", "-q", "--squash", &lane]);
+    git(repo, &["commit", "-qm", "fix(cas-ea89): integrated squash"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "staging"]);
+    let updated = call(&f.supervisor, serde_json::json!({
+        "action": "update", "id": id, "proof_scope_fix": true,
+        "target_branch": "staging", "reason": "Delivery intentionally integrated into staging",
+    })).await;
+    assert!(updated.contains("staging"), "{updated}");
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Delivery integrated into chosen target",
+        "commit_receipt": receipt,
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::Closed, "{response}");
+}
+
 /// The task closed on its proof and nothing of the lane was attributed to it.
 fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
     let task = f.task(id);

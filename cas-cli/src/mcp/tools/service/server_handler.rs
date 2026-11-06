@@ -460,7 +460,7 @@ impl CasService {
     ///   keeps running to completion (one mutation, no retry invited);
     /// - the budget elapsing first returns the error it always did (COMMITTED
     ///   or UNKNOWN) and cancels the handler only when nothing committed.
-    async fn call_with_deadline_and_grace<F>(
+    pub(crate) async fn call_with_deadline_and_grace<F>(
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,

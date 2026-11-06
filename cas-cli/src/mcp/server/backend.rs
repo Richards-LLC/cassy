@@ -214,6 +214,37 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn background_tool_work_defers_backend_swap_cas_5fd5() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Switchable::standby(dir.path().join(".cas"));
+        let service = backend.passive.clone();
+        backend.active.set(service.clone()).ok().unwrap();
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let work_finish = finish.clone();
+        let work_finished = finished.clone();
+        let arguments = json!({"action":"close", "id":"cas-background"});
+        let response = service.call_with_deadline_and_grace("task", arguments.as_object(),
+            std::time::Duration::from_secs(60), std::time::Duration::ZERO, async move {
+                crate::mcp::tools::service::mutation_receipt::task_committed("cas-background");
+                work_finish.notified().await;
+                work_finished.store(true, Ordering::Release);
+                Ok(rmcp::model::CallToolResult::success(Vec::new()))
+            }).await.unwrap();
+        assert_ne!(response.is_error, Some(true));
+        assert!(!finished.load(Ordering::Acquire), "the response must precede background completion");
+        // The front's candidate switch uses this bounded idle handshake after
+        // the client has received its early answer. It must defer retirement.
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(45), backend.wait_idle()).await.is_err(),
+            "a new install must not retire the backend while promised tool work is still running");
+        finish.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), backend.wait_idle()).await
+            .expect("the same backend can retire once background work completes");
+        assert!(finished.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn standby_negotiates_real_rmcp_without_opening_a_store_cas_81c4() {
         let dir = tempfile::tempdir().unwrap();

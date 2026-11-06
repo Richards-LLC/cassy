@@ -323,6 +323,7 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
         !row.contains("merged ("),
         "retained ahead-of-receipt work must not read clean: {status}"
     );
+    assert!(row.contains("retained local work"), "{status}");
     assert!(
         status.contains("Retained worker") && status.contains("unpushed=1"),
         "{status}"
@@ -339,6 +340,8 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
             "visibility never refreshes an index"
         );
     }
+    let partial = crate::worktree::retained::scan_until(&root, std::time::Instant::now());
+    assert!(partial.needs_attention() && partial.compact().contains("partial inventory"));
     assert_eq!(
         git(&retained[1].2, &["status", "--porcelain"]),
         "?? dirty.txt"

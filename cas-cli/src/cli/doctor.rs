@@ -7096,7 +7096,7 @@ mod tests {
             assert!(check.message.contains("merge queue"), "{}", check.message);
             if warning {
                 assert!(check.message.contains("gh api -X PUT repos/acme/repo/rulesets/42"), "{}", check.message);
-                let rendered = serialize_checks(&[check.clone()], &[]);
+                let rendered = serialize_checks(&[check], &[]);
                 assert!(rendered[0]["remediation"].as_str().unwrap().contains("gh api -X PUT repos/acme/repo/rulesets/42"));
             }
             let calls = fs::read_to_string(&log).unwrap();

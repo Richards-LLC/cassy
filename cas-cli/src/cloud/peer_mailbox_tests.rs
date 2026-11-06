@@ -817,7 +817,7 @@ async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
                 "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"owner"
             }]}))).expect(lookups as u64).mount(&server).await;
         Mock::given(method("GET")).and(path("/api/agents/locks"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]})))
             .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
         let messages = recipient.map(|id| serde_json::json!({
             "id":"mail", "project_id":REPO, "recipient_agent_id":id,

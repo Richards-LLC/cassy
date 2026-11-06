@@ -207,10 +207,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(remoteTab).toContainText("prowl");
         await remoteTab.focus(); await page.keyboard.press("Enter");
         await expect(remoteTab).toHaveAttribute("aria-selected", "true");
-        await expect(page.locator("#epic-tab-panel")).toContainText("remote-worker");
         // Parked work folds to a count until it is asked for.
         await expect(page.locator("#epic-tab-panel")).not.toContainText("Parking");
         await page.getByRole("button", { name: "Show 1 parked" }).click();
+        await expect(page.locator("#epic-tab-panel")).toContainText("remote-worker");
         await expect(page.locator("#epic-tab-panel")).toContainText("Parking");
         follow.tasks[0].delivery_state = "merged";
         follow.epics[0].progress!.merged = 3;

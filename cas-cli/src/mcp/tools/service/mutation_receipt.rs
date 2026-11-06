@@ -18,6 +18,7 @@ pub(crate) struct Receipt {
     /// note, a parked anchor) sets `commit` but never this, so an early
     /// answer can only ever describe the mutation the caller asked for.
     pub terminal: OnceLock<std::time::Instant>,
+    pub outcome: OnceLock<String>,
     /// cas-3937 review: the outcome of the work after a merge's commit (its
     /// task close), for the note recorded once that work finishes.
     pub followup: std::sync::Mutex<Option<String>>,
@@ -34,6 +35,7 @@ impl Receipt {
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
+            outcome: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
             phases: std::sync::Mutex::new(Vec::new()),
         })
@@ -121,14 +123,18 @@ pub(crate) fn task_committed(id: &str) {
 /// reports COMMITTED, and lets the dispatch answer once post-commit work
 /// overruns its grace instead of holding the response hostage.
 pub(crate) fn task_terminal_committed(id: &str) {
+    task_disposition_committed(id, &format!("task `{id}` write committed"));
+}
+
+/// A checked park is the worker close request's committed disposition. It
+/// awaits a merge; it must never be described as a completed task close.
+pub(crate) fn task_disposition_committed(id: &str, outcome: &str) {
     task_committed(id);
     if let Some(receipt) = current()
         && receipt.tool == "task"
-        && receipt
-            .task_id
-            .as_deref()
-            .is_none_or(|expected| expected == id)
+        && receipt.task_id.as_deref().is_none_or(|expected| expected == id)
     {
+        let _ = receipt.outcome.set(outcome.to_string());
         let _ = receipt.terminal.set(std::time::Instant::now());
     }
 }

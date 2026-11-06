@@ -252,7 +252,7 @@ impl ServerHandler for CasService {
                     &tool_name,
                     timeout_arguments.as_ref(),
                     budget,
-                    POST_COMMIT_GRACE,
+                    response_grace(&tool_name, timeout_arguments.as_ref()),
                     handler,
                 )
                 .await;
@@ -345,6 +345,15 @@ fn caller_transcript_path(agent: &crate::types::Agent) -> Option<std::path::Path
 /// Closed write, a note append), the caller is answered after at most this
 /// much more post-commit work; the rest finishes in the background.
 const POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn response_grace(tool: &str, arguments: Option<&serde_json::Map<String, serde_json::Value>>) -> std::time::Duration {
+    let action = arguments.and_then(|args| args.get("action")).and_then(serde_json::Value::as_str);
+    if matches!((tool, action), ("factory", Some("worktree_merge")) | ("task", Some("close"))) {
+        std::time::Duration::ZERO
+    } else {
+        POST_COMMIT_GRACE
+    }
+}
 // Receipt validation and persistence are already complete. Give fast closes a
 // short chance to return inline without making a batch wait on selector work.
 const BATCH_RECEIPT_POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -514,9 +523,10 @@ impl CasService {
         let won = tokio::select! {
             biased;
             joined = &mut handle => Won::Handler(joined),
-            // The budget outranks the grace when both are due in one tick.
-            () = tokio::time::sleep_until(deadline) => Won::Deadline,
+            // A confirmed terminal commit outranks an expiring budget. Its
+            // receipt is a success even if both became observable together.
             () = post_commit_grace => Won::Grace,
+            () = tokio::time::sleep_until(deadline) => Won::Deadline,
         };
         match won {
             Won::Handler(joined) => {
@@ -544,13 +554,13 @@ impl CasService {
             }
             Won::Grace => {
                 let elapsed = start.elapsed();
-                let description = receipt
+                let description = receipt.outcome.get().cloned().or_else(|| receipt
                     .commit
                     .get()
-                    .map(|commit| commit.description.clone())
+                    .map(|commit| commit.description.clone()))
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                if !matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
+                if !matches!(receipt.action(), "worktree_merge" | "batch_receipt" | "close") {
                     let watcher_receipt = receipt.clone();
                     let tool = tool_name.to_string();
                     tokio::spawn(async move {
@@ -566,22 +576,15 @@ impl CasService {
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
                     return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                        "COMMITTED: `{tool_name} action={action}` write committed ({description}). Its \
-                         remaining work was still running {grace_s:.1}s after the commit and \
-                         finishes in the background. Do not retry it; read the task's notes \
-                         for the rest.",
+                        "COMMITTED: `{tool_name} action={action}` write committed ({description}). \
+                         Remaining work continues in the background; its outcome is in task notes. Do not retry.",
                         action = receipt.action(),
-                        grace_s = grace.as_secs_f64(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                    "COMMITTED: task{task} {action} write committed ({description}). Its post-commit work \
-                     (search index, reminders, the lifecycle outbox, dependents, leases) was still \
-                     running {grace_s:.1}s after the commit and finishes in the background. Do not \
-                     retry; `task action=show` reflects the committed state.",
-                    action = receipt.action(),
-                    grace_s = grace.as_secs_f64(),
+                    "COMMITTED: {description}. Remaining close follow-up continues in the background; \
+                     read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
+                    receipt.timings(),
                 ))]))
             }
             Won::Deadline => {
@@ -806,7 +809,7 @@ impl CasService {
                 .collect()
         } else {
             arguments
-                .and_then(|args| args.get("task_id"))
+                .and_then(|args| args.get(if receipt.action() == "close" { "id" } else { "task_id" }))
                 .and_then(serde_json::Value::as_str)
                 .filter(|id| !id.trim().is_empty())
                 .map(str::to_string)
@@ -818,7 +821,7 @@ impl CasService {
         let service = self.clone();
         tokio::spawn(async move {
             let joined = handle.await;
-            let tool = if receipt.action() == "batch_receipt" { "verification" } else { "factory" };
+            let tool = match receipt.action() { "batch_receipt" => "verification", "close" => "task", _ => "factory" };
             log_post_commit(tool, &receipt, "finished in the background");
             // cas-3937 review: the close's own outcome, not the merge
             // answer's first line (always its CI block).
@@ -842,6 +845,7 @@ impl CasService {
                 None => late_close_summary(&joined),
             };
             let action = receipt.action().to_string();
+            let timings = receipt.timings();
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
@@ -852,7 +856,7 @@ impl CasService {
                         .map(|task| task.status.to_string())
                         .unwrap_or_else(|error| format!("unreadable ({error})"));
                     let note = format!(
-                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
+                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}. Timing (inclusive): {timings}",
                         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                         elapsed.as_secs_f64(),
                     );
@@ -1617,6 +1621,42 @@ mod tests {
         assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
         assert!(!error.message.contains("COMMITTED ("), "{error:?}");
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+
+        let tasks = service.inner.open_task_store().unwrap();
+        for (id, status, disposition) in [
+            ("cas-closed", crate::types::TaskStatus::Closed, "closed"),
+            ("cas-parked", crate::types::TaskStatus::AwaitingMerge, "parked awaiting_merge"),
+        ] {
+            let task = crate::types::Task::new(id.into(), "checked disposition".into());
+            tasks.add(&task).unwrap();
+            let arguments = serde_json::json!({"action":"close", "id":id});
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let (finished, continued) = tokio::sync::oneshot::channel();
+            let store = tasks.clone();
+            let started = tokio::time::Instant::now();
+            tokio::time::pause();
+            let answer = service.call_with_deadline_and_grace(
+                "task", arguments.as_object(), std::time::Duration::from_secs(55),
+                super::response_grace("task", arguments.as_object()), async move {
+                    let mut task = store.get(id).unwrap();
+                    task.status = status;
+                    store.update(&task).unwrap();
+                    super::super::mutation_receipt::task_disposition_committed(id, disposition);
+                    held.await.unwrap();
+                    finished.send(()).unwrap();
+                    Ok(rmcp::model::CallToolResult::success(vec![]))
+                },
+            ).await.expect("a durable disposition answers before held follow-up");
+            let elapsed = started.elapsed();
+            tokio::time::resume();
+            let text = format!("{answer:?}");
+            assert!(text.contains("COMMITTED") && text.contains(disposition), "{text}");
+            assert!(!text.contains("UNKNOWN") && !text.contains("IN_PROGRESS"), "{text}");
+            assert!(elapsed < std::time::Duration::from_secs(1), "committed close waited {elapsed:?}");
+            assert_eq!(tasks.get(id).unwrap().status, status);
+            resume.send(()).unwrap();
+            continued.await.unwrap();
+        }
     }
 
     /// cas-3fc8: after a merge's early COMMITTED answer, the task note says

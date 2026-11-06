@@ -1729,6 +1729,16 @@ request's commit was not confirmed. Re-query state before retrying either case.
 The error's structured data includes `mutation_outcome`, `notification_id`,
 `elapsed_ms` and `budget_ms`.
 
+Factory merge and task-close handlers run synchronous Git/store work on the
+blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
+commits, the response adds no post-commit grace: it names that outcome while
+close follow-up, dispatch and notes finish in the background. A committed park
+is still awaiting merge. Gate/audit writes alone do not certify a close, and a
+close still evaluating gates reports `IN_PROGRESS` at its deadline. The final
+continuation outcome is recorded in task notes. Receipts and tracing include
+inclusive merge-tree, push, close-gate, dispatch and note timings; `+` means a
+phase is still running and zero means no measured work in that phase yet.
+
 Optional resource notifications and factory recall have bounded response waits.
 Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;

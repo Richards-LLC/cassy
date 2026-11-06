@@ -9369,7 +9369,13 @@ impl CasCore {
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, anchor.as_deref(),
                         ).or_else(|| task.deliverables.factory_branch_anchor.clone())
-                    } else { parking.deliverables.factory_branch_anchor.clone().or(anchor.clone()) };
+                    } else {
+                        // Predict the same handoff/anchor decision that the
+                        // guarded park will persist, including branch changes.
+                        let mut delivery = parking.deliverables.clone();
+                        delivery.record_park(measured_branch.as_deref(), anchor.as_deref(), task.assignee.as_deref());
+                        delivery.factory_branch_anchor
+                    };
                     if tip_is_pushed && let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
                         // A first park must identify the pushed source the
                         // supervisor will merge. Content attribution may keep

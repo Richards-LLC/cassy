@@ -34,6 +34,19 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Worker contracts across machines
+
+`coordination action=message target=<worker>@<machine>` can carry an advisory
+contract between live workers of the same account and repository holding active
+claims under a common epic. Send and receive both validate Cloud identity and
+claims against synced task ancestry. Missing evidence fails closed; there is no
+worker succession redirect or cross-project worker route. Receive records quiet,
+idempotent copies for both supervisors before acknowledging the original mail.
+Only untyped, ask, answer and receipt intent is allowed; urgency, blocker/merge
+escalation and supervisor action kinds remain unavailable. Explicit `wake=false`
+stays quiet. Replies bind to a peer message delivered to that worker and recheck
+the current scope. CLI coordination uses the same handler and policy.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history

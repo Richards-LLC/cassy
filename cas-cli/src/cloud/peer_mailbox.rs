@@ -1143,8 +1143,9 @@ pub struct DeliveryReport {
 
 /// Claim this session's peer messages and admit each once.
 ///
-/// Recipients are the live local supervisors of `factory_session`; workers
-/// are never recipients. A message for another repo is acked `rejected`.
+/// Supervisor-only entry point. The daemon runtime additionally authorizes
+/// live workers with same-account, same-repo, active-same-epic scope.
+/// A message for another repo is acked `rejected`.
 /// Every admitted (or already admitted) message is acked `delivered`; a
 /// message that failed to admit is left unacked for redelivery.
 #[allow(clippy::too_many_arguments)]

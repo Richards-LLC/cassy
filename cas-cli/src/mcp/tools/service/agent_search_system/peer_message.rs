@@ -39,7 +39,9 @@ impl CasService {
                 "Remote worker messages are advisory: no urgency, blocker, merge, broadcast or supervisor action kind"));
         }
         let body = self.peer_body(message, attachment).await?;
-        let body = peer_mailbox::attach_message_intent(&body, kind.or(in_reply_to.map(|_| "answer")), false)
+        let intent = if crate::supervisor_message_wakes::quiet(&body) { Some("receipt") }
+            else { kind.or(in_reply_to.map(|_| "answer")) };
+        let body = peer_mailbox::attach_message_intent(&body, intent, false)
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         let (sender, target, summary) = (sender.clone(), target.to_string(), summary.to_string());
         let sent = tokio::task::spawn_blocking(move || -> Result<Option<(String, peer_mailbox::SendReceipt)>, String> {

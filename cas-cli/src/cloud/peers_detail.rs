@@ -269,8 +269,8 @@ fn belongs_to_peer(
 }
 
 /// A live worker in a peer supervisor's factory session (cas-9f53), as
-/// `peers detail=true` lists it. It takes instructions only from its own
-/// supervisor, so a message for it is relayed through that supervisor.
+/// `peers detail=true` lists it. Supervisor instructions still go through its
+/// owner; active same-epic workers may exchange advisory contracts directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerWorkerRef {
     pub agent_id: String,

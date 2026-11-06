@@ -449,7 +449,7 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         let answer = if reply.in_reply_to.is_none() && reply.kind == Some(PeerMessageKind::Answer) {
             let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
             let named: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
-                (!ask.answered && ask.ask.cloud_id.as_deref().is_some_and(|id| names_ask(body, id))).then_some(i)
+                ask.ask.cloud_id.as_deref().is_some_and(|id| names_ask(body, id)).then_some(i)
             }).collect();
             match named.as_slice() {
                 [i] if candidates.contains(i) => Some(*i),

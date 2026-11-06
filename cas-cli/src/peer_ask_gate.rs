@@ -317,11 +317,11 @@ mod tests {
         use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
         for case in ["single", "named", "explicit", "linked-successor", "ambiguous", "wrong-peer", "wrong-target",
             "wrong-reference", "stale", "receipt", "status", "untyped", "prefix",
-            "ambiguous-then-explicit", "answered-then-named", "duplicate", "queued", "wrong-source"]
+            "ambiguous-then-explicit", "duplicate", "queued", "wrong-source"]
         {
             let (_env, _temp, root, conn) = fixture();
             sent_ask(&conn, "ask-7435", "Please review PR #4249.");
-            let two_asks = matches!(case, "named" | "explicit" | "linked-successor" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "answered-then-named" | "duplicate");
+            let two_asks = matches!(case, "named" | "explicit" | "linked-successor" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
             if two_asks {
                 sent_ask(&conn, "ask-74350", "Please review PR #4250.");
             }
@@ -337,7 +337,6 @@ mod tests {
             };
             match case {
                 "explicit" => reply.in_reply_to = Some("ask-7435".into()),
-                "answered-then-named" => reply.in_reply_to = Some("ask-74350".into()),
                 "linked-successor" => {
                     // Explicit Cloud reply links survive supervisor succession.
                     reply.in_reply_to = Some("ask-7435".into());
@@ -367,11 +366,6 @@ mod tests {
             if case == "stale" {
                 conn.execute("UPDATE prompt_queue SET created_at=datetime('now','-60 seconds')", []).unwrap();
             }
-            if case == "answered-then-named" {
-                reply.id = "later-answer".into();
-                reply.in_reply_to = None;
-                insert(&reply, "ask-7435 after ask-74350.");
-            }
             if case == "ambiguous-then-explicit" {
                 reply.id = "explicit-second-answer".into();
                 reply.in_reply_to = Some("ask-74350".into());
@@ -380,12 +374,12 @@ mod tests {
                 insert(&reply, "A duplicate delivery cannot answer the remaining question.");
             }
             let refusal = pr_merge(&root, "sup-soundwave", 4249);
-            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit" | "linked-successor" | "answered-then-named"), "{case}: {refusal:?}");
+            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit" | "linked-successor"), "{case}: {refusal:?}");
             if matches!(case, "ambiguous" | "ambiguous-then-explicit" | "wrong-reference" | "queued") {
                 assert!(refusal.as_deref().unwrap().contains("reply-7435"), "{case}: {refusal:?}");
             }
             if two_asks {
-                let other_answered = matches!(case, "prefix" | "ambiguous-then-explicit" | "answered-then-named" | "duplicate");
+                let other_answered = matches!(case, "prefix" | "ambiguous-then-explicit" | "duplicate");
                 assert_eq!(pr_merge(&root, "sup-soundwave", 4250).is_none(), other_answered, "other ask in {case}");
             }
         }

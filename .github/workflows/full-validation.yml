@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: ["epic/release-train-**"]
+  merge_group:
+
+concurrency:
+  group: full-gate-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validation:
+    name: Shared train and queue graph
+    uses: ./.github/workflows/ci.yml
+    with:
+      full-set: true
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+      statuses: write
+      pull-requests: read
+  fast-validation:
+    name: Fast Validation
+    if: always()
+    needs: validation
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULT: ${{ needs.validation.result }}
+        run: test "$RESULT" = success

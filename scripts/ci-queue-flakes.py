@@ -217,7 +217,8 @@ def run(args):
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('queue tests require a clean tracked tree')
-    active = quarantine(GitHub(args.issues_repo)) if queued else []
+    recovering = queued or train
+    active = quarantine(GitHub(args.issues_repo)) if recovering else []
     excluded = [t for t in active if t['runner']==args.runner]
     summary = f'Queue quarantine: {len(excluded)} {args.runner} test(s)\n'+''.join(f'- {identity(t)} — {t["issue"]}\n' for t in excluded)
     print(summary,flush=True)
@@ -229,15 +230,15 @@ def run(args):
         cwd = repo
         command = [str(HERE/'run-verified-tests.sh'),'nextest','run','--archive-file',str(repo/'fast-validation-suite.tar.zst'),
                    '--workspace-remap',str(repo),'--no-fail-fast']
-        if queued or train:command += ['--profile','queue','--retries','0']
+        if recovering:command += ['--profile','queue','--retries','0']
     else:
         cwd = repo/'hub-web'
         command = ['npm','run','journeys','--','--workers=2']
-        if queued:command += ['--retries=0']
+        if recovering:command += ['--retries=0']
     # Strict non-queue callers retain the original command, including their
     # native zero-test guard. No quarantine or additional attempt applies.
     partition = ['--partition',f'count:{args.shard}'] if args.runner=='rust' else [f'--shard={args.shard}']
-    if not queued:
+    if not recovering:
         return subprocess.run(command+partition,cwd=cwd,env=base_env).returncode
     if (out/'receipt.json').exists():
         raise ValueError('refusing to overwrite earlier queue evidence')
@@ -295,8 +296,8 @@ def run(args):
 
 
 def reconcile(args):
-    if os.environ.get('GITHUB_EVENT_NAME') != 'merge_group':
-        raise ValueError('flake publication is merge-queue-only')
+    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'push' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
+        raise ValueError('flake publication requires a train or merge-queue run')
     receipts = sorted(args.receipts.rglob('receipt.json'))
     if not receipts:
         raise ValueError('no queue receipts found; publication cannot silently pass')

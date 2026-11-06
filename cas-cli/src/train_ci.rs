@@ -129,14 +129,25 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
         let Some(branch) = crate::train_guardrails::train_lane(&epic) else {
             continue;
         };
-        if crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
-            continue;
-        }
         if let Some(owner) = epic.epic_verification_owner.as_deref()
             && let Some(agent) = agents
                 .iter()
                 .find(|agent| agent.id == owner || agent.name == owner)
             && agent.factory_session.as_deref() != Some(session)
+        {
+            continue;
+        }
+        if crate::mcp::tools::core::task::release_train::is_cut_train(&epic)
+            && std::fs::read(directory(root, &epic.id)?.join("state.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|state| {
+                    let complete = state["queue_seconds"].is_number();
+                    if complete {
+                        record_timings(root, &epic.id, &state);
+                    }
+                    complete
+                })
         {
             continue;
         }
@@ -184,6 +195,7 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                     }
                 }
             }
+            record_timings(root, &epic.id, &state);
             notify(root, &epic, &state)
         })();
         if let Err(error) = result {
@@ -191,4 +203,106 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Durations already measured by CI, recorded once per immutable run and train.
+fn record_timings(root: &Path, train: &str, state: &Value) {
+    use cas_store::{CheckOutcome, CheckStage};
+    for (id, stage, seconds, run, attempt, head, link) in [
+        (
+            "train_full_gate",
+            CheckStage::Lane,
+            "elapsed_seconds",
+            "run_id",
+            "run_attempt",
+            "head",
+            "run_url",
+        ),
+        (
+            "merge_queue",
+            CheckStage::Queue,
+            "queue_seconds",
+            "queue_run_id",
+            "queue_run_attempt",
+            "queue_head",
+            "queue_run_url",
+        ),
+    ] {
+        let Some(seconds) = state[seconds]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        else {
+            continue;
+        };
+        let Some(run) = state[run].as_str().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if state["schema"] != 2 || state["scope"] != "full-set" {
+            continue;
+        }
+        let outcome = match state["outcome"].as_str() {
+            Some("PASS") => CheckOutcome::Pass,
+            Some("FAIL") if id == "train_full_gate" => CheckOutcome::Fail,
+            _ => continue,
+        };
+        crate::quality_ledger::check_run(
+            root,
+            crate::quality_ledger::Check {
+                natural_key: format!(
+                    "{id}|{train}|{run}|{}",
+                    state[attempt].as_u64().unwrap_or(1)
+                ),
+                check_id: id,
+                stage,
+                outcome,
+                task_id: Some(train),
+                sha: state[head].as_str(),
+                minutes: Some(seconds / 60.0),
+                link: state[link].as_str(),
+                actor: None,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_gate_timings_reach_the_friction_ledger_once_cas_8413() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut state = serde_json::json!({
+            "schema": 1, "scope": "full-set", "outcome": "PASS", "run_id": "101",
+            "elapsed_seconds": 600, "head": "a".repeat(40), "run_url": "https://github.com/example/repo/actions/runs/101",
+            "queue_seconds": 120, "queue_run_id": "102", "queue_head": "b".repeat(40),
+            "queue_run_url": "https://github.com/example/repo/actions/runs/102"
+        });
+        record_timings(&root, "cas-fixture", &state);
+        assert!(
+            cas_store::quality_events_for_task(&root, "cas-fixture")
+                .unwrap()
+                .is_empty()
+        );
+        state["schema"] = 2.into();
+        record_timings(&root, "cas-fixture", &state);
+        record_timings(&root, "cas-fixture", &state);
+        let rows = cas_store::quality_events_for_task(&root, "cas-fixture").unwrap();
+        assert_eq!(rows.len(), 2);
+        state["run_attempt"] = 2.into();
+        record_timings(&root, "cas-fixture", &state);
+        assert_eq!(
+            cas_store::quality_events_for_task(&root, "cas-fixture")
+                .unwrap()
+                .len(),
+            3
+        );
+        for (id, expected) in [("train_full_gate", 10.0), ("merge_queue", 2.0)] {
+            assert!(rows.iter().any(|row| matches!(&row.payload,
+                cas_store::QualityPayload::CheckRun { check_id, minutes: Some(minutes), .. }
+                    if check_id == id && *minutes == expected)));
+        }
+    }
 }

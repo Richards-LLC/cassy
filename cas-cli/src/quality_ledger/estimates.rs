@@ -32,7 +32,7 @@ pub(crate) struct TaskReference {
     pub task_type: String,
     pub priority: i32,
     pub risk: Vec<cas_types::TaskRisk>,
-    pub files_touched: usize,
+    pub files_touched: Option<usize>,
     pub worker_model: Option<String>,
     pub lease_count: usize,
     pub distance: u32,
@@ -77,8 +77,7 @@ fn task_reference(root: &Path, task: &cas_types::Task) -> TaskReference {
             s.get("files_touched")
                 .and_then(|v| v.as_array())
                 .map(Vec::len)
-        })
-        .unwrap_or(0);
+        });
     TaskReference {
         id: task.id.clone(),
         created_at: task.created_at,
@@ -116,6 +115,16 @@ pub(crate) fn estimate(
     if !matches!(recipient, "operator" | "client") {
         bail!("recipient must be operator or client");
     }
+    if kind == "pipeline"
+        && record
+        && !instance.is_some_and(|sha| {
+            sha.len() >= 7 && sha.len() <= 64 && sha.bytes().all(|c| c.is_ascii_hexdigit())
+        })
+    {
+        bail!(
+            "recorded pipeline estimates need a hexadecimal head SHA; use preview for an unbound read"
+        );
+    }
     let limit = limit.clamp(1, 200);
     let mut details = Vec::new();
     let mut samples: Vec<EstimateReference> = if matches!(kind, "task" | "epic") {
@@ -139,10 +148,11 @@ pub(crate) fn estimate(
                 8 * u32::from(reference.started_at.is_some() != target.started_at.is_some())
                     + 4 * u32::from(reference.risk != target.risk)
                     + reference.priority.abs_diff(target.priority)
-                    + reference
-                        .files_touched
-                        .abs_diff(target.files_touched)
-                        .min(8) as u32
+                    + match (reference.files_touched, target.files_touched) {
+                        (Some(a), Some(b)) => a.abs_diff(b).min(8) as u32,
+                        (None, None) => 0,
+                        _ => 2,
+                    }
                     + 2 * u32::from(reference.worker_model != target.worker_model)
                     + reference.lease_count.abs_diff(target.lease_count).min(4) as u32;
             details.push(reference);
@@ -588,21 +598,6 @@ mod tests {
         env.set("CAS_ROOT", &root);
         (temp, root, env)
     }
-    pub(super) fn sample(root: &Path, minutes: f64, key: &str) {
-        super::super::emit(
-            root,
-            &NewQualityEvent::new(
-                key,
-                QualityPayload::CheckRun {
-                    check_id: "merge_queue".into(),
-                    stage: CheckStage::Queue,
-                    outcome: CheckOutcome::Pass,
-                    sha: None,
-                    minutes: Some(minutes),
-                },
-            ),
-        );
-    }
     #[test]
     fn measured_reference_classes_return_quantiles_and_closest_tasks() {
         let (_temp, root, _env) = fixture();
@@ -647,7 +642,7 @@ mod tests {
             &root,
             "pipeline",
             "release_publish",
-            None,
+            Some("abc1234"),
             "client",
             20,
             true,
@@ -677,6 +672,23 @@ mod tests {
             (Some(16.0), Some(31.0))
         );
         assert_eq!(task.reference_details.len(), 5);
+        assert!(
+            task.reference_details
+                .iter()
+                .all(|r| r.files_touched.is_none())
+        );
+        assert!(
+            estimate(
+                &root,
+                "pipeline",
+                "merge_queue",
+                Some("not-a-sha"),
+                "operator",
+                20,
+                true
+            )
+            .is_err()
+        );
     }
 
     #[test]

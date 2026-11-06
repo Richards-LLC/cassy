@@ -4856,10 +4856,10 @@ mod tests {
         std::fs::write(cas_src.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::write(cas_src.join("cas-cli/src/builtins.rs"), "").unwrap();
         let cas_src_only = [
-            "merge queue", "cas_lane_slim", "fast rows", "fast-row", "contributing", "journey-eval",
-            "assembly-proof", "release.sh --hotfix", "hub-web/dist", "hub_e2e_port",
+            "merge queue", "merge-queue", "the queue", "cas_lane_slim", "fast row", "fast-row", "contributing", "journey-eval",
+            "assembly-proof", "release.sh --hotfix", "hub-web/", "hub_e2e_port",
         ];
-        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
             let personal = temp.path().join("home").join(format!("{harness:?}"));
             let source = cas_src.join(format!(".{harness:?}"));
             sync_all_builtins_for_harness(harness, &personal).unwrap();

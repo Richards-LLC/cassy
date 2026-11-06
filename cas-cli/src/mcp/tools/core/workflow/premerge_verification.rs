@@ -776,13 +776,16 @@ impl CasCore {
         &self,
         task: &Task,
         dispatch: &VerificationDispatch,
-    ) -> Result<(), McpError> {
+    ) -> Result<Option<std::thread::JoinHandle<()>>, McpError> {
         if self.daemon.is_some() {
-            if let Err(error) = automatic::launch(self, task, dispatch) {
-                automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
-                    .map_err(fail)?;
-            }
-            return Ok(());
+            return match automatic::launch(self, task, dispatch) {
+                Ok(handle) => Ok(handle),
+                Err(error) => {
+                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
+                        .map_err(fail)?;
+                    Ok(None)
+                }
+            };
         }
         let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(fail)?;
         let location = dispatch.repository.as_ref().map(|proof| format!(
@@ -793,7 +796,7 @@ impl CasCore {
             &self.cas_root, queue.as_ref(), dispatch, task.assignee.as_deref().unwrap_or("worker"),
             location.as_deref().unwrap_or("Review the exact candidate bound to this dispatch."),
         ).map_err(fail)?;
-        Ok(())
+        Ok(None)
     }
 
     pub(crate) async fn continue_premerge_after_verdict(

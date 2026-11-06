@@ -5021,6 +5021,8 @@ impl FactoryDaemon {
             ended.worker_states.push(format!("{state}; {outcome}"));
         }
         ended.at = chrono::Utc::now().to_rfc3339();
+        let retained_workers: std::collections::HashSet<_> = ended.orphans.iter()
+            .chain(&ended.unverified).cloned().collect();
         let shutdown_report = if ended.worker_states.is_empty() { String::new() } else {
             format!("\r\nFactory session ended ({}).\r\n{}\r\n", ended.reason, ended.worker_states.join("\r\n"))
         };
@@ -5042,6 +5044,9 @@ impl FactoryDaemon {
             // to ensure we find all agents, including those registered after cache refresh
             if let Ok(all_agents) = agent_store.list(None) {
                 for name in &names_to_unregister {
+                    if retained_workers.contains(name) {
+                        continue; // Their task owner remains available for recovery.
+                    }
                     for agent in all_agents.iter().filter(|a| {
                         a.name == *name
                             && a.factory_session.as_deref() == Some(self.session_name.as_str())
@@ -5891,6 +5896,7 @@ mod communication_summary_tests {
     async fn supervisor_exit_reports_and_releases_unfinished_worker_cas_affc() {
         use std::io::Read;
         use std::os::unix::net::UnixStream;
+        for owned in [true, false] {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         let repo = project.path();
@@ -5933,7 +5939,9 @@ mod communication_summary_tests {
             env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
         let worker_pid = pty.process_group_id().unwrap();
-        crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
+        if owned {
+            crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
+        }
         daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
             worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
         ).unwrap());
@@ -5962,14 +5970,22 @@ mod communication_summary_tests {
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();
         let recovered = tasks.get(&task.id).unwrap();
+        let outcome = if owned { "stopped; recovered_tasks=1" }
+            else { "stop unverified; tasks retained for recovery" };
         let mut failures = Vec::new();
         if !(output.contains(worker) && output.contains(&task.id)
             && output.contains("dirty_files=1") && output.contains("unpushed_commits=1")
-            && output.contains("stopped")) {
+            && output.contains(outcome)) {
             failures.push(format!("missing terminal teardown evidence: {output:?}"));
         }
-        if recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some() {
+        if owned && (recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some()) {
             failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        }
+        if owned {
+            assert!(agents.get_lease(&task.id).unwrap().is_none(), "stopped worker's lease is released");
+        } else {
+            assert!(agents.get(&agent.id).is_ok(), "unverified stop retains its registered owner");
+            assert_eq!(recovered.assignee.as_deref(), Some(worker));
         }
         if receipt.ended.reason != "prompt_input_exit" {
             failures.push(format!("wrong exit reason: {}", receipt.ended.reason));
@@ -5978,12 +5994,13 @@ mod communication_summary_tests {
         if !durable["ended"]["worker_states"].as_array().is_some_and(|rows| rows.iter().any(|row| {
             row.as_str().is_some_and(|line| line.contains(worker) && line.contains(&task.id)
                 && line.contains("dirty_files=1") && line.contains("unpushed_commits=1")
-                && line.contains("stopped"))
+                && line.contains(outcome))
         })) {
             failures.push(format!("missing durable worker state: {durable}"));
         }
         assert_eq!(std::fs::read_to_string(repo.join("dirty.txt")).unwrap(), "keep this\n");
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
     }
 
     #[tokio::test]

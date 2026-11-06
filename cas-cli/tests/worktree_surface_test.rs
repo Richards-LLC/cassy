@@ -2904,22 +2904,19 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
                 let armed = bin.join("merged");
                 let script = format!(r#"#!/bin/sh
 real={real}
-printf '%s: %s\n' "$(pwd -P)" "$*" >> {trace}
-if [ "$(pwd -P)" = {target} ] && [ "$1" = merge ]; then
+if [ "$1" = update-ref ] && [ "$2" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
   "$real" "$@" || exit $?
   touch {armed}
   exit 0
 fi
-if [ "$(pwd -P)" = {target} ] && [ "$1" = rev-parse ] && [ "$2" = HEAD ] && [ -f {armed} ]; then
+if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = 'epic/rebound^{{commit}}' ] && [ -f {armed} ]; then
   rm {armed}
-  "$real" "$@" || exit $?
-  printf '%s\n' 'third writer owns this commit' > delivery.txt
-  "$real" add delivery.txt && "$real" commit -qm 'Third writer' || exit $?
-  "$real" rev-parse HEAD > {tip}
-  exit 0
+  printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
+  "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
+  "$real" -C {target} rev-parse HEAD > {tip}
 fi
 exec "$real" "$@"
-"#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip), trace=quote(&fixture.cas_root.join("race-git-trace")));
+"#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
                 std::fs::write(bin.join("git"), script).unwrap();
                 std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
                 env.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
@@ -2927,7 +2924,7 @@ exec "$real" "$@"
             let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
             assert!(refused.message.contains("reviewed delivery"), "{refused}");
             let expected_target = if racing_writer {
-                std::fs::read_to_string(&race_tip).unwrap_or_else(|error| panic!("third writer: {error}; refusal: {refused}; trace: {}", std::fs::read_to_string(fixture.cas_root.join("race-git-trace")).unwrap_or_default())).trim().to_string()
+                std::fs::read_to_string(&race_tip).expect("third writer ran after the owned merge").trim().to_string()
             } else { local_review_base.clone() };
             assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), expected_target,
                 "refused landing may undo only its own merge, never a third writer: {refused}");

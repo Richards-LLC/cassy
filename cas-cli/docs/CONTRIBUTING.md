@@ -162,6 +162,11 @@ require an explicit separate recovery; this operation only copies commits.
 
 ## Coordination messages and reminders
 
+Agent-facing message provenance and pointer wakes stamp the current render time
+in the host's local timezone (`TZ` when set), in twelve-hour form with a zone
+(for example `6:36 AM ET`). Queue age and first/replay provenance remain separate.
+Supervisor clock times and ETAs require a clock read or measured start that turn.
+
 `cas factory message --session <name> --project-dir <project>` uses the
 destination session's store and queue session, even from another factory's
 shell with inherited `CAS_ROOT` and `CAS_FACTORY_SESSION`. Either selector

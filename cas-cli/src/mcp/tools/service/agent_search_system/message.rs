@@ -137,6 +137,44 @@ pub(crate) fn queued_message_provenance_at(
     message: &cas_store::QueuedPrompt,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    format!("{} [{}]", message_provenance_at(message, observed_at), operator_clock_at(observed_at))
+}
+
+/// The operator's host-local clock, including its actual zone abbreviation.
+/// Chrono's Local offset formats `%Z` as a numeric offset; libc retains the
+/// host/TZ zone name and DST rules. Keep the numeric offset as a truthful fallback.
+pub(crate) fn operator_clock_at(observed_at: chrono::DateTime<chrono::Utc>) -> String {
+    #[cfg(unix)]
+    {
+        let timestamp = observed_at.timestamp() as libc::time_t;
+        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+        let mut buffer = [0u8; 80];
+        // SAFETY: timestamp is valid for this call, local points to writable tm
+        // storage, and strftime reads it only after localtime_r initializes it.
+        // The output buffer and NUL-terminated format have their stated lengths.
+        let len = unsafe {
+            if libc::localtime_r(&timestamp, local.as_mut_ptr()).is_null() {
+                0
+            } else {
+                libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), c"%I:%M %p %Z".as_ptr(), local.as_ptr())
+            }
+        };
+        if len > 0 && let Ok(clock) = std::str::from_utf8(&buffer[..len]) {
+            let clock = clock.trim_start_matches('0');
+            // ET names the same operator zone in standard and daylight time.
+            if let Some(time) = clock.strip_suffix(" EST").or_else(|| clock.strip_suffix(" EDT")) {
+                return format!("{time} ET");
+            }
+            return clock.to_owned();
+        }
+    }
+    observed_at.with_timezone(&chrono::Local).format("%-I:%M %p %:z").to_string()
+}
+
+fn message_provenance_at(
+    message: &cas_store::QueuedPrompt,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> String {
     let delivery = if message.processed_at.is_some() {
         "replay"
     } else {
@@ -426,10 +464,7 @@ mod viktor_provenance_tests {
         let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        assert_eq!(
-            queued_message_provenance_at(&row, observed_at),
-            "[cas #73 viktor 360s first]"
-        );
+        assert!(queued_message_provenance_at(&row, observed_at).starts_with("[cas #73 viktor 360s first]"));
     }
 
     #[test]
@@ -486,6 +521,71 @@ mod viktor_provenance_tests {
         }
     }
 
+    /// cas-06eb: an old reminder, wake or peer row needs the clock at render,
+    /// not its enqueue time or an inferred elapsed number of turns.
+    #[test]
+    fn delayed_messages_and_wakes_show_the_host_clock_cas_06eb() {
+        const TEST: &str = "mcp::tools::service::agent_search_system::message::viktor_provenance_tests::delayed_messages_and_wakes_show_the_host_clock_cas_06eb";
+        const CHILD: &str = "CAS_CLOCK_TEST_CHILD";
+        let Ok(zone) = std::env::var(CHILD) else {
+            for zone in ["America/New_York", "UTC"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, zone)
+                    .env("TZ", zone)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{zone}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), TEST);
+            }
+            return;
+        };
+        let cases = if zone == "America/New_York" {
+            vec![
+                ("2026-11-06T11:36:00Z", "6:36 AM ET"),
+                ("2026-07-06T10:36:00Z", "6:36 AM ET"),
+                ("2026-11-06T17:00:00Z", "12:00 PM ET"),
+                ("2026-11-07T05:00:00Z", "12:00 AM ET"),
+                ("2026-11-01T05:30:00Z", "1:30 AM ET"),
+                ("2026-11-01T06:30:00Z", "1:30 AM ET"),
+            ]
+        } else {
+            vec![("2026-11-06T11:36:00Z", "11:36 AM UTC")]
+        };
+        for (instant, expected) in cases {
+            let now = chrono::DateTime::parse_from_rfc3339(instant).unwrap().with_timezone(&chrono::Utc);
+            let mut row = commander_row(Some(cas_store::QueueOrigin::PairedDevice { device_id: "dev".into() }));
+            row.created_at = now - chrono::Duration::minutes(5);
+            for source in ["commander:Daniel@iphone-15", "supervisor", "director", "reminder", "viktor", "peer"] {
+                row.source = source.into();
+                let rendered = queued_message_provenance_at(&row, now);
+                assert!(rendered.contains("300s first]"), "identity/age/delivery lost: {rendered}");
+                assert!(rendered.ends_with(&format!("[{expected}]")), "{source}: {rendered}");
+            }
+            row.processed_at = Some(now);
+            let replay = queued_message_provenance_at(&row, now);
+            assert!(replay.contains("300s replay]"), "{replay}");
+            assert!(replay.ends_with(&format!("[{expected}]")), "{replay}");
+            use crate::cloud::peer_mailbox::{PeerEnvelope, PeerScope, render_envelope};
+            row.origin = Some(cas_store::QueueOrigin::Daemon);
+            row.prompt = render_envelope(&PeerEnvelope {
+                id: "pm_clock".into(), sender_name: "peer-supervisor".into(),
+                sender_agent_id: "remote".into(), machine: "soundwave".into(),
+                session: None, repo: "repo".into(), in_reply_to: None,
+                kind: None, scope: PeerScope::Project,
+            });
+            let peer = queued_message_provenance_at(&row, now);
+            assert!(peer.contains("peer-supervisor peer-supervisor@soundwave via-cloud 300s replay]"), "{peer}");
+            assert!(peer.ends_with(&format!("[{expected}]")), "{peer}");
+            for id in [Some(row.id), None] {
+                let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload_at("supervisor", id, now);
+                assert!(wake.ends_with(&format!("[{expected}]")), "{wake}");
+                assert_eq!(wake.lines().count(), 1);
+            }
+        }
+    }
+
     /// cas-7f81: a hub-stamped paired device renders as the operator class —
     /// the one header the skills treat as user authority.
     #[test]
@@ -494,13 +594,10 @@ mod viktor_provenance_tests {
             device_id: "dev-42".into(),
         }));
         let observed_at = row.created_at + chrono::Duration::seconds(4);
-        assert_eq!(
-            queued_message_provenance_at(&row, observed_at),
-            "[cas #75 operator Daniel@iphone-15 verified 4s first]"
-        );
+        assert!(queued_message_provenance_at(&row, observed_at).starts_with("[cas #75 operator Daniel@iphone-15 verified 4s first]"));
         let mut replayed = row.clone();
         replayed.processed_at = Some(observed_at);
-        assert!(queued_message_provenance_at(&replayed, observed_at).ends_with("4s replay]"));
+        assert!(queued_message_provenance_at(&replayed, observed_at).contains("4s replay]"));
     }
 
     /// cas-7f81: the `commander:` label alone never verifies. Unstamped,
@@ -518,9 +615,8 @@ mod viktor_provenance_tests {
         ] {
             let row = commander_row(origin.clone());
             let observed_at = row.created_at + chrono::Duration::seconds(9);
-            assert_eq!(
-                queued_message_provenance_at(&row, observed_at),
-                "[cas #75 unverified:Daniel@iphone-15 9s first]",
+            assert!(
+                queued_message_provenance_at(&row, observed_at).starts_with("[cas #75 unverified:Daniel@iphone-15 9s first]"),
                 "origin {origin:?} must not verify"
             );
         }
@@ -546,10 +642,7 @@ mod viktor_provenance_tests {
             scopes: vec!["message:send".into()],
             verified: true,
         });
-        assert_eq!(
-            queued_message_provenance_at(&row, row.created_at),
-            "[cas #75 operator Daniel@iphone-15 verified 0s first]"
-        );
+        assert!(queued_message_provenance_at(&row, row.created_at).starts_with("[cas #75 operator Daniel@iphone-15 verified 0s first]"));
         // An unverified stamp never upgrades an unattributed row.
         let mut unverified = commander_row(Some(cas_store::QueueOrigin::Unattributed));
         unverified.operator = Some(cas_store::OperatorStamp {
@@ -559,10 +652,7 @@ mod viktor_provenance_tests {
             scopes: Vec::new(),
             verified: false,
         });
-        assert_eq!(
-            queued_message_provenance_at(&unverified, unverified.created_at),
-            "[cas #75 unverified:Daniel@iphone-15 0s first]"
-        );
+        assert!(queued_message_provenance_at(&unverified, unverified.created_at).starts_with("[cas #75 unverified:Daniel@iphone-15 0s first]"));
         let mut agent = commander_row(None);
         agent.source = "supervisor".into();
         assert_eq!(super::operator_class(&agent), None);

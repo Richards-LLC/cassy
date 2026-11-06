@@ -179,9 +179,11 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
             }));
             const root = document.documentElement.cloneNode(true) as HTMLElement;
             root.querySelectorAll("script, link").forEach(node => node.remove());
-            return `<!doctype html>${root.outerHTML}`.replace("</head>", `<style>${css.join("\n")}</style></head>`);
+            return `<!doctype html>${root.outerHTML}`.replace("</head>", `<style>${css.join("\n")}</style></head>`)
+              .replace("</body>", '<script>document.querySelectorAll("dialog[open]").forEach(dialog => { dialog.removeAttribute("open"); dialog.showModal(); });</script></body>');
           });
           writeFileSync(`${process.env.EPIC_TABS_QA}/epic-tabs-${width}.html`, html);
+          await page.screenshot({ path: `${process.env.EPIC_TABS_QA}/epic-tabs-${width}.png` });
         }
         if (width === 390) await page.getByRole("button", { name: "Close epic tasks" }).click();
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);

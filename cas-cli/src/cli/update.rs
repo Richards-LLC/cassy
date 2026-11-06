@@ -4403,7 +4403,7 @@ fn running_factory_sessions() -> Vec<(String, bool)> {
 /// Say how already running factories pick up the installed build.
 fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> Option<String> {
     if sessions.is_empty() { return None; }
-    Some(format!("{} running factory session(s): {}. After the hub step, cas update requests an in-place daemon update to {version} for each session. To retry one, run `cas factory reexec --session <session>`; panes and the daemon PID survive. Older daemons without handoff support refuse and keep running.",
+    Some(format!("{} running factory session(s): {}. After the hub step, cas update requests an in-place daemon update to {version} for each session. To retry one, run `cas factory reexec --session <session>`; panes and the daemon PID survive when handoff is supported. Older daemons may ignore the request; after a bounded wait they are reported as relaunch required, while their existing panes keep running.",
         sessions.len(), sessions.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")))
 }
 

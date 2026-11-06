@@ -11,18 +11,41 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn read_frame(stream: &mut UnixStream) -> Result<DaemonMessage> {
+#[derive(Debug, thiserror::Error)]
+#[error("relaunch required: factory daemon did not answer the in-place update before the request deadline; it may be too old to support reexec")]
+struct RelaunchRequired;
+
+fn time_left(deadline: Instant) -> Result<Duration> {
+    deadline.checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero()).ok_or_else(|| RelaunchRequired.into())
+}
+
+fn read_exact_before(stream: &mut UnixStream, mut data: &mut [u8], deadline: Instant) -> Result<()> {
+    while !data.is_empty() {
+        stream.set_read_timeout(Some(time_left(deadline)?))?;
+        match stream.read(data) {
+            Ok(0) => bail!("Daemon disconnected before completing its response"),
+            Ok(n) => data = &mut data[n..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(RelaunchRequired.into()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn read_frame(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage> {
     let mut header = [0; FRAME_HEADER_SIZE];
-    stream.read_exact(&mut header)?;
+    read_exact_before(stream, &mut header, deadline)?;
     let length = decode_length(&header);
     ensure!(
         length <= MAX_MESSAGE_SIZE,
         "Daemon response exceeds the protocol limit"
     );
     let mut data = vec![0; length];
-    stream.read_exact(&mut data)?;
+    read_exact_before(stream, &mut data, deadline)?;
     Ok(serde_json::from_slice(&data)?)
 }
 
@@ -30,7 +53,8 @@ pub(crate) fn request(session: &str, binary: &Path) -> Result<ReexecReceipt> {
     request_with_timeout(session, binary, Duration::from_secs(60))
 }
 
-fn request_with_timeout(session: &str, binary: &Path, _timeout: Duration) -> Result<ReexecReceipt> {
+fn request_with_timeout(session: &str, binary: &Path, timeout: Duration) -> Result<ReexecReceipt> {
+    let deadline = Instant::now() + timeout;
     let session_info = SessionManager::new()
         .list_sessions_read_only()?
         .into_iter()
@@ -40,20 +64,29 @@ fn request_with_timeout(session: &str, binary: &Path, _timeout: Duration) -> Res
     let mut stream = UnixStream::connect(gui_socket_path(session)).with_context(|| {
         format!("Could not connect to factory {session}; an older daemon may require relaunch")
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     ensure!(
-        matches!(read_frame(&mut stream)?, DaemonMessage::Welcome { .. }),
+        matches!(read_frame(&mut stream, deadline)?, DaemonMessage::Welcome { .. }),
         "Daemon did not send its welcome"
     );
     let nonce = uuid::Uuid::new_v4().to_string();
-    stream.write_all(&encode_message(&ClientMessage::Reexec {
+    let frame = encode_message(&ClientMessage::Reexec {
         binary: binary.to_path_buf(),
         version: env!("CARGO_PKG_VERSION").into(),
         nonce: nonce.clone(),
-    })?)?;
+    })?;
+    let mut pending = frame.as_slice();
+    while !pending.is_empty() {
+        stream.set_write_timeout(Some(time_left(deadline)?))?;
+        match stream.write(pending) {
+            Ok(0) => bail!("Daemon disconnected before receiving the request"),
+            Ok(n) => pending = &pending[n..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(RelaunchRequired.into()),
+            Err(error) => return Err(error.into()),
+        }
+    }
     loop {
-        match read_frame(&mut stream)? {
+        match read_frame(&mut stream, deadline)? {
             DaemonMessage::ReexecResult { receipt } if receipt.nonce == nonce => {
                 ensure!(
                     receipt.pid == pid,
@@ -163,7 +196,7 @@ fn update_live_daemons_with_timeout(timeout: Duration) -> Vec<UpdateOutcome> {
                 },
                 Err(error) => UpdateOutcome {
                     session: session.name,
-                    status: "failed",
+                    status: if error.is::<RelaunchRequired>() { "relaunch_required" } else { "failed" },
                     receipt: None,
                     error: Some(format!("{error:#}")),
                 },

@@ -104,6 +104,13 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
             "an exec image without its handoff marker must fail, never spawn another fixture"
         );
         let root = std::path::PathBuf::from(root);
+        crate::server_signals::ignore_sigpipe_for_server();
+        let missing = root.join("missing-exec-image");
+        let error = super::super::reexec::exec_image(&missing, -1, false, &missing);
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let mut signal: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut signal) }, 0);
+        assert_eq!(signal.sa_sigaction, libc::SIG_IGN, "failed exec must retain server SIGPIPE handling");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -136,7 +143,20 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
             })).unwrap()).unwrap();
             std::fs::write(root.join("ready"), "ready").unwrap();
             loop {
-                daemon.accept_gui_clients();
+                if daemon.accept_gui_clients() {
+                    use std::io::Write;
+                    // Replay the real transport seam: a preceding output frame
+                    // was only partly written when the reexec request arrived.
+                    let frame = crate::ui::factory::protocol::encode_message(
+                        &crate::ui::factory::protocol::DaemonMessage::Output {
+                            pane_id: "kept-0".into(), data: b"queued before exec".to_vec(),
+                        }).unwrap();
+                    let cut = crate::ui::factory::protocol::FRAME_HEADER_SIZE + 2;
+                    for client in daemon.gui_clients.values_mut() {
+                        client.stream.write_all(&frame[..cut]).unwrap();
+                        client.write_buf.extend(&frame[cut..]);
+                    }
+                }
                 daemon.process_gui_client_input().await;
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }

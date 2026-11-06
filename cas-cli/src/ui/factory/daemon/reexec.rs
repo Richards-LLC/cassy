@@ -228,6 +228,12 @@ fn preserve_startup_image(source: &Path, pin: &Path) -> Result<()> {
     std::fs::copy(source, staged.path()).context("Could not snapshot daemon startup image")?;
     std::fs::set_permissions(staged.path(), std::fs::Permissions::from_mode(0o700))?;
     staged.as_file().sync_all()?;
+    publish_startup_image(staged, pin)?;
+    Ok(())
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn publish_startup_image(staged: tempfile::NamedTempFile, pin: &Path) -> Result<()> {
     staged.persist(pin).context("Could not publish daemon startup image")?;
     Ok(())
 }
@@ -253,6 +259,14 @@ mod startup_pin_tests {
 
         preserve_startup_image(&installed, &pin).unwrap();
         assert_eq!(std::fs::read(&pin).unwrap(), b"running daemon image");
+
+        let raced_pin = root.path().join("concurrent-pin");
+        let staged = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        std::fs::write(staged.path(), b"losing publisher").unwrap();
+        // Another startup publishes after our copy but before our rename.
+        std::fs::write(&raced_pin, b"winning publisher").unwrap();
+        publish_startup_image(staged, &raced_pin).unwrap();
+        assert_eq!(std::fs::read(&raced_pin).unwrap(), b"winning publisher");
 
         // An independent snapshot survives even an install that rewrites
         // the original inode. Rechecking startup cannot replace that pin.
@@ -356,7 +370,7 @@ fn restore_flags(originals: &[(RawFd, i32)]) {
         }
     }
 }
-fn exec_image(binary: &Path, manifest: RawFd, fallback: bool, rollback: &Path) -> std::io::Error {
+pub(super) fn exec_image(binary: &Path, manifest: RawFd, fallback: bool, rollback: &Path) -> std::io::Error {
     std::process::Command::new(binary)
         .arg0(std::env::args_os().next().unwrap_or_default())
         .args(std::env::args_os().skip(1))

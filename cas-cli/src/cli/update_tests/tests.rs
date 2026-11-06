@@ -2754,6 +2754,7 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
     assert!(notice.contains("pinned-session"), "{notice}");
     assert!(notice.contains("older-session"), "{notice}");
     assert!(notice.contains("9.99.1") && notice.contains("cas factory reexec --session <session>"), "{notice}");
+    assert!(notice.contains("relaunch required"), "{notice}");
 }
 
 // One real Git repo carries the seven downstream drift shapes from cas-6718.

@@ -2626,7 +2626,7 @@ fn factory_provision_build_compatibility(
     };
     if daemon_build != provisioner_build {
         return FactoryProvisionBuildCheck::Mismatch(format!(
-            "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+            "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Try `cas factory reexec --session <session>`. Only daemons too old to support reexec require stopping with `cas factory kill <session>` and relaunching `cas factory` before spawning."
         ));
     }
     FactoryProvisionBuildCheck::Compatible

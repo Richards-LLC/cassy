@@ -177,6 +177,39 @@ class QueueRecovery(unittest.TestCase):
                 self.assertEqual(published.returncode, 0, published.stdout+published.stderr)
         self.assertEqual(len(self.issues), 2)
 
+    def test_script_step_retry_publication_and_all_pass_cleanup(self):
+        script = self.repo/'test-script.py'
+        script.write_text("""import os,pathlib,sys
+p=pathlib.Path('step-count'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
+case=os.environ['STEP_CASE']
+if case=='cleanup':
+ print('19 passed, 0 failed',flush=True)
+ print('rm: cannot remove fixture: Directory not empty',file=sys.stderr)
+ sys.exit(1)
+failed=n==1 or case=='persistent'
+print('0 passed, 1 failed' if failed else '1 passed, 0 failed',flush=True)
+sys.exit(int(failed))
+""")
+        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS')]:
+            with self.subTest(case=case):
+                shutil.rmtree(self.repo/'receipts',ignore_errors=True)
+                (self.repo/'step-count').unlink(missing_ok=True)
+                result = subprocess.run([sys.executable,str(SCRIPT),'step','--repo',str(self.repo),
+                    '--id','script/test-release-publish','--out',str(self.repo/'receipts'),
+                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case},capture_output=True,text=True)
+                self.assertEqual(result.returncode,code,result.stdout+result.stderr)
+                self.assertEqual(int((self.repo/'step-count').read_text()),attempts)
+                receipt=json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'],outcome)
+                self.assertEqual(receipt['attempts'][0]['raw_status'],1)
+                if case=='flake':
+                    published=self.reconcile()
+                    self.assertEqual(published.returncode,0,published.stdout+published.stderr)
+                    self.assertEqual(len(self.issues),1)
+                    self.assertIn('flaky-quarantine',[label['name'] for label in self.issues[0]['labels']])
+                elif case=='cleanup':
+                    self.assertIn('warning',result.stdout.lower())
+
     def test_non_queue_events_never_rerun(self):
         for engine in ('rust','playwright'):
             for event in ('workflow_dispatch', 'push'):

@@ -18,13 +18,17 @@ root=pathlib.Path(os.environ['FORGE']); args=sys.argv[1:]
 data=json.loads((root/'forge.json').read_text())
 if args[:2]==['repo','view']: print('fixture/repo')
 elif args[:2]==['run','download']:
- shutil.copytree(root/data['artifact'],pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
+ name=args[args.index('--name')+1]
+ source=data.get('job_downloads',{}).get(name,data.get('artifact',''))
+ shutil.copytree(root/source,pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
 elif args[0]=='api':
  endpoint=next(a.lstrip('/') for a in args if a.lstrip('/').startswith('repos/'))
- if '/pulls/' in endpoint: print(json.dumps(data['pr']))
+ if '/actions/artifacts?' in endpoint: print(json.dumps({'artifacts':data.get('job_artifacts',[])}))
+ elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
+ elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
  elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
- elif endpoint.endswith('/jobs'): print(json.dumps({'jobs':[{'name':'Shared train and queue graph / Full-set gate','conclusion':data['fanin']}]}))
+ elif endpoint.endswith('/jobs'): print(json.dumps({'jobs':data.get('job_jobs',[{'name':'Shared train and queue graph / Full-set gate','conclusion':data.get('fanin','success')}])}))
  else: print(json.dumps({'workflow_runs':data['runs']}))
 else: sys.exit(2)
 '''
@@ -89,6 +93,35 @@ class TrainReceipts(unittest.TestCase):
         self.assertEqual(full.returncode, int(failed), full.stdout+full.stderr)
         return json.loads(full.stdout)
 
+
+    def test_same_tree_requeue_reuses_only_successful_job_receipts(self):
+        inputs='{"selection":"all","matrix":1}'
+        downloads={}; artifacts=[]; jobs=[]
+        producer=self.env['GITHUB_SHA']
+        for slot,status in [('scripts','success'),('rust','failure')]:
+            out=self.root/slot
+            saved=self.run_cli('job-save','--repo',self.repo,'--job',slot,'--job-name',slot,
+                '--inputs',inputs,'--status',status,'--out',out)
+            name=saved['artifact']
+            downloads[name]=slot
+            artifacts.append({'id':len(artifacts)+1,'name':name,'expired':False,
+                'workflow_run':{'id':101,'head_sha':producer}})
+            jobs.append({'name':slot,'conclusion':status})
+        (self.root/'forge.json').write_text(json.dumps({'job_artifacts':artifacts,'job_downloads':downloads,
+            'job_jobs':jobs,'job_run':{'id':101,'head_sha':producer,'event':'merge_group',
+                'path':'.github/workflows/full-validation.yml','status':'completed','conclusion':'failure'}}))
+        self.git('commit','--allow-empty','-qm','same tree requeue')
+        self.env.update(GITHUB_SHA=self.git('rev-parse','HEAD'),GITHUB_RUN_ID='102')
+        def check(slot, selection=inputs):
+            return self.run_cli('job-check','--repo',self.repo,'--job',slot,'--job-name',slot,
+                '--inputs',selection,'--out',self.root/'restore'/slot,'--gh',self.gh)['reused']
+        self.assertTrue(check('scripts'))
+        self.assertFalse(check('rust'))
+        self.assertFalse(check('scripts','{"selection":"changed"}'))
+        self.commit('different tree')
+        self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
+        self.assertFalse(check('scripts'))
+        self.assertFalse(check('rust'))
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{

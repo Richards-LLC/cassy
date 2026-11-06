@@ -3763,6 +3763,15 @@ names the queued prompt, or explicitly reports why no worker was notified so
 the supervisor can contact it. A worker start surfaces any unread correction
 before acquiring the task; the worker reads it, then retries start.
 
+When the correction requires importing an unlanded release or sibling batch,
+the supervisor includes `merge_source=<full commit SHA>` in that same
+`request_changes` reason (repeat the marker for multiple sources). Cassy records
+the immutable source, supervisor identity and task target atomically with the
+review decision. Its ancestors count as upstream imports during source and park
+attribution; later descendants and unrelated work do not. Movable branch names
+are refused. A worker copying the marker into notes grants no authority, and a
+grant for a different task target does not apply.
+
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current
 registration is live in this factory, independent of the implementer, and has

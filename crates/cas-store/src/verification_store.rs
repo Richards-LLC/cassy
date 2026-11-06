@@ -2386,6 +2386,23 @@ pub fn request_changes_for_parked_delivery(
         })?;
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    // Only this authenticated supervisor transition grants import authority;
+    // ordinary task notes, including copied review text, are never parsed.
+    for source in reason.split_whitespace().filter_map(|word| word.strip_prefix("merge_source=")) {
+        if !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StoreError::Parse("merge_source requires a full immutable commit SHA".into()));
+        }
+        let work_target = deliverables.work_target.clone().ok_or_else(||
+            StoreError::Parse("merge_source requires a declared task work target".into()))?;
+        let commit = source.to_ascii_lowercase();
+        if !deliverables.authorized_merge_sources.iter().any(|known|
+            known.commit == commit && known.work_target == work_target)
+        {
+            deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                commit, supervisor_id: supervisor_agent_id.to_string(), work_target,
+            });
+        }
+    }
     let blocked_parked = status == TaskStatus::Blocked.to_string()
         && (deliverables.parked_branch.is_some()
             || deliverables.factory_branch_anchor.is_some()

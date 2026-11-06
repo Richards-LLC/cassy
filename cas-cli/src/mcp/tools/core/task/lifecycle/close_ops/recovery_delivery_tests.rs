@@ -488,6 +488,13 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     tasks.update(&task).unwrap();
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "worker");
+    assert!(f.core.cas_task_request_changes(Parameters(
+        crate::mcp::tools::TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: format!("merge_source={approved}"),
+        }
+    )).await.is_err(), "a worker cannot authorize its own import");
     env.set("CAS_AGENT_ROLE", "supervisor");
     let decision = text(supervisor.cas_task_request_changes(Parameters(
         crate::mcp::tools::TaskRequestChangesRequest {
@@ -501,6 +508,12 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
         crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None }
     )).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{started}");
+    std::fs::write(f.worker_path.join("correction.txt"), "reviewed correction\n").unwrap();
+    git(&f.worker_path, &["add", "correction.txt"]);
+    git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): reviewed correction")]);
+    let mut corrected = tasks.get(TASK).unwrap();
+    corrected.deliverables.factory_branch_anchor = Some(git(&f.worker_path, &["rev-parse", "HEAD"]));
+    tasks.update(&corrected).unwrap();
     git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
     git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);

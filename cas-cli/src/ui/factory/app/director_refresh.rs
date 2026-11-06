@@ -336,18 +336,19 @@ mod qa_walk_tests {
         app.cas_dir = crate::store::init_cas_dir(tmp.path()).unwrap();
         let event = DirectorEvent::QaWalkAttention { key: "qa-flat:cas-walk:stamp".into(), text: "old".into() };
         let mut inputs = app.delivery_request(&[event.clone()]).read(None);
+        let fresh_text = format!("fresh progress {}", 480);
         inputs.qa_progress = Some(crate::qa_walk_progress::Report {
             lines: vec![], advisories: vec![crate::qa_walk_progress::Advisory {
-                key: event.debounce_key(), text: "QA output flat: fresh result age; native execution is separate".into(),
+                key: event.debounce_key(), text: fresh_text.clone(),
             }],
         });
         let (_, prompts, _) = app.revalidate_and_prompt_for_delivery_from(&[event.clone()], inputs);
         assert_eq!(prompts.len(), 1);
-        assert!(prompts[0].text.contains("fresh result age"));
+        assert_eq!(prompts[0].text, fresh_text);
         assert_eq!(prompts[0].target, app.supervisor_name);
         let inputs = app.delivery_request(&[event.clone()]).read(None);
         let (_, prompts, _) = app.revalidate_and_prompt_for_delivery_from(&[event], inputs);
-        assert!(prompts.is_empty(), "a resumed ledger must retract an old alarm");
+        assert_eq!(prompts.len(), 0);
     }
 }
 

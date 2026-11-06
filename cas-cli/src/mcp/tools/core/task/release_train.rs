@@ -112,24 +112,20 @@ fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
 
 /// Checked at target resolution and again under the delivery-target lock.
 /// Release tracking takes that same lock before persisting the cut marker.
-pub(crate) fn check_cut_merge(cas_root: &Path, repo: &Path, target: &str) -> Result<(), String> {
+pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), String> {
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {
-        if train.is_terminal() || !is_cut_train(&train) {
+        if !is_cut_train(&train) {
             continue;
         }
         let Some(lane) = train.effective_epic_branch() else { continue };
         if super::repo_context::effective_epic_ref(cas_root, lane) != target {
             continue;
         }
-        let integration = train.deliverables.work_target.as_ref()
-            .ok_or_else(|| format!("RELEASE TRAIN CUT: {} has no integration target; repair its work target before merging", train.id))?;
-        if !lane_landed(repo, target, &integration.target_branch) {
-            return Err(format!(
-                "RELEASE TRAIN CUT: {target} ({}) is frozen until it lands on `{}`. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
-                train.id, integration.target_branch
-            ));
-        }
+        return Err(format!(
+            "RELEASE TRAIN CUT: {target} ({}) is frozen and accepts no further merges. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
+            train.id
+        ));
     }
     Ok(())
 }

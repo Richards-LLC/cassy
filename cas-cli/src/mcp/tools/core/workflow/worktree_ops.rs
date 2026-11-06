@@ -4717,7 +4717,7 @@ impl CasCore {
             &self.cas_root, &worktree.parent_branch,
         );
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &cwd, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         // Bind this mutation to the task's declared work repository before
@@ -4870,7 +4870,7 @@ impl CasCore {
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &cwd, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let pending_observation_recovery = if transactional_delivery.is_none() {

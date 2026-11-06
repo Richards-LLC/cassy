@@ -45,7 +45,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    keeps the caller's `--base` flow (default `main`). A matched train must persist
    its cut marker before push/enqueue; failure stops with a retry command. New
    tasks join a fresh train, and unfinished deliveries need retargeting; merges
-   into the cut lane wait until it lands. Reminder tracking stays advisory.
+   into the cut lane stay refused after landing too. Reminder tracking stays advisory.
    Missing/unreachable owners use the shared resolver's
    peer fallback, or print one clear tracking-skipped message.
 3. The command automatically arms cross-session `branch_contained_in` for the

@@ -382,6 +382,7 @@ impl SqliteVerificationStore {
                 let severity = IssueSeverity::from_str(&severity_str).unwrap_or_default();
 
                 Ok(VerificationIssue {
+                    triage: Default::default(),
                     file: row.get(0)?,
                     line: row.get::<_, Option<i32>>(1)?.map(|v| v as u32),
                     severity,
@@ -430,6 +431,7 @@ impl SqliteVerificationStore {
             Ok((
                 vid,
                 VerificationIssue {
+                    triage: Default::default(),
                     file: row.get(1)?,
                     line: row.get::<_, Option<i32>>(2)?.map(|v| v as u32),
                     severity,
@@ -3823,7 +3825,7 @@ mod tests {
     fn test_verification_with_issues() {
         let (store, _dir) = create_test_store();
 
-        let issues = vec![
+        let mut issues = vec![
             VerificationIssue::blocking(
                 "src/main.rs".to_string(),
                 Some(42),
@@ -3839,6 +3841,13 @@ mod tests {
             ),
         ];
 
+        issues[0].triage = cas_types::FindingTriage {
+            severity: cas_types::FindingSeverity::Money,
+            reach: cas_types::FindingReach::Main,
+            journey: Some("save".into()),
+            repro: Some("Saving an idea charged twice".into()),
+        };
+        let expected = issues[0].triage.clone();
         let verification = Verification::rejected(
             "ver-test".to_string(),
             "cas-1234".to_string(),
@@ -3858,6 +3867,9 @@ mod tests {
         assert_eq!(first_issue.file, "src/main.rs");
         assert_eq!(first_issue.line, Some(42));
         assert!(first_issue.is_blocking());
+        assert_eq!(first_issue.triage, expected, "single reads retain finding reach");
+        let batch = store.get_for_task("cas-1234").unwrap();
+        assert_eq!(batch[0].issues[0].triage, expected, "batch reads retain finding reach");
     }
 
     #[test]

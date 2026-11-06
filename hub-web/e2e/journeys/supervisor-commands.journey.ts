@@ -26,18 +26,20 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await journey.stage("Reload Cassy once from the idle Claude supervisor", async () => {
         const input = page.locator("#message-text");
         await input.fill("/mcp"); await input.press("Enter");
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
         expect(frames).toHaveLength(1);
         const request = frames[0]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
-        await expect(page.locator('.supervisor-command-receipt[data-command="mcp"]')).toHaveCount(0);
+        await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/mcp" })).toHaveAttribute("data-phase", "observed");
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Exit once after the native turn has completed", async () => {
         const input = page.locator("#message-text");
         await input.fill("/exit"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Exit", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
         expect(frames).toHaveLength(2);
         expect(frames[1]!.body).toMatchObject({ command: "exit", confirmed: true });

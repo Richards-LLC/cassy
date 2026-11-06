@@ -790,7 +790,10 @@ pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
         let head_mode = text(&head)?.split_whitespace().next();
         let Some((mode, indexed)) = plan.index.get(path) else {
             // Sync untracks generated files, retaining their working copies.
-            if ignored(path, &ignored_paths) && matches!(head_mode, Some("100644" | "100755")) { continue; }
+            let retired = !root.join(path).exists()
+                && git(root, &["show", &format!("HEAD:{path}")]).is_ok_and(|bytes| cassy_body(path, &bytes));
+            if (ignored(path, &ignored_paths) || retired)
+                && matches!(head_mode, Some("100644" | "100755")) { continue; }
             return Ok(false);
         };
         let expected_mode = head_mode.unwrap_or(if path.ends_with(".sh") { "100755" } else { "100644" });

@@ -7,11 +7,18 @@ use crate::ui::factory::daemon::runtime::ci_watch::{
 };
 
 /// A transport whose failed run has `job` (and optionally `step`), or whose
-/// job lookup errors when `job` is `None`.
+/// job lookup errors when `job` is `None`. `ahead` names run 2's job.
+#[derive(Default)]
 struct Fake {
     job: Option<&'static str>,
     step: Option<&'static str>,
     log: Option<&'static str>,
+    ahead: Option<&'static str>,
+    log_reads: std::cell::Cell<u32>,
+}
+
+fn failing_job(transport: &Fake, run_id: Option<u64>) -> Option<String> {
+    FailedRunLookups::default().failing_job(transport, run_id)
 }
 
 impl CiTransport for Fake {
@@ -21,8 +28,8 @@ impl CiTransport for Fake {
     fn failing_job(&self, _: u64) -> Result<Option<String>, CiWatchError> {
         Ok(self.job.map(str::to_string))
     }
-    fn failed_job_detail(&self, _: u64) -> Result<Option<FailedJob>, CiWatchError> {
-        match self.job {
+    fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
+        match if run_id == 2 { self.ahead } else { self.job } {
             Some(name) => Ok(Some(FailedJob {
                 name: name.to_string(),
                 step: self.step.map(str::to_string),
@@ -31,6 +38,7 @@ impl CiTransport for Fake {
         }
     }
     fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
+        self.log_reads.set(self.log_reads.get() + 1);
         Ok(self.log.map(str::to_string))
     }
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
@@ -47,6 +55,7 @@ fn failing_job_names_the_job_and_its_failed_step() {
         job: Some("Fast Validation — CI tiers"),
         step: Some("Test release publication guards"),
         log: None,
+        ..Fake::default()
     };
     assert_eq!(
         failing_job(&with_step, Some(38647056637)).as_deref(),
@@ -58,15 +67,23 @@ fn failing_job_names_the_job_and_its_failed_step() {
         job: Some("Rust Suite"),
         step: Some("nextest"),
         log: Some("test a::passes ... ok\ntest a::red ... FAILED\ntest b::red ... FAILED\ntest a::red ... FAILED\n"),
+        ..Fake::default()
     };
-    assert_eq!(
-        failing_job(&with_tests, Some(1)).as_deref(),
-        Some("Rust Suite › nextest (failing tests: a::red, b::red)")
-    );
+    // cas-f2ea: one watcher's lookups keep the named job across polls, so a
+    // repeat ejection never downloads its failed log again.
+    let lookups = FailedRunLookups::default();
+    for _ in 0..3 {
+        assert_eq!(
+            lookups.failing_job(&with_tests, Some(1)).as_deref(),
+            Some("Rust Suite › nextest (failing tests: a::red, b::red)")
+        );
+    }
+    assert_eq!(with_tests.log_reads.get(), 1);
     let job_only = Fake {
         job: Some("macOS Check"),
         step: None,
         log: None,
+        ..Fake::default()
     };
     assert_eq!(
         failing_job(&job_only, Some(1)).as_deref(),
@@ -80,6 +97,7 @@ fn failing_job_degrades_to_none_without_a_run_or_a_readable_job() {
         job: Some("macOS Check"),
         step: None,
         log: None,
+        ..Fake::default()
     };
     assert_eq!(
         failing_job(&job, None),
@@ -90,6 +108,7 @@ fn failing_job_degrades_to_none_without_a_run_or_a_readable_job() {
         job: None,
         step: None,
         log: None,
+        ..Fake::default()
     };
     assert_eq!(
         failing_job(&offline, Some(1)),
@@ -142,4 +161,21 @@ fn supervisor_prs_track_open_epics_on_epic_branches_only() {
             branch: "epic/release".to_string()
         }]
     );
+}
+
+/// cas-f2ea: the entry ahead counts as the possible cause when it failed the
+/// same job, is still running, or cannot be read; only a clear entry ahead or
+/// one that failed a different job lets this run spend the repair cycle.
+#[test]
+fn ahead_may_be_cause_blames_same_job_running_or_unreadable_entries_ahead() {
+    use crate::ui::factory::daemon::runtime::ci_watch::AheadEntry;
+    let blamed = |ahead_job, ahead| {
+        let transport = Fake { job: Some("Rust Suite"), ahead: ahead_job, ..Fake::default() };
+        FailedRunLookups::default().ahead_may_be_cause(&transport, Some(1), ahead)
+    };
+    assert!(blamed(Some("Rust Suite"), AheadEntry::Failed(2)), "same job ahead");
+    assert!(!blamed(Some("macOS Check"), AheadEntry::Failed(2)), "different job ahead");
+    assert!(blamed(None, AheadEntry::Failed(2)), "unreadable job ahead");
+    assert!(blamed(None, AheadEntry::Unknown), "entry ahead still running");
+    assert!(!blamed(None, AheadEntry::Clear), "no failed entry ahead");
 }

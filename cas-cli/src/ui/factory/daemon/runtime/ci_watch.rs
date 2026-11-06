@@ -386,10 +386,50 @@ pub(crate) struct MergeQueueEjection {
     pub occurrence: String,
     /// The PR head at the exit; a repair cycle is keyed on run and head.
     pub head_sha: String,
-    /// cas-25ce: the failed merge_group run of the PR this group entry was
-    /// built on (GitHub names it in `pr-<n>-<base sha>`), which may be the
-    /// real cause of this failure.
-    pub ahead_failed_run_id: Option<u64>,
+    /// cas-25ce: the merge-group entry this run was built on (GitHub names
+    /// its commit in `pr-<n>-<base sha>`), which may be the real cause.
+    pub ahead: AheadEntry,
+}
+
+/// cas-f2ea: what the merge-group entry ahead of a failed run shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AheadEntry {
+    /// No entry ahead, or it did not fail.
+    Clear,
+    /// The entry ahead failed in this run.
+    Failed(u64),
+    /// The entry ahead is still running or could not be read.
+    Unknown,
+}
+
+/// cas-f2ea: every run of the entry ahead, whatever its status, so a red
+/// entry ahead still running is not mistaken for this PR's own failure.
+fn ahead_entry(transport: &dyn CiTransport, failed: &CiRun, pr_number: u64) -> AheadEntry {
+    let Some(base) = failed
+        .head_branch
+        .rsplit_once("/pr-")
+        .and_then(|(_, suffix)| suffix.split_once('-'))
+        .map(|(_, base)| base)
+    else {
+        return AheadEntry::Clear;
+    };
+    let Ok(runs) = transport.runs_for_sha(base) else {
+        return AheadEntry::Unknown;
+    };
+    let ahead: Vec<_> = runs
+        .iter()
+        .filter(|run| {
+            run.event == "merge_group"
+                && merge_group_pr_number(&run.head_branch).is_some_and(|number| number != pr_number)
+        })
+        .collect();
+    if let Some(run) = ahead.iter().find(|run| run.conclusion.as_deref() == Some("failure")) {
+        AheadEntry::Failed(run.id)
+    } else if ahead.iter().any(|run| run.status != "completed") {
+        AheadEntry::Unknown
+    } else {
+        AheadEntry::Clear
+    }
 }
 
 /// cas-e369: a supervisor-owned PR (an open epic's `epic/` branch) that the
@@ -1247,18 +1287,6 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
         }
         let failed_run = failed_runs.get(&pr.number);
         let failed_run_id = failed_run.map(|run| run.id);
-        let ahead_failed_run_id = failed_run
-            .and_then(|run| run.head_branch.rsplit_once("/pr-"))
-            .and_then(|(_, suffix)| suffix.split_once('-'))
-            .and_then(|(_, base)| {
-                runs.iter().find(|ahead| {
-                    ahead.event == "merge_group"
-                        && ahead.conclusion.as_deref() == Some("failure")
-                        && ahead.head_sha == base
-                        && merge_group_pr_number(&ahead.head_branch) != Some(pr.number)
-                })
-            })
-            .map(|ahead| ahead.id);
         let arm_vanished = pr.head_branch.starts_with("factory/")
             && previously_armed.contains(&pr.number)
             && !pr.auto_merge_armed()
@@ -1280,6 +1308,14 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             poll.queued_prs.insert(pr.number);
             continue;
         }
+        let ahead = failed_run.map_or(AheadEntry::Clear, |run| ahead_entry(transport, run, pr.number));
+        // cas-f2ea: an entry ahead still running gets one confirming poll
+        // before this exit is judged; still unknown then, it is not counted.
+        if ahead == AheadEntry::Unknown && !previously_held.contains(&pr.number) {
+            poll.held_exits.insert(pr.number);
+            poll.queued_prs.insert(pr.number);
+            continue;
+        }
         let occurrence = if disarmed {
             format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
         } else {
@@ -1292,7 +1328,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             failed_run_id,
             occurrence,
             head_sha: pr.head_sha.clone(),
-            ahead_failed_run_id,
+            ahead,
         });
     }
     poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
@@ -2398,7 +2434,21 @@ mod tests {
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
         // cas-25ce: a failed group entry ahead (the run whose head is this
         // entry's `pr-556-<base>`) is named as the possible cause.
-        assert_eq!(first.ejections[0].ahead_failed_run_id, Some(900));
+        assert_eq!(first.ejections[0].ahead, AheadEntry::Failed(900));
+        // cas-f2ea: an entry ahead still running holds the exit for one
+        // confirming poll, then reports Unknown (never this PR's own failure).
+        let mut running = run_with("gh-readonly-queue/main/pr-555-trunk", "base", 900, None);
+        (running.event, running.status) = ("merge_group".to_string(), "in_progress".to_string());
+        let pending = FakeTransport {
+            runs: vec![failed.clone(), running], pulls: ejected.pulls.clone(), delivery_pulls: Vec::new(),
+            job: String::new(), log: None, calls: Cell::new(0),
+        };
+        let held = collect_tracked_merge_queue_ejections(&pending, std::slice::from_ref(&delivery), &[],
+            &BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new()).unwrap();
+        assert!(held.ejections.is_empty() && held.held_exits.contains(&556));
+        let confirmed = collect_tracked_merge_queue_ejections(&pending, std::slice::from_ref(&delivery), &[],
+            &BTreeSet::new(), &BTreeSet::new(), &held.held_exits).unwrap();
+        assert_eq!(confirmed.ejections[0].ahead, AheadEntry::Unknown);
         assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z");
 
         let observed_exit = collect_merge_queue_ejections(

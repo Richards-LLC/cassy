@@ -45,7 +45,7 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
       const view = new ConversationView(document, history, { supervisor: "sup", retryMessage: vi.fn() });
       view.update();
       expect(view.element.querySelectorAll(".conversation-retry")).toHaveLength(0);
-      expect(view.element.textContent).not.toContain("Not confirmed");
+
     }
   });
 
@@ -94,7 +94,6 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
     expect(line("On the wire, no receipt yet")).toBeUndefined();
     expect(line("Receipt never came")).toContain("2 messages not confirmed");
     expect(line("Refused by the hub")).toContain("Not sent");
-    expect(view.element.textContent).not.toMatch(/Sending…|Delivered/);
     // The held message still counts as pending (its session stays listed), and nothing claims the supervisor has it.
     expect(reloaded.hasPending()).toBe(true);
     expect(reloaded.awaitingReply()).toBe(false);

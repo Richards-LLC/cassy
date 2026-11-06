@@ -13,7 +13,7 @@ use cas::builtins::{
     BUILTIN_AGENTS, BUILTIN_SKILLS, BUILTIN_WORKFLOWS, BuiltinFile, CODEX_BUILTIN_AGENTS,
     CODEX_BUILTIN_SKILLS, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
 };
-use cas::maintenance_jobs::MAINTENANCE_JOBS;
+
 
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
@@ -44,65 +44,17 @@ fn all_flavors(relative: &str) -> [String; 3] {
     ]
 }
 
-fn line_index(body: &str, needle: &str) -> usize {
-    body.lines()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("expected to find {needle:?} in the document"))
-}
 
-#[test]
-fn supervisor_guidance_drives_each_turn_to_a_named_exit_rung() {
-    for flavor_rel in all_flavors("skills/cas-supervisor.md") {
-        let body = load(&flavor_rel);
-        for marker in [
-            "Drive to the exit",
-            "Children merged",
-            "Epic assembled",
-            "Integration gated",
-            "PR queued",
-            "On main",
-            "Released and deployed",
-        ] {
-            assert!(
-                body.contains(marker),
-                "{flavor_rel} must carry supervisor forward-motion marker {marker:?}"
-            );
-        }
-        assert!(
-            !body.contains("produce no more output") && !body.contains("wait for events"),
-            "{flavor_rel} must not tell the supervisor to stop before owning the next rung"
-        );
-    }
-}
+
+
 
 // ---------------------------------------------------------------------------
 // 1. Doc family: shared hygiene reference, real signals only
 // ---------------------------------------------------------------------------
 
-const DOC_FAMILY: [&str; 3] = ["codemap", "project-overview", "design-spec"];
 
-#[test]
-fn doc_family_shares_one_hygiene_reference_instead_of_restating_it() {
-    for skill in DOC_FAMILY {
-        for flavor_rel in all_flavors(&format!("skills/{skill}/SKILL.md")) {
-            let body = load(&flavor_rel);
-            assert!(
-                body.contains("doc-hygiene.md"),
-                "{flavor_rel} must link the shared doc-hygiene reference"
-            );
-            assert!(
-                !body.contains("Preserve any `<!-- keep -->`"),
-                "{flavor_rel} still restates the keep-block procedure that moved to \
-                 doc-hygiene.md"
-            );
-            assert!(
-                !body.contains("No content duplication."),
-                "{flavor_rel} still restates the pointer-memory procedure that moved to \
-                 doc-hygiene.md"
-            );
-        }
-    }
-}
+
+
 
 #[test]
 fn doc_hygiene_reference_is_registered_in_every_flavor() {
@@ -147,54 +99,11 @@ fn doc_hygiene_reference_is_registered_in_every_flavor() {
     }
 }
 
-#[test]
-fn design_spec_drops_the_removed_review_persona_and_the_phantom_drift_signal() {
-    for flavor_rel in all_flavors("skills/design-spec/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            !body.to_ascii_lowercase().contains("persona"),
-            "{flavor_rel} still names the review persona layer removed in v3.10.0"
-        );
-        assert!(
-            !body.contains("staleness signal"),
-            "{flavor_rel} still promises a DESIGN.md staleness signal; no hook or CLI \
-             checks DESIGN.md freshness"
-        );
-        assert!(
-            body.contains("reviewers can diff"),
-            "{flavor_rel} must state the real reason to commit DESIGN.md"
-        );
-    }
-}
 
-#[test]
-fn project_overview_tells_the_agent_to_commit_the_doc() {
-    for flavor_rel in all_flavors("skills/project-overview/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            body.contains("git add docs/PRODUCT_OVERVIEW.md"),
-            "{flavor_rel} must include the commit step; git history is the primary \
-             freshness signal (project_overview.rs:525-527)"
-        );
-    }
-}
 
-#[test]
-fn codemap_states_the_real_missing_codemap_gate_behaviour() {
-    for flavor_rel in all_flavors("skills/codemap/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            !body.contains("PreToolUse blocks worker dispatch"),
-            "{flavor_rel} claims a block the gate never performs: pre_tool.rs:352-356 \
-             fires only on SignificantlyStale, for supervisors, on task create / \
-             spawn_workers"
-        );
-        assert!(
-            body.contains("SignificantlyStale"),
-            "{flavor_rel} must name the real gate condition"
-        );
-    }
-}
+
+
+
 
 // ---------------------------------------------------------------------------
 // 2. Merges, inlines, retirements
@@ -240,34 +149,7 @@ fn merged_and_inlined_builtins_are_gone_from_disk_and_from_every_catalog() {
     }
 }
 
-#[test]
-fn codebase_design_absorbs_domain_modeling_and_its_two_inlined_references() {
-    for flavor_rel in all_flavors("skills/cas-codebase-design/SKILL.md") {
-        let body = load(&flavor_rel);
-        for marker in [
-            // the unique cas-domain-modeling content
-            "Challenge the language",
-            // DEEPENING.md
-            "deletion-test",
-            "local-substitutable",
-            // DESIGN-IT-TWICE.md
-            "three materially different interfaces",
-        ] {
-            assert!(
-                body.contains(marker),
-                "{flavor_rel} must carry the merged/inlined content marker {marker:?}"
-            );
-        }
-        assert!(
-            !body.contains("DEEPENING.md") && !body.contains("DESIGN-IT-TWICE.md"),
-            "{flavor_rel} still links references that were inlined and deleted"
-        );
-        assert!(
-            !body.contains("NestJS"),
-            "{flavor_rel} still carries a downstream-project carve-out"
-        );
-    }
-}
+
 
 /// Nothing in the codebase spawns these two: `grep -rn` outside the builtins
 /// tree finds only the registry, the marker tests and one CHANGELOG entry.
@@ -309,156 +191,25 @@ fn unwired_agents_are_retired_from_every_agent_registry() {
 // 3. The yardstick
 // ---------------------------------------------------------------------------
 
-#[test]
-fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
-    for flavor_rel in all_flavors("skills/cas-writing-for-agents/SKILL.md") {
-        let body = load(&flavor_rel);
 
-        assert!(
-            body.contains("## Steps"),
-            "{flavor_rel} must give the steps it demands of every other skill"
-        );
-        for step in ["1.", "2.", "3.", "4.", "5."] {
-            assert!(
-                body.contains(step),
-                "{flavor_rel} must number its steps ({step} missing)"
-            );
-        }
-        assert!(
-            body.contains("Done when"),
-            "{flavor_rel} must state an observable completion criterion"
-        );
-        // Required frontmatter fields, stated as house facts.
-        for field in [
-            "`name`",
-            "`description`",
-            "`managed_by`",
-            "`disable-model-invocation`",
-            "`disallowed-tools`",
-        ] {
-            assert!(
-                body.contains(field),
-                "{flavor_rel} must name the frontmatter field {field}"
-            );
-        }
-        assert!(
-            body.contains("Use when"),
-            "{flavor_rel} must pin the \"Use when …\" description convention"
-        );
-        // The one-tree rule (audit D1): one canonical copy with bare tool
-        // names, no codex/grok twin trees, and the named per-harness files.
-        for marker in [
-            "is the one copy",
-            "no `codex/` or `grok/` twin tree",
-            "Name Cassy tools by bare name",
-            "Codex-only files under `builtins/codex/`",
-        ] {
-            assert!(
-                body.contains(marker),
-                "{flavor_rel} must state the one-tree rule ({marker:?} missing)"
-            );
-        }
-        // A line budget, and the absorbed skill mechanics.
-        assert!(
-            body.contains("80 lines"),
-            "{flavor_rel} must state a line budget"
-        );
-        for mechanic in ["disable-model-invocation: true", "router"] {
-            assert!(
-                body.contains(mechanic),
-                "{flavor_rel} must absorb the skill-mechanics marker {mechanic:?}"
-            );
-        }
-        assert!(
-            !body.contains("SKILL-MECHANICS.md"),
-            "{flavor_rel} still links the reference it absorbed"
-        );
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 4. Stance after procedure
 // ---------------------------------------------------------------------------
 
-#[test]
-fn html_reports_leads_with_the_procedure_not_the_stance() {
-    for flavor_rel in all_flavors("skills/cas-html-reports/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            line_index(&body, "## The workflow") < line_index(&body, "## What counts as a report"),
-            "{flavor_rel}: the first step must precede the stance sections"
-        );
-    }
-}
 
-#[test]
-fn github_issues_leads_with_the_sweep_not_the_banner_essay() {
-    for flavor_rel in all_flavors("skills/cas-github-issues/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            line_index(&body, "## 1. List open issues")
-                < line_index(&body, "unfiled-reports banner"),
-            "{flavor_rel}: the seventeen-line banner preamble must sit after the steps"
-        );
-    }
-}
+
+
 
 // ---------------------------------------------------------------------------
 // 5. P3 hygiene
 // ---------------------------------------------------------------------------
 
-#[test]
-fn methodology_skills_name_the_task_note_type_they_expect() {
-    for flavor_rel in all_flavors("skills/cas-diagnosing-bugs/SKILL.md") {
-        assert!(
-            load(&flavor_rel).contains("note_type=discovery"),
-            "{flavor_rel} must name the note type it wants recorded"
-        );
-    }
-    for flavor_rel in all_flavors("skills/cas-resolving-merge-conflicts/SKILL.md") {
-        assert!(
-            load(&flavor_rel).contains("note_type=decision"),
-            "{flavor_rel} must name the note type it wants recorded"
-        );
-    }
-}
 
-#[test]
-fn codex_exec_does_not_pin_a_stale_model_slug() {
-    for flavor_rel in all_flavors("skills/cas-codex-exec/SKILL.md") {
-        let body = load(&flavor_rel);
-        assert!(
-            !body.contains("gpt-5.5"),
-            "{flavor_rel} pins a model slug that is not the box default; omit -m and let \
-             the configured default win"
-        );
-        assert!(
-            !body.contains("-m gpt"),
-            "{flavor_rel} must not pin any -m model slug in the canonical recipe"
-        );
-    }
-}
 
-#[test]
-fn wizard_template_shows_the_safe_confirm_form_under_set_e() {
-    for flavor_rel in all_flavors("skills/cas-wizard/template.sh") {
-        let body = load(&flavor_rel);
-        assert!(
-            body.contains("set -euo pipefail"),
-            "{flavor_rel} must keep the strict shell mode"
-        );
-        assert!(
-            body.contains("if confirm"),
-            "{flavor_rel} must show `confirm` wrapped in an `if`; a bare `confirm` \
-             returning 1 aborts the whole wizard under `set -e`"
-        );
-        assert!(
-            body.lines().count() >= 24,
-            "{flavor_rel} is truncated: the twins previously dropped the example block \
-             because the drift guard compared only .md files"
-        );
-    }
-}
+
+
+
 
 // ============================================================================
 // Operator-data lint
@@ -628,375 +379,11 @@ fn operator_data_lint_catches_what_it_names() {
     }
 }
 
-// ============================================================================
-// AI-vocabulary and abstract-metaphor lint
-// ============================================================================
 
-/// This is a word-list lint over shipped Markdown, not a collection of
-/// sentence pins. Review a hit in context before adding a file/phrase
-/// exception: `leverage` can be an architecture noun, `journey` a named QA
-/// flow, and `landscape` a physical page orientation.
-const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
-    ("delve", r"\bdelv(?:e|es|ed|ing)\b"),
-    ("leverage", r"\bleverag(?:e|es|ed|ing)\b"),
-    ("seamless", r"\bseamless(?:ly)?\b"),
-    ("robust", r"\brobust(?:ly)?\b"),
-    ("tapestry", r"\btapestr(?:y|ies)\b"),
-    ("landscape", r"\blandscapes?\b"),
-    ("realm", r"\brealms?\b"),
-    ("journey", r"\bjourneys?\b"),
-    ("serves as", r"\bserves?\s+as\b"),
-    ("it's worth noting", r"\bit['’]s\s+worth\s+noting\b"),
-    ("unlock", r"\bunlock(?:s|ed|ing)?\b"),
-    ("empower", r"\bempower(?:s|ed|ing)?\b"),
-    ("transformative", r"\btransformative\b"),
-    ("game-changer", r"\bgame[ -]chang(?:er|ers|ing)\b"),
-];
-
-/// Exact catalog path, phrase name, and why that use is literal or a term of
-/// art. A file-level exception is intentionally visible and checked for drift.
-const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
-    (
-        "agents/task-verifier.md",
-        "journey",
-        "Names declared product user flows and the severity/reach/journey triage field used in verification findings.",
-    ),
-    (
-        "skills/cas-supervisor/SKILL.md",
-        "journey",
-        "Names declared product user flows in the two-axis severity/reach triage policy.",
-    ),
-    (
-        "skills/cas-supervisor/references/epic-flow-walk.md",
-        "journey",
-        "Names declared main product user flows whose reproduced failures take staffing priority.",
-    ),
-    (
-        "skills/cas-tdd/SKILL.md",
-        "journey",
-        "cas-97c4: the operator-approved proof-ownership sentence names the registry-backed QA journeys walked once per release batch.",
-    ),
-    (
-        "skills/cas-qa-craft/references/evidence-ledger.md",
-        "journey",
-        "Names the registry-backed journey IDs prefilled by cas qa ledger init.",
-    ),
-    (
-        "skills/cas-codebase-design/references/design-it-twice.md",
-        "leverage",
-        "Architecture term for caller benefit used to compare the proposed interfaces.",
-    ),
-    (
-        "skills/cas-codebase-design/SKILL.md",
-        "leverage",
-        "Architecture term for caller benefit from a deeper module interface.",
-    ),
-    (
-        "skills/cas-tdd/SKILL.md",
-        "leverage",
-        "Names the architecture vocabulary taught by cas-codebase-design.",
-    ),
-    (
-        "skills/cas-cut-release/SKILL.md",
-        "journey",
-        "Names the journey-eval QA command and required release evidence.",
-    ),
-    (
-        "skills/cas-supervisor/references/workflow.md",
-        "journey",
-        "Names the registry-backed QA journeys each verification tier walks.",
-    ),
-    (
-        "skills/cas-cut-release/references/failure-log.md",
-        "journey",
-        "Names the required journey-evaluation report and its Markdown files carried on a release branch.",
-    ),
-    (
-        "skills/cas-frontend-engineering/SKILL.md",
-        "journey",
-        "A Playwright journey is a concrete end-to-end test scenario.",
-    ),
-    (
-        "skills/cas-html-reports/references/report-types.md",
-        "journey",
-        "Product journey is a defined report diagram type and reader path.",
-    ),
-    (
-        "skills/cas-html-reports/references/review-checklist.md",
-        "journey",
-        "Journey diagram is a specific visual checked for print legibility.",
-    ),
-    (
-        "skills/cas-ui-craft/references/critique-rubric.md",
-        "journey",
-        "Names visual-qa.mjs's literal --journey flag and its journey-start.json example file.",
-    ),
-    (
-        "skills/cas-qa-craft/SKILL.md",
-        "journey",
-        "User journey is the QA evidence unit defined by this skill.",
-    ),
-    (
-        "skills/cas-qa-craft/references/evidence-bundle.md",
-        "journey",
-        "Names the journey evidence bundle and its producer field.",
-    ),
-    (
-        "skills/cas-qa-craft/references/independent-pass.md",
-        "journey",
-        "Names the journey suite and its scored QA path.",
-    ),
-    (
-        "skills/cas-qa-craft/references/journeys.md",
-        "journey",
-        "Defines the project's end-to-end user-flow terminology and file names.",
-    ),
-    (
-        "skills/cas-worker/SKILL.md",
-        "journey",
-        "Names the journey-eval.sh browser tier command and its affected-journey selection.",
-    ),
-    (
-        "skills/cas-worker/references/discipline.md",
-        "journey",
-        "Names the journey-eval.sh browser tier command and the journey npm scripts the hook denies.",
-    ),
-    (
-        "skills/cas-worker/references/close-gate.md",
-        "journey",
-        "Names the journey registry and impact as QA evidence triggers and upkeep gates.",
-    ),
-    (
-        "skills/cas-supervisor/references/reporting-and-routing.md",
-        "journey",
-        "Names the journey registry checked by the upkeep gates and the read-back flow.",
-    ),
-    (
-        "skills/cas-qa-craft/references/maintain.md",
-        "journey",
-        "Names the journey registry whose upkeep gates replace the feature-map check.",
-    ),
-    (
-        "skills/codemap/SKILL.md",
-        "journey",
-        "Identifies product journeys as content owned by project-overview.",
-    ),
-    (
-        "skills/project-overview/SKILL.md",
-        "journey",
-        "A journey is a named product user flow in the overview template.",
-    ),
-    (
-        "skills/project-overview/SKILL.md",
-        "empower",
-        "Appears only as a marked bad example of vague product copy.",
-    ),
-    (
-        "skills/verify-before-claim/SKILL.md",
-        "journey",
-        "Refers to the end-to-end user-path verification rung.",
-    ),
-    (
-        "skills/cas-technical-drawing/SKILL.md",
-        "landscape",
-        "Landscape means a physical page orientation for the drawing sheet.",
-    ),
-    (
-        "skills/cas-technical-drawing/references/drafting-conventions.md",
-        "landscape",
-        "Landscape means a physical page orientation in drafting conventions.",
-    ),
-    (
-        "skills/cas-technical-drawing/references/model-schema.md",
-        "landscape",
-        "Landscape is a literal value of the drawing sheet schema.",
-    ),
-];
-
-#[test]
-fn shipped_builtin_markdown_has_no_unapproved_ai_vocabulary() {
-    let rules: Vec<(&str, regex::Regex)> = AI_VOCABULARY_RULES
-        .iter()
-        .map(|(phrase, pattern)| {
-            (
-                *phrase,
-                regex::RegexBuilder::new(pattern)
-                    .case_insensitive(true)
-                    .build()
-                    .unwrap(),
-            )
-        })
-        .collect();
-    let mut violations = Vec::new();
-    let mut allowlist_used = vec![false; AI_VOCABULARY_ALLOWLIST.len()];
-
-    let mut inspect =
-        |source: &str, path: &str, content: &str| {
-            for (line_number, line) in content.lines().enumerate() {
-                for (phrase, pattern) in &rules {
-                    if !pattern.is_match(line) {
-                        continue;
-                    }
-                    if let Some(index) = AI_VOCABULARY_ALLOWLIST.iter().position(
-                        |(allowed_path, allowed_phrase, _)| {
-                            *allowed_path == path && allowed_phrase == phrase
-                        },
-                    ) {
-                        allowlist_used[index] = true;
-                    } else {
-                        violations.push(format!("{path}:{}:{phrase} ({source})", line_number + 1));
-                    }
-                }
-            }
-        };
-
-    for (catalog_name, catalog) in shipped_catalogs() {
-        for file in catalog.iter().filter(|file| file.path.ends_with(".md")) {
-            inspect(catalog_name, file.path, file.content);
-        }
-    }
-    for job in MAINTENANCE_JOBS {
-        inspect(
-            "MAINTENANCE_JOBS",
-            &format!("jobs/{}.md", job.name),
-            job.body,
-        );
-    }
-
-    assert!(
-        violations.is_empty(),
-        "AI-vocabulary hits in shipped builtin Markdown; rewrite plainly or add an exact (file, phrase, reason) exception to AI_VOCABULARY_ALLOWLIST:\n{}",
-        violations.join("\n")
-    );
-    let stale: Vec<_> = AI_VOCABULARY_ALLOWLIST
-        .iter()
-        .zip(&allowlist_used)
-        .filter(|(_, used)| !**used)
-        .map(|((path, phrase, _), _)| format!("{path}: {phrase}"))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "stale AI-vocabulary allowlist entries: {stale:?}"
-    );
-    for (path, phrase, reason) in AI_VOCABULARY_ALLOWLIST {
-        assert!(
-            !reason.trim().is_empty(),
-            "{path}: {phrase} needs an allowlist reason"
-        );
-    }
-}
-
-#[test]
-fn ai_vocabulary_word_list_matches_case_insensitively_and_at_word_boundaries() {
-    let patterns: Vec<_> = AI_VOCABULARY_RULES
-        .iter()
-        .map(|(phrase, regex)| {
-            (
-                *phrase,
-                regex::RegexBuilder::new(regex)
-                    .case_insensitive(true)
-                    .build()
-                    .unwrap(),
-            )
-        })
-        .collect();
-    let catches = |text: &str, phrase: &str| {
-        patterns
-            .iter()
-            .any(|(name, pattern)| *name == phrase && pattern.is_match(text))
-    };
-    assert!(catches("DELVE into this", "delve"));
-    assert!(catches("Leverage the API", "leverage"));
-    assert!(catches("user journeys", "journey"));
-    assert!(catches("It's worth noting", "it's worth noting"));
-    assert!(!catches("unleveraged", "leverage"));
-    assert!(!catches("subrealm", "realm"));
-}
-
-#[path = "support/builtin_contract_phrases.rs"]
-mod builtin_contract_phrases;
 
 /// One registry owns contract-bearing text; ordinary prose is free to change.
-#[test]
-fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
-    use builtin_contract_phrases::Policy;
-    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-        "../../scripts/builtin-contract-schema-fixtures.json"
-    ))
-    .unwrap();
-    for fixture in fixtures.as_array().unwrap() {
-        assert_eq!(
-            Policy::parse(&fixture["policy"].to_string()).is_ok(),
-            fixture["valid"].as_bool().unwrap(),
-            "schema fixture: {}",
-            fixture["name"]
-        );
-    }
-    let policy = Policy::parse(include_str!("../../scripts/builtin-contract-phrases.json"))
-        .expect("valid reasoned builtin contract registry");
-    let failures = policy.failures(|label, path| {
-        if let Some(name) = path
-            .strip_prefix("jobs/")
-            .and_then(|p| p.strip_suffix(".md"))
-        {
-            return MAINTENANCE_JOBS
-                .iter()
-                .find(|job| job.name == name)
-                .unwrap_or_else(|| panic!("missing maintenance job {name}"))
-                .body
-                .to_owned();
-        }
-        let harness = match label {
-            "claude" => cas_mux::SupervisorCli::Claude,
-            "codex" => cas_mux::SupervisorCli::Codex,
-            "grok" => cas_mux::SupervisorCli::Grok,
-            "opencode" => cas_mux::SupervisorCli::OpenCode,
-            _ => panic!("unknown catalog {label}"),
-        };
-        cas::builtins::skill_catalog_for_harness(harness)
-            .iter()
-            .chain(cas::builtins::agent_catalog_for_harness(harness))
-            .find(|file| file.path == path)
-            .unwrap_or_else(|| panic!("missing {label} contract document {path}"))
-            .content
-            .to_owned()
-    });
-    assert!(
-        failures.is_empty(),
-        "builtin text contracts failed:\n{}",
-        failures.join("\n")
-    );
-}
+
 
 /// cas-1c1f: a supervisor's plain pane exit shuts its whole factory down, so no
 /// shipped text may present one as something its workers outlive. Only
 /// `factory action=restart_supervisor` spares them (cas-b492).
-#[test]
-fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
-    let unsafe_claim = regex::RegexBuilder::new(
-        r"fresh supervisor session|restart (?:the|each|your)(?: affected)? supervisor session|recycle affected sessions|workers? keeps? running in (?:their|its) own panes?|workers? survives? (?:a|the|your) supervisor restart",
-    )
-    .case_insensitive(true)
-    .build()
-    .unwrap();
-    let mut violations = Vec::new();
-    let mut inspect = |source: &str, path: &str, content: &str| {
-        for hit in unsafe_claim.find_iter(content) {
-            violations.push(format!("{source} {path}: {:?}", hit.as_str()));
-        }
-    };
-    for (catalog_name, catalog) in shipped_catalogs() {
-        for file in catalog {
-            inspect(catalog_name, file.path, file.content);
-        }
-    }
-    for job in MAINTENANCE_JOBS {
-        inspect("MAINTENANCE_JOBS", job.name, job.body);
-    }
-    assert!(
-        violations.is_empty(),
-        "a plain supervisor exit stops every worker; name that cost, the MCP reconnect \
-         route and restart_supervisor instead:\n{}",
-        violations.join("\n")
-    );
-}

@@ -15,8 +15,5 @@ fn epic_close_owner_gate_exposes_owner_mismatch_as_a_typed_error() {
         &error,
         TaskLifecycleGateError::OwnerMismatch { .. }
     ));
-    assert_eq!(
-        error.to_string(),
-        "Epic cas-epic is owned by epic_verification_owner=owner-id; this session cannot close it. Update epic_verification_owner if ownership has transferred (cas-9fff)."
-    );
+
 }

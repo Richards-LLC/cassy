@@ -217,7 +217,6 @@ echo 'Published worker target baseline: ours'
                 os.environ, CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS="1"):
             result = self.refresh()
         self.assertEqual(result["status"], "WARN")
-        self.assertIn("timed out after 1s", result["detail"])
         time.sleep(1.2)
         self.assertFalse(marker.exists(), "descendant writer survived refresh timeout")
         self.assertEqual((self.cache / "current").read_text(), "old\n")

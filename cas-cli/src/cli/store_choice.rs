@@ -103,13 +103,10 @@ mod tests {
         .to_string();
         assert!(error.contains("/work/cas-src/.cas"), "{error}");
         assert!(error.contains("/work/violet_ps/.cas"), "{error}");
-        assert!(error.contains("Nothing was written"), "{error}");
-        assert!(error.contains("--store here"), "{error}");
-        assert!(error.contains("--store cas-root"), "{error}");
-        assert!(
-            error.contains("env -u CAS_ROOT cas cloud project set"),
-            "{error}"
-        );
+
+
+
+
     }
 
     #[test]

@@ -834,7 +834,7 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(global.message.contains("Global task scope is unsupported"));
+
     }
 
     #[test]

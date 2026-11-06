@@ -202,8 +202,7 @@ assert_eq!(send_message(&read_only_device, "hello"), Err(SendError::Forbidden));
 
 Use the real request/handler and assert no delivery occurred through its supported
 observable seam. Do not bypass authorization or weaken the assertion to make green.
-Snapshot/phrase updates must preserve the intended refusal, not merely match the
-latest output. The names above are illustrative, not existing Rust APIs.
+Assert refusal through the error code and unchanged state; do not compare its human-readable message. The names above are illustrative, not existing Rust APIs.
 
 ## Source and prose audits
 
@@ -211,10 +210,8 @@ latest output. The names above are illustrative, not existing Rust APIs.
 | --- | --- | --- |
 | Reading `.rs` source with `include_str!`/filesystem reads and asserting text | Correct text can exist in dead or unwired code. | Exercise the exported behavior. For genuine cross-file wiring, keep a structural check with a specific `// pin: <reason>`. |
 | Comparing `.find()` positions or asserting source line order | Source order can change without changing execution order. | Send inputs through the real handler and assert effects; pin textual order only if a source consumer requires it. |
-| Asserting a phrase in a skill/doc | Wording can change without behavior changing; the phrase cannot prove execution. | Check routing/installation/parser behavior, or use a reasoned contract registry for tokens an actual consumer requires. |
+| Asserting a phrase in a skill/doc | Wording can change without behavior changing; the phrase cannot prove execution. | Check routing, installation and parser behavior, or stable machine identifiers. |
 
 In the Cassy source repository, `scripts/check-test-shape.py` detects mechanical
 source-as-text and constant/literal violations; `--changed-since <base>` scopes
-its audit. Other projects use their equivalent lint. A reasoned pin names the
-consumer, not a wording preference. Put prose pins in the contract registry rather
-than adding scattered literal assertions.
+its audit. Other projects use their equivalent lint. Human-message assertions use error codes or rule IDs, never prose substrings. A `pin:` comment does not authorize wording checks.

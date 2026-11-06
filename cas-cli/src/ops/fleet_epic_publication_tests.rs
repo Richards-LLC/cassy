@@ -421,10 +421,7 @@ fn cas_bfa1_round3_focus_refuses_cancelled_epic() {
         )
         .unwrap_err()
         .to_string();
-        assert!(
-            error.contains("is cancelled") && error.contains("Terminal epics cannot be pinned"),
-            "{error}"
-        );
+
         assert!(
             git(
                 origin,

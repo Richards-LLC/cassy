@@ -54,11 +54,7 @@ fn cas_ef94_running_consumer_comes_from_the_live_daemon_receipt() {
         (unknown.consumer_id, unknown.daemon_build.as_deref()),
         (None, Some("abc1234"))
     );
-    assert!(
-        unknown.detail.contains("ignored a receipt from pid"),
-        "{}",
-        unknown.detail
-    );
+
     assert_eq!(
         observe(root, &restarted, false).unwrap().state,
         ConsumerState::Stale
@@ -72,7 +68,7 @@ fn cas_ef94_running_consumer_comes_from_the_live_daemon_receipt() {
         "{}",
         old.detail
     );
-    assert!(!old.detail.contains("it predates"), "{}", old.detail);
+
     assert!(observe(root, &live_session("old"), false).is_none());
 
     // Clean shutdown retires only this process's receipt.
@@ -192,11 +188,7 @@ fn cas_a6f2_failed_publication_cleans_temp_and_reports_write_failure() {
         "{files:?}"
     );
     assert_eq!(status.state, ConsumerState::Unknown);
-    assert!(
-        status.detail.contains("receipt write failed"),
-        "{}",
-        status.detail
-    );
+
     let mut other = live_session("s1");
     other.daemon_pid = 1;
     let other = observe(root, &other, true).unwrap();

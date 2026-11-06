@@ -525,7 +525,7 @@ async fn test_skill_create_validation_failure_is_reported_without_writing() {
         .await;
 
     let error = result.expect_err("a failing validation script must reject create");
-    assert!(error.message.contains("validation"));
+
     assert!(error.message.contains("validation-failed"));
 
     let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
@@ -604,7 +604,7 @@ async fn test_skill_update_validation_failure_is_atomic() {
         .await;
 
     let error = result.expect_err("the existing failing validation script must reject update");
-    assert!(error.message.contains("validation"));
+
 
     let stored = skill_store.get(&id).unwrap();
     assert_eq!(stored.description, "Revised description");

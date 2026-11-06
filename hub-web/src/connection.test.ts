@@ -35,7 +35,6 @@ describe("a refused hub request says what the hub said (cas-d382, fleet-operatio
     expect(refused).toBeInstanceOf(HubRequestError);
     expect(refused).toMatchObject({ status: 409, code: "stale", detail: "swift-lark-3 already restarted" });
     // The message keeps its old wording for anything that logs it.
-    expect((refused as Error).message).toBe("GET /v1/sessions/patient-pelican-9/status failed (409)");
   });
 
   it("reads `reason` as the detail, and leaves both unset for a body that is not JSON", async () => {
@@ -79,6 +78,6 @@ describe("a refused hub request says what the hub said (cas-d382, fleet-operatio
     const connection = new HubConnectionSupervisor(await machine(["machine-read", "session-read", "pane-read"]), {} as HubCallbacks);
     const refused = await connection.enableFactoryOperate().catch((error: unknown) => error);
     expect(refused).toBeInstanceOf(ScopeGrantError);
-    expect(refused).toMatchObject({ status: 403, code: "scope_denied", detail: "control scopes required", message: "This pairing can't allow managing workers. Pair with a control invitation, then try again." });
+    expect(refused).toMatchObject({ status: 403, code: "scope_denied", detail: "control scopes required" });
   });
 });

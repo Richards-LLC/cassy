@@ -154,8 +154,8 @@ fn ct2_p3_dead_owner_notice_rerouted() {
                 serde_json::from_str(&row.prompt).unwrap();
             assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
             assert!(payload.message.contains("#12"));
-            assert!(payload.message.contains("run 3"));
-            assert!(payload.message.contains("Fast Validation › publication fixture"));
+
+
             crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
                 .unwrap();
             assert_eq!(queue.peek_all(100).unwrap().iter().filter(|r| r.target == "operator").count(), 1);

@@ -41,8 +41,6 @@ describe("F2: cancel while staged, then the rollback rejects", () => {
     // current, but the cancellation that ended it is.
     expect(coordinator.isCurrent(operation)).toBe(false);
     expect(lateCleanupDecision(tracker, coordinator, operation)).toBe("show");
-    expect(LATE_ROLLBACK_FAILURE_MESSAGE).toContain("retry the cleanup");
-    expect(LATE_ROLLBACK_FAILURE_MESSAGE).not.toContain("resume");
   });
 
   it("drops the late failure once a replacement flow owns the dialog", () => {
@@ -105,14 +103,12 @@ describe("F2: Retry cleanup is serialized, guarded and reports rejection", () =>
   it("turns a rejected recovery into a visible, retryable status", () => {
     const rejected = cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { failed: true });
     expect(rejected.done).toBe(false);
-    expect(rejected.status).toContain("could not be checked");
     const stillStaged = cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 1 });
     expect(stillStaged.done).toBe(false);
-    expect(stillStaged.status).toContain("still waiting for cleanup");
     const storeStillOpen = cleanupRetryOutcome({ persistentRemovalFailed: true, failClosed: false }, { pendingCleanup: 0 });
     expect(storeStillOpen.done).toBe(false);
-    expect(cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 0 })).toEqual({ done: true, status: "Pairing cancelled." });
-    expect(cleanupRetryOutcome({ persistentRemovalFailed: true, failClosed: true }, { pendingCleanup: 0 }).status).toContain("durably blocked");
+    expect(cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 0 }).done).toBe(true);
+    expect(cleanupRetryOutcome({ persistentRemovalFailed: true, failClosed: true }, { pendingCleanup: 0 }).done).toBe(true);
   });
 });
 
@@ -145,27 +141,5 @@ describe("F2: a failed exchange whose rollback rejected owns a retry too (review
     expect(cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 0 }).done).toBe(true);
   });
 
-  it("says only what is outstanding, for either way into the step", () => {
-    const cancelStore = cleanupStepCopy({ cause: "cancel", storeOpen: true, rollbackPending: false });
-    expect(cancelStore.title).toBe("Could not finish cancelling");
-    expect(cancelStore.outstanding).toContain("reload could still see");
-    expect(cancelStore.outstanding).not.toContain("credential this browser started saving");
 
-    const cancelRollback = cleanupStepCopy({ cause: "cancel", storeOpen: false, rollbackPending: true });
-    expect(cancelRollback.outstanding).not.toContain("reload could still see");
-    expect(cancelRollback.outstanding).toContain("blocked and invisible");
-
-    const failure = cleanupStepCopy({ cause: "failure", storeOpen: false, rollbackPending: true });
-    expect(failure.title).toBe("Pairing failed and cleanup is incomplete");
-    expect(failure.discarded).toContain("did not complete");
-    expect(failure.discarded).not.toContain("cancelled on this page");
-
-    const both = cleanupStepCopy({ cause: "cancel", storeOpen: true, rollbackPending: true });
-    expect(both.outstanding).toContain("reload could still see");
-    expect(both.outstanding).toContain("blocked and invisible");
-    for (const copy of [cancelStore, cancelRollback, failure, both]) {
-      expect(copy.next).toContain("blocks this browser only");
-      expect(`${copy.discarded} ${copy.outstanding}`).not.toContain("resume ");
-    }
-  });
 });

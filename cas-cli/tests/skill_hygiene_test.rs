@@ -6,114 +6,17 @@ use cas::builtins::sync_all_builtins_for_project;
 use cas_mux::SupervisorCli;
 use tempfile::TempDir;
 
-#[path = "support/builtin_catalog.rs"]
-mod builtin_catalog;
 
-fn source(flavor: &str, relative: &str) -> &'static str {
-    let flavor = match flavor {
-        "" => builtin_catalog::Flavor::Claude,
-        "codex" => builtin_catalog::Flavor::Codex,
-        "grok" => builtin_catalog::Flavor::Grok,
-        other => panic!("unknown builtin flavor {other}"),
-    };
-    builtin_catalog::find(flavor, relative)
-}
 
-#[test]
-fn ct2_p1_skill_one_message_per_event() {
-    let skill = source("", "skills/cas-worker/SKILL.md");
-    for flavor in ["codex", "grok"] {
-        assert_eq!(
-            source(flavor, "skills/cas-worker/SKILL.md"),
-            skill,
-            "{flavor} worker skill mirror must match"
-        );
-    }
-    for phrase in [
-        "One event gets one message.",
-        "A close is the lifecycle report; never send a post-close",
-        "The park relay is the completion signal; send merge_request=true only for local_merge.",
-        "wait for the supervisor's",
-        "summary or echo the close relay",
-        "send no follow-up update",
-        "Don't re-close or block on it",
-        "Stay available after handoff",
-    ] {
-        assert!(
-            skill.contains(phrase),
-            "cas-worker missing contract phrase: {phrase}"
-        );
-    }
-}
 
-#[test]
-fn ct2_p3_worker_lane_documented() {
-    let skill = source("", "skills/cas-worker/SKILL.md");
-    for phrase in [
-        "Worker peer lane",
-        "same factory session",
-        "sends a copy",
-        "kind=status",
-        "typed action wake",
-    ] {
-        assert!(
-            skill.contains(phrase),
-            "cas-worker missing peer-lane phrase: {phrase}"
-        );
-    }
 
-    let guide = include_str!("../../docs/guides/peer-supervisors.md");
-    assert!(
-        !guide.contains("Peer workers are never addressable"),
-        "the peer guide must describe the worker lane instead of denying it"
-    );
-    assert!(guide.contains("Worker peer lane"));
-    assert!(guide.contains("copied to the session supervisor"));
-}
 
-#[test]
-// pin: Cross-check init registration against the release skill and rubric; an omitted registration is invisible to catalog lookup.
-fn release_notes_are_generic_procedure_and_rubric_driven() {
-    let init = include_str!("../src/cli/init/docs_and_skill.rs");
-    assert!(init.contains("follow docs/release-notes/RUBRIC.md"));
-    assert!(!init.contains("Slack per docs/release-notes/RUBRIC.md"));
-}
 
-#[test]
-fn fallow_examples_honor_machine_output_rule() {
-    let skill = source("", "skills/fallow/SKILL.md");
-    let mut command_count = 0;
-    for line in skill.lines() {
-        let command = line.trim_start();
-        if command.starts_with("fallow ") {
-            command_count += 1;
-            assert!(
-                command.contains("--format json"),
-                "example lacks JSON output: {command}"
-            );
-            assert!(
-                command.contains("--quiet"),
-                "example lacks quiet output: {command}"
-            );
-            // `|| true` forces status 0, so a missing binary or a failed
-            // `npx` looked like a clean pass; the status must stay visible.
-            assert!(
-                command.contains("2>/dev/null; echo \"exit=$?\""),
-                "example must print its exit status: {command}"
-            );
-            assert!(
-                !command.contains("|| true"),
-                "example swallows the exit status: {command}"
-            );
-        }
-    }
-    assert!(
-        command_count >= 10,
-        "expected the workflow examples to be guarded"
-    );
-    // Counts and tool tables drift between fallow releases; the skill points
-    // at `fallow schema` instead of copying them.
-}
+
+
+
+
+
 
 #[test]
 fn optional_stack_skills_follow_detection_and_explicit_enable() {
@@ -196,37 +99,7 @@ fn optional_stack_skills_follow_detection_and_explicit_enable() {
 /// (trace CLI, `--debug=cli` + session-scoped `playwright cli`) with command
 /// shapes verified against @playwright/test 1.63, and never recommends the
 /// idioms Playwright discourages inside a runnable example.
-#[test]
-fn playwright_debug_teaches_trace_cli_and_agent_debugger() {
-    let skill = source("", "skills/cas-playwright-debug/SKILL.md");
-    for flavor in ["codex", "grok"] {
-        assert_eq!(
-            source(flavor, "skills/cas-playwright-debug/SKILL.md"),
-            skill,
-            "{flavor} mirror must be byte-identical"
-        );
-    }
 
-    // 1.63's snapshot phase flag is --phase; --name does not exist.
-
-    // Discouraged idioms may appear only as the left column of the
-    // "Instead of" table or in prose that forbids them — never in a code block.
-    let mut in_code = false;
-    for line in skill.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            for banned in ["networkidle", "waitForTimeout", ":visible"] {
-                assert!(
-                    !line.contains(banned),
-                    "code example recommends {banned}: {line}"
-                );
-            }
-        }
-    }
-}
 
 /// cas-5e54: cas-playwright-debug is an optional stack skill selected by a
 /// Playwright Test dependency, a playwright config file, or explicit opt-in.

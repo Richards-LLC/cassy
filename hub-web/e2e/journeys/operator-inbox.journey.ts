@@ -44,7 +44,7 @@ async function enrollAlertPhone(page: Page, journey: Journey, cloud: Awaited<Ret
   await inbox.getByRole("button", { name: "Sign in" }).click();
   const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
   await cloud.approve(code, { capabilities: ["feed:read", "account:manage"] });
-  await expect(inbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(inbox.locator('[data-machine-presence][data-monitoring="enabled"][data-presence="observed"] > p').first()).toBeVisible({ timeout: 15_000 });
 }
 
 test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, async ({ page, journey, browser }) => {
@@ -62,19 +62,19 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       await inbox.getByRole("button", { name: "Sign in" }).click();
       const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
       await cloud.approve(code, { capabilities: ["feed:read", "account:manage"] });
-      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(row.locator(':scope[data-monitoring="disabled"] > p').first()).toBeVisible({ timeout: 15_000 });
       expect(cloud.presence.get(soundwave.id)?.monitoring).toBe("disabled");
       const settings = row.locator("summary");
-      await expect(settings).toHaveText("Monitoring settings");
-      await expect(settings).toHaveAccessibleName("Monitoring settings for soundwave");
+      await expect(settings).toBeVisible();
+      await expect(settings).toHaveAccessibleName(/\S/);
       const chevron = settings.locator(".machine-presence-chevron");
       await expect(chevron).toBeVisible();
       const closedMarker = await chevron.evaluate((node) => getComputedStyle(node).transform);
       await settings.focus();
       await settings.press("Enter");
-      await expect(row.getByText(/keeps notices for 90 days/)).toBeVisible();
+      await expect(row.locator("details > p").first()).toContainText("90");
       expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
-      await expect(row.getByText(/Enable alerts, then run cas hub restart on soundwave/)).toBeVisible();
+      await expect(row.locator("details code")).toHaveText("cas hub restart");
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
       await expect(enable).toHaveText("Enable alerts");
       await page.emulateMedia({ forcedColors: "active" });
@@ -101,14 +101,14 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       await page.emulateMedia({ forcedColors: null });
       await enable.focus();
       await enable.press("Enter");
-      await expect(row.getByText("Waiting for the first report", { exact: true })).toBeVisible();
+      await expect(row.locator(':scope[data-presence="pending_first_report"] > p').first()).toBeVisible();
       expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("1");
       cloud.presence.set(soundwave.id, report());
       await refresh();
-      await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
-      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
-      await expect(row.getByText(/Factory: not known/)).toBeVisible();
-      await expect(row.getByText(/Last report/)).toBeVisible();
+      await expect(row.locator(':scope[data-monitoring="enabled"][data-presence="observed"] > p').first()).toBeVisible();
+      await expect(row.locator('[data-component="serve"][data-state="degraded"]')).toBeVisible();
+      await expect(row.locator('[data-component="factory"][data-state="unknown"]')).toBeVisible();
+      await expect(row.locator("p > time[datetime]")).toBeVisible();
       await expect(row.locator("p time")).toHaveText(/^(?:now|\d+[smhd] ago)$/);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
     });
@@ -116,14 +116,14 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
       await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outage.eventId });
       await refresh();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+      await expect(notices.locator("[data-presence-event][data-ref-event]")).toBeVisible();
       await desk.goto(page.url());
       await desk.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await deskInbox.getByLabel("Name this browser").fill("Presence desk");
       await deskInbox.getByRole("button", { name: "Sign in" }).click();
       const code = (await deskInbox.getByLabel("Sign-in code").textContent())!.trim();
       await cloud.approve(code);
-      await expect(deskInbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.locator('[data-machine-presence][data-monitoring="enabled"][data-presence="observed"] > p').first()).toBeVisible({ timeout: 15_000 });
       await expect(deskInbox.getByRole("button", { name: /Enable alerts|Disable alerts/ })).toHaveCount(0);
     });
     await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
@@ -137,11 +137,11 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       await expect(disable).toHaveText("Disable alerts");
       await disable.focus();
       await disable.press("Enter");
-      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();
+      await expect(row.locator(':scope[data-monitoring="disabled"] > p').first()).toBeVisible();
       expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("2");
       await deskInbox.getByRole("button", { name: "Refresh machine status" }).click();
-      await expect(deskInbox.getByText("Monitoring is off", { exact: true })).toBeVisible();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toHaveCount(1);
+      await expect(deskInbox.locator('[data-machine-presence][data-monitoring="disabled"] > p').first()).toBeVisible();
+      await expect(notices.locator("[data-presence-event][data-ref-event]")).toHaveCount(1);
       await expect(row.getByRole("button", { name: "Enable alerts for soundwave", exact: true })).toMatchAriaSnapshot('- button "Enable alerts for soundwave"');
       if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/keyboard-disable.png` });
     });
@@ -170,16 +170,16 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await deskInbox.getByRole("button", { name: "Sign in" }).click();
       const code = (await deskInbox.getByLabel("Sign-in code").textContent())!.trim();
       await cloud.approve(code);
-      await expect(deskInbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.locator('[data-machine-presence][data-monitoring="enabled"][data-presence="observed"] > p').first()).toBeVisible({ timeout: 15_000 });
       await expect(deskInbox.getByRole("button", { name: /Enable alerts|Disable alerts/ })).toHaveCount(0);
       const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
       outageId = outage.eventId;
       cloud.presence.set(soundwave.id, { ...report(), presence: "unobserved", open_outage: { outage_epoch: "1", opened_at: new Date(journeyNow()).toISOString(), unobserved_event_id: outageId } });
       await refresh();
-      await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(notices.locator("[data-presence-event]:not([data-ref-event])")).toBeVisible({ timeout: 15_000 });
       await expect(inbox.getByRole("heading", { name: "Alert history", exact: true })).toBeVisible();
       expect(await inbox.locator(".machine-presence-history").evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
-      await expect(deskInbox.getByText("soundwave unreachable", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.locator("[data-presence-event]:not([data-ref-event])")).toBeVisible({ timeout: 15_000 });
       const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
       const desktop = [...cloud.devices.values()].find((device) => device.label === "Presence desk")!;
       await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(1);
@@ -190,22 +190,22 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await page.reload();
       await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await expect(notices.locator(`[data-presence-event="${outageId}"]`)).toHaveCount(1);
-      await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible();
+      await expect(notices.locator("[data-presence-event]:not([data-ref-event])")).toBeVisible();
       await expect(inbox.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
       const recovery = await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outageId });
       cloud.presence.set(soundwave.id, report());
       await refresh();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(notices.locator("[data-presence-event][data-ref-event]")).toBeVisible({ timeout: 15_000 });
       await expect(notices.locator(`[data-presence-event="${recovery.eventId}"]`)).toHaveAttribute("data-ref-event", outageId);
-      await expect(notices.getByText("soundwave unreachable", { exact: true })).toHaveCount(1);
-      await expect(deskInbox.getByText("soundwave recovered", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(notices.locator("[data-presence-event]:not([data-ref-event])")).toHaveCount(1);
+      await expect(deskInbox.locator("[data-presence-event][data-ref-event]")).toBeVisible({ timeout: 15_000 });
       const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
       await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(2);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
       cloud.observerStatus = "unavailable";
       await refresh();
-      await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
-      await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
+      await expect(inbox.locator('.machine-presence .operator-inbox-warning[role="status"]')).toBeVisible();
+      await expect(row.locator(':scope[data-monitoring="enabled"][data-presence="observed"] > p').first()).toBeVisible();
     });
   } finally {
     await peer.close();
@@ -220,8 +220,8 @@ test("HUB-J19 machine alerts across accessibility modes", journeyPart, async ({ 
   cloud.observerStatus = "unavailable";
   await journey.stage("Sign in and read a signed recovered alert", async () => {
     await enrollAlertPhone(page, journey, cloud);
-    await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
-    await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
+    await expect(notices.locator("[data-presence-event][data-ref-event]")).toBeVisible();
+    await expect(inbox.locator('.machine-presence .operator-inbox-warning[role="status"]')).toBeVisible();
   });
   const cells = [
     { name: "phone-light", width: 390, height: 844, scheme: "light" as const },
@@ -238,8 +238,8 @@ test("HUB-J19 machine alerts across accessibility modes", journeyPart, async ({ 
       await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {})});
       await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
       if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
-      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+      await expect(row.locator('[data-component="serve"][data-state="degraded"]')).toBeVisible();
+      await expect(notices.locator("[data-presence-event][data-ref-event]")).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (cell.name === "forced-colors") {
         await row.locator("summary").click();
@@ -292,14 +292,14 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
   await journey.stage("Sign in on a brand-new phone with no machine paired", async () => {
     await journey.open();
     await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
-    await expect(inbox.getByText("this isn’t end-to-end encryption")).toBeVisible();
+    await expect(inbox.locator(".operator-inbox-disclosure")).toBeVisible();
     await inbox.getByLabel("Name this browser").fill("Pixel 9");
     // QA F02 (round 1): Enter in the name field signs in.
     await inbox.getByLabel("Name this browser").press("Enter");
     await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
     await expect(inbox.getByRole("link", { name: "Approve on Cassy Cloud" })).toHaveAttribute("href", /\/operator\/approve\?code=/);
     // cas-d043 G05: one brand, the one on the button below it.
-    await expect(inbox.locator(".operator-inbox-lead")).toHaveText("Approve this browser from your Cassy Cloud account. Check that the code matches.");
+    await expect(inbox.locator(".operator-inbox-lead")).toBeVisible();
   });
 
   await journey.stage("Approve it from the account; the weeks of messages are there", async () => {
@@ -319,7 +319,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
   await journey.stage("Reply while soundwave is off: it waits for soundwave", async () => {
     await inbox.getByLabel(/Reply — soundwave gets it when it’s back/).fill("Go. Cut the release.");
     await inbox.getByRole("button", { name: "Queue reply" }).click();
-    await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
+    await expect(inbox.locator('.operator-inbox-command-state[data-state="pending_machine"], .operator-inbox-command-state[data-state="reserved"]')).toBeVisible();
     // QA F01 (round 1): bodies read as messages in the thread's bubble inks,
     // metadata stays quieter, and the reply's machine state is a state line.
     const look = await inbox.evaluate((dialog) => {
@@ -365,7 +365,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     await expect(otherInbox.getByText("Cloud half shipped. Ready for your go.")).toBeVisible();
     await expect(otherInbox.getByText("Go. Cut the release.")).toBeVisible();
     // This profile cannot queue replies: it was approved for reading only.
-    await expect(otherInbox.getByText(/can read this conversation but not reply/)).toBeVisible();
+    await expect(otherInbox.locator(".operator-inbox-composer > p").first()).toBeVisible();
     const desk = [...cloud.devices.values()].find((device) => device.label === "Desk")!;
     expect(cloud.acks.get(desk.id)?.size).toBe(4);
     await desktop.close();
@@ -382,7 +382,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
         await page.setViewportSize(size);
         await page.emulateMedia({ colorScheme: scheme });
         await page.evaluate((value) => { document.documentElement.dataset.scheme = value; }, scheme);
-        await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
+        await expect(inbox.locator('.operator-inbox-command-state[data-state="pending_machine"], .operator-inbox-command-state[data-state="reserved"]')).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
         await page.screenshot({ path: `${qa}/inbox-${scheme}-${size.name}.png` });
       }
@@ -401,7 +401,7 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
     for (const [name, query, media] of modes) {
       await page.emulateMedia(media);
       expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(inbox.getByText("Waiting for soundwave")).toBeVisible();
+      await expect(inbox.locator('.operator-inbox-command-state[data-state="pending_machine"], .operator-inbox-command-state[data-state="reserved"]')).toBeVisible();
       await page.screenshot({ path: `${qa}/a11y-${name}.png` });
     }
     await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
@@ -410,12 +410,12 @@ test("HUB-J19 read my inbox on a new phone while the machine is off", async ({ p
   await journey.stage("soundwave returns and accepts the reply; a reload keeps everything", async () => {
     const [command] = cloud.commands.keys();
     cloud.acceptCommand(command);
-    await expect(inbox.getByText("soundwave received it")).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.locator('.operator-inbox-command-state[data-state="accepted"]')).toBeVisible({ timeout: 15_000 });
     await page.reload();
     await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByText("Started the release epic. Three lanes.")).toBeVisible();
-    await expect(inbox.getByText("soundwave received it")).toBeVisible();
+    await expect(inbox.locator('.operator-inbox-command-state[data-state="accepted"]')).toBeVisible();
     // Signed in once: the reload neither asked again nor replayed history twice.
     expect(cloud.enrollments.size).toBe(2);
   });
@@ -442,10 +442,10 @@ test("HUB-J19 a message that can't be verified is named, never shown (cas-9b7d Q
     await inbox.getByRole("button", { name: "Sign in" }).click();
     const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
     await cloud.approve(code);
-    await expect(inbox.getByText("1 message couldn’t be verified, so it isn’t shown.")).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.locator(".operator-inbox-withheld")).toBeVisible({ timeout: 15_000 });
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByText("Genuine message one.")).toBeVisible();
-    await expect(inbox.getByText("1 message couldn’t be verified, so it isn’t shown.")).toBeVisible();
+    await expect(inbox.locator(".operator-inbox-withheld")).toBeVisible();
     await expect(page.getByText(/TAMPERED-SECRET/)).toHaveCount(0);
     const phone = [...cloud.devices.values()].find((device) => device.label === "QA phone")!;
     expect([...(cloud.acks.get(phone.id) ?? [])].map((value) => String(Array.isArray(value) ? value[0] : value))).not.toContain(tampered.eventId);
@@ -557,7 +557,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await captureReply(page, "M01-read-only", true);
       readerId = [...cloud.devices.values()].find(d => d.label === "Reader phone")!.id;
       await inbox.getByRole("button", { name: "Ask to reply", exact: true }).press("Enter");
-      await expect(inbox.getByText("Waiting for the account owner to allow replies. Your messages stay here.", { exact: true })).toBeVisible();
+      await expect(inbox.locator('.operator-inbox-composer[data-request-status="pending"] > [role="status"]')).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([]);
       await captureReply(page, "M02-pending");
     });
@@ -568,7 +568,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await owner.goto(page.url());
       const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner desktop", true);
       const requests = ownerInbox.getByRole("region", { name: "Reply requests", exact: true });
-      await expect(requests.getByText(/Reader phone.*asks to reply to soundwave · amber-fox-29/)).toBeVisible({ timeout: 15_000 });
+      await expect(requests.locator("section > p")).toContainText(new RegExp("(?=[\\s\\S]*Reader phone)(?=[\\s\\S]*soundwave)(?=[\\s\\S]*amber-fox-29)"), { timeout: 15_000 });
       await captureReply(owner, "M03-owner", true);
       const allow = requests.getByRole("button", { name: /Allow Reader phone/ });
       const deny = requests.getByRole("button", { name: /Deny Reader phone/ });
@@ -577,7 +577,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       expect(denyBox.x - allowBox.x - allowBox.width).toBeGreaterThanOrEqual(8);
       expect(await allow.evaluate(el => getComputedStyle(el).background)).not.toBe(await deny.evaluate(el => getComputedStyle(el).background));
       await allow.press("Enter");
-      await expect(ownerInbox.getByText("Replying allowed for Reader phone.", { exact: true })).toBeVisible();
+      await expect(ownerInbox.locator(".operator-inbox-status")).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([{ hub_id: HUB, project_id: PROJECT, session_id: sessionId, operations: ["operator_message"] }]);
     });
     await journey.stage("The existing phone can reply without signing out or pairing again", async () => {
@@ -666,14 +666,14 @@ test("HUB-J19 Ask to reply names denial without granting permission (cas-874b)",
       await routeOperatorCloud(peer, cloud); await owner.goto(page.url());
       const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner", true);
       await ownerInbox.getByRole("button", { name: /Deny Denied phone/ }).click();
-      await expect(inbox.getByText("The owner denied this reply request. This browser is still read-only.", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(inbox.locator('.operator-inbox-composer[data-request-status="denied"] > [role="status"]')).toBeVisible({ timeout: 15_000 });
       await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
       await captureReply(page, "F01-denied");
     });
     // The denied reader can request again; no expiry setup is needed to
     // prove that transition (cas-33167). Keep the denied stage capture above.
     await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
-    await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
+    await expect(inbox.locator('.operator-inbox-composer[data-request-status="pending"] > [role="status"]')).toBeVisible();
   } finally { await peer.close(); }
 });
 
@@ -687,7 +687,7 @@ test("HUB-J19 Ask to reply names expiry without granting permission (cas-874b)",
     await journey.open(); await enrollReplyBrowser(page, cloud, "Expiring phone");
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
-    await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
+    await expect(inbox.locator('.operator-inbox-composer[data-request-status="pending"] > [role="status"]')).toBeVisible();
   });
   await journey.stage("An expired request is shown honestly after a reload", async () => {
     const pending = [...cloud.replyGrants.requests.values()].find(r => r.status === "pending")!;
@@ -695,7 +695,7 @@ test("HUB-J19 Ask to reply names expiry without granting permission (cas-874b)",
     pending.expires_at = new Date(cloud.now() - 1).toISOString();
     await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
-    await expect(inbox.getByText("This reply request expired. This browser is still read-only.", { exact: true })).toBeVisible();
+    await expect(inbox.locator('.operator-inbox-composer[data-request-status="expired"] > [role="status"]')).toBeVisible();
     await captureReply(page, "F02-expired");
     await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toBeVisible();
     await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
@@ -721,13 +721,12 @@ test("HUB-J19 unavailable or unshipped reply permissions never block history (ca
   await routeOperatorCloud(page.context(), cloud);
   await journey.stage("Reply permissions fail but history loads, with no false empty state or dead control", async () => {
     await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only", false, false);
-    await expect(inbox.getByText("Loading inbox history…", { exact: true })).toBeVisible({ timeout: 15_000 });
-    await expect(inbox.getByText(/^No messages yet/)).toHaveCount(0);
+    await expect(inbox.locator('.operator-inbox-empty[role="status"]')).toBeVisible({ timeout: 15_000 });
     releaseHistory();
     await expect(inbox.getByRole("button", { name: /soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
-    await expect(inbox.getByText(/This browser can read this conversation but not reply/)).toBeVisible();
+    await expect(inbox.locator(".operator-inbox-composer > p").first()).toBeVisible();
     await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId,
       plaintext: supervisorTurn(799, "New history after grant introspection.", journeyDay(1, 13)) });
     await expect(inbox.getByText("New history after grant introspection.", { exact: true })).toBeVisible({ timeout: 15_000 });

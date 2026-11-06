@@ -48,7 +48,7 @@ class ReviewBodyTests(unittest.TestCase):
         self.assertIn("**Door:** not declared", body)
 
     def test_missing_version_refused(self):
-        with self.assertRaisesRegex(ValueError, "could not derive"):
+        with self.assertRaises(ValueError):
             review.release_body(CHANGELOG, "3.29.2")
 
 

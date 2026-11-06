@@ -299,7 +299,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("--global-root"), "{err}");
-        assert!(err.contains("--scope project"), "{err}");
+
     }
 
     #[test]

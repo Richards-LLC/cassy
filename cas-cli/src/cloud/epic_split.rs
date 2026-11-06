@@ -1910,7 +1910,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("live supervisor"), "{error}");
+
         let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
         assert_eq!(split.state, SplitState::Accepted);
         assert_eq!(split.reason, None);

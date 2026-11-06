@@ -120,7 +120,6 @@ describe("Slack thread message injection", () => {
 
     const result = await inject(config, baseMessage);
     expect(result).toMatchObject({ ok: false });
-    expect(result.error).toContain("could not be read");
     expect(result.error).toContain(path);
     expect(calls).toBe(0);
   });
@@ -139,7 +138,6 @@ describe("Slack thread message injection", () => {
 
     const rejected = await inject(config, baseMessage);
     expect(rejected.ok).toBe(false);
-    expect(rejected.error).toContain("no restart needed");
     expect(calls).toHaveLength(0);
 
     // Exactly what the error tells the operator to do — repair the file, then

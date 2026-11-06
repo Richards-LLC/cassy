@@ -1542,10 +1542,7 @@ mod tests {
             let error = codex_launch_readiness(&unsafe_config, &unsafe_home, &unsafe_cwd)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.contains(&format!("codex{visible}home")) && error.contains("failed to parse"),
-                "{error:?}"
-            );
+
             assert!(!error.contains(suffix), "{error:?}");
             assert_eq!(
                 std::fs::read_to_string(&unsafe_config).unwrap(),

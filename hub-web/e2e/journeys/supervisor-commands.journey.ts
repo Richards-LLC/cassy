@@ -41,7 +41,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".working-turn .phase-line")).toContainText("Turn completed");
+        await expect(page.locator(".working-turn .phase-line")).toBeVisible();
         const receipt = page.locator(".native-command-receipt");
         await expect(receipt).toContainText("/mcp reconnect cas");
         await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");
@@ -192,7 +192,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });
         const receipt = page.locator(".supervisor-command-receipt");
         await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await receipt.getByText("Harness output", { exact: true }).click();
+        await receipt.locator("details > summary").click();
         await expect(receipt.locator("pre")).toContainText("<untrusted>");
         await expect(receipt.locator("untrusted")).toHaveCount(0);
         expect(mutations()).toHaveLength(1);
@@ -278,7 +278,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(mutations()).toHaveLength(3);
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
-        await expect(dialog).toContainText("Its harness will end");
+        await expect(dialog).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("ArrowRight");
         await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
@@ -313,7 +313,7 @@ test("HUB-J27 explain commands without control rights and keep Raw output usable
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
-    await expect(page.locator("#supervisor-command-palette")).toContainText("paired without command control");
+    await expect(page.locator("#supervisor-command-palette")).toBeVisible();
     expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(0);
     await page.keyboard.press("Escape");
   });

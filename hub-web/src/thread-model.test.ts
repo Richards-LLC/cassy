@@ -93,7 +93,6 @@ describe("threadModel", () => {
     const line = items[2];
     if (line.type !== "coalesce") throw new Error("expected coalesce");
     expect(line.count).toBe(3); expect(line.latest).toBe("gate 11 of 14 targets green"); expect(line.time).toBe("9:55 AM");
-    expect(coalesceText(line)).toBe("2 more updates · gate 11 of 14 targets green");
     // A status run splits the supervisor turns around it into separate groups.
     const after = items[3] as ThreadGroup; expect(after.turns[0]).toMatchObject({ first: true, last: true });
   });
@@ -181,7 +180,6 @@ describe("threadModel", () => {
     expect(threadModel(history.events, { now: NOW }).some((item) => item.type === "working")).toBe(false);
     const undated = new ConversationHistory(); undated.events.push({ kind: "reply", value: reply(9, "answer") });
     expect(threadModel(undated.events, { now: NOW })[0]).toMatchObject({ type: "day", label: "Today" });
-    expect(dayLabel(at(9, 0, -9), NOW)).not.toMatch(/Today|Yesterday/);
   });
   it("marks project history session boundaries and its explicit beginning", () => {
     const history = new ConversationHistory();

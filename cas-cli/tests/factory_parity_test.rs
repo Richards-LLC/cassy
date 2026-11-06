@@ -31,7 +31,7 @@ fn factory_parity_command_reports_all_eight_cells_passing() {
     let cells = report["cells"].as_array().expect("cells array");
     assert_eq!(cells.len(), 8, "matrix must be 4 harnesses × 2 roles");
 
-    // Every (harness, role) shape is present and passes all five named stages.
+    // Every (harness, role) shape is present and passes all four named stages.
     let mut shapes: Vec<String> = Vec::new();
     for cell in cells {
         let harness = cell["harness"].as_str().unwrap();
@@ -50,10 +50,9 @@ fn factory_parity_command_reports_all_eight_cells_passing() {
                 "catalog",
                 "instruction_source",
                 "launch_args",
-                "effective_contract",
                 "prefix"
             ],
-            "{harness}/{role} must name all four+prefix stages"
+            "{harness}/{role} must name all four stages"
         );
         for stage in cell["stages"].as_array().unwrap() {
             assert_eq!(

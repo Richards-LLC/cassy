@@ -59,7 +59,7 @@ fi
 output="$(bash "$script_dir/check-operator-launch.sh" "$(fake_cas v3510)" 2>&1)" && status=0 || status=$?
 if [[ "$status" -ne 0 ]] && grep -qF 'FAIL operator: cas factory --check-launch' <<<"$output" \
     && grep -qF 'FAIL operator: cas claude smoke --check-launch' <<<"$output" \
-    && grep -qF 'an operator could not launch' <<<"$output"; then
+; then
     ok '3.51.0 prefix gate: the smoke fails the release on the operator lockout'
 else
     bad "3.51.0 prefix gate was not caught: $output"

@@ -14,10 +14,119 @@ merge-base(ref, HEAD), including working changes, excluding files imported only
 by a released-trunk sync merge.
 """
 import argparse
+import ast
 from pathlib import Path
 import re
 import subprocess
 from rust_test_source import tokens, pairs
+
+
+def human_message_literal(value):
+    """Machine identifiers are tokens; readable messages contain whitespace.
+
+    Rule markers and gate-row records are structured identifiers, even when
+    their wire spelling includes spaces. No English vocabulary is consulted.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    machine = (re.fullmatch(r'\[rule:\s*[\w.-]+\]', value)
+               or re.fullmatch(r'(?:PASS|FAIL|SKIP) [\w.-]+', value)
+               or re.fullmatch(r'[0-9]+|[A-Z][A-Z0-9_]+|[a-z0-9]+(?:[_.-][a-z0-9]+)+', value)
+               or (not re.search(r'\s', value) and ('/' in value or value.startswith('--'))))
+    return not machine
+
+
+def message_assertions(source, path, changed_lines=None):
+    """Reject prose operands on error channels, never diagnostic arguments."""
+    if changed_lines is not None:
+        lines = source.splitlines()
+        if not any(0 < line <= len(lines) and re.search(r'[\"\'`]', lines[line - 1]) for line in changed_lines):
+            return []
+    hits = []
+    channels = r'\b(?:error|err|stderr|refusal|detail|remediation|warning|reason)(?:\b|_)|\.(?:error|stderr|message|detail|remediation|warning|reason)\b'
+    if Path(path).suffix in ('.py', '.pyi'):
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            name = node.func.attr
+            if name == 'assertRaisesRegex' and len(node.args) >= 2:
+                literal = node.args[1]
+                receiver = 'error'
+            elif name in ('assertIn', 'assertNotIn', 'assertRegex', 'assertNotRegex', 'assertEqual') and len(node.args) >= 2:
+                literal, actual = (node.args[0], node.args[1]) if name in ('assertIn', 'assertNotIn') else (node.args[1], node.args[0])
+                if name == 'assertEqual' and isinstance(node.args[0], ast.Constant):
+                    literal, actual = node.args[0], node.args[1]
+                receiver = ast.get_source_segment(source, actual) or ''
+            else:
+                continue
+            if (isinstance(literal, ast.Constant) and human_message_literal(literal.value)
+                    and re.search(channels, receiver)
+                    and (changed_lines is None or literal.lineno in changed_lines)):
+                hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
+        return hits
+    if Path(path).suffix == '.rs':
+        ts = tokens(source)
+        ps = pairs(ts)
+        for i, token in enumerate(ts[:-2]):
+            if token.string or token.value not in ('assert', 'assert_eq', 'assert_ne') or ts[i + 1].value != '!' or i + 2 not in ps:
+                continue
+            close = ps[i + 2]
+            end = ts[close].start
+            diagnostic = next(iter(rust_assertion_diagnostics(source[token.start:ts[close].end])), None)
+            if diagnostic:
+                end = token.start + diagnostic[0]
+            expression = source[token.start:end]
+            if not re.search(channels, re.sub(r'"(?:\\.|[^"\\])*"', '""', expression)):
+                continue
+            for literal in ts[i + 3:close]:
+                if not literal.string or literal.start >= end:
+                    continue
+                prefix = source[token.start:literal.start]
+                substring = re.search(r'\.(?:contains|starts_with|ends_with)\(\s*(?:&?format!\(\s*)?$', prefix)
+                scalar = re.fullmatch(r'assert_(?:eq|ne)!\(\s*(?:(?:error|err)(?:[.\w()]+)?\s*,\s*)?', prefix)
+                if not substring and not scalar:
+                    continue
+                value = literal.value
+                if value.startswith('"'):
+                    try:
+                        value = ast.literal_eval(value)
+                    except (ValueError, SyntaxError):
+                        pass
+                line = source.count('\n', 0, literal.start) + 1
+                if human_message_literal(value) and (changed_lines is None or line in changed_lines):
+                    hits.append((line, 'TEST_ASSERTION_PROSE'))
+        return sorted(set(hits))
+    if not is_test_file(path):
+        return []
+    for start, end, value in text_literals(source, path):
+        line = source.count('\n', 0, start) + 1
+        if source[start:start + 1] == '/':
+            literal_parts = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
+            if not re.search(r'[A-Za-z]', literal_parts):
+                continue
+            value = value.removeprefix('^').removesuffix('$')
+        if not human_message_literal(value) or (changed_lines is not None and line not in changed_lines):
+            continue
+        node_calls = list(re.finditer(r'\bassert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match|throws|rejects)\(', source[:start]))
+        beginning = max(source.rfind('expect(', 0, start), node_calls[-1].start() if node_calls else -1)
+        if beginning < source.rfind(';', 0, start) or beginning < 0:
+            continue
+        context = source[beginning:start]
+        if (re.search(r'\.toThrow(?:Error)?\(\s*(?:new\s+[\w.]+\(\s*)?$', context)
+                or (re.match(r'assert\.(?:throws|rejects)\(', context)
+                    and context.count('(') - context.count(')') == 1 and re.search(r',\s*$', context))
+                or (re.search(channels, context) and re.match(r'assert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match)\(', context)
+                    and re.search(r'(?:,|\.includes\()\s*$', context))
+                or (re.search(r'\.to(?:MatchObject|Equal|StrictEqual)\(', context)
+                    and re.search(r'\b(?:message|reason|remediation|warning)\s*:\s*$', context))
+                or (re.search(r'\bexpect\(', context) and re.search(channels, context)
+                    and re.search(r'\.to(?:Be|Equal|Contain|Match)\(\s*$', context))):
+            hits.append((line, 'TEST_ASSERTION_PROSE'))
+    return hits
 
 
 def is_test_file(path):
@@ -58,6 +167,7 @@ def text_literals(source, path):
                 yield token.start, token.end, body
         return
     hash_comments = suffix in {'.py', '.pyi', '.sh', '.bash', '.rb', '.pl', '.r', '.yaml', '.yml', '.toml', '.ini'}
+    javascript = suffix in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}
     i = 0
     while i < len(source):
         if source.startswith('//', i) or (hash_comments and source[i] == '#'):
@@ -67,6 +177,28 @@ def text_literals(source, path):
         if source.startswith('/*', i):
             close = source.find('*/', i + 2)
             i = len(source) if close < 0 else close + 2
+            continue
+        if javascript and source[i] == '/' and source[:i].rstrip()[-1:] in ('(', ',', '=', '[', ':'):
+            start = i
+            i += 1
+            body_start = i
+            character_class = False
+            while i < len(source) and source[i] != '\n':
+                if source[i] == '\\':
+                    i += 2
+                    continue
+                if source[i] == '[':
+                    character_class = True
+                elif source[i] == ']':
+                    character_class = False
+                elif source[i] == '/' and not character_class:
+                    body = source[body_start:i]
+                    i += 1
+                    while i < len(source) and source[i].isalpha():
+                        i += 1
+                    yield start, i, body
+                    break
+                i += 1
             continue
         quote = source[i]
         if quote not in ('"', "'", '`'):
@@ -403,6 +535,7 @@ def task_changed_paths(base):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
+    parser.add_argument('--messages-only', action='store_true')
     args = parser.parse_args()
     try:
         if args.changed_since:
@@ -448,13 +581,15 @@ def main():
             except UnicodeDecodeError:
                 continue
             if path.endswith('.rs'):
-                file_hits = lint(source, path, path in text_pin_paths,
+                file_hits = [] if args.messages_only else lint(source, path, path in text_pin_paths,
                                  changed_text_lines.get(path) if changed_text_lines is not None else None)
             else:
-                file_hits = lint_text_pins(
+                file_hits = [] if args.messages_only else lint_text_pins(
                     source, path,
                     changed_lines=changed_text_lines.get(path) if changed_text_lines is not None else None,
                 )
+            file_hits.extend(message_assertions(source, path,
+                changed_text_lines.get(path) if changed_text_lines is not None else None))
             for line, kind in file_hits:
                 if kind == 'archive-unsafe Cargo binary path':
                     remedy = 'use cas::test_paths::cas_binary() for archive runners'
@@ -462,6 +597,8 @@ def main():
                     name = kind[kind.index('(') + 1:-1]
                     remedy = (f'resolve it at runtime: std::env::var_os("NEXTEST_BIN_EXE_{name}"), '
                               f'falling back to option_env!("CARGO_BIN_EXE_{name}")')
+                elif kind == 'TEST_ASSERTION_PROSE':
+                    remedy = 'assert behavior, an error code or a rule ID; pin comments do not waive prose checks'
                 else:
                     remedy = 'add // pin: <reason> or replace with a behavior test'
                 hits.append(f'{path}:{line}: {kind}; {remedy}')

@@ -674,7 +674,7 @@ mod tests {
         fs::write(dir.path().join(".credentials.json"), "{}").unwrap();
         let report = collect_claude("fixture", dir.path());
         assert_eq!(report.state, "unavailable");
-        assert!(report.detail.as_deref().unwrap().contains("Claude Code statusline"));
+
         let usage = account_usage(crate::accounts::Provider::Claude, dir.path());
         assert!(!usage.rejected && !usage.authenticated);
     }

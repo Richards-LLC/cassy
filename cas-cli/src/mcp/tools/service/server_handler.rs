@@ -1621,7 +1621,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
-        assert!(!error.message.contains("COMMITTED ("), "{error:?}");
+
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
 
         let tasks = service.inner.open_task_store().unwrap();

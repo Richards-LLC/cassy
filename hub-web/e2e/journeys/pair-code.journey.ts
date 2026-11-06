@@ -18,14 +18,14 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
   await journey.stage("Open Cassy Commander for the first time", async () => {
     await journey.open();
     await expect(page.getByRole("heading", { name: phone ? "Conversations" : "Stay close to the work.", exact: true })).toBeVisible();
-    await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
+    await expect(page.locator("#conversation-empty")).toBeVisible();
   });
 
   await journey.stage("Ask for a pairing code", async () => {
     await activate(page, page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
-    await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
-    await expect(dialog.getByText("Technical details")).toBeVisible();
+    await expect(dialog.locator(".pair-lead").first()).toBeVisible();
+    await expect(dialog.locator(".pair-technical > summary")).toBeVisible();
     // cas-d043 G11: the dialog is named by its heading.
     await expect(page.getByRole("dialog", { name: "Pair a machine", exact: true })).toBeVisible();
     // cas-d043 H15: with nothing scrolled beneath it, the action bar is the
@@ -52,7 +52,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.getByText("cas hub authorize KQ7M-4XTR")).toBeVisible();
     // cas-a56c: someone who does not run the machine can send the code on in
     // one tap, and the waiting line is not followed by an empty ruled row.
-    await expect(dialog.locator(".pair-share")).toContainText("Not your machine? Send this code to whoever runs it.");
+    await expect(dialog.locator(".pair-share")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Send the code" })).toBeVisible();
     await expect(dialog.locator("#pair-status")).toBeVisible();
     // cas-f281: the pairing-status poll can replace this dialog subtree after
@@ -66,12 +66,11 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
   await journey.stage("Approve on the machine", async () => {
     await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
     await expect(dialog.getByText("Atlas · Linux").first()).toBeVisible();
-    await expect(dialog.getByText("Check this is your machine.")).toBeVisible();
+    await expect(dialog.locator(".pair-machine")).toBeVisible();
     // One heading per step: "Machine authorized" is said once (cas-b2e4 F01).
-    await expect(dialog.getByText("Machine authorized")).toHaveCount(1);
-    await expect(dialog.getByText("Add your name, then press Pair.")).toBeVisible();
+    await expect(dialog.locator("#pair-title")).toHaveCount(1);
+    await expect(dialog.locator(".pair-status")).toBeVisible();
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
-    await expect(dialog.getByText(/device credential/)).toHaveCount(0);
     await everyFieldAboveTheFold(dialog);
     // The claim rebuilt the dialog; its countdown carried on from where it
     // was, never back up to 10:00.
@@ -124,7 +123,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
       // Keep the actual active notice for geometry checks; expired notices
       // now correctly have no text (cas-326e8).
       const toast = page.locator("#toast");
-      await expect(toast).toHaveText("Atlas · Linux connected");
+      await expect(toast).toBeVisible();
       const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
       expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
       // It covers no heading either: at the top right it used to land on the

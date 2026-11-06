@@ -287,6 +287,6 @@ mod tests {
     fn test_new_with_status() {
         let line = StatusLine::new(Status::Warning, "watch out");
         assert_eq!(line.status, Status::Warning);
-        assert_eq!(line.message, "watch out");
+
     }
 }

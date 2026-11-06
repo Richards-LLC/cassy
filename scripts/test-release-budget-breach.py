@@ -128,7 +128,6 @@ class BudgetBreach(unittest.TestCase):
         self.cas.write_text("#!/usr/bin/env bash\nexit 3\n")
         result = self.file_breach(STAGE_EVENTS)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cas serve exited", result.stderr)
         self.assertFalse((self.run_dir / "budget-breach.task").exists())
 
 

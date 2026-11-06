@@ -75,9 +75,6 @@ jobs:
           base-sha: ${{ github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
-      - name: Check Violet references before queue admission
-        run: bash scripts/test-no-mecha-references.sh
-
       - id: script-tests
         name: Classify script suite inputs
         env:

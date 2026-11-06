@@ -120,11 +120,9 @@ describe("Cassy Cloud supervisor send plan", () => {
     }));
     expect(plan).toMatchObject({ kind: "blocked", block: "missing-scope" });
     if (plan.kind !== "blocked") return;
-    expect(plan.reason).toContain("Ask whoever runs soundwave-linux for a link that can send");
     // cas-a56c (QA F02): a fact about this pairing keeps its neutral tone when Send is tapped.
     expect(sendBlockTone(plan.block)).toBe("info");
     expect(sendBlockTone("no-supervisor")).toBe("error");
-    expect(plan.reason).not.toMatch(/cas hub|--scopes|message:send/);
   });
 
   it("reports a device that can never send before it reports an empty draft", () => {
@@ -150,7 +148,6 @@ describe("Cassy Cloud supervisor send plan", () => {
   it("waits for unknown hub capabilities without asking for an upgrade", () => {
     const plan = planSupervisorSend(context({ daemonAttach: undefined }));
     expect(plan).toMatchObject({ kind: "blocked", block: "checking-hub" });
-    if (plan.kind === "blocked") expect(plan.reason).not.toMatch(/old|upgrade/i);
     expect(planSupervisorSend(context({ ended: true, daemonAttach: undefined })))
       .toMatchObject({ kind: "blocked", block: "ended" });
   });

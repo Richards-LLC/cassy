@@ -4995,6 +4995,9 @@ function renderConversationList(): void {
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) {
+    const observedConnection = conversationConnection(selectedMachineId, selectedSession);
+    state.dataset.phase = observedConnection?.phase ?? "unknown";
+    state.dataset.degraded = String(observedConnection?.phase === "live" && observedConnection.degraded === true);
     const label = conversationHeaderLabel(selectedMachineId, selectedSession);
     // The dot separates it from the codename on screen; the status reads just
     // the state ("Live", not "· Live") (cas-17e3).

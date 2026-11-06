@@ -1961,10 +1961,7 @@ mod tests {
                 ..IngestBatch::default()
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("requires an origin project id"),
-            "unexpected error: {err}"
-        );
+
     }
 
     #[test]

@@ -226,10 +226,7 @@ async fn memory_missing_id_remains_a_lookup_error() {
             .await
             .expect_err("unknown IDs must remain errors");
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS, "{action}");
-        assert!(
-            error.message.contains("entry not found"),
-            "{action}: {error}"
-        );
+
     }
 }
 

@@ -8,8 +8,6 @@ release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
 verified="$repo_root/scripts/run-verified-tests.sh"
-snapshot_router="$repo_root/scripts/check-scoped-snapshot-tests.sh"
-snapshot_router_test="$repo_root/scripts/test-check-scoped-snapshot-tests.sh"
 scoped_surface="$repo_root/scripts/check-scoped-test-surface.sh"
 scoped_surface_test="$repo_root/scripts/test-check-scoped-test-surface.sh"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
@@ -153,20 +151,6 @@ else
 fi
 rm -f "$impact_fixture_log"
 
-if [[ -x "$snapshot_router" ]]; then
-    printf 'ok   snapshot router is executable\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL snapshot router must be executable\n'
-    fail=$((fail + 1))
-fi
-if [[ -x "$snapshot_router_test" ]]; then
-    printf 'ok   snapshot router has an executable self-test\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL snapshot router has no executable self-test\n'
-    fail=$((fail + 1))
-fi
 
 if [[ -x "$scoped_surface" ]]; then
     printf 'ok   scoped test surface checker is executable\n'

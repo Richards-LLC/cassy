@@ -961,11 +961,7 @@ mod tests {
             .save_config_with(|| InvocationContext::default())
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("already saved")
-                && error.contains(host_root.join("config.toml").to_string_lossy().as_ref()),
-            "{error}"
-        );
+
         let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
         assert!(
             host_saved.contains("transport_mode = \"required\""),

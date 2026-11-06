@@ -105,7 +105,7 @@ describe("adopting a peer tab's rotated credential (cas-d308)", () => {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
       onOutput: () => {}, onSocketError: () => {},
     });
-    await expect(connection.request("GET", "/v1/auth/devices")).rejects.toMatchObject({ kind: "revoked", message: "pairing was revoked" });
+    await expect(connection.request("GET", "/v1/auth/devices")).rejects.toMatchObject({ kind: "revoked" });
     // No different credential exists to adopt, so nothing is retried with one.
     expect(new Set(used)).toEqual(new Set(["DPoP opaque-gen-2"]));
     connection.stop();

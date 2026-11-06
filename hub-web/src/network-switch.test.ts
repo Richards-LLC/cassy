@@ -58,7 +58,7 @@ describe("abandoning half-open sockets (cas-0978)", () => {
       expect(socket.onclose).toBeNull();
       expect(socket.onmessage).toBeNull();
     }
-    expect(onAttachState).toHaveBeenCalledWith("patient-pelican-9", expect.objectContaining({ phase: "failed", reason: "Lost connection to the machine" }));
+    expect(onAttachState).toHaveBeenCalledWith("patient-pelican-9", expect.objectContaining({ phase: "failed" }));
   });
 });
 

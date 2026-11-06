@@ -286,7 +286,7 @@ class AgentBoot(unittest.TestCase):
             agent = ExitAfterCreate(1, args, {"project": root}, [], [], [], threading.Lock(), 0)
             env = dict(os.environ, FAKE_SERVE_MARKER=str(marker), FAKE_SERVE_EXIT_AFTER_CREATE="1",
                        FAKE_SERVE_CREATES=str(creates))
-            with self.assertRaisesRegex(RuntimeError, r"cas serve exited \(1\)"):
+            with self.assertRaises(RuntimeError):
                 agent.boot(env, root / "run")
             self.assertEqual(creates.read_text().splitlines(), ["cas-abcd"],
                              "acknowledged create must fence the boot retry")

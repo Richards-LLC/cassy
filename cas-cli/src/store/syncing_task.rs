@@ -1288,12 +1288,7 @@ mod tests {
             .add_with_mutation_receipt(&task, "receipt-id")
             .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("atomic task mutation receipts are unsupported"),
-            "{error}"
-        );
+
         assert!(inner.is_empty());
     }
 

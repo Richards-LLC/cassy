@@ -247,7 +247,7 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
             self.assertIn('live users', report['reason'])
             self.assertTrue((target / 'output').exists())
         self.git('worktree', 'add', '-q', '-b', 'fixture/cache', str(target / 'registered'))
-        with self.assertRaisesRegex(ValueError, 'registered worktree'):
+        with self.assertRaises(ValueError):
             with scratch.BoundedCache(target, env, self.repo):
                 pass
         self.assertTrue((target / 'registered/source').exists())

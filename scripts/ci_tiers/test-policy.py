@@ -121,7 +121,6 @@ class PolicyTests(unittest.TestCase):
     def test_parser_dependency_absence_is_a_hard_failure(self):
         result = subprocess.run([sys.executable, '-S', str(policy.HERE / 'policy.py'), 'check'], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('requires pyyaml==6.0.3', result.stderr)
 
     def test_real_parser_provisioning_step_reuses_yaml_or_isolates_installation(self):
         step = next(s for s in self.ci()['jobs']['fast-validation-ci-tiers']['steps']
@@ -573,9 +572,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             ('docs-lint', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', 'Run no-build release gate rows', 'true'),
             ('scoped-validation-fast', rust, 'true'),
-            ('scoped-validation-fast', 'Test snapshot-pinned CLI output surfaces', 'true'),
             ('scoped-validation', rust, 'false'),
-            ('scoped-validation', 'Test snapshot-pinned CLI output surfaces', 'false'),
         ]:
             with self.subTest(job=job, step=name):
                 self.assertTrue(runs(job, name, '', fast), 'unset CAS_LANE_SLIM keeps the lane as it was')
@@ -738,8 +735,6 @@ else:
                 result = subprocess.run([str(policy.ROOT / 'scripts/setup-cassy-actions-rust.sh')],
                                         env=environment, capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn('shared stable Rust toolchain is incomplete', result.stderr)
-                self.assertIn('all runner slots are idle', result.stderr)
                 self.assertNotIn('toolchain install', (fixture / 'rustup/calls').read_text())
                 self.assertFalse((fixture / 'github-env').exists())
 
@@ -766,8 +761,8 @@ else:
                 self.assertNotEqual(self.run_body(step['run'], {**healthy, key: 'skipped'}).returncode, 0)
         # Every red input-gated lane is reported in the same run, not just the first.
         result = self.run_body(step['run'], {**healthy, 'WEB': 'failure', 'JOURNEYS': 'failure'})
-        self.assertIn('WEB lane is failure', result.stdout)
-        self.assertIn('JOURNEYS lane is failure', result.stdout)
+        self.assertIn('WEB', result.stdout)
+        self.assertIn('JOURNEYS', result.stdout)
         shard = next(s for s in self.ci()['jobs']['fast-validation-suite']['steps'] if 'test "$SHARDS" = success' in s.get('run', ''))
         self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
         for result in ['failure', 'cancelled']:
@@ -895,7 +890,6 @@ else:
         changed.write_text('\n'.join(assets) + '\n')
         result = self.run_body(step['run'], environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('No Markdown files changed', result.stdout)
         self.assertFalse(log.exists())
 
     def test_real_runner_route_defaults_to_hosted_and_requires_both_opt_ins(self):

@@ -1449,12 +1449,20 @@ pub(crate) fn mark_merged_failures(project: &Path, mut failures: Vec<CiFailure>)
 /// Extract the common Rust/nextest failure shape without treating log parsing
 /// as authoritative.  Missing or unfamiliar logs simply omit the test name.
 pub(crate) fn first_failing_test(log: &str) -> Option<String> {
-    log.lines().find_map(|line| {
-        let line = line.trim();
-        let test = line.strip_prefix("test ")?;
-        let (name, outcome) = test.rsplit_once(" ... ")?;
-        (outcome.contains("FAILED")).then(|| name.trim().to_string())
-    })
+    failing_tests(log).next()
+}
+
+/// Every failing test in log order, each once (cas-25ce).
+pub(crate) fn failing_tests(log: &str) -> impl Iterator<Item = String> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    log.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let test = line.strip_prefix("test ")?;
+            let (name, outcome) = test.rsplit_once(" ... ")?;
+            (outcome.contains("FAILED")).then(|| name.trim().to_string())
+        })
+        .filter(move |name| seen.insert(name.clone()))
 }
 
 pub(crate) fn relay_body(failure: &CiFailure) -> String {

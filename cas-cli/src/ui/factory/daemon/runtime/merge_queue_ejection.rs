@@ -32,14 +32,24 @@ pub(crate) fn supervisor_prs(cas_dir: &Path) -> Vec<SupervisorPr> {
     .collect()
 }
 
-/// "job › step" of the failed merge_group run, when GitHub names one.
-/// Lookup errors degrade to `None`; the wake is sent either way.
+/// "job › step" of the failed merge_group run, when GitHub names one, plus
+/// the failing tests its log names (cas-25ce: they become the worker's change
+/// request). Lookup errors degrade to `None`; the wake is sent either way.
 pub(crate) fn failing_job(transport: &dyn CiTransport, run_id: Option<u64>) -> Option<String> {
-    let job = transport.failed_job_detail(run_id?).ok().flatten()?;
-    Some(match job.step {
+    /// Enough names to batch the repair; the run log holds the rest.
+    const TESTS: usize = 10;
+    let run_id = run_id?;
+    let job = transport.failed_job_detail(run_id).ok().flatten()?;
+    let mut named = match job.step {
         Some(step) => format!("{} › {step}", job.name),
         None => job.name,
-    })
+    };
+    let log = transport.failed_log(run_id).ok().flatten().unwrap_or_default();
+    let tests: Vec<_> = super::ci_watch::failing_tests(&log).take(TESTS).collect();
+    if !tests.is_empty() {
+        named.push_str(&format!(" (failing tests: {})", tests.join(", ")));
+    }
+    Some(named)
 }
 
 #[cfg(test)]

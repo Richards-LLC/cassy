@@ -93,8 +93,13 @@ runs:
         # The train receives one complete Rust result at each newest tip,
         # including a docs-only tip. Web selection stays path-scoped below.
         if [[ "${TRAIN_RUST:-false}" == true ]]; then
-          class=rust-touched
-          rust_unaffected=false
+          if python3 scripts/train-ci.py prepared >/dev/null 2>&1; then
+            class=version-bump
+            rust_unaffected=true
+          else
+            class=rust-touched
+            rust_unaffected=false
+          fi
         fi
 
         # Web tests read hub-web/ plus named repo-level inputs (the journey

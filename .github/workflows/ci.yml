@@ -256,6 +256,7 @@ jobs:
     name: Fast Validation — merge-queue runner route
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
+      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -290,6 +291,7 @@ jobs:
     name: Fast Validation — main-push tree dedupe
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
+      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -1132,6 +1134,7 @@ jobs:
     name: Fast Validation — suite archive build
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
+      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1356,6 +1359,7 @@ jobs:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
+      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1543,6 +1547,7 @@ jobs:
     name: Fast Validation — full suite
     if: >-
       always() && needs.ci-diff.outputs.class != 'docs-only'
+      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'

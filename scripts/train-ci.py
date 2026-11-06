@@ -14,10 +14,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import xml.etree.ElementTree as ET
+import zipfile
 
 ARTIFACT = 'train-rust-suite'
 PREFIX = 'epic/release-train-'
+MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
+             ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
 
 
 def command(args, cwd=None, output=None):
@@ -39,6 +43,43 @@ def write(path, value):
         stream.write('\n')
         temporary = stream.name
     os.replace(temporary, path)
+
+
+def prepared(repo, head):
+    """Recognize only this command's version-only commit, including its assets.
+
+    The general diff classifier deliberately allows only manifest/lock bumps;
+    real release preparation also writes notes, changelog and generated dist.
+    Keep this exception local to train receipt reuse, never queue validation.
+    """
+    body = git(repo, 'log', '-1', '--format=%B', head)
+    source = re.search(r'^Train-CI-Head: ([0-9a-f]{40})$', body, re.M)
+    version = re.search(r'^Release-Version: (\d+\.\d+\.\d+)$', body, re.M)
+    if not source or not version or body.splitlines()[0] != f'release: v{version[1]}':
+        return None
+    parent = git(repo, 'rev-parse', f'{head}^1')
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', source[1], parent], cwd=repo).returncode:
+        return None
+    paths = git(repo, 'diff', '--name-only', parent, head).splitlines()
+    for path in paths:
+        if path in MANIFESTS:
+            before = tomllib.loads(git(repo, 'show', f'{parent}:{path}'))
+            after = tomllib.loads(git(repo, 'show', f'{head}:{path}'))
+            before['package']['version'] = version[1]
+            if before != after:
+                return None
+        elif path == 'Cargo.lock':
+            before = tomllib.loads(git(repo, 'show', f'{parent}:Cargo.lock'))
+            after = tomllib.loads(git(repo, 'show', f'{head}:Cargo.lock'))
+            for package in before['package']:
+                if package['name'] in MANIFESTS.values():
+                    package['version'] = version[1]
+            if before != after:
+                return None
+        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md') and not path.startswith(
+                ('changelog.d/', 'docs/release-notes/', 'hub-web/dist/')):
+            return None
+    return source[1]
 
 
 def identity():
@@ -135,6 +176,9 @@ def observe(args):
             pending.rename(destination)
     if not (destination/'complete-workflow-logs.zip').is_file():
         raise ValueError('complete workflow log archive is missing')
+    with zipfile.ZipFile(destination/'complete-workflow-logs.zip') as logs:
+        if not logs.namelist() or logs.testzip() is not None:
+            raise ValueError('complete workflow log archive is empty or corrupt')
     receipt = json.loads(receipt_path.read_text())
     expected = {'schema': 1, 'head': head, 'branch': branch, 'run_id': run_id, 'run_attempt': attempt}
     if any(receipt.get(key) != value for key, value in expected.items()):
@@ -150,8 +194,10 @@ def observe(args):
     if receipt['outcome'] == 'PASS':
         state['last_green'] = head
         state.pop('red_since', None)
+        state.pop('red_head', None)
     else:
         state['red_since'] = previous.get('red_since') or head
+        state['red_head'] = head
         green = previous.get('last_green')
         state['introducing_merge'] = head if green == receipt['parent'] else None
         state['merge_range'] = []
@@ -168,6 +214,9 @@ def observe(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
+    preparation = sub.add_parser('prepared')
+    preparation.add_argument('--repo', type=Path, default=Path.cwd())
+    preparation.add_argument('--head', default='HEAD')
     native = sub.add_parser('shard')
     native.add_argument('--log', type=Path, required=True)
     native.add_argument('--junit', type=Path, required=True)
@@ -187,7 +236,12 @@ def main():
         read.add_argument('--out', type=Path)
         read.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))
     args = parser.parse_args()
-    if args.command == 'shard':
+    if args.command == 'prepared':
+        source = prepared(args.repo, args.head)
+        if not source:
+            return 1
+        print(source)
+    elif args.command == 'shard':
         shard(args)
     elif args.command == 'collect':
         collect(args)
@@ -200,7 +254,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
-    except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError) as error:
+        sys.exit(main() or 0)
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError, zipfile.BadZipFile) as error:
         print(f'train CI: {error}', file=sys.stderr)
         sys.exit(1)

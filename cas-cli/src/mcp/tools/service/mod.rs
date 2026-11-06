@@ -1269,7 +1269,7 @@ impl CasService {
                         "reason",
                     ])
                 }
-                "train_merge" => Some(&["action", "id", "task_ids"]),
+                "train_merge" => Some(&["action", "id", "task_ids", "supervisor_override", "reason"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
                 "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
@@ -1371,7 +1371,7 @@ impl CasService {
                 "train_merge" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;
                     let inner = this.inner.clone();
-                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref()))
+                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref(), req.supervisor_override.unwrap_or(false), req.reason.as_deref()))
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))

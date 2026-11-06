@@ -83,6 +83,9 @@ class PolicyTests(unittest.TestCase):
                      'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
             self.assertTrue(self.gh_expr(jobs[name]['if'], context), name)
         self.assertFalse(self.gh_expr(jobs['scoped-validation']['if'], context))
+        version_only = {**context, 'needs.ci-diff.outputs.class': 'version-bump'}
+        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
+            self.assertFalse(self.gh_expr(jobs[name]['if'], version_only), name)
 
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
@@ -376,8 +379,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
 
     def test_suite_fanin_reuses_classification_without_source_checkout(self):
         job = self.ci()['jobs']['fast-validation-suite']
-        self.assertFalse(any(step.get('uses') for step in job['steps']))
-        report, assertion = job['steps']
+        for step in job['steps']:
+            if step.get('uses'):
+                self.assertFalse(self.gh_expr(step['if'], {'github.event_name':'merge_group', 'github.ref':'refs/heads/gh-readonly-queue/main/pr-1'}))
+        report = next(step for step in job['steps'] if 'DIFF_CLASS' in step.get('env', {}))
+        assertion = next(step for step in job['steps'] if 'SHARDS' in step.get('env', {}))
         for unaffected in ('true', 'false'):
             context = {'needs.ci-diff.outputs.rust-unaffected': unaffected,
                        'needs.ci-diff.outputs.class': 'hub-web-only'}

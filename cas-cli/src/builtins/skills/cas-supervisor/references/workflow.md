@@ -249,7 +249,14 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    <!-- cas-src:end -->
 4. Run the final assembled-tree gate:
    <!-- cas-src:begin -->
-   the epic's single full-suite run on the tree that lands; skip it when the queue or CI already ran it. With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Do not run a local full suite before the PR. Without a queue or check-runs, run the project's assembly gate on that SHA; with `scripts/assembly-proof.py` it is `python3 scripts/assembly-proof.py prove <epic-worktree>`. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
+   On Cassy's release train, the existing CI archive/shards run the full Rust suite
+   on each newest train tip; older runs are cancelled. Read the complete log
+   artifact and failure list. A known red holds `train_merge` until green or a
+   visible supervisor override for that run; do not treat a baseline red as safe.
+   `scripts/release.sh` checks a green receipt for the starting train tip before
+   version preparation. Do not run a local pre-cut full suite. The merge queue
+   remains the final-tree gate, proving the version commit once. Workers run
+   only touched tests before park; batch QA owns the release's user-path walk.
    <!-- cas-src:else -->
    the epic's single full-suite run on the tree that lands; skip it when CI already ran it. Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Without check-runs on the exact default-branch SHA, run the project's full suite (the commands its CLAUDE.md or AGENTS.md names) on that SHA. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
    <!-- cas-src:end -->

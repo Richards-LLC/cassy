@@ -10538,7 +10538,7 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
-                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), task.assignee.as_deref())),
+                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {

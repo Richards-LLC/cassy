@@ -12552,7 +12552,7 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
 
 #[tokio::test]
 async fn approved_no_delivery_wait_closes_without_worker_retry_cas_842d() {
-    for wait in ["verification", "independent", "successor"] {
+    for wait in ["unassigned", "verification", "independent", "successor"] {
         verification_wait_close_fixture(true, wait).await;
     }
 }
@@ -12598,7 +12598,7 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
     let mut task = cas::types::Task::new("cas-7fc3-wait".into(), "Publish the artifact".into());
     task.status = TaskStatus::InProgress;
     task.task_type = TaskType::Chore;
-    task.assignee = Some("worker-7fc3".into());
+    task.assignee = (wait != "unassigned").then(|| "worker-7fc3".into());
     if !no_delivery {
         task.execution_note = Some("no-code".into());
         task.external_ref = Some("artifact:cas-7fc3/report".into());
@@ -12634,7 +12634,7 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
         let saved = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent.unwrap();
         assert_eq!(saved.dispatch_id, dispatch.id);
         assert_eq!(saved.reason, reason);
-        assert_eq!(saved.assignee, task.assignee);
+        assert_eq!(saved.assignee.as_deref(), Some("worker-7fc3"));
     }
 
     // The worker records the documented verification wait.

@@ -460,7 +460,7 @@ impl CasService {
     ///   keeps running to completion (one mutation, no retry invited);
     /// - the budget elapsing first returns the error it always did (COMMITTED
     ///   or UNKNOWN) and cancels the handler only when nothing committed.
-    async fn call_with_deadline_and_grace<F>(
+    pub(crate) async fn call_with_deadline_and_grace<F>(
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -487,8 +487,10 @@ impl CasService {
             .and_then(|args| args.get("id"))
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
+        let tool_work = self.tool_work.permit();
         let start = std::time::Instant::now();
         let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), async move {
+            let _tool_work = tool_work;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             let _memory_call = crate::mcp::server::memory::Call::started();
             future.await

@@ -47,7 +47,11 @@ impl Switchable {
             let changed = self.idle.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.handlers.load(Ordering::Acquire) == 0 { return; }
+            if self.handlers.load(Ordering::Acquire) == 0 {
+                let service = self.active.get().unwrap_or(&self.passive);
+                service.tool_work.wait_idle().await;
+                if self.handlers.load(Ordering::Acquire) == 0 { return; }
+            }
             changed.await;
         }
     }
@@ -213,6 +217,47 @@ pub(crate) async fn run(fd: i32, standby: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn background_tool_work_defers_backend_swap_cas_5fd5() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Switchable::standby(dir.path().join(".cas"));
+        let service = backend.passive.clone();
+        backend.active.set(service.clone()).ok().unwrap();
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let work_finish = finish.clone();
+        let work_finished = finished.clone();
+        let arguments = json!({"action":"close", "id":"cas-background"});
+        let response = service.call_with_deadline_and_grace("task", arguments.as_object(),
+            std::time::Duration::from_secs(60), std::time::Duration::ZERO, async move {
+                crate::mcp::tools::service::mutation_receipt::task_terminal_committed("cas-background");
+                work_finish.notified().await;
+                work_finished.store(true, Ordering::Release);
+                Ok(rmcp::model::CallToolResult::success(Vec::new()))
+            }).await.unwrap();
+        assert_ne!(response.is_error, Some(true));
+        assert!(!finished.load(Ordering::Acquire), "the response must precede background completion");
+        // The front times out in another process. Its abandoned idle request
+        // stays alive in this backend, including after the 45s switch budget.
+        let idle_backend = backend.clone();
+        let idle = tokio::spawn(async move { idle_backend.wait_idle().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(46)).await;
+        assert!(!idle.is_finished(), "background work still prevents retirement");
+        let fresh = tokio::time::timeout(std::time::Duration::from_secs(1),
+            service.call_with_deadline_and_grace("task", Some(&serde_json::Map::new()),
+                std::time::Duration::from_secs(55), std::time::Duration::ZERO,
+                async { Ok(rmcp::model::CallToolResult::success(Vec::new())) })).await
+            .expect("an idle wait past the front timeout must not block a new tool before its budget starts")
+            .unwrap();
+        assert_ne!(fresh.is_error, Some(true));
+        assert!(!idle.is_finished(), "the fresh call cannot release the unfinished background work");
+        finish.notify_one();
+        idle.await.expect("backend idle completes once background work finishes");
+        assert!(finished.load(Ordering::Acquire));
+    }
 
     #[tokio::test]
     async fn standby_negotiates_real_rmcp_without_opening_a_store_cas_81c4() {

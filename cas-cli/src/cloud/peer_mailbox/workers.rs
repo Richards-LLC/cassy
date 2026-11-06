@@ -36,7 +36,7 @@ impl WorkerDirectory {
         let mut epics: BTreeMap<String, BTreeMap<String, chrono::DateTime<Utc>>> = BTreeMap::new();
         for worker in &workers {
             for lock in locks.iter().filter(|l| l.agent_id == worker.agent_id
-                && l.status == LeaseStatus::Active && l.expires_at > now && l.renewed_at <= now) {
+                && l.status == LeaseStatus::Active && l.expires_at > now) {
                 let Some(task_id) = peers_detail::task_id_for_peer(&lock.task_id, &worker.supervisor, &aliases) else { continue };
                 let Ok(mut task) = tasks.get(task_id) else { continue };
                 if task.is_terminal() { continue; }
@@ -75,6 +75,12 @@ impl WorkerDirectory {
     }
 
     pub(crate) fn pair(&self, sender: &str, recipient: &str) -> Result<(&peers_detail::PeerWorkerRef, &peers_detail::PeerWorkerRef), String> {
+        self.pair_for_receipt(sender, recipient)?
+            .ok_or_else(|| "worker peers require active task claims under the same epic".into())
+    }
+
+    /// A missing claim observation is retryable on receipt, never permission.
+    pub(crate) fn pair_for_receipt(&self, sender: &str, recipient: &str) -> Result<Option<(&peers_detail::PeerWorkerRef, &peers_detail::PeerWorkerRef)>, String> {
         let from = self.workers.iter().find(|w| w.agent_id == sender);
         let to = self.workers.iter().find(|w| w.agent_id == recipient);
         let (Some(from), Some(to)) = (from, to) else { return Err("both worker peers must be live registered workers of your account and repository".into()); };
@@ -85,9 +91,9 @@ impl WorkerDirectory {
         if !self.epics.get(sender).is_some_and(|mine| self.epics.get(recipient)
             .is_some_and(|theirs| mine.iter().any(|(epic, expires)| *expires > now
                 && theirs.get(epic).is_some_and(|expires| *expires > now)))) {
-            return Err("worker peers require active task claims under the same epic".into());
+            return Ok(None);
         }
-        Ok((from, to))
+        Ok(Some((from, to)))
     }
 
     /// Record local visibility and send the other supervisor a durable quiet

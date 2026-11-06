@@ -113,9 +113,14 @@ export interface EpicSessionProgress {
 }
 export interface EpicTab {
   readonly key: string;
+  /** The session project identity, so a pane can scope tabs to its own project. */
+  readonly project: string;
+  /** The epic's own name: never a bare "EPIC" left by a generic prefix. */
+  readonly title: string;
   readonly epic: ReleaseEpic;
   readonly machines: readonly string[];
   readonly workers: readonly { name: string; machine: string; state: string }[];
+  /** Blocked, then live, then ready work; parked and merged rows last. */
   readonly rows: readonly { task: ProgressTask; worker: string; machine: string; state: string }[];
   readonly inFlight: number;
   readonly stale: boolean;
@@ -130,9 +135,19 @@ function epicTaskState(task: ProgressTask, worker: WorkerProgress | undefined): 
   return state === "Executing" ? "Building" : state;
 }
 
+/** Rows that wait on the merge gate or are done: a pane collapses them to a count. */
+export const PARKED_EPIC_STATES: readonly string[] = ["Parking", "Merged"];
+const rowRank = (state: string): number => state === "Blocked" ? 0 : state === "Ready" ? 2 : PARKED_EPIC_STATES.includes(state) ? 3 : 1;
+
+/** "EPIC: Conversational intelligence" names Conversational intelligence; an empty name falls back to the id. */
+export function epicTitle(epic: ReleaseEpic): string {
+  const title = (epic.title ?? "").trim();
+  return title.replace(/^epic\s*[:\-–—]\s*/i, "").trim() || title || epic.id;
+}
+
 /** Project identity groups a shared epic across machines; same IDs in other projects stay separate. */
 export function epicTabs(sources: readonly EpicSessionProgress[]): EpicTab[] {
-  const tabs = new Map<string, { epic: ReleaseEpic; machines: Set<string>; workers: Map<string, EpicTab["workers"][number]>; rows: Map<string, EpicTab["rows"][number]>; stale: boolean }>();
+  const tabs = new Map<string, { project: string; epic: ReleaseEpic; machines: Set<string>; workers: Map<string, EpicTab["workers"][number]>; rows: Map<string, EpicTab["rows"][number]>; stale: boolean }>();
   const latest = new Map<string, ReleaseEpic>();
   // Prefer the newest authoritative task/progress snapshot when sessions overlap.
   for (const source of [...sources].sort((a, b) => b.received - a.received)) {
@@ -143,7 +158,7 @@ export function epicTabs(sources: readonly EpicSessionProgress[]): EpicTab[] {
       if (!["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification"].includes(statusLabel(latest.get(key)?.status))) continue;
       let tab = tabs.get(key);
       if (!tab) {
-        tab = { epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true };
+        tab = { project: source.project, epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true };
         tabs.set(key, tab);
       } else if (!tab.epic.progress && epic.progress) tab.epic = { ...tab.epic, progress: epic.progress };
       tab.machines.add(source.machineLabel);
@@ -164,7 +179,8 @@ export function epicTabs(sources: readonly EpicSessionProgress[]): EpicTab[] {
       }
     }
   }
-  return [...tabs].map(([key, tab]) => ({ key, epic: tab.epic, machines: [...tab.machines], workers: [...tab.workers.values()], rows: [...tab.rows.values()], stale: tab.stale,
+  return [...tabs].map(([key, tab]) => ({ key, project: tab.project, title: epicTitle(tab.epic), epic: tab.epic, machines: [...tab.machines], workers: [...tab.workers.values()],
+    rows: [...tab.rows.values()].sort((a, b) => rowRank(a.state) - rowRank(b.state)), stale: tab.stale,
     inFlight: [...tab.rows.values()].filter(({ task }) => task.delivery_state !== "merged" && ["In progress", "Awaiting merge", "Awaiting verification"].includes(statusLabel(task.status))).length,
   })).sort((a, b) => b.inFlight - a.inFlight || b.workers.length - a.workers.length || a.key.localeCompare(b.key));
 }

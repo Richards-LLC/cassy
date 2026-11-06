@@ -84,10 +84,11 @@ it("joins live epics across machines, ranks in-flight work and retains a manual 
   ], roster: ["worker", "offline"], tasks: [
     { id: "review", epic_id: "follow-ups", title: "Review the delivery", status: "awaiting_merge", assignee: "worker" },
     { id: "ready", epic_id: "follow-ups", status: "open" },
+    { id: "stuck", epic_id: "follow-ups", status: "blocked" },
     { id: "landed", epic_id: "follow-ups", status: "awaiting_merge", delivery_state: "merged", assignee: "offline" },
   ], epics: [
     { id: "train", title: "Release train", status: "in_progress", progress: { total: 14, merged: 10, merges_per_hour: 2 } },
-    { id: "follow-ups", title: "Follow-ups", status: "open" },
+    { id: "follow-ups", title: "EPIC: Follow-ups", status: "open" },
     { id: "closed", status: "closed" },
   ] }), source("soundwave", { session: "duplicate-session", roster: [], received: 0 })];
   let tabs = epicTabs(sources);
@@ -99,7 +100,9 @@ it("joins live epics across machines, ranks in-flight work and retains a manual 
   expect(train.workers.map(worker => worker.name)).toEqual(["worker"]);
   expect(train.rows.map(row => row.state)).toEqual(["Building", "In progress"]);
   expect(follow.workers.map(worker => worker.name)).toEqual(["worker"]);
-  expect(follow.rows.map(row => [row.worker, row.state])).toEqual([["worker", "Parking"], ["offline", "Merged"], ["Unassigned", "Ready"]]);
+  // Blocked and live work lead; parked and merged rows trail for the pane to collapse.
+  expect(follow.rows.map(row => [row.worker, row.state])).toEqual([["Unassigned", "Blocked"], ["Unassigned", "Ready"], ["worker", "Parking"], ["offline", "Merged"]]);
+  expect([follow.title, train.title, train.project]).toEqual(["Follow-ups", "Release train", "shared-project"]);
   expect(follow.epic.progress).toBeUndefined();
   expect(selectedEpicTab(tabs)).toBe(train.key);
   expect(selectedEpicTab([...tabs].reverse(), train.key)).toBe(train.key);

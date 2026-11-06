@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { epicTabs, type EpicSessionProgress } from "./progress-model";
+import { epicTabs, selectedEpicTab, type EpicSessionProgress } from "./progress-model";
 import { renderEpicTabs } from "./epic-tabs";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -360,6 +360,7 @@ function scheduleReplyPresentation(): void {
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
 let contextProgress = false;
+let contextEpics = false;
 const allProgressTasks = new Set<string>();
 let revealedPhoneNotice: object | undefined;
 let contextAttention = 0;
@@ -374,7 +375,7 @@ function syncConversationContext(): void {
     return;
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
-  syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
+  syncContextRail(document, { history, progress: contextProgress || contextEpics || progressSheetOpen(), attention: contextAttention });
   scheduleConversationLayout();
 }
 
@@ -5571,7 +5572,10 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
 
 // A tab choice belongs to the browser, never to factory focus_epic.
 let epicChoice: string | undefined;
-let epicSheetOpen = false;
+// The pane shows its own project's epics; other projects wait behind a filter.
+let epicAllProjects = false;
+let epicParkedOpen: string | undefined;
+const epicProject = (machineId: string, session: HubSession): string => session.cloud_project_id ?? session.project ?? session.project_dir ?? sessionKey(machineId, session.name);
 function syncEpicTabs(): void {
   const root = document.getElementById("epic-tabs");
   if (!root) return;
@@ -5585,7 +5589,7 @@ function syncEpicTabs(): void {
       const status = statuses.get(key);
       if (statusFailures.has(key)) unavailable.add(machine.label);
       if (!status) continue;
-      sources.push({ project: session.cloud_project_id ?? session.project ?? session.project_dir ?? key,
+      sources.push({ project: epicProject(machineId, session),
         machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
         roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
         tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
@@ -5595,15 +5599,22 @@ function syncEpicTabs(): void {
       });
     }
   }
-  const tabs = epicTabs(sources);
+  const all = epicTabs(sources);
+  const pane = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  const paneProject = pane ? epicProject(selectedMachineId!, pane) : undefined;
+  const own = all.filter(tab => tab.project === paneProject);
+  const tabs = epicAllProjects ? all : own;
+  contextEpics = tabs.length > 0;
   if (epicChoice && !tabs.some(tab => tab.key === epicChoice)) epicChoice = undefined;
-  renderEpicTabs(root, tabs, { choice: epicChoice, phone: phoneLayout(), sheetOpen: epicSheetOpen,
+  const selected = selectedEpicTab(tabs, epicChoice);
+  renderEpicTabs(root, tabs, { choice: epicChoice,
+    otherProjects: all.length - own.length, allProjects: epicAllProjects,
+    toggleProjects: () => { epicAllProjects = !epicAllProjects; syncEpicTabs(); syncConversationContext(); },
+    parkedOpen: selected !== undefined && epicParkedOpen === selected,
+    toggleParked: () => { epicParkedOpen = epicParkedOpen === selected ? undefined : selected; syncEpicTabs(); },
     notice: unavailable.size ? `Epic status unavailable on ${[...unavailable].join(", ")}.` : undefined,
     retry: () => { for (const machineId of machines.keys()) refreshEpicSessions(machineId); },
-    select: key => { epicChoice = key; epicSheetOpen = true; syncEpicTabs(); },
-    close: () => { epicSheetOpen = false; syncEpicTabs();
-      root.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
-    },
+    select: key => { epicChoice = key; syncEpicTabs(); },
   });
 }
 

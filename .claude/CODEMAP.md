@@ -110,7 +110,7 @@
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - core operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/service/factory_ops.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - harness token-accounting readers, measured worker context notices and authenticated response context.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/` - task start/close, repository proof, evidence gates and delivery closure.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/` - task start/close, repository proof, evidence gates and delivery closure; plain-lane park attribution includes target-sync merge tips.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - lifecycle outbox, dispatch expiry ownership, old-wait fallback and approved-close grace.
 - `cas-cli/src/mcp/tools/service/worker_liveness.rs`, `cas-cli/src/cli/factory/wedged.rs` - bounded transcript/process evidence, background-job completion and CPU attribution across user-work descendants.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - delivery attribution, proof/upkeep gates and reviewed corrections; `gate_preflight.rs` snapshots park requirements. `verified_delivery.rs` binds synthetic premerge approvals to the task's landed source and mechanically checks its complete patch at the first authoritative landing, allowing later ordinary edits. `merge_queue_proof.rs` discovers queue receipts from recorded default-branch landings and verifies workflow, tree and delivery containment for scoped-proof reuse.

@@ -56,10 +56,21 @@ describe('conversation evidence', () => {
     const view = new ConversationView(document, history, 'supervisor');
     document.body.replaceChildren(view.element); view.update();
     const receipt = view.element.querySelector('.native-command-receipt');
+    expect(receipt).not.toBeNull();
     expect(receipt?.textContent).toContain('/mcp reconnect cas');
     expect(receipt?.classList.contains('bub')).toBe(false);
     expect(view.element.textContent).not.toContain('<command-name>');
     expect(history.preview()).not.toContain('<command-name>');
+    for (const [index, text] of ['<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>',
+      '<local-command-stdout>Successfully reconnected to cas</local-command-stdout>'].entries()) {
+      history.hydrateSend({ notification_id: 9910 + index, target: 'terminal-history', text,
+        state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: '2026-11-06T13:10:01Z' });
+    }
+    view.update();
+    expect(view.element.querySelectorAll('.native-command-receipt')).toHaveLength(3);
+    expect(view.element.textContent).toContain('Successfully reconnected to cas');
+    expect(view.element.textContent).not.toContain('<local-command-');
+    expect(history.preview()).not.toContain('<local-command-');
     history.hydrateSend({ notification_id: 9908, target: 'supervisor', text: `Explain this XML: ${xml}`,
       state: 'acknowledged', stamped: true, device_id: 'phone', operator_label: 'Daniel', at: '2026-11-06T13:11:00Z' });
     view.update();

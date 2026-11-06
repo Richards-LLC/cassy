@@ -17,7 +17,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".phase-line")).toContainText("Turn completed");
+        await expect(page.locator(".working-turn .phase-line")).toContainText("Turn completed");
         const receipt = page.locator(".native-command-receipt");
         await expect(receipt).toContainText("/mcp reconnect cas");
         await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");

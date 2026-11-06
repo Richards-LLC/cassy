@@ -567,14 +567,16 @@ fn claude_user_text(value: &Value) -> Option<&str> {
         return None;
     }
     let content = value.pointer("/message/content")?;
+    let local_command = |text: &str| ["<command-name>", "<local-command-stdout>", "<local-command-caveat>"]
+        .iter().any(|prefix| text.trim_start().starts_with(prefix));
     if let Some(text) = content.as_str() {
-        return (!text.trim().is_empty()).then_some(text);
+        return (!text.trim().is_empty() && !local_command(text)).then_some(text);
     }
     content.as_array()?.iter().find_map(|part| {
         (part.get("type").and_then(Value::as_str) == Some("text"))
             .then(|| part.get("text").and_then(Value::as_str))
             .flatten()
-            .filter(|text| !text.trim().is_empty())
+            .filter(|text| !text.trim().is_empty() && !local_command(text))
     })
 }
 
@@ -864,6 +866,12 @@ mod tests {
         assert_eq!(got.wake.unwrap().at, ts("2026-07-31T20:01:00Z"));
         assert_eq!(got.reaction.unwrap().at, ts("2026-07-31T20:01:03Z"));
         assert_eq!(got.completion.unwrap().at, ts("2026-07-31T20:01:04Z"));
+        let mut rows = std::fs::read_to_string(&transcript).unwrap();
+        rows.push_str("\n{\"timestamp\":\"2026-07-31T20:01:08Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Please explain <command-name>/mcp</command-name>\"}}\n");
+        std::fs::write(&transcript, rows).unwrap();
+        let active = latest_turn_observations(&transcript, cas_mux::SupervisorCli::Claude);
+        assert_eq!(active.wake.unwrap().at, ts("2026-07-31T20:01:08Z"));
+        assert!(active.completion.is_none(), "a genuine later user turn remains busy");
     }
 
     #[test]

@@ -1272,6 +1272,20 @@ impl CasService {
                 message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
             }
         }
+        // Same-epic remote workers use project-scope mail only, after local
+        // caps and worker-authored authority tags have been neutralized.
+        if role == "worker"
+            && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self.worker_peer_message_send(
+                sender, &target, &summary, &message, req.in_reply_to,
+                req.urgent.unwrap_or(false) || req.blocker.unwrap_or(false)
+                    || req.merge_request.unwrap_or(false) || req.sticky.unwrap_or(false),
+                req.kind.as_deref(), req.attachment.as_deref(),
+            ).await?
+        {
+            return Ok(sent);
+        }
+
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
         // The registered caller row is the authoritative owner; the

@@ -162,6 +162,14 @@ impl PeerMailboxRuntime {
                     ..Default::default()
                 },
             };
+            let local = agents.list(None).map_err(|error| error.to_string())?;
+            let owner = local.iter().find(|a| a.role == AgentRole::Supervisor
+                && a.factory_session.as_deref() == Some(self.factory_session.as_str()) && live_supervisor(a));
+            let worker_scope = if local.iter().any(|a| a.role == AgentRole::Worker
+                && a.factory_session.as_deref() == Some(self.factory_session.as_str())
+                && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)) {
+                owner.map(|owner| WorkerDirectory::load(&self.cas_dir, &owner.id)).transpose()
+            } else { Ok(None) };
             let mut report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),
@@ -171,6 +179,7 @@ impl PeerMailboxRuntime {
                 &self.factory_session,
                 &self.consumer_id,
                 &history,
+                worker_scope.as_ref().ok().and_then(|scope| scope.as_ref()).map(|scope| (scope, self.cas_dir.as_path())),
                 &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
                     use crate::mcp::tools::core::workflow::premerge_verification::{PeerReceiptIngested, ingest_peer_receipt};
@@ -194,6 +203,9 @@ impl PeerMailboxRuntime {
                     Ok(PeerAckOutcome::Delivered)
                 },
             );
+            if let Err(error) = worker_scope {
+                report.warnings.push(format!("worker peer scope unavailable: {error}"));
+            }
             report.retry_after = mailbox.retry_after();
             Ok(report)
         };

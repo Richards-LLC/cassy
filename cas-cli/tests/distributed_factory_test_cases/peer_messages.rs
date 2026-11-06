@@ -2078,7 +2078,7 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
     ])));
     let lock_response = locks.clone();
     Mock::given(method("GET")).and(path("/api/agents/locks"))
-        .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_json(json!({"locks":lock_response.lock().unwrap().clone()})))
+        .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_json(json!({"status":"success", "locks":lock_response.lock().unwrap().clone()})))
         .mount(&server).await;
     let sender = service_for(&a, "wa");
     let receiver = service_for(&b, "wb");
@@ -2137,6 +2137,21 @@ async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_c
             assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"refused", "message":"out of scope"})).await.is_err(), "{id} {field}");
             assert_eq!(mailbox.lock().unwrap().len(), before, "{id} {field}");
             *registry.lock().unwrap().get_mut(id).unwrap().pointer_mut(field).unwrap() = old;
+        }
+    }
+    for index in [0, 1] {
+        for (field, value) in [
+            ("task_id", json!("cas-no-shared-epic")),
+            ("task_id", json!(cas::cloud::peer_claims::claim_key("github.com/acme/elsewhere", "cas-contract-a"))),
+            ("status", json!("released")), ("status", json!("unknown")),
+            ("expires_at", json!((chrono::Utc::now()-chrono::Duration::seconds(1)).to_rfc3339()))
+        ] {
+            let old = locks.lock().unwrap()[index][field].clone();
+            locks.lock().unwrap()[index][field] = value;
+            let before = mailbox.lock().unwrap().len();
+            assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"refused claim", "message":"out of scope"})).await.is_err(), "claim {index} {field}");
+            assert_eq!(mailbox.lock().unwrap().len(), before);
+            locks.lock().unwrap()[index][field] = old;
         }
     }
     // Claim expires after send, before receive: the daemon must revalidate.

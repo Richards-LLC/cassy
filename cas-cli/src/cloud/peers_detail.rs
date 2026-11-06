@@ -216,7 +216,7 @@ fn heartbeat_age(agent: &AgentInfo, now: DateTime<Utc>) -> Option<i64> {
 
 /// Cloud task keys carry a repository hash. Only unwrap keys from this
 /// identity/alias class; legacy unscoped task IDs retain their spelling.
-fn task_id_for_peer<'a>(key: &'a str, peer: &Peer, aliases: &[String]) -> Option<&'a str> {
+pub(crate) fn task_id_for_peer<'a>(key: &'a str, peer: &Peer, aliases: &[String]) -> Option<&'a str> {
     let Some((task_id, suffix)) = key.rsplit_once('~') else {
         return Some(key);
     };
@@ -273,6 +273,7 @@ fn belongs_to_peer(
 /// supervisor, so a message for it is relayed through that supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerWorkerRef {
+    pub agent_id: String,
     pub name: String,
     pub machine: String,
     pub supervisor: Peer,
@@ -317,6 +318,7 @@ pub fn live_peer_workers(
                         && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
                 })
                 .map(move |agent| PeerWorkerRef {
+                    agent_id: agent.id.clone(),
                     name: agent.name.clone(),
                     machine: supervisor.machine.clone(),
                     supervisor: supervisor.clone(),

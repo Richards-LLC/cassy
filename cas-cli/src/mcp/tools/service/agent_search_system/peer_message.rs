@@ -17,6 +17,61 @@ use crate::mcp::tools::service::imports::*;
 const LOCAL_TARGETS: &[&str] = &["operator", "supervisor", "all_workers", "director", "owner"];
 
 impl CasService {
+    /// Advisory contracts between live workers of one account/repo/epic.
+    /// Never enters supervisor discovery, user scope, or escalation routing.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::mcp::tools::service) async fn worker_peer_message_send(
+        &self, sender: &cas_types::Agent, target: &str, summary: &str, message: &str,
+        in_reply_to: Option<i64>, escalation: bool, kind: Option<&str>, attachment: Option<&str>,
+    ) -> Result<Option<CallToolResult>, McpError> {
+        if LOCAL_TARGETS.iter().any(|local| target.eq_ignore_ascii_case(local))
+            || target.starts_with("supervisor:") || target.starts_with("commander:")
+            || target.starts_with("inbox:") || super::message::target_is_reserved_source(target)
+        { return Ok(None); }
+        let root = self.inner.cas_root.clone();
+        // Existing local messaging owns local names and its session policy.
+        if !target.contains('@') && crate::store::open_agent_store(&root).ok()
+            .and_then(|store| store.list(None).ok()).is_some_and(|agents| agents.iter()
+                .any(|agent| agent.name.eq_ignore_ascii_case(target)))
+        { return Ok(None); }
+        if escalation || !matches!(kind, None | Some("ask" | "answer" | "receipt")) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                "Remote worker messages are advisory: no urgency, blocker, merge, broadcast or supervisor action kind"));
+        }
+        let body = self.peer_body(message, attachment).await?;
+        let body = peer_mailbox::attach_message_intent(&body, kind.or(in_reply_to.map(|_| "answer")), false)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        let (sender, target, summary) = (sender.clone(), target.to_string(), summary.to_string());
+        let sent = tokio::task::spawn_blocking(move || -> Result<Option<(String, peer_mailbox::SendReceipt)>, String> {
+            let directory = peer_mailbox::WorkerDirectory::load(&root, &sender.id)?;
+            let Some(to) = directory.resolve(&target)? else { return Ok(None) };
+            if !directory.matches_local(&sender) { return Err("worker sender registration is not live or does not match Cloud identity".into()); }
+            directory.pair(&sender.id, &to.agent_id)?;
+            let queue = crate::store::open_prompt_queue_store(&root).map_err(|e| e.to_string())?;
+            let reply = if let Some(id) = in_reply_to {
+                let row = queue.queued_prompt(id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("peer reply message {id} does not exist"))?;
+                let envelope = peer_mailbox::parse_envelope(&row.prompt).filter(|envelope|
+                    row.origin == Some(cas_store::QueueOrigin::Daemon)
+                    && row.target.eq_ignore_ascii_case(&sender.name)
+                    && row.factory_session == sender.factory_session
+                    && envelope.scope == peer_mailbox::PeerScope::Project
+                    && envelope.sender_agent_id == to.agent_id)
+                    .ok_or("reply must address the sender of a peer message delivered to this worker")?;
+                Some(envelope.id)
+            } else { None };
+            let label = format!("{}@{}", to.name, to.machine);
+            let receipt = peer_mailbox::send_raw(&root, &sender.id, &to.agent_id, &body,
+                Some(&summary), reply.as_deref(), &label).map_err(|e| e.to_string())?;
+            if let Some(id) = in_reply_to { queue.ack(id).map_err(|e| format!("sent, but reply ack failed: {e}"))?; }
+            Ok(Some((label, receipt)))
+        }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+            .map_err(|e| Self::error(ErrorCode::INVALID_REQUEST, e))?;
+        Ok(sent.map(|(label, receipt)| Self::success(format!(
+            "Sent to peer worker {label} via Cassy Cloud (peer message {}, {}). Both supervisors receive quiet copies on delivery. Check delivery with coordination action=message_status id={}.",
+            receipt.id, receipt.status, receipt.id))))
+    }
+
     /// Route a supervisor's message to a peer supervisor when it addresses
     /// one: a reply (`in_reply_to` naming a delivered peer message) or a
     /// target that is not a local agent but names a peer of this repo.

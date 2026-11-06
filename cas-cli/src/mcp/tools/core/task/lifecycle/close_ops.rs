@@ -10259,7 +10259,7 @@ impl CasCore {
                         let recovery_anchor = verification_tier.as_ref()
                             .filter(|_| supervisor_tier_two_recovery)
                             .map(|decision| decision.tip.as_str());
-                        let merged_receipt = if post_merge_target.is_none() {
+                        let merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
                             req.commit_receipt.as_deref().or(recovery_anchor).and_then(|receipt| {
                                 let resolved =
                                     resolve_task_commit_receipt_sha(&close_project_root, receipt)

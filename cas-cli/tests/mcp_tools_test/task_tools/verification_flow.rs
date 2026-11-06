@@ -1242,7 +1242,9 @@ async fn retired_tier_two_close_needs_supervisor_dispatch_unless_overridden_cas_
                 assert_eq!(dispatch.state, cas::types::VerificationDispatchState::Pending);
                 assert_eq!(dispatch.requester_agent_id, supervisor_id);
                 assert_eq!(dispatch.owner_agent_id, supervisor_id);
-                assert!(dispatch.repository.is_some(), "recovery must bind the merged proof");
+                let proof = dispatch.repository.as_ref().expect("merged repository proof");
+                assert_eq!(proof.head_commit, head_of(temp.path()));
+                assert!(proof.anchor_commits.contains(task.deliverables.factory_branch_anchor.as_ref().unwrap()));
                 assert!(text.contains(&dispatch.id), "{identity}: {text}");
                 assert!(row.is_none_or(|row| row.status != cas::types::VerificationStatus::Skipped));
             }

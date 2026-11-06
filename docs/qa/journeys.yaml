@@ -3,6 +3,7 @@
 # Header policy is authoritative; local qa.registry.enforce is fallback only.
 # A delivery uses the stricter policy at base and head.
 version: 1
+main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26]
 updated: '2026-10-26'
 selection: legacy_catalog
 enforce: enforce
@@ -11,11 +12,7 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  native-claude-command-receipts:
-    title: Completed Claude turns accept commands while local command transcript receipts remain compact
-    tasks: [cas-99e7]
-    invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
-    journeys: [HUB-J27]
+  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-NATIVE-IDLE-COMMANDS]
   peer-ask-merge-scope:
     title: Only explicit asks hold related merges and later messages from that peer clear them
     tasks: [cas-5ec1]
@@ -263,6 +260,10 @@ invariants:
     statement: An unchanged catalog refresh retains the focused project machine button and its keyboard focus ring.
     check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
     bug: {task: cas-2e1c}
+  HUB-J27-CARD-RELOAD:
+    statement: Older Claude MCP cards expose Reload Cassy directly and Session actions always retains it; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, pending dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
+    check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
+    bug: {task: cas-fd9ff}
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
@@ -647,6 +648,10 @@ invariants:
     statement: A native background launch keeps its worker busy within the configured stall window and afterward while user-work descendants are CPU busy; a missing completion becomes Stalled when those jobs are quiet even if harness timers use CPU, while a matching completion returns the worker to Waiting.
     check: Run worker_liveness::tests (including process_evidence_busy_background_child_and_grandchild_keep_executing and process_evidence_silent_background_child_ignores_harness_cpu); compare Team worker liveness to native worker_status for busy children/grandchildren and quiet children under a ticking harness past the stall window on the release candidate.
     bug: {task: cas-185e}
+  HUB-J26-REGISTERED-RUN-STALL:
+    statement: A live worker/task/session-matched registered capped run suppresses direct director stall nudges after its launch tool returns, regardless of instantaneous CPU use; completion reaches its worker once, and a finished run cannot hide a subsequent stall.
+    check: Run stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers through the real director health probe; on the release candidate compare the direct worker-stall feed before and after a registered capped producer finishes. Quiet unregistered native jobs retain HUB-J26-BACKGROUND-BOUND behavior.
+    bug: {task: cas-54f2}
   HUB-J26-WORKER-BRIEF-PRIVATE:
     statement: Worker task text is delivered through a private file inside the worker worktree, so OpenCode external_directory denial permits reading it, never through process argv; unrelated process-name cleanup cannot match workers by words in their assignment. Initial and resumed workers receive the same brief and teardown removes it.
     check: Run cas-pty pty::tests::copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt; inspect live PTY argv with ps and the child-scoped pgrep full-command matcher, verify the path is inside the worktree plus exact brief bytes, mode 0600 and removal after teardown. Claude and Codex cover initial and resumed selectors; Grok and OpenCode cover initial launch.
@@ -2598,7 +2603,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.
@@ -2614,7 +2619,8 @@ journeys:
     trigger: Open a paired Claude or Codex conversation at desktop or 390 px.
   steps:
   - Type a slash, filter the curated palette, and run Usage by keyboard.
-  - In Claude, run /mcp as Reload Cassy and read the replacement server PID and version; other harnesses refuse it by name.
+  - In Claude, reload from a skewed supervisor card or type /mcp; read the replacement server PID and version. Session actions retains reload; other harnesses name Claude Code.
+  - Open the header command dropdown beside its button; dismiss terminal receipts without replaying commands.
   - Read submission separately from an observed native outcome without repeating a mutation.
   - Finish waits for the active turn, then its reply reaches the conversation
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
@@ -2632,7 +2638,7 @@ journeys:
   - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
+  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

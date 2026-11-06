@@ -3466,6 +3466,7 @@ impl CasService {
             .flatten();
         // cas-ee68: store the brief on the task before the worker exists, so
         // the spawn message can quote it and task show/start list it.
+        let triage_notice = crate::finding_triage::staffing_notice(&self.inner.cas_root, &source_ids);
         let brief_delivery_note = match (spawn_brief.as_deref(), req.task_id.as_deref()) {
             (Some(brief), Some(task_id)) => {
                 let note = crate::ui::factory::daemon::runtime::queue_and_events::spawn_brief_note(
@@ -3604,11 +3605,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -14337,12 +14338,26 @@ mod spawn_lifecycle_tests {
         use cas_types::Task;
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().expect("temp project");
-        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let focus = "visible chunks first";
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nfocus_mode='{focus}'\n")).unwrap();
+        std::fs::create_dir_all(temp.path().join("docs/qa")).unwrap();
+        std::fs::write(temp.path().join("docs/qa/journeys.yaml"),
+            "main_journeys: [save]\njourneys:\n- id: save\n  status: active\n").unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let task_store = core.open_task_store().expect("open task store");
         task_store.init().expect("init task store");
         task_store
             .add(&Task::new("cas-brief1".to_string(), "Fix the sweep".to_string()))
             .expect("add task");
+        let mut theoretical = task_store.get("cas-brief1").unwrap();
+        theoretical.labels = vec!["from-finding".into(), "reach:theoretical".into(), "severity:broken".into()];
+        task_store.update(&theoretical).unwrap();
+        let mut main = Task::new("cas-visible".into(), "Save fails for everyone".into());
+        main.notes = "Repro: Save fails for the person using the main journey".into();
+        main.labels = vec!["reach:main".into(), "severity:broken".into(), "journey:save".into(), "runtime-repro".into()];
+        task_store.add(&main).unwrap();
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -14383,6 +14398,11 @@ mod spawn_lifecycle_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
+        assert!(text.contains(&main.id), "{text}");
+        let prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
+            &cas_root, "worker-1", "cas-brief1", "Fix the sweep", cas_mux::SupervisorCli::Claude,
+        );
+        assert!(prompt.contains(focus), "{prompt}");
         let notes = task_store.get("cas-brief1").expect("task").notes;
         assert!(
             notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),

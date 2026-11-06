@@ -1141,9 +1141,10 @@ pub fn validate_round_bundle(
 /// A `qa_record` issue the reviewer marked `"scope": "pre-existing"`: the base
 /// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
 /// finding 1). It never rejects a correct, narrow change. Cassy files it as a
-/// follow-up linked to the delivery only when it clears the spawn threshold.
+/// follow-up linked to the delivery, with theoretical findings in the backlog.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreExistingIssue {
+    pub triage: cas_types::FindingTriage,
     /// The ledger's finding id ("F10"), when the reviewer gave one.
     pub id: String,
     /// A short title, when the reviewer gave one separately from the problem.
@@ -1159,12 +1160,6 @@ pub struct PreExistingIssue {
     pub affected: String,
 }
 
-impl PreExistingIssue {
-    /// cas-0ad8: the spawn threshold. Anything else stays in the verdict.
-    pub fn clears_spawn_threshold(&self) -> bool {
-        !self.repro.is_empty() && !self.affected.is_empty()
-    }
-}
 
 /// One finding line in a ledger's "## Pre-existing" section (cas-2849).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1319,7 +1314,13 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
             if problem.is_empty() {
                 problem = title.clone();
             }
+            let mut triage: cas_types::FindingTriage = item.get("triage").cloned()
+                .map(serde_json::from_value).transpose()
+                .map_err(|error| format!("invalid finding triage: {error}"))?.unwrap_or_default();
+            if triage.repro.is_none() && !text("repro").is_empty() { triage.repro = Some(text("repro")); }
+            if item.get("triage").is_none() && triage.repro.is_some() { triage.reach = cas_types::FindingReach::Secondary; }
             pre_existing.push(PreExistingIssue {
+                triage,
                 id: text("id"),
                 title,
                 severity: text("severity"),
@@ -1351,15 +1352,6 @@ pub fn rejection_scope_refusal(
              otherwise record status=approved and Cassy files the pre-existing issues as follow-ups."
         )
     })
-}
-
-/// Priority of a follow-up for a pre-existing issue, from its severity.
-pub fn follow_up_priority(severity: &str) -> cas_types::Priority {
-    match severity.trim().to_ascii_lowercase().as_str() {
-        "blocking" | "critical" => cas_types::Priority::HIGH,
-        "high" | "normal" => cas_types::Priority::MEDIUM,
-        _ => cas_types::Priority::LOW,
-    }
 }
 
 /// Title of the follow-up task for one pre-existing issue.
@@ -1438,16 +1430,17 @@ pub fn follow_up_task(
     task.description = follow_up_description(delivery, pass, issue, ledger_path);
     task.notes = crate::mcp::tools::core::task::lifecycle::review_loop::origin_note(
         &format!("qa:{}", delivery.id),
-        &issue.repro,
+        issue.triage.repro.as_deref().unwrap_or(&issue.repro),
         &issue.affected,
     );
-    task.priority = follow_up_priority(&issue.severity);
+    task.priority = cas_types::Priority(4);
     task.risk = vec![cas_types::TaskRisk::None];
     task.labels = vec![
         "qa-follow-up".to_string(),
         "pre-existing".to_string(),
         crate::mcp::tools::core::task::lifecycle::review_loop::FINDING_LABEL.to_string(),
     ];
+    crate::finding_triage::finding_labels(&mut task.labels, &issue.triage);
     task.external_ref = Some(ledger_path.to_string());
     task.deliverables.work_target = delivery.deliverables.work_target.clone();
     task.delivery_mode = delivery.delivery_mode;
@@ -1510,8 +1503,8 @@ with matchMedia (for example matchMedia('(forced-colors: active)').matches is tr
 - A failure the base build already has is pre-existing only when it falls outside the delivery's stated \
 purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or \
 edits. Record only those findings under Pre-existing in LEDGER.md and pass them to qa_record with \
-\"scope\": \"pre-existing\". Cassy files one as a follow-up only when it also carries \
-\"repro\" (steps or command, plus the wrong output) and \"affected\" (who acts on it today); the rest stay in the verdict.\n\
+\"scope\": \"pre-existing\". Every finding carries triage (severity, reach, journey and repro). Cassy files it with priority derived from severity × reach; no repro means theoretical backlog. Observed issues also carry \
+\"repro\" (steps or command, plus the wrong output) and \"affected\" (who acts on it today).\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.
@@ -2568,9 +2561,8 @@ mod tests {
             ..issue
         };
         assert!(follow_up_title(&delivery, &blank).contains("defect recorded by independent QA"));
-        assert_eq!(follow_up_priority("Blocking"), cas_types::Priority::HIGH);
-        assert_eq!(follow_up_priority("high"), cas_types::Priority::MEDIUM);
-        assert_eq!(follow_up_priority("note"), cas_types::Priority::LOW);
+        let theoretical = follow_up_task("cas-theory", &delivery, &round, &blank, "/a/LEDGER.md", None);
+        assert_eq!(theoretical.priority.0, 4, "code-read findings start in the backlog");
     }
 
     /// cas-e371: a round whose tip shares every visual-QA finding with the

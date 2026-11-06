@@ -160,6 +160,7 @@ export interface ConversationViewOptions {
   sessionLive?: () => boolean;
   commandReceipts?: () => readonly CommandReceipt[];
   commandStep?: (clientRef: string, key: CommandKey) => void;
+  commandDismiss?: (clientRef: string) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -746,7 +747,7 @@ export class ConversationView {
     if (signature === this.commandSignature) return;
     this.commandSignature = signature;
     this.commands.hidden = !receipts.length;
-    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key), this.options.commandDismiss);
   }
 
   /** Scroll-only window changes reuse the last data/state presentation. */

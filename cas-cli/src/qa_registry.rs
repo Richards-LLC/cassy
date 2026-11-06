@@ -47,6 +47,9 @@ pub struct Registry {
     /// GH #1346: project QA safety policy every journey inherits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety: Option<Safety>,
+    /// The live journeys that drive severity × reach triage in this project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub main_journeys: Vec<String>,
     pub journeys: Vec<Journey>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

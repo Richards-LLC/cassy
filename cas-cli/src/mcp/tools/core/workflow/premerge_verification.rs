@@ -1311,6 +1311,31 @@ mod tests {
     }
 
     #[test]
+    fn premerge_rejection_notice_carries_findings_cas_381f() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-381f-fixture".into(), "Review".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch(&root, &task.id, "worker", &owner.id,
+            chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+        let mut verdict = cas_types::Verification::new("verdict".into(), task.id.clone());
+        verdict.status = VerificationStatus::Rejected;
+        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.summary = "REJECTED: candidate loses the operator draft".into();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        cas_store::add_system_verification(&root, &verdict).unwrap();
+        core.continue_premerge_after_verdict(&dispatch, verdict.status).unwrap();
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].prompt.contains(&verdict.summary), "supervisor needs the actual findings: {:?}", prompts[0]);
+    }
+
+    #[test]
     fn landing_verifies_past_a_regenerated_artifact_commit_cas_7a8f() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();

@@ -1205,8 +1205,19 @@ async fn retired_tier_two_close_needs_supervisor_dispatch_unless_overridden_cas_
             let supervisor_id = "tier-two-supervisor";
             let supervisor = registered_supervisor(&cas_dir, supervisor_id).await;
             let _guard = ScopedSupervisorEnv::new(&mut env);
+            if identity == "retired" && !overridden {
+                // An unavailable worker does not authorize unmerged code.
+                proof_boundary_git(temp.path(), &["reset", "--hard", "HEAD^1"]);
+                let mut request = close_request(&id, "unmerged enforcement delivery");
+                request.commit_receipt = Some(tip.clone());
+                let held = extract_text(supervisor.cas_task_close(Parameters(request)).await.unwrap());
+                assert_ne!(tasks.get(&id).unwrap().status, TaskStatus::Closed, "{held}");
+                assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap().is_none(), "{held}");
+                proof_boundary_git(temp.path(), &["merge", "-q", "--no-ff", branch, "-m", "merge PR"]);
+            }
             let mut request = close_request(&id, "review the merged enforcement delivery");
-            request.commit_receipt = Some(tip);
+            // A plain close recovers the retired worker's recorded anchor.
+            request.commit_receipt = (identity != "retired").then_some(tip);
             request.supervisor_override = overridden.then_some(true);
             let text = extract_text(supervisor.cas_task_close(Parameters(request)).await.unwrap());
             let task = tasks.get(&id).unwrap();

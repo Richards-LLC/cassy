@@ -414,6 +414,7 @@ fn peer(name: &str, machine: &str, live: bool) -> Peer {
         branch: None,
         own: None,
         harness_auth_failed: None,
+        build_capacity: None,
     }
 }
 

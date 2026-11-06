@@ -231,6 +231,10 @@ impl Config {
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
             ),
+            (
+                "factory.auto_route_builds".to_string(),
+                factory.auto_route_builds.to_string(),
+            ),
             ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
             ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
             ("factory.build_guard.max_memory_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_memory_pressure_percent)),

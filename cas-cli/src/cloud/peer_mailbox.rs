@@ -1499,6 +1499,13 @@ pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str)
     outbox::enqueue_premerge_receipt(root, message, label)
 }
 
+/// Build overflow uses a task-stable key in the existing durable outbox.
+pub(crate) fn send_build_route(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
+    outbox::enqueue_and_send(root, message, label)
+}
+
+pub(crate) use outbox::{build_route_recent_peers, cancel_build_route};
+
 /// One durable logical expiry notice, reused if reconciliation restarts after
 /// Cloud acceptance but before its split work flag is settled.
 pub(crate) fn send_split_expiry(

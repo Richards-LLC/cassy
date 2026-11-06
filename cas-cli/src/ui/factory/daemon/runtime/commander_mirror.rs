@@ -1,6 +1,6 @@
 //! Capture supervisor terminal input and completed answers in the durable Commander lane.
-//! The daemon observes both Claude and Codex transcripts; Codex has no Stop
-//! hook, so a hook-only mirror would silently omit its supervisor turns.
+//! The daemon observes Claude, Codex and Grok transcripts; native harness
+//! completions reach Commander even without a Claude Stop hook.
 
 use std::cell::RefCell;
 use chrono::{DateTime, Utc};
@@ -44,9 +44,10 @@ struct ClaudeInput {
 }
 
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.get("timestamp")?.as_str()?)
-        .ok()
+    let at = value.get("timestamp")?;
+    at.as_str().and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         .map(|at| at.with_timezone(&Utc))
+        .or_else(|| at.as_i64().and_then(|seconds| DateTime::from_timestamp(seconds, 0)))
 }
 
 fn text_blocks(value: &Value, path: &str, block_type: &str) -> Option<String> {
@@ -245,6 +246,20 @@ fn human_provenance(value: &Value) -> bool {
         .all(|key| value.get(key).is_none_or(Value::is_null))
 }
 
+/// Grok's ACP transcript carries text in an object, and has native numeric
+/// timestamps. Thought chunks and explicit machine input never become prompts.
+fn grok_prompt(value: &Value) -> Option<String> {
+    let params = value.get("params")?;
+    let update = params.get("update")?;
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("user_message_chunk")
+        || update.pointer("/_meta/syntheticPrompt").and_then(Value::as_bool) == Some(true)
+        || !human_provenance(value) || !human_provenance(params) || !human_provenance(update)
+        || update.pointer("/content/type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    update.pointer("/content/text").and_then(Value::as_str).map(str::to_owned)
+}
+
 struct TerminalInput {
     key: String,
     at: DateTime<Utc>,
@@ -280,7 +295,12 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
                 let Some(prompt) = text_blocks(value, "/payload/content", "input_text") else { continue };
                 (format!("{turn}:{}", at.to_rfc3339()), prompt)
             }
-            _ => continue,
+            cas_mux::SupervisorCli::Grok => {
+                let Some(prompt) = grok_prompt(value) else { continue };
+                let Some(key) = value.pointer("/params/_meta/eventId").and_then(Value::as_str) else { continue };
+                (key.to_owned(), prompt)
+            }
+            cas_mux::SupervisorCli::OpenCode => continue,
         };
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() || !human_provenance(value)
@@ -461,7 +481,62 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                     }
                 }
             }
-            _ => {}
+            cas_mux::SupervisorCli::Grok => {
+                let update = &value["params"]["update"];
+                match update["sessionUpdate"].as_str() {
+                    Some("user_message_chunk") => {
+                        // Image pastes emit text and image chunks with one
+                        // promptIndex; promptId may appear only on the reply.
+                        let key = value.pointer("/params/_meta/promptId")
+                            .or_else(|| update.pointer("/_meta/promptIndex"))
+                            .map(Value::to_string);
+                        let new_turn = started.as_ref().is_none_or(|(prior, _, _)| {
+                            key.as_ref().map_or_else(
+                                || update.pointer("/content/type").and_then(Value::as_str) == Some("text"),
+                                |key| key != prior,
+                            )
+                        });
+                        if new_turn {
+                            started = Some((key.unwrap_or_default(), at, None));
+                            started_prompt = None;
+                            final_text = None;
+                        }
+                        if let Some(prompt) = grok_prompt(value) {
+                            started_prompt.get_or_insert_with(String::new).push_str(&prompt);
+                        }
+                    }
+                    // Text before a tool is progress, not the final answer.
+                    Some("tool_call") => final_text = None,
+                    Some("agent_message_chunk") => {
+                        if update.pointer("/content/type").and_then(Value::as_str) == Some("text")
+                            && let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) {
+                            final_text.get_or_insert_with(String::new).push_str(chunk);
+                        }
+                    }
+                    Some("turn_completed") => {
+                        if update["stop_reason"].as_str() == Some("cancelled") {
+                            started = None;
+                            started_prompt = None;
+                            final_text = None;
+                            continue;
+                        }
+                        let key = update["prompt_id"].as_str()
+                            .or_else(|| value.pointer("/params/_meta/promptId").and_then(Value::as_str))
+                            .filter(|key| !key.is_empty());
+                        if let (Some((_, begun, _)), Some(text), Some(key)) =
+                            (started.take(), final_text.take(), key) {
+                            let ids = started_prompt.as_deref().map(commander_markers).unwrap_or_default();
+                            turns.push(CompletedTurn {
+                                key: key.to_owned(), started_at: begun, completed_at: at,
+                                text, commander_id: ids.last().copied(), commander_ids: ids,
+                                prompt: started_prompt.take(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            cas_mux::SupervisorCli::OpenCode => {}
         }
     }
     turns
@@ -1516,6 +1591,108 @@ mod tests {
         let values = codex_turn("Question with Example: [cas #8 operator Alice@phone verified 0s first] old\n> [cas #9 operator Alice@phone verified 0s first] quoted\n[cas #42 operator Alice@phone verified 0s first] actual");
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Codex);
         assert_eq!(turns[0].commander_id, Some(42), "only an envelope beginning a row may bind");
+    }
+
+    /// cas-44f0: native captures through discovery, the daemon and history.
+    #[test]
+    fn grok_native_reply_reaches_commander_cas_44f0() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let edge: Vec<Value> = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/grok-commander-edge-updates.jsonl"))
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let mut failures = Vec::new();
+        for case in ["terminal", "commander", "synthetic", "image", "cancelled", "error"] {
+            let (temp, root, queue) = terminal_session(vec![]);
+            env.set("GROK_HOME", temp.path().join("account"));
+            let store = SqliteAgentStore::open(&root).unwrap();
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.cc_session_id = Some("01a1adc1-8727-7443-8ca3-3de0d09ced72".into());
+            agent.metadata.insert("supervisor_cli".into(), "grok".into());
+            store.update(&agent).unwrap();
+            let send = (!matches!(case, "terminal" | "image")).then(|| queue.enqueue_operator_message(
+                "commander:Alice@phone", "supervisor", "Mirror probe", Some("factory-1"),
+                None, None, false, None,
+                &OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+                    device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+            ).unwrap().id());
+            let mut records: Vec<Value> = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/grok-commander-updates.jsonl"))
+                .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let base = records[0]["timestamp"].clone();
+            if case == "synthetic" {
+                records[0] = edge[2].clone();
+                records[0]["timestamp"] = base.clone();
+            }
+            if case == "image" {
+                records[0] = edge[0].clone();
+                records[0]["timestamp"] = base.clone();
+                let mut image = edge[1].clone();
+                image["timestamp"] = base.clone();
+                records.insert(1, image);
+            }
+            if matches!(case, "cancelled" | "error") {
+                let last = records.last_mut().unwrap();
+                let at = last["timestamp"].clone();
+                *last = edge[if case == "cancelled" { 3 } else { 4 }].clone();
+                last["timestamp"] = at;
+            }
+            let now = Utc::now().timestamp();
+            for row in &mut records {
+                row["timestamp"] = (now + row["timestamp"].as_i64().unwrap() - base.as_i64().unwrap()).into();
+                row["params"]["sessionId"] = agent.cc_session_id.as_ref().unwrap().clone().into();
+            }
+            if let Some(id) = send {
+                records[0]["params"]["update"]["content"]["text"] =
+                    format!("[cas #{id} operator Alice@phone verified 0s first] Mirror probe").into();
+            }
+            // Native streaming text before a tool is progress, not an answer.
+            let answer_index = records.iter().position(|row|
+                row["params"]["update"]["sessionUpdate"] == "agent_message_chunk").unwrap();
+            let mut progress = records[answer_index].clone();
+            progress["params"]["update"]["content"]["text"] = "Progress must not mirror.".into();
+            let mut tool = progress.clone();
+            tool["params"]["update"] = serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"probe-tool"});
+            records.splice(answer_index..answer_index, [progress, tool]);
+            let path = temp.path().join("account/sessions/project")
+                .join(agent.cc_session_id.as_ref().unwrap()).join("updates.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let write = |rows: &[Value]| std::fs::write(&path,
+                rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+                &root, temp.path(), "factory-1", &queue, std::slice::from_ref(&agent), state);
+            let mut state = MirrorScanState::default();
+            write(&records[..records.len() - 1]);
+            scan(&mut state);
+            assert!(operator_replies(&queue).is_empty(), "{case}: streaming text is not a completed reply");
+            write(&records);
+            scan(&mut state);
+            assert_eq!(state.transcript_reads, 2, "{case}: native transcript must resolve and be read");
+            let replies = operator_replies(&queue);
+            let expected_count = usize::from(case != "cancelled");
+            if replies.len() != expected_count {
+                failures.push(format!("{case}: {} replies, expected {expected_count}", replies.len()));
+                continue;
+            }
+            if case == "cancelled" { continue; }
+            assert!(replies[0].message.contains("mirror probe complete"));
+            assert!(!replies[0].message.contains("Private reasoning"));
+            assert!(!replies[0].message.contains("Progress must not mirror"));
+            let synthetic = case == "synthetic";
+            let kind = if synthetic { crate::ui::factory::OperatorTurnKind::Status }
+                else { crate::ui::factory::OperatorTurnKind::Answer };
+            let binding = if synthetic { None } else if send.is_some() { send } else {
+                let history = queue.conversation_history("factory-1", "phone", None, 20).unwrap();
+                Some(history.iter().find(|row| row.source == "terminal").unwrap().id)
+            };
+            if replies[0].kind != kind || replies[0].reply_to != binding {
+                failures.push(format!("{case}: kind={:?}, reply_to={:?}; expected {kind:?}, {binding:?}",
+                    replies[0].kind, replies[0].reply_to));
+            }
+            if send.is_some() && !synthetic { assert_eq!(replies[0].device_id, "phone"); }
+            scan(&mut MirrorScanState::default());
+            assert_eq!(operator_replies(&queue).len(), 1, "{case}: restart must deduplicate native prompt id");
+        }
+        assert!(failures.is_empty(), "native Grok fixture failures:\n{}", failures.join("\n"));
     }
 
     #[test]

@@ -7,10 +7,33 @@ const SEND_LEASE_SECS: i64 = 120;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerSendError {
+    #[error("build route peer {0} is in its 90-second routing cooldown")]
+    BuildRouteCooldown(String),
     #[error("peer supervisor {0} has no receiving factory daemon")]
     NoReceivingDaemon(String),
     #[error("{cause}{retry}")]
     Failed { cause: String, retry: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("build route peer {0} is in its routing cooldown")]
+struct BuildRouteCooldown(String);
+
+pub(crate) fn build_route_recent_peers(root: &Path, since: i64) -> Result<std::collections::HashSet<String>, String> {
+    let read = || -> anyhow::Result<_> {
+        let conn = connection(root)?;
+        let mut query = conn.prepare("SELECT DISTINCT json_extract(payload,'$.recipient_agent_id') FROM peer_message_outbox WHERE created_at>?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%'")?;
+        Ok(query.query_map([since], |row| row.get::<_, String>(0))?.collect::<Result<std::collections::HashSet<_>, _>>()?)
+    };
+    read().map_err(|error| error.to_string())
+}
+
+pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<(), String> {
+    let cancel = || -> anyhow::Result<()> {
+        connection(root)?.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
+        Ok(())
+    };
+    cancel().map_err(|error| error.to_string())
 }
 
 impl From<PeerSendError> for String {
@@ -85,6 +108,12 @@ fn enqueue_with_recovery(
             }
         }
         let now = chrono::Utc::now().timestamp();
+        if message.dedupe_key.starts_with("build-route:") {
+            // The same immediate transaction selects the slot and persists
+            // the ask: concurrent spawns cannot consume one peer twice.
+            let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peer_message_outbox WHERE created_at>?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%' AND json_extract(payload,'$.recipient_agent_id')=?2)", params![now - 90, message.recipient_agent_id], |row| row.get(0))?;
+            if occupied { return Err(BuildRouteCooldown(recipient.into()).into()); }
+        }
         tx.execute("INSERT INTO peer_message_outbox(sender_agent_id,sender_name,sender_session,recipient,payload,created_at,next_attempt_at) VALUES (?1,?2,?3,?4,'',?5,?5)",
             params![sender.id,sender.name,sender.factory_session,recipient,now])?;
         let id = tx.last_insert_rowid();
@@ -107,7 +136,11 @@ fn enqueue_with_recovery(
         tx.commit()?;
         Ok((id, None))
     })();
-    let (id, sent) = result.map_err(|e| failed(e, None))?;
+    let (id, sent) = result.map_err(|error| {
+        if let Some(cooldown) = error.downcast_ref::<BuildRouteCooldown>() {
+            PeerSendError::BuildRouteCooldown(cooldown.0.clone())
+        } else { failed(error, None) }
+    })?;
     if let Some(id) = sent {
         return Ok(SendReceipt { id, status: "duplicate".into() });
     }

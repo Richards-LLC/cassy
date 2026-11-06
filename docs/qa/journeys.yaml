@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  sandboxed-harness-stall-detection:
+    title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
+    tasks: [cas-cff4]
+    invariants: [HUB-J26-BACKGROUND-BOUND]
+    journeys: [HUB-J26]
   project-card-minute-recency:
     title: Project cards hold Most recent through alternating activity in one minute and move it without shifting rows in a later minute
     tasks: [cas-b6ed]
@@ -196,6 +201,10 @@ invariants:
   HUB-J13-COMPATIBLE-CLAUDE:
     statement: Commander and factory launches prefer a verified native Claude over stale PATH clients, or refuse with an actionable version error. Hub readiness keeps missing, outdated and unverifiable clients visible with their own repair action.
     check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME and CAS_TEST_HUB_PATH; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.
+  HUB-J4-GROK-NATIVE-REPLY:
+    statement: Completed Grok replies appear once in durable conversation history and answer the originating terminal or verified Commander question; thoughts, tool progress, cancelled turns and native synthetic-input bindings stay excluded; image-paste chunks retain their shared prompt.
+    check: Replay the captured native updates.jsonl through commander_mirror::tests::grok_native_reply_reaches_commander_cas_44f0; verify incomplete turns stay absent, integer timestamps parse, verified sends retain reply_to and device, text/image chunks retain their prompt, syntheticPrompt cannot claim operator input, cancelled completions stay absent while errors remain visible, and restart adds no duplicate. Walk a real Grok conversation on the batch candidate.
+    bug: {task: cas-44f0}
   HUB-J4-API-ERROR-VISIBLE:
     statement: The first native Claude API failure appears in the conversation and session preview within that turn.
     check: Run commander_mirror::tests::claude_api_error_reaches_commander_in_one_scan_cas_d8e0 through a real transcript scan and queue; verify the error reply and summary before another turn, and dedupe on replay.
@@ -359,6 +368,10 @@ invariants:
     statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
     bug: {task: cas-fc10}
+  FACTORY-IDLE-STALE-ASSIGNMENT:
+    statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
+    check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
+    bug: {task: cas-8aa1}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
@@ -1008,6 +1021,7 @@ journeys:
   invariants:
   - HUB-J4-GOAL
   - HUB-J4-API-ERROR-VISIBLE
+  - HUB-J4-GROK-NATIVE-REPLY
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-IMAGE-INSPECTION
   - HUB-J4-READABLE-PROSE-TABLES
@@ -2568,6 +2582,7 @@ journeys:
     trigger: Open a paired Claude or Codex conversation at desktop or 390 px.
   steps:
   - Type a slash, filter the curated palette, and run Usage by keyboard.
+  - In Claude, run /mcp as Reload Cassy and read the replacement server PID and version; other harnesses refuse it by name.
   - Read submission separately from an observed native outcome without repeating a mutation.
   - Finish waits for the active turn, then its reply reaches the conversation
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.

@@ -2756,6 +2756,79 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
     }
 }
 
+/// cas-015e replays cas-f43d: review accidentally used an unpublished local
+/// main merge, then resetting that merge made a normal origin advance look
+/// like a non-ancestral target replacement. The delivered source never moves.
+#[tokio::test]
+async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
+    let mut env = test_env();
+    for unpublished_merge in [true, false] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        let published_base = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        let target = fixture.cas_root.join("target-writer");
+        run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
+        if unpublished_merge {
+            run_git(&["checkout", "-b", "unpublished-sibling"], &target);
+            std::fs::write(target.join("unpublished.txt"), "Never published\n").unwrap();
+            run_git(&["add", "unpublished.txt"], &target);
+            run_git(&["commit", "-m", "Unpublished sibling"], &target);
+            run_git(&["checkout", "epic/rebound"], &target);
+            run_git(&["merge", "--no-ff", "-m", "Local merge before rejected publication", "unpublished-sibling"], &target);
+        }
+        let local_review_base = git_stdout(&target, &["rev-parse", "HEAD"]);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let _ = fixture.service.factory(Parameters(merge.clone())).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        let proof = dispatch.repository.as_ref().unwrap();
+        let bound_base = git_stdout(&fixture.repo.root, &["rev-parse", &format!("{}^1", proof.head_commit)]);
+        eprintln!("cas-f43d replay: source={} local_target={} published_target={} bound_target={}",
+            fixture.tip, local_review_base, published_base, bound_base);
+        let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Approve this delivered patch once",
+        })))).await.unwrap();
+        assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        // Roll back the unpublished local merge, then let a disjoint delivery
+        // advance the published target, exactly as soundwave's main reflog did.
+        run_git(&["reset", "--hard", &published_base], &target);
+        std::fs::write(target.join("published-sibling.txt"), "Published sibling\n").unwrap();
+        run_git(&["add", "published-sibling.txt"], &target);
+        run_git(&["commit", "-m", "Published target advances"], &target);
+        run_git(&["push", "origin", "epic/rebound"], &target);
+        let next_base = git_stdout(&target, &["rev-parse", "HEAD"]);
+        let result = fixture.service.factory(Parameters(merge)).await;
+        let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id,
+            "unpublished_merge={unpublished_merge}: target {bound_base} -> {next_base}, unchanged source {}; normal published progress must not dispatch another review: {result:?}", fixture.tip);
+        assert_eq!(bound_base, published_base, "review binds the published base even when local target is ahead");
+        assert_eq!(serde_json::to_value(cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&verdict).unwrap(), "carry-forward cannot mutate the original verdict");
+        assert_eq!(latest.repository, dispatch.repository, "the original proof remains immutable");
+        assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip,
+            "candidate preparation never rewrites the worker source");
+        let published = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        run_git(&["merge-base", "--is-ancestor", &fixture.tip, &published], &fixture.repo.root);
+        let queue = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap();
+        assert_eq!(queue.peek_all(100).unwrap().iter()
+            .filter(|row| row.source.starts_with("verification-dispatch:")).count(), 1,
+            "no second verifier handoff is sent");
+    }
+}
+
 #[tokio::test]
 async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_once() {
     let mut env = test_env();

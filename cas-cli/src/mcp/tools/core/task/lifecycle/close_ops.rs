@@ -100,16 +100,33 @@ fn request_close_verification_dispatch(
     owner_id: &str,
     boundary: &cas_types::VerificationProofBoundary,
     supervisor_recovery: bool,
+    no_delivery_reason: Option<&str>,
 ) -> Result<CloseVerificationDispatch, McpError> {
-    match cas_store::create_verification_dispatch_bound(
-        cas_root,
-        task_id,
-        requester_id,
-        owner_id,
-        boundary,
-        chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-        supervisor_recovery,
-    ) {
+    let persist = || -> cas_store::Result<cas_types::VerificationDispatch> {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
+        cas_store::shared_db::install_busy_handler(&conn)?;
+        let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
+        let dispatch = cas_store::create_verification_dispatch_bound_with_conn(
+            &tx, task_id, requester_id, owner_id, boundary,
+            chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+            supervisor_recovery,
+        )?;
+        if let Some(reason) = no_delivery_reason {
+            let (encoded, assignee): (String, Option<String>) = tx.query_row(
+                "SELECT deliverables, assignee FROM tasks WHERE id = ?1",
+                [task_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let mut deliverables: cas_types::TaskDeliverables = serde_json::from_str(&encoded)?;
+            deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
+                dispatch_id: dispatch.id.clone(), reason: reason.to_string(), assignee,
+            });
+            tx.execute("UPDATE tasks SET deliverables = ?1 WHERE id = ?2",
+                rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
+        }
+        tx.commit()?;
+        Ok(dispatch)
+    };
+    match persist() {
         Ok(dispatch) => Ok(CloseVerificationDispatch::Requested(dispatch)),
         Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => {
             Ok(CloseVerificationDispatch::AlreadyActive(*dispatch))
@@ -176,6 +193,7 @@ mod verification_dispatch_tests {
                     owner,
                     requested,
                     false,
+                    None,
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
                 match outcome {
@@ -10488,6 +10506,7 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
+                            req.no_delivery.filter(|value| *value).map(|_| req.reason.as_deref().unwrap_or_default()),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {
@@ -11704,6 +11723,7 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
+        task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
         task.updated_at = now;
@@ -13072,6 +13092,7 @@ impl CasCore {
                 )
             })?;
         let clear_blocked_hold = old_status == TaskStatus::Blocked;
+        task.deliverables.no_delivery_close_intent = None;
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed

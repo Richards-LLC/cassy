@@ -12622,6 +12622,12 @@ async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bo
         .unwrap()
         .expect("exact dispatch");
     assert_eq!(dispatch.owner_agent_id, "sup-7fc3");
+    if no_delivery {
+        let saved = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent.unwrap();
+        assert_eq!(saved.dispatch_id, dispatch.id);
+        assert_eq!(saved.reason, reason);
+        assert_eq!(saved.assignee, task.assignee);
+    }
 
     // The worker records the documented verification wait.
     let mut waiting = tasks.get(&task.id).unwrap();
@@ -12658,6 +12664,7 @@ async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bo
             assert_eq!(state["blocked_hold"]["reason"], "Operator decision still required");
         } else {
             assert_eq!(current.close_reason.as_deref(), Some(reason));
+            assert!(current.deliverables.no_delivery_close_intent.is_none());
             assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("blocked_hold").is_none());
         }
         let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();

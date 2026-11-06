@@ -1412,6 +1412,11 @@ async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
     git(repo, &["push", "-q", "origin", "main"]);
     let target = git(repo, &["rev-parse", "HEAD"]);
     assert_ne!(original.base_sha, target);
+    // The incident's target checkout lagged origin. Start resets the lane to
+    // origin/main, while dispatch must not treat that integrated tip as work.
+    git(repo, &["reset", "--hard", &original.base_sha]);
+    assert_eq!(git(repo, &["rev-parse", "main"]), original.base_sha);
+    assert_eq!(git(repo, &["rev-parse", "origin/main"]), target);
     let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id, "full":true})).await;
     assert!(restarted.contains("REUSED FACTORY BRANCH RESET"), "{restarted}");
     assert_eq!(git(&worker_path, &["rev-parse", "HEAD"]), target);

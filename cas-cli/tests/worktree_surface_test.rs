@@ -2762,7 +2762,7 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
 #[tokio::test]
 async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
     let mut env = test_env();
-    for unpublished_merge in [true, false] {
+    for (unpublished_merge, overlaps_delivery) in [(true, false), (false, false), (true, true)] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2778,9 +2778,15 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         let target = fixture.cas_root.join("target-writer");
         run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
         if unpublished_merge {
+            if overlaps_delivery {
+                // Git can merge both additions, but the unpublished extra
+                // content in a reviewed file must never inherit approval.
+                std::fs::write(fixture.repo.root.join(".git/info/attributes"), "delivery.txt merge=union\n").unwrap();
+            }
             run_git(&["checkout", "-b", "unpublished-sibling"], &target);
-            std::fs::write(target.join("unpublished.txt"), "Never published\n").unwrap();
-            run_git(&["add", "unpublished.txt"], &target);
+            let file = if overlaps_delivery { "delivery.txt" } else { "unpublished.txt" };
+            std::fs::write(target.join(file), if overlaps_delivery { "approved task delivery\nunreviewed extra\n" } else { "Never published\n" }).unwrap();
+            run_git(&["add", file], &target);
             run_git(&["commit", "-m", "Unpublished sibling"], &target);
             run_git(&["checkout", "epic/rebound"], &target);
             run_git(&["merge", "--no-ff", "-m", "Local merge before rejected publication", "unpublished-sibling"], &target);
@@ -2802,6 +2808,15 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         })))).await.unwrap();
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
         let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        if overlaps_delivery {
+            let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
+            assert!(refused.message.contains("reviewed delivery"), "{refused}");
+            assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), local_review_base,
+                "cas-4c92: refused landing must restore the exact pre-merge target: {refused}");
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), published_base);
+            assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
+            continue;
+        }
         // Roll back the unpublished local merge, then let a disjoint delivery
         // advance the published target, exactly as soundwave's main reflog did.
         run_git(&["reset", "--hard", &published_base], &target);

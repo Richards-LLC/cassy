@@ -672,7 +672,6 @@ impl CasCore {
                                 .ids_by_assignees_and_statuses(
                                     &[&worker.name, &worker.id],
                                     &[
-                                        TaskStatus::Open,
                                         TaskStatus::InProgress,
                                         TaskStatus::Blocked,
                                     ],

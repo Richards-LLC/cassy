@@ -788,6 +788,7 @@ async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
                 "fixture".into(), root.path().join(name).to_str().unwrap().into()],
             cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
+        daemon.app.add_worker_name_for_test(name);
         daemon.app.mux.add_pane(cas_mux::Pane::with_pty(
             name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
         ).unwrap());
@@ -828,8 +829,14 @@ async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
         }
     }).await;
     let received: Vec<_> = names.iter().map(|name| (*name, std::fs::read(root.path().join(name)).unwrap_or_default())).collect();
+    let state = daemon.build_session_state();
+    let counts: Vec<_> = names.iter().map(|name| {
+        let pane = state.panes.iter().find(|pane| &pane.id == name).unwrap();
+        (pane.input_bytes_received, pane.input_bytes_written)
+    }).collect();
     for pane in daemon.app.mux.panes_mut() {
         pane.kill_tree_force();
     }
+    assert_eq!(counts, vec![(14, 14); 3], "PaneInfo reports accepted and written bytes for every PTY");
     assert!(result.is_ok(), "all three PTY consumers must receive their input: {received:?}");
 }

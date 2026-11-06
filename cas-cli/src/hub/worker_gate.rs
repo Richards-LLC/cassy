@@ -151,6 +151,8 @@ mod tests {
             focused: false,
             title: id.into(),
             exited: false,
+            input_bytes_received: 0,
+            input_bytes_written: 0,
         }
     }
 

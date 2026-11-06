@@ -1235,6 +1235,18 @@ impl Pane {
         (coalesced, other_events)
     }
 
+    /// Total bytes accepted by the PTY input queue and physically written.
+    /// Includes harness/control writes; panes without a PTY report zero.
+    pub fn input_byte_counts(&self) -> (u64, u64) {
+        match &self.backend {
+            PaneBackend::Pty(pty) => {
+                let input = pty.input();
+                (input.bytes_received(), input.bytes_written())
+            }
+            PaneBackend::None => (0, 0),
+        }
+    }
+
     pub async fn write(&self, data: &[u8]) -> Result<()> {
         match &self.backend {
             PaneBackend::Pty(pty) => {

@@ -215,6 +215,34 @@ fn pin_rollback(session: &str) -> Result<tempfile::TempPath> {
     Ok(path)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
+fn preserve_startup_image(_source: &Path, _pin: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod startup_pin_tests {
+    use super::*;
+
+    #[test]
+    fn startup_creates_missing_rollback_pin_before_installed_image_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed-cas");
+        let pin = root.path().join("session.provisioner/cas");
+        std::fs::write(&installed, b"running daemon image").unwrap();
+        assert!(!pin.exists());
+
+        preserve_startup_image(&installed, &pin).unwrap();
+        assert_eq!(std::fs::read(&pin).unwrap(), b"running daemon image");
+
+        // An independent snapshot survives even an install that rewrites
+        // the original inode. Rechecking startup cannot replace that pin.
+        std::fs::write(&installed, b"new installed image").unwrap();
+        preserve_startup_image(&installed, &pin).unwrap();
+        assert_eq!(std::fs::read(&pin).unwrap(), b"running daemon image");
+    }
+}
+
 fn manifest_file(session: &str, manifest: &Handoff) -> Result<File> {
     #[cfg(target_os = "linux")]
     let mut file = {

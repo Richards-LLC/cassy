@@ -3688,3 +3688,11 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media print {
   .live-epic-tasks[hidden], .live-epic[hidden] { display: grid; }
 }
+
+/* cas-85bfb: a reply's inline image. Bounded so a screenshot never takes over
+   the thread; the image viewer enlarges it. */
+.markdown-image { display: block; max-width: 100%; margin: var(--space-2) 0; padding: 0; overflow: hidden; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-raised); cursor: zoom-in; }
+.markdown-image img { display: block; max-width: 100%; max-height: min(24rem, 60vh); width: auto; height: auto; object-fit: contain; }
+.markdown-image[data-state="loading"] img { min-width: var(--space-16); min-height: var(--space-12); }
+.markdown-image:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+@media (forced-colors: active) { .markdown-image { border-color: CanvasText; } }

@@ -43,7 +43,7 @@
 - `cas-cli/src/phase_outcome.rs` - measured Epic/Gate outcomes, inherited dependency holds and operator exceptions.
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, application modules and command dispatch.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery, receipts and ref cleanup.
-- `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files/` - initialization, provisioning and managed-file reconciliation.
+- `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - initialization, provisioning, content-based managed sync commits and merge-residue recovery.
 - `cas-cli/src/accounts.rs`, `cas-cli/src/cli/accounts.rs`, `cas-cli/src/account_registry/` - account inventory, identity discovery and native usage snapshots.
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded mutations and shared-link repair.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/cli/limits.rs` - harness launch, login, account choice and capacity reports.
@@ -77,7 +77,7 @@
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merged-delivery approval recovery, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
-- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - no-progress watchdog: supervisor wake at 45 min, operator page at 90.
+- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - local no-progress watchdog: supervisor wake at 45 min, operator page at 90; excludes contained parked deliveries and binding peer-owned work/target epics.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches. Shared key-shape redaction lives in `cas-cli/src/hooks/handlers/handlers_events/message_display.rs`.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - prompt readiness, clock-stamped pointer wakes, attributed director queue envelopes with immutable delivery-tip context, queued input and recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
@@ -161,9 +161,9 @@
 - `hub-web/src/epic-progress.ts` - Live epics in Tasks & progress: the selected project's epics across machines, open / in progress / merged split bars and in-place task disclosure.
 - `hub-web/src/provider-mark.ts`, `hub-web/src/live-phase.ts`, `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts` - harness marks, live phase, attention-priority Team state and release/task projections.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity views.
-- `hub-web/src/markdown-renderer.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` - safe Markdown, source controls and lazy evidence renderers.
+- `hub-web/src/markdown-renderer.ts`, `hub-web/src/reply-images.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` - safe Markdown, inline reply images, source controls and lazy evidence renderers.
 - `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `cas-cli/src/hub/composer_upload.rs` - upload identity, progress and stored attachment routes.
-- `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media, content chunks and passive page previews.
+- `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs`, `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - authorized media (including artifacts-directory reply images), content chunks and passive page previews.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/accounts-panel.ts` - pairing, scoped input grants and account controls.
 - `hub-web/src/account-usage-check.ts`, `cas-cli/src/hub/account_routes.rs` - per-account native usage rechecks shared by Accounts and New session, with distinct check/observation times.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, protocol doubles and real-hub fixtures.

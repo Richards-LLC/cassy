@@ -33,6 +33,8 @@ mod secret_request;
 mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
+#[path = "local_image.rs"]
+mod local_image;
 
 #[path = "dismissed_sessions.rs"]
 mod dismissed_sessions;

@@ -31,7 +31,8 @@ import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSend
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
+import { ConversationView, emptyActivityText, registerReplyImageResolver, type TurnRenderContext } from "./conversation-view";
+import type { ArtifactViewResult } from "./artifact-open";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
@@ -284,6 +285,24 @@ installAttachmentSheet((sheet, file, context) => {
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
+});
+// cas-85bfb: a reply's inline images come from the machine that published
+// the reply, through its media ticket; a view is reused until it expires.
+const replyImageViews = new Map<string, { view: Promise<ArtifactViewResult | undefined>; until: number }>();
+registerReplyImageResolver((reference, context) => {
+  const thread = threadOf(context);
+  const connection = thread && connectionStates.get(thread.machineId)?.phase === "live" ? connections.get(thread.machineId) : undefined;
+  if (!thread || !connection) return Promise.resolve(undefined);
+  const key = JSON.stringify([thread.machineId, thread.session, reference]);
+  const cached = replyImageViews.get(key);
+  if (cached && cached.until > Date.now()) return cached.view;
+  const entry = { view: connection.artifactPreview(thread.session, reference).catch(() => undefined), until: Date.now() + 60_000 };
+  replyImageViews.set(key, entry);
+  void entry.view.then(result => {
+    if (!result?.ok) replyImageViews.delete(key);
+    else if (result.view.expires_at) entry.until = Date.parse(result.view.expires_at) - 5_000;
+  });
+  return entry.view;
 });
 const conversationHistories = new Map<string, ConversationHistory>();
 /**

@@ -44,6 +44,8 @@ fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
 enum ArtifactSource {
     Cloud(std::path::PathBuf),
     Composer(std::fs::File),
+    /// An image a reply names by path, already proven by `local_image`.
+    Local(std::fs::File),
 }
 
 struct ScopedArtifact {
@@ -90,6 +92,10 @@ async fn scoped<R: SessionReadModel>(
     let session = session.to_owned();
     tokio::task::spawn_blocking(move || {
         let root = crate::store::find_cas_root_ignoring_env(std::path::Path::new(&project)).ok()?;
+        if artifact.starts_with(super::local_image::LOCAL_IMAGE_PREFIX) {
+            let (record, file) = super::local_image::open_local_image(&root, &artifact).ok()?;
+            return Some(ScopedArtifact { record, source: ArtifactSource::Local(file) });
+        }
         let store = cas_store::SqliteArtifactStore::open(&root).ok()?;
         if let Some(record) = store.get(&artifact).ok()?
             && record.task_id == format!("commander-{session}")
@@ -430,7 +436,9 @@ async fn fetch_artifact<R: SessionReadModel>(
         let opened = (|| -> anyhow::Result<(Box<dyn Read + Send + Sync>, bool)> {
             auth.ensure_active_context(&context, chrono::Utc::now())?;
             let root = match source {
-                ArtifactSource::Composer(file) => return Ok((Box::new(file), false)),
+                ArtifactSource::Composer(file) | ArtifactSource::Local(file) => {
+                    return Ok((Box::new(file), false));
+                }
                 ArtifactSource::Cloud(root) => root,
             };
             #[cfg(test)]

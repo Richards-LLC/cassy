@@ -507,13 +507,16 @@ impl WorktreeManager {
                 };
 
                 if !conflicting.is_empty() {
-                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
-                        crate::worktree::git::DirtyClassification {
-                            blocking: conflicting,
-                            warnings: Vec::new(),
-                        }
-                        .describe_blocking(),
-                    )));
+                    let mut details = crate::worktree::git::DirtyClassification {
+                        blocking: conflicting,
+                        warnings: Vec::new(),
+                    }.describe_blocking();
+                    if target_dirty.blocking.iter().all(|entry| entry.status.ends_with(' '))
+                        && crate::cli::project_files::staged_sync_only(&self.repo_root).unwrap_or(false)
+                    {
+                        details.push_str("\nCassy-managed sync changes are staged. Run `cas update --sync` in the shared target checkout to commit them, then retry worktree_merge.");
+                    }
+                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(details)));
                 }
 
                 tracing::warn!(

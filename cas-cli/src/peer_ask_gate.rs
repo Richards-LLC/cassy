@@ -315,13 +315,13 @@ mod tests {
     #[test]
     fn peer_answers_match_only_their_unambiguous_question_cas_7435() {
         use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
-        for case in ["single", "named", "explicit", "ambiguous", "wrong-peer", "wrong-target",
+        for case in ["single", "named", "explicit", "linked-successor", "ambiguous", "wrong-peer", "wrong-target",
             "wrong-reference", "stale", "receipt", "status", "untyped", "prefix",
             "ambiguous-then-explicit", "duplicate", "queued", "wrong-source"]
         {
             let (_env, _temp, root, conn) = fixture();
             sent_ask(&conn, "ask-7435", "Please review PR #4249.");
-            let two_asks = matches!(case, "named" | "explicit" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
+            let two_asks = matches!(case, "named" | "explicit" | "linked-successor" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
             if two_asks {
                 sent_ask(&conn, "ask-74350", "Please review PR #4250.");
             }
@@ -337,6 +337,12 @@ mod tests {
             };
             match case {
                 "explicit" => reply.in_reply_to = Some("ask-7435".into()),
+                "linked-successor" => {
+                    // Explicit Cloud reply links survive supervisor succession.
+                    reply.in_reply_to = Some("ask-7435".into());
+                    reply.sender_agent_id = "successor-peer".into();
+                    reply.sender_name = "successor-supervisor".into();
+                }
                 "wrong-reference" => reply.in_reply_to = Some("unrelated-ask".into()),
                 "wrong-peer" => reply.sender_agent_id = "different-peer".into(),
                 "receipt" => reply.kind = Some(PeerMessageKind::Receipt),
@@ -368,7 +374,7 @@ mod tests {
                 insert(&reply, "A duplicate delivery cannot answer the remaining question.");
             }
             let refusal = pr_merge(&root, "sup-soundwave", 4249);
-            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit"), "{case}: {refusal:?}");
+            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit" | "linked-successor"), "{case}: {refusal:?}");
             if matches!(case, "ambiguous" | "ambiguous-then-explicit" | "wrong-reference" | "queued") {
                 assert!(refusal.as_deref().unwrap().contains("reply-7435"), "{case}: {refusal:?}");
             }

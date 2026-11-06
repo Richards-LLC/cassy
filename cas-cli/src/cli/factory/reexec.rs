@@ -14,22 +14,37 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
-#[error("relaunch required: factory daemon did not answer the in-place update before the request deadline; it may be too old to support reexec")]
+#[error(
+    "relaunch required: factory daemon did not answer the in-place update before the request deadline; it may be too old to support reexec"
+)]
 struct RelaunchRequired;
 
 fn time_left(deadline: Instant) -> Result<Duration> {
-    deadline.checked_duration_since(Instant::now())
-        .filter(|left| !left.is_zero()).ok_or_else(|| RelaunchRequired.into())
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| RelaunchRequired.into())
 }
 
-fn read_exact_before(stream: &mut UnixStream, mut data: &mut [u8], deadline: Instant) -> Result<()> {
+fn read_exact_before(
+    stream: &mut UnixStream,
+    mut data: &mut [u8],
+    deadline: Instant,
+) -> Result<()> {
     while !data.is_empty() {
         stream.set_read_timeout(Some(time_left(deadline)?))?;
         match stream.read(data) {
             Ok(0) => bail!("Daemon disconnected before completing its response"),
             Ok(n) => data = &mut data[n..],
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(RelaunchRequired.into()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(RelaunchRequired.into());
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -65,7 +80,10 @@ fn request_with_timeout(session: &str, binary: &Path, timeout: Duration) -> Resu
         format!("Could not connect to factory {session}; an older daemon may require relaunch")
     })?;
     ensure!(
-        matches!(read_frame(&mut stream, deadline)?, DaemonMessage::Welcome { .. }),
+        matches!(
+            read_frame(&mut stream, deadline)?,
+            DaemonMessage::Welcome { .. }
+        ),
         "Daemon did not send its welcome"
     );
     let nonce = uuid::Uuid::new_v4().to_string();
@@ -81,7 +99,14 @@ fn request_with_timeout(session: &str, binary: &Path, timeout: Duration) -> Resu
             Ok(0) => bail!("Daemon disconnected before receiving the request"),
             Ok(n) => pending = &pending[n..],
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(RelaunchRequired.into()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(RelaunchRequired.into());
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -196,7 +221,11 @@ fn update_live_daemons_with_timeout(timeout: Duration) -> Vec<UpdateOutcome> {
                 },
                 Err(error) => UpdateOutcome {
                     session: session.name,
-                    status: if error.is::<RelaunchRequired>() { "relaunch_required" } else { "failed" },
+                    status: if error.is::<RelaunchRequired>() {
+                        "relaunch_required"
+                    } else {
+                        "failed"
+                    },
                     receipt: None,
                     error: Some(format!("{error:#}")),
                 },
@@ -227,39 +256,77 @@ mod tests {
         let session = "chatty-old";
         let _main = UnixListener::bind(socket_path(session)).unwrap();
         let listener = UnixListener::bind(gui_socket_path(session)).unwrap();
-        let mut metadata = create_metadata(session, std::process::id(), "lead", &[], None,
-            Some(project.to_str().unwrap()), None);
+        let mut metadata = create_metadata(
+            session,
+            std::process::id(),
+            "lead",
+            &[],
+            None,
+            Some(project.to_str().unwrap()),
+            None,
+        );
         metadata.daemon_build_hash = Some("old-daemon-without-reexec".into());
         manager.save_daemon_metadata(metadata, &root).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
             let welcome = DaemonMessage::Welcome {
                 session_name: session.into(),
-                state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
-                    epic_title: None, cols: 80, rows: 24 },
-                scrollback: None, protocol_version: 1, capabilities: vec![], pane_bootstrap: vec![],
+                state: SessionState {
+                    focused_pane: None,
+                    panes: vec![],
+                    epic_id: None,
+                    epic_title: None,
+                    cols: 80,
+                    rows: 24,
+                },
+                scrollback: None,
+                protocol_version: 1,
+                capabilities: vec![],
+                pane_bootstrap: vec![],
             };
-            stream.write_all(&encode_message(&welcome).unwrap()).unwrap();
+            stream
+                .write_all(&encode_message(&welcome).unwrap())
+                .unwrap();
             // A real old parser consumes the unknown request without replying.
             let mut header = [0; FRAME_HEADER_SIZE];
             stream.read_exact(&mut header).unwrap();
             let mut body = vec![0; decode_length(&header)];
             stream.read_exact(&mut body).unwrap();
-            assert!(serde_json::from_slice::<serde_json::Value>(&body).unwrap().get("Reexec").is_some());
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&body)
+                    .unwrap()
+                    .get("Reexec")
+                    .is_some()
+            );
             let output = encode_message(&DaemonMessage::Output {
-                pane_id: "chatty".into(), data: b"still working\r\n".to_vec(),
-            }).unwrap();
+                pane_id: "chatty".into(),
+                data: b"still working\r\n".to_vec(),
+            })
+            .unwrap();
             let end = Instant::now() + Duration::from_millis(300);
             let mut frames = 0;
-            while Instant::now() < end && stream.write_all(&output).is_ok() { frames += 1; }
+            while Instant::now() < end && stream.write_all(&output).is_ok() {
+                frames += 1;
+            }
             frames
         });
         let outcomes = update_live_daemons_with_timeout(Duration::from_millis(50));
         let frames = server.join().unwrap();
-        assert!(frames > 0, "the old daemon must keep producing unrelated output");
+        assert!(
+            frames > 0,
+            "the old daemon must keep producing unrelated output"
+        );
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].status, "relaunch_required", "{:?}", outcomes[0]);
-        assert!(outcomes[0].error.as_deref().unwrap().contains("relaunch required"));
+        assert!(
+            outcomes[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("relaunch required")
+        );
     }
 }

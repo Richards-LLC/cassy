@@ -29,6 +29,8 @@ pub(super) struct Handoff {
     pub(super) ws_listener: Option<i32>,
     pub(super) teams_present: bool,
     reply: Option<i32>,
+    #[serde(default)]
+    reply_pending: Vec<u8>,
     pub(super) app: AppHandoff,
 }
 
@@ -102,7 +104,7 @@ impl FactoryDaemon {
         &mut self,
         binary: &Path,
         _version: &str,
-        reply: Option<RawFd>,
+        reply: Option<(RawFd, Vec<u8>)>,
         nonce: &str,
     ) -> Result<()> {
         // This must be first: an unsupported candidate cannot change input,
@@ -140,7 +142,8 @@ impl FactoryDaemon {
             gui_listener: self.gui_listener.as_raw_fd(),
             ws_listener: self.ws_listener.as_ref().map(AsRawFd::as_raw_fd),
             teams_present: self.teams.is_some(),
-            reply,
+            reply: reply.as_ref().map(|(fd, _)| *fd),
+            reply_pending: reply.map(|(_, pending)| pending).unwrap_or_default(),
             app,
         };
         let result = (|| {
@@ -234,8 +237,15 @@ fn preserve_startup_image(source: &Path, pin: &Path) -> Result<()> {
 
 #[cfg(any(not(target_os = "linux"), test))]
 fn publish_startup_image(staged: tempfile::NamedTempFile, pin: &Path) -> Result<()> {
-    staged.persist(pin).context("Could not publish daemon startup image")?;
-    Ok(())
+    match staged.persist_noclobber(pin) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists && pin.is_file() => {
+            Ok(())
+        }
+        Err(error) => {
+            Err(anyhow::Error::new(error).context("Could not publish daemon startup image"))
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -370,14 +380,23 @@ fn restore_flags(originals: &[(RawFd, i32)]) {
         }
     }
 }
-pub(super) fn exec_image(binary: &Path, manifest: RawFd, fallback: bool, rollback: &Path) -> std::io::Error {
-    std::process::Command::new(binary)
+pub(super) fn exec_image(
+    binary: &Path,
+    manifest: RawFd,
+    fallback: bool,
+    rollback: &Path,
+) -> std::io::Error {
+    let error = std::process::Command::new(binary)
         .arg0(std::env::args_os().next().unwrap_or_default())
         .args(std::env::args_os().skip(1))
         .env(HANDOFF_ENV, manifest.to_string())
         .env(FALLBACK_ENV, if fallback { "1" } else { "0" })
         .env(ROLLBACK_ENV, rollback)
-        .exec()
+        .exec();
+    // Command resets SIGPIPE before exec even when exec then fails. The old
+    // image remains a server and must survive writes to disconnected peers.
+    crate::server_signals::ignore_sigpipe_for_server();
+    error
 }
 
 pub(super) fn duplicate(fd: RawFd) -> Result<RawFd> {
@@ -534,6 +553,9 @@ fn resume(fd: String, fallback: bool, adopted: &std::cell::Cell<bool>) -> Result
             let mut stream = unsafe { UnixStream::from_raw_fd(duplicate(reply)?) };
             stream.set_nonblocking(false)?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            // The first bytes may finish a frame partially sent before exec.
+            // Keep its suffix ahead of our receipt so the requester can parse.
+            stream.write_all(&manifest.reply_pending)?;
             stream.write_all(&crate::ui::factory::protocol::encode_message(
                 &crate::ui::factory::protocol::DaemonMessage::ReexecResult {
                     receipt: receipt.clone(),

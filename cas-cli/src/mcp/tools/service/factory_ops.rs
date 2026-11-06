@@ -14805,6 +14805,7 @@ mod tests {
         assert!(message.contains("older-daemon-build"), "{message}");
         assert!(message.contains(&provisioner_build), "{message}");
         assert!(message.contains("cas factory kill"), "{message}");
+        assert!(message.contains("Only daemons too old to support reexec"), "{message}");
         assert!(message.contains(session), "{message}");
 
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");

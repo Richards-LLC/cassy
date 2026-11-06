@@ -216,8 +216,27 @@ fn pin_rollback(session: &str) -> Result<tempfile::TempPath> {
 }
 
 #[cfg(any(not(target_os = "linux"), test))]
-fn preserve_startup_image(_source: &Path, _pin: &Path) -> Result<()> {
+fn preserve_startup_image(source: &Path, pin: &Path) -> Result<()> {
+    if pin.is_file() {
+        return Ok(());
+    }
+    let parent = pin.parent().context("Rollback pin has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let staged = tempfile::NamedTempFile::new_in(parent)?;
+    // Copy rather than link: even an in-place install must leave our boot
+    // image intact. Publish only a complete, executable, durable snapshot.
+    std::fs::copy(source, staged.path()).context("Could not snapshot daemon startup image")?;
+    std::fs::set_permissions(staged.path(), std::fs::Permissions::from_mode(0o700))?;
+    staged.as_file().sync_all()?;
+    staged.persist(pin).context("Could not publish daemon startup image")?;
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn pin_startup_image(session: &str) -> Result<()> {
+    // Resolve this at boot. After an install this path names the new image.
+    let source = std::env::current_exe().context("Could not locate daemon startup image")?;
+    preserve_startup_image(&source, &crate::ui::factory::provisioner_pin_path(session))
 }
 
 #[cfg(test)]

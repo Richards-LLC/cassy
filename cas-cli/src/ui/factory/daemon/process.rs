@@ -303,6 +303,10 @@ pub(super) fn from_app_after_fork(
     mut app: FactoryApp, listener: UnixListener, session_name: String,
     handoff: Option<&super::reexec::Handoff>,
 ) -> anyhow::Result<FactoryDaemon> {
+    #[cfg(not(target_os = "linux"))]
+    if handoff.is_none() {
+        super::reexec::pin_startup_image(&session_name)?;
+    }
     crate::server_signals::ignore_sigpipe_for_server();
     app.set_factory_session(session_name.clone());
 

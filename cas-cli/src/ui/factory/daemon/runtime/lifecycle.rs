@@ -3851,6 +3851,8 @@ impl FactoryDaemon {
             &config.session_name,
             &config.factory_config.cwd,
         )?;
+        #[cfg(not(target_os = "linux"))]
+        super::super::reexec::pin_startup_image(&config.session_name)?;
         // Get initial terminal size (default for daemon without terminal)
         let (cols, rows) = (120, 40);
 

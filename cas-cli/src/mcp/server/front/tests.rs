@@ -51,7 +51,7 @@ impl Fixture {
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["serverInfo"]["version"], "old");
         send(&mut f.output, json!({"jsonrpc":"2.0", "method":"notifications/initialized"})).await;
-        assert!(matches!(f.event().await, Event::Serving(version) if version == "old"));
+        assert!(matches!(f.event().await, Event::Serving { version, .. } if version == "old"));
         f
     }
 
@@ -119,7 +119,7 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
         }
     });
     Backend { input: Box::new(front_in), output: Box::new(front_out),
-        control_input: Box::new(front_control_in), control_output: Box::new(front_control_out), child: None }
+        control_input: Box::new(front_control_in), control_output: Box::new(front_control_out), child: None, image: None }
 }
 
 #[tokio::test]
@@ -150,7 +150,7 @@ async fn compatible_candidate_drains_inflight_and_partial_input_without_replay_c
     let reply = receive(&mut f.input).await;
     assert_eq!(reply["id"], 3);
     assert_eq!(reply["result"]["version"], "old");
-    assert!(matches!(f.event().await, Event::Serving(version) if version == "new"));
+    assert!(matches!(f.event().await, Event::Serving { version, .. } if version == "new"));
     f.call(4).await;
     let reply = receive(&mut f.input).await;
     assert_eq!(reply["id"], 4);

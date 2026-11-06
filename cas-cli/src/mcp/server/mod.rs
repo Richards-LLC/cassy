@@ -603,7 +603,7 @@ impl CasCore {
                     crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
                     #[cfg(unix)]
                     {
-                        let ppid = std::os::unix::process::parent_id();
+                        let ppid = crate::agent_id::get_cc_pid_for_mcp();
                         agent.ppid = Some(ppid);
                         crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
                     }
@@ -648,7 +648,7 @@ impl CasCore {
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, our_pid);
                 #[cfg(unix)]
                 {
-                    let ppid = std::os::unix::process::parent_id();
+                    let ppid = crate::agent_id::get_cc_pid_for_mcp();
                     agent.ppid = Some(ppid);
                     crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
                 }
@@ -779,7 +779,7 @@ impl CasCore {
         crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
         #[cfg(unix)]
         {
-            let ppid = std::os::unix::process::parent_id();
+            let ppid = crate::agent_id::get_cc_pid_for_mcp();
             agent.ppid = Some(ppid);
             crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
         }
@@ -997,6 +997,11 @@ mod prompts;
 mod resources;
 mod runtime;
 mod front;
+#[cfg(unix)]
+mod backend;
+#[cfg(unix)]
+pub(crate) use backend::run as run_backend;
+pub(crate) use front::serving_state;
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};

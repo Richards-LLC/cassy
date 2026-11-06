@@ -232,6 +232,33 @@ if [[ -n "$run_dir" && "$start_kind" != tag-push ]]; then
     fi
 fi
 
+# Rule-176 endpoints come from the cut receipt and GitHub merged_at, never
+# park time or Git committer time for the landing. Missing evidence stays unknown.
+release_context="$("${CAS_BIN:-cas}" release context --version "${tag#v}" 2>/dev/null || true)"
+first_child_epoch="$(jq -r '.first_child_epoch // empty' <<<"${release_context:-null}" 2>/dev/null || true)"
+first_child_to_main=unavailable
+main_to_published=unavailable
+queue_runs=unavailable
+queue_run_ids=unavailable
+if [[ "$main_landed_epoch" =~ ^[0-9]+$ ]]; then
+    main_to_published=$((end - main_landed_epoch))
+    if [[ "$first_child_epoch" =~ ^[0-9]+$ && "$first_child_epoch" -le "$main_landed_epoch" ]]; then
+        first_child_to_main=$((main_landed_epoch - first_child_epoch))
+    fi
+    # Count all CI attempts for this PR, including failed/ejected older trees.
+    # Pagination prevents a busy repository from quietly understating the count.
+    queue_evidence="$("$gh_bin" api "repos/$repo/actions/runs?event=merge_group&per_page=100" --paginate --slurp 2>/dev/null || true)"
+    queue_attempts="$(jq -c --arg pr "$pr_number" --arg merged "$main_landed_at" '
+        [if type == "array" then .[] else . end | .workflow_runs[]? |
+         select(.event == "merge_group" and .name == "CI" and .updated_at <= $merged and
+                (.head_branch | contains("/pr-" + $pr + "-")))] | unique_by(.id)
+    ' <<<"${queue_evidence:-null}" 2>/dev/null || true)"
+    if [[ "$(jq 'length' <<<"${queue_attempts:-[]}" 2>/dev/null)" -gt 0 ]]; then
+        queue_runs="$(jq '[.[] | .run_attempt // 1] | add' <<<"$queue_attempts")"
+        queue_run_ids="$(jq -r '[.[].id | tostring] | join(",")' <<<"$queue_attempts")"
+    fi
+fi
+
 {
     printf 'TAG=%s\n' "$tag"
     printf 'PUBLISH_START_KIND=%s\n' "$start_kind"
@@ -252,7 +279,17 @@ fi
             printf 'GATE_GREEN_RUN_ID=%s\n' "$gate_green_run_id"
         fi
     fi
-    printf 'PUBLISHED_AT=%s\n' "$published_at"
+    printf 'FIRST_CHILD_TO_MAIN_SECONDS=%s\n' "$first_child_to_main"
+    printf 'FIRST_CHILD_TO_MAIN_BUDGET_SECONDS=1800\n'
+    printf 'MAIN_TO_PUBLISHED_SECONDS=%s\n' "$main_to_published"
+    printf 'MAIN_TO_PUBLISHED_BUDGET_SECONDS=1200\n'
+    printf 'QUEUE_RUNS_USED=%s\n' "$queue_runs"
+    printf 'QUEUE_RUN_IDS=%s\n' "$queue_run_ids"
+    printf 'QUEUE_RUNS_SOURCE=associated-PR-CI-attempts-before-mergedAt\n'
+    if [[ "$queue_runs" == unavailable ]]; then
+        printf 'QUEUE_RUNS_UNKNOWN_REASON=no-associated-PR-CI-evidence-before-mergedAt\n'
+    fi
+    printf 'PUBLISHED_AT=%s\n'  "$published_at"
     printf 'PUBLISH_LATENCY_SECONDS=%s\n' "$latency"
     printf 'BUDGET_SECONDS=%s\n' "$budget"
     printf 'WITHIN_BUDGET=%s\n' "$within"
@@ -275,4 +312,11 @@ cat "$receipt_output"
 
 if ! "$within"; then
     echo "WARN: $tag took ${latency}s from $start_description to publication, over the ${budget}s budget" >&2
+fi
+
+if [[ "$first_child_to_main" != unavailable && "$first_child_to_main" -gt 1800 ]]; then
+    echo "WARN: first child commit to main took ${first_child_to_main}s, over the 1800s target" >&2
+fi
+if [[ "$main_to_published" != unavailable && "$main_to_published" -gt 1200 ]]; then
+    echo "WARN: main to published took ${main_to_published}s, over the 1200s target" >&2
 fi

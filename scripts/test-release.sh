@@ -37,14 +37,30 @@ case "$1 $2" in
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
-  "pr merge") exit "${FAKE_MERGE_EXIT:-0}" ;;
+  "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
-  "api graphql") cat "${FAKE_PR_STATE_JSON:?}" ;;
+  "api graphql")
+    if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
+    elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}'
+    else echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}'; fi ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+
+cat >"$tmp/bin/cas" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
+case "$1 $2" in
+  "release context")
+    printf '{"branch":"%s","integration":"main","base_commit":"%s"}\n' "$(git branch --show-current)" "$(git merge-base origin/main HEAD)" ;;
+  "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
+  *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/bin/cas"
+export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
 
 export GH_BIN="$tmp/bin/gh"
 export FAKE_GH_LOG="$tmp/gh.log"
@@ -380,33 +396,21 @@ check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$
 check '[[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$(git -C "$epic" rev-parse HEAD)" ]]' 'the release commit is pushed'
 check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.0: epic/alpha" "$FAKE_GH_LOG"' 'the PR to main is opened'
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
-checked="$(grep -n "^pr checks 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1 || true)"
-merged="$(grep -n "^pr merge 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1)"
-check '[[ -n "$checked" && -n "$merged" && "$checked" -lt "$merged" ]]' 'the PR CI is green before auto-merge is enabled (cas-2aef)'
+check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
+check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
-
-# 3b. cas-2aef: a red PR CI is reported with its failing tests, and the PR never
-# gets auto-merge, so it never enters the queue.
-echo '[{"name":"Scoped Validation (fast)","bucket":"fail","link":"https://example.test/actions/runs/2/job/21"},{"name":"Scoped Validation (factory/PR)","bucket":"pass","link":"https://example.test/actions/runs/2/job/22"}]' >"$tmp/checks-red.json"
-printf 'Scoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.1234567Z         FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.2Z test release::tests::bumps ... FAILED\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:04.0Z      FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\n' >"$tmp/red.log"
-: >"$FAKE_GH_LOG"
-set +e
-out="$(cd "$epic" && FAKE_PR_CHECKS_JSON="$tmp/checks-red.json" FAKE_RUN_LOG="$tmp/red.log" ./scripts/release.sh --no-watch 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 5 && "$out" == *"CI is red (Scoped Validation (fast))"* ]]' 'a red PR CI stops with exit 5 and names the failing check'
-check '[[ "$out" == *"Failing tests: cas-mux opencode::tests::projection_config_is_deterministic; release::tests::bumps"* ]]' 'the failing tests are named once, in one message'
-check '! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -q "^run view --job 21 --log-failed" "$FAKE_GH_LOG"' 'a red PR gets no auto-merge'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a
 # later day. Both the original (now removed) and renamed notes paths work.
 rerun_after_repair() {
     local before notes out status
+    rm -f "$FAKE_GH_STATE/admitted"
     echo repaired >"$epic/alpha.txt"
     git -C "$epic" commit --quiet -am 'repair queue failure'
     before="$(git -C "$epic" rev-parse HEAD)"
     for notes in "$original_notes" docs/release-notes/2026-10-15-v9.100.0-slack.md ''; do
         : >"$FAKE_GH_LOG"
+        rm -f "$FAKE_GH_STATE/admitted"
         out="$(cd "$epic" && RELEASE_DATE=2026-10-16 ./scripts/release.sh --no-watch ${notes:+--notes "$notes"} 2>&1)" || { echo "$out"; return 1; }
         [[ "$(git -C "$epic" rev-parse HEAD)" == "$before" && -z "$(git -C "$epic" status --porcelain)" ]] || return 1
         [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$before" ]] || return 1
@@ -415,6 +419,7 @@ rerun_after_repair() {
             ! grep -q '^pr create' "$FAKE_GH_LOG" || return 1
     done
     status=0
+    rm -f "$FAKE_GH_STATE/admitted"
     out="$(cd "$epic" && FAKE_MERGE_EXIT=42 ./scripts/release.sh --no-watch 2>&1)" || status=$?
     [[ $status -eq 42 && "$out" == *"error:"* && "$out" == *"42"* && "$out" == *'pr merge'* ]]
 }
@@ -426,10 +431,10 @@ clone_epic "$tmp/beta" epic/beta beta
 git -C "$tmp/beta" rm --quiet hub-web/dist/app.css
 git -C "$tmp/beta" commit --quiet -m 'drop obsolete generated styles'
 write_valid_draft "$tmp/beta-draft.md"
-rm -f "$FAKE_GH_STATE/pr"
+rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"
 run "$tmp/beta" --no-watch --notes "$tmp/beta-draft.md" 2>/dev/null
 git -C "$tmp/beta" push --quiet origin epic/beta:main
-rm -f "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
+rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
 : >"$FAKE_GH_LOG"
 run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
@@ -461,33 +466,18 @@ check '[[ $status -eq 4 && "$out" == *"conflicts outside the release files"* && 
 check '[[ -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'a code conflict leaves no merge in progress'
 git -C "$epic" reset --quiet --hard HEAD^
 
-# 7. Watch: an ejected PR stops with exit 3; a merged PR ends with exit 0.
+# 7. A queued rerun is one read, no duplicate admission and no polling.
 git -C "$tmp/seed" revert --no-edit HEAD >/dev/null
 git -C "$tmp/seed" push --quiet origin main
 run "$epic" --no-watch 2>/dev/null
-echo '{"state":"OPEN","mergeable":"MERGEABLE","autoMergeRequest":null,"mergeQueueEntry":null,"mergeCommit":null}' >"$tmp/ejected.json"
-set +e
-out="$(cd "$epic" && RELEASE_WATCH_INTERVAL=0 FAKE_PR_STATE_JSON="$tmp/ejected.json" ./scripts/release.sh 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 3 && "$out" == *"no auto-merge and no merge-queue entry"* ]]' 'an ejected PR stops the watch with exit 3'
-echo '{"state":"OPEN","mergeable":"MERGEABLE","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"},"mergeCommit":null}' >"$tmp/queued.json"
-echo '{"state":"MERGED","mergeable":"UNKNOWN","autoMergeRequest":null,"mergeQueueEntry":null,"mergeCommit":{"oid":"abc123"}}' >"$tmp/merged.json"
-cat >"$tmp/bin/gh-seq" <<EOF
-#!/usr/bin/env bash
-if [[ "\$1 \$2" == "api graphql" ]]; then
-  n="\$(cat "$tmp/seq" 2>/dev/null || echo 0)"; n=\$((n + 1)); echo "\$n" >"$tmp/seq"
-  if [[ "\$n" -lt 3 ]]; then cat "$tmp/queued.json"; else cat "$tmp/merged.json"; fi
-  exit 0
-fi
-exec "$tmp/bin/gh" "\$@"
-EOF
-chmod +x "$tmp/bin/gh-seq"
-set +e
-out="$(cd "$epic" && GH_BIN="$tmp/bin/gh-seq" RELEASE_WATCH_INTERVAL=0 ./scripts/release.sh 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 0 && "$out" == *"merged as abc123"* ]]' 'a queued then merged PR ends the watch with exit 0'
+: >"$FAKE_GH_LOG"
+run "$epic" 2>"$tmp/event-driven.err"
+check '! grep -q "^pr merge\|^pr checks" "$FAKE_GH_LOG" && [[ "$(grep -c "^api graphql" "$FAKE_GH_LOG")" == 1 ]]' 'cas-61e0: an admitted train reuses its PR and returns after one enqueue smoke check'
+# Auto-merge must really be enabled; a successful command with no admission is refused.
+echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}' >"$tmp/not-enqueued.json"
+status=0
+(cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
+check '[[ "$status" == 3 ]] && grep -q "no auto-merge and no merge-queue entry" "$tmp/not-enqueued.err"' 'cas-61e0: a missing enqueue is reported immediately after admission'
 
 # 8. cas-ea62: git exports GIT_DIR to hooks. A fixture
 # test that creates bare repositories must leave the repository those name

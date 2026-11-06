@@ -7,7 +7,7 @@ metadata:
 
 # One-command release
 
-The release rides in the epic PR. One command prepares it, the merge queue
+The release rides in the canonical open release train PR (the oldest open Cassy epic labelled `release-train`). One command prepares it, the merge queue
 proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
@@ -28,25 +28,26 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
-2. Run `scripts/release.sh` in the background with a log; it stays up until
-   the PR merges. It merges `main` in when the branch is behind, bumps the
-   release crates and `Cargo.lock`, promotes `[Unreleased]` and the
-   fragments to the dated section (deleting the fragments), names the draft, commits `release: vX.Y.Z`, pushes, opens the PR
-   and enables auto-merge. `--no-watch` stops after auto-merge. A hotfix is a
-   branch from `main` released with `scripts/release.sh --hotfix` (next
-   patch), through the same queue.
-3. If another release lands first, the command merges it, takes the next
-   version and re-enables auto-merge. Exit 4 is a code conflict with
-   `main`: resolve it on the branch, push, rerun. Exit 3 means the queue
-   ejected the PR: one repair cycle (run every remaining failing check in one
-   batch, fix, push), then rerun the command. A second ejection goes to the
-   operator as a P0.
-4. The merge queue runs the required checks; Commander journey shards run
-   only for `hub-web/` product inputs. The same run starts the optional
-   Release Prebuild (Linux `release-fast`, macOS ARM64 without LTO). Wait with
-   `remind_event=ci_completed` and, for the landing,
-   `remind_event=branch_contained_in`, both `cross_session=true`; supervisors
-   monitor CI and workers never poll CI.
+2. Check out the train lane, then run `scripts/release.sh` with an installed
+   Cassy that has `release context`, `release track` and `release installed`
+   (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
+   train and integration branch, merges the base when behind, bumps versions,
+   promotes the changelog, builds Commander, commits and pushes. It reuses the
+   train PR, requests auto-merge only when needed and checks admission once.
+   It returns after admission; `--no-watch` behaves the same way. No PR-CI watch
+   or PR polling stage runs: the queue proves the prepared tree once.
+3. The command automatically arms cross-session `branch_contained_in` for the
+   release SHA and integration branch, plus `tag_exists` for the version, even
+   with `--no-watch`. A retry reuses these durable occurrences. Do not arm a
+   duplicate CI/PR watcher. A missing admission is exit 3; resolve the named
+   queue failure in one batch and rerun. If another version landed first,
+   rerunning merges it and takes the next version. Exit 4 names a code conflict:
+   resolve it on the train, push and rerun. A second ejection is an operator P0.
+4. The merge queue runs required checks and starts Release Prebuild for the
+   exact release tree. Commander journey shards run only for web product inputs.
+   Landing wakes the supervisor through the persisted SHA reminder; publication
+   wakes through the tag reminder. The command never closes the train: core
+   rolls it over when later work is created.
 5. Landing on `main` starts `release.yml` with no agent: it adopts the queue
    run's archives by tree id, runs the ISA audit and the operator launch smoke
    on the packaged Linux and macOS assets, creates the annotated tag and the
@@ -56,11 +57,17 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    with `scripts/install-on-publish.sh --install`). While the user session is
    active it checks every minute; after a successful update and version check,
    the notes record the first host's actual install time and PR opened to
-   installed timer. Confirm the local version with `cas --version`.
+   installed timer. A verified publication plus matching installed binary sends
+   one owner-addressed post-release action notice. A failed notice retries on
+   the next timer tick without reinstalling. A generic binary-skew notice also
+   wakes once; it is not publication evidence. Confirm with `cas --version`.
 6. Off the clock: fill the draft checksums with
    `release-published-receipt.sh --write-draft`, post through the Violet hub
    (`cas-release-notes`; never a personal Slack route), and publish the report
-   (`cas-release-report`).
+   (`cas-release-report`). The publication receipt prints first child commit →
+   GitHub mergedAt against 30 minutes, mergedAt → publishedAt against 20 minutes,
+   and associated queue CI attempts. Missing evidence is unavailable; overruns
+   report the measured time without adding a release gate.
 7. Recovery: if `release.yml` fails after landing, fix the cause on `main`,
    then `gh workflow run release.yml -f dry_run=false`; it never replaces an
    existing release. Whole-path dry run for any branch:

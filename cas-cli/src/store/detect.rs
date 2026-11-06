@@ -765,6 +765,8 @@ fn open_rule_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Ru
         }
     };
 
+    // The cut must precede raw Cloud/hub pull writes as well as sessions.
+    SyncingRuleStore::start_receipts(cas_dir, base_store.as_ref())?;
     Ok(base_store)
 }
 
@@ -883,9 +885,8 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     let store = SqliteStore::open(&cas_dir)?;
     store.init()?;
 
-    // Create rule store
-    let rule_store = SqliteRuleStore::open(&cas_dir)?;
-    rule_store.init()?;
+    // A fresh rule store establishes an empty cut before any later pull.
+    open_rule_store_base(&cas_dir, false)?;
 
     // Create task store
     let task_store = SqliteTaskStore::open(&cas_dir)?;

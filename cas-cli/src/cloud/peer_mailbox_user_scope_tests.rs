@@ -644,6 +644,7 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
         branch: None,
         own: None,
         harness_auth_failed: None,
+        build_capacity: None,
     };
     let mut peers = [
         at("bright-newt-56", "gabber", "prowl", "s1", 13, None),
@@ -697,6 +698,7 @@ fn cas_8522_project_address_names_owned_epics_and_an_epic_resolves_its_owner() {
         branch: None,
         own: Some(true),
         harness_auth_failed: None,
+        build_capacity: None,
     };
     let peers = [
         supervisor("zen-hound-24", "cas-fcf9", "Burn-down v50"),

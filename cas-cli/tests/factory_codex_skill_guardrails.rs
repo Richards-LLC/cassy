@@ -227,7 +227,10 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
             "{contract}"
         );
         assert!(
-            contract.contains("ask the supervisor to verify and close"),
+            // pin: one close owner — the verdict closes the task (cas-5597).
+            contract.contains("Never re-close, spawn a verifier or ask anyone to close for you.")
+                // pin: the retired "supervisor closes for you" rule must not return.
+                && !contract.contains("close on your behalf"),
             "{contract}"
         );
     }

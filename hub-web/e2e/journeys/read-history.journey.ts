@@ -141,10 +141,16 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
     "| Weekly summary | Ready after the current work session ends. |", "",
     "| # | What | Starts |", "| --- | --- | --- |",
     "| C2 | **Review the current changes** and record the remaining work. | After `C1` |",
-    "| C3 | Publish the reviewed report when every check passes. | After C2 |",
+    "| C3 | Publish the reviewed report when every check passes. | After C2 |", "",
+    // cas-72ff: the operator's table, whose mixed columns used to zig-zag.
+    "| gabber supervisor | soundwave | prowl |", "| --- | --- | --- |",
+    "| actually working | 17% | **13%** |",
+    "| idle with every worker idle | 53% | **61%** |",
+    "| biggest single gap | 8.3 h | **9.3 h** (9:51 PM → 7:10 AM, all 7 workers waiting) |",
+    "| worker test time | 39% | not measurable cleanly (~9% proxy). one task ordered **5 full-suite runs** for a flake |",
   ].join("\n"));
   const tables = page.getByRole("log").getByRole("table");
-  await expect(tables).toHaveCount(2);
+  await expect(tables).toHaveCount(3);
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
     await page.emulateMedia({ colorScheme });
@@ -199,6 +205,23 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
         expect.soft(rendered.right).toBeLessThanOrEqual(rendered.pageWidth);
         expect.soft(rendered.pageScrollWidth).toBe(rendered.pageWidth);
       }
+      const mixed = tables.nth(2);
+      await mixed.scrollIntoViewIfNeeded();
+      if (process.env.DELIVERY_QA) await mixed.screenshot({ path: `${process.env.DELIVERY_QA}/table-mixed-${width}-${colorScheme}.png` });
+      const layout = await mixed.evaluate(node => {
+        const rows = [...node.querySelectorAll("tr")].map(row => [...row.cells].map(cell => {
+          const box = cell.getBoundingClientRect(); const text = document.createRange(); text.selectNodeContents(cell);
+          return { align: getComputedStyle(cell).textAlign, left: Math.round(text.getBoundingClientRect().left - box.left - parseFloat(getComputedStyle(cell).paddingLeft)) };
+        }));
+        return { rows, width: node.getBoundingClientRect().width, sheet: node.parentElement!.clientWidth };
+      });
+      // One alignment per column: every cell, header included, starts at its column's left edge.
+      for (let column = 0; column < 3; column++) {
+        expect.soft(new Set(layout.rows.map(row => row[column]!.align)), `column ${column} at ${width}`).toEqual(new Set(["left"]));
+        expect.soft(layout.rows.every(row => row[column]!.left === 0), `column ${column} starts flush at ${width}`).toBe(true);
+      }
+      // Columns size to content: at desktop width the table no longer stretches across the sheet.
+      if (width === 1280) expect.soft(layout.width).toBeLessThan(layout.sheet);
     });
   }
 });

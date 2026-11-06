@@ -100,6 +100,25 @@ fn cas_a131_note_is_sent_once_per_tip_and_not_on_retry() {
         }
         assert!(summary.contains(TARGET), "{summary}");
         assert!(body.contains("nothing waits"), "informational only: {body}");
+        // cas-4e00: observe the sent body through the receiver's real routing path.
+        let received = serde_json::from_value(serde_json::json!({
+            "id": "merge-note",
+            "project_id": REPO,
+            "recipient_agent_id": peer.agent_id,
+            "sender_agent_id": "me",
+            "sender_name": "me",
+            "body": body,
+            "created_at": Utc::now().to_rfc3339(),
+        }))
+        .unwrap();
+        let prompt = crate::cloud::peer_mailbox::render_prompt(&received);
+        let envelope = crate::cloud::peer_mailbox::parse_envelope(&prompt).unwrap();
+        assert_eq!(
+            envelope.kind,
+            Some(crate::cloud::peer_mailbox::PeerMessageKind::Receipt),
+            "merge heads-up must be a quiet receipt: {prompt}"
+        );
+        assert!(!envelope.wakes_idle(), "merge heads-up must not wake the peer");
         sent.push(peer.name.clone());
         Ok(())
     };

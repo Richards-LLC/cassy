@@ -135,6 +135,7 @@ pub(crate) fn capture_repository_proof_with_anchors(
     }
 
     Ok(RepositoryProofBoundary {
+        peer_premerge: None,
         repository_root: repository_root.to_string_lossy().into_owned(),
         worktree_root: worktree_root.to_string_lossy().into_owned(),
         head_commit,
@@ -260,6 +261,7 @@ pub(crate) fn capture_repository_proof_at_target(
     hasher.update(tree);
 
     Ok(RepositoryProofBoundary {
+        peer_premerge: None,
         repository_root: repository_root.to_string_lossy().into_owned(),
         // Keep the owning repository root here. Evaluation resolves
         // `target_branch` again, so a later primary-checkout move or linked

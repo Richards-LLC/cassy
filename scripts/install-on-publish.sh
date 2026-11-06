@@ -193,9 +193,14 @@ run_once() {
     fi
     started="$(now)"
     log "installing $tag over ${current:-nothing}"
-    if update_release "$latest" && [[ "$(installed_version)" == "$latest" ]]; then
+    local status=0
+    update_release "$latest" || status=$?
+    # A project refresh can fail (it is reported in the update summary and at
+    # SessionStart) after the binary is current; the release is still installed.
+    if [[ "$(installed_version)" == "$latest" ]]; then
         rm -f "$state_file"
         log "installed $tag in $(( $(now) - started )) s"
+        (( status == 0 )) || log "cas update exited $status after installing $tag; its summary names the failed project refresh"
         complete_timer "$tag" "$(now)"
     else
         mkdir -p "$state_dir"

@@ -280,12 +280,12 @@ fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
 
     if candidates.is_empty() {
         if cli.json {
-            println!(r#"{{"status":"clean","files_checked":0}}"#);
+            println!(r#"{{"status":"no_candidates_found","candidates":0}}"#);
         } else {
             let theme = ActiveTheme::default();
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
-            StatusLine::success("No duplicate Cassy hooks found in project settings").render(&mut fmt)?;
+            StatusLine::success("No duplicate Cassy hooks found in scanned project settings").render(&mut fmt)?;
         }
         return Ok(());
     }
@@ -333,7 +333,7 @@ fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
 
     if cli.json {
         println!(
-            r#"{{"status":"done","dry_run":{dry_run},"stripped":{cleaned},"deleted":{deleted},"errors":{errors}}}"#
+            r#"{{"status":"processed","dry_run":{dry_run},"stripped":{cleaned},"deleted":{deleted},"errors":{errors}}}"#
         );
     } else {
         fmt.newline()?;

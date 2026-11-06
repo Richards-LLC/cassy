@@ -511,6 +511,15 @@ async fn cas_f707_branch_is_registered_and_refreshed_on_the_heartbeat() {
         json!("factory/next")
     );
     assert_eq!(state.agents[me]["metadata"][META_BRANCH], json!("factory/next"));
+    // Both registration and heartbeat publish the same capacity schema.
+    for metadata in [&state.registrations[0]["metadata"], state.heartbeat_metadata.last().unwrap()] {
+        let sample: crate::factory_build_routing::BuildCapacity = serde_json::from_str(
+            metadata[crate::factory_build_routing::CAPACITY_META].as_str().unwrap(),
+        ).unwrap();
+        assert!(sample.cpu_count > 0);
+        assert!(sample.observed_at <= chrono::Utc::now());
+        assert_eq!(sample.free_slots, crate::config::Config::load(&fx.cas_root).unwrap().factory().max_concurrent_builders);
+    }
 }
 
 #[tokio::test]

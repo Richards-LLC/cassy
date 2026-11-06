@@ -19,7 +19,7 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print wakes, usage, interventions, speed, escapes and feature verdicts for a release
+    /// Print wakes, usage, interventions, speed, escapes, friction found and feature verdicts for a release
     Report {
         /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
@@ -28,7 +28,7 @@ enum LedgerCommand {
         #[arg(long)]
         offline: bool,
     },
-    /// Turn history already on disk into events (safe to rerun)
+    /// Turn history already on disk into events, including filed Cassy problems (safe to rerun)
     Backfill {
         /// How many days of task notes and verifications to read
         #[arg(long, default_value_t = 30)]
@@ -58,12 +58,33 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
             }
         }
         LedgerCommand::Backfill { days } => {
-            let inserted =
-                crate::quality_ledger::backfill(cas_root, Utc::now() - Duration::days(*days))?;
+            let since = Utc::now() - Duration::days(*days);
+            let inserted = crate::quality_ledger::backfill(cas_root, since)?;
+            let gh = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| std::path::PathBuf::from("gh"), std::path::PathBuf::from);
+            let friction = crate::quality_ledger::backfill_friction(cas_root, since, &gh)?;
             if cli.json {
-                println!("{}", serde_json::json!({ "inserted": inserted }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "inserted": inserted + friction.tasks + friction.issues,
+                        "friction_tasks": friction.tasks,
+                        "friction_issues": friction.issues,
+                        "friction_issues_skipped": friction.issues_skipped,
+                    })
+                );
             } else {
                 println!("Recorded {inserted} events from the last {days} days of history.");
+                println!(
+                    "Recorded {} friction row(s): {} Cassy bug task(s), {} Cassy issue(s).",
+                    friction.tasks + friction.issues,
+                    friction.tasks,
+                    friction.issues
+                );
+                if let Some(reason) = &friction.issues_skipped {
+                    println!("Cassy issues skipped: {reason}");
+                }
             }
         }
         LedgerCommand::RecordRelease { receipt } => {
@@ -101,13 +122,17 @@ fn pull_before_report(cas_root: &Path) {
     }
 }
 
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
+/// Trimmed stdout of a successful git command, empty output included.
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git").current_dir(repo).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    git_output(repo, args).filter(|text| !text.is_empty())
 }
 
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
@@ -161,6 +186,254 @@ fn commit_to_main_minutes(repo: &Path, tag: &str) -> Option<f64> {
         );
     }
     median(minutes)
+}
+
+/// A measured value, or the reason it could not be measured. Missing data is
+/// never reported as zero.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum Measure<T> {
+    Known(T),
+    Unknown { unknown: String },
+}
+
+fn unknown<T>(reason: impl Into<String>) -> Measure<T> {
+    Measure::Unknown { unknown: reason.into() }
+}
+
+impl<T> Measure<T> {
+    fn render(&self, known: impl FnOnce(&T) -> String) -> String {
+        match self {
+            Measure::Known(value) => known(value),
+            Measure::Unknown { unknown } => format!("unknown ({unknown})"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LandingSpread {
+    median_minutes: f64,
+    p90_minutes: f64,
+    deliveries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LineChurn {
+    added: u64,
+    removed: u64,
+}
+
+/// New checks: net `#[test]` attributes in Rust sources plus CI workflow jobs
+/// that did not exist at the start of the range.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct NewChecks {
+    total: i64,
+    tests: i64,
+    ci_jobs: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SpeedRow {
+    commit_to_main: Measure<LandingSpread>,
+    main_to_published_minutes: Measure<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComplexityRow {
+    lines: Measure<LineChurn>,
+    config_keys: Measure<i64>,
+    checks: Measure<NewChecks>,
+}
+
+/// Where `cas config set` keys are declared (`ConfigMeta { key: .. }`).
+const CONFIG_REGISTRY_PATH: &str = "cas-cli/src/config/meta";
+const WORKFLOWS_PATH: &str = ".github/workflows";
+
+/// Git revisions bounding a release: its previous tag to its tag, or the
+/// newest tag to HEAD for work in progress.
+fn release_range(repo: &Path, release: &str, published: bool) -> Result<(String, String), String> {
+    if !published {
+        let newest = git(repo, &["describe", "--tags", "--abbrev=0"])
+            .ok_or("no release tag bounds the work in progress")?;
+        return Ok((newest, "HEAD".to_string()));
+    }
+    git(repo, &["rev-parse", "--verify", "--quiet", &format!("{release}^{{commit}}")])
+        .ok_or_else(|| format!("tag {release} is not in this repository"))?;
+    let previous = previous_tag(repo, release).ok_or_else(|| format!("no earlier tag bounds {release}"))?;
+    Ok((previous, release.to_string()))
+}
+
+fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = ((percentile * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
+}
+
+/// Per delivery (each first-parent landing on main), minutes from its earliest
+/// authored commit to the landing.
+fn delivery_landing_spread(repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
+    let Some(landings) =
+        git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")])
+    else {
+        return unknown(format!("git log {from}..{to} failed"));
+    };
+    let mut minutes: Vec<f64> = landings
+        .lines()
+        .filter_map(|landing| {
+            let (sha, landed_at) = landing.split_once(' ')?;
+            let landed_at = parse_time(landed_at)?;
+            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{sha}^1..{sha}")])?;
+            let first = authored.lines().filter_map(parse_time).min()?;
+            Some(minutes_between(first, landed_at))
+        })
+        .collect();
+    if minutes.is_empty() {
+        return unknown(format!("no deliveries landed in {from}..{to}"));
+    }
+    minutes.sort_by(f64::total_cmp);
+    Measure::Known(LandingSpread {
+        median_minutes: median(minutes.clone()).unwrap_or_default(),
+        p90_minutes: nearest_rank(&minutes, 0.9),
+        deliveries: minutes.len(),
+    })
+}
+
+/// Minutes from the release commit to publication: the release record's own
+/// measure, else its publish time, else the annotated tag's date.
+fn main_to_published(
+    repo: &Path,
+    release: &str,
+    published: bool,
+    recorded: Option<f64>,
+    published_at: Option<DateTime<Utc>>,
+) -> Measure<f64> {
+    if !published {
+        return unknown("not published yet");
+    }
+    if let Some(minutes) = recorded {
+        return Measure::Known(minutes);
+    }
+    let Some(released) = tag_time(repo, release) else {
+        return unknown(format!("tag {release} is not in this repository"));
+    };
+    let tagged = || {
+        git(repo, &["for-each-ref", "--format=%(taggerdate:iso-strict)", &format!("refs/tags/{release}")])
+            .and_then(|date| parse_time(&date))
+    };
+    match published_at.or_else(tagged) {
+        Some(at) => Measure::Known(minutes_between(released, at)),
+        None => unknown(format!("no release record, and {release} is a lightweight tag")),
+    }
+}
+
+fn line_churn(repo: &Path, from: &str, to: &str) -> Measure<LineChurn> {
+    let Some(stat) = git_output(repo, &["diff", "--shortstat", from, to]) else {
+        return unknown(format!("git diff {from} {to} failed"));
+    };
+    let count = |suffix: &str| -> u64 {
+        stat.split(',')
+            .find(|part| part.contains(suffix))
+            .and_then(|part| part.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0)
+    };
+    Measure::Known(LineChurn { added: count("insertion"), removed: count("deletion") })
+}
+
+fn config_keys_at(repo: &Path, rev: &str) -> Option<std::collections::BTreeSet<String>> {
+    git_output(repo, &["cat-file", "-e", &format!("{rev}:{CONFIG_REGISTRY_PATH}")])?;
+    // `git grep` exits 1 when nothing matches: a registry with no keys yet.
+    let found = git_output(repo, &["grep", "-h", "-o", "-E", r#"key: *"[^"]+""#, rev, "--", CONFIG_REGISTRY_PATH])
+        .unwrap_or_default();
+    Some(found.lines().filter_map(|line| line.split('"').nth(1).map(str::to_string)).collect())
+}
+
+fn new_config_keys(repo: &Path, from: &str, to: &str) -> Measure<i64> {
+    let Some(after) = config_keys_at(repo, to) else {
+        return unknown(format!("no config registry at {CONFIG_REGISTRY_PATH}"));
+    };
+    let before = config_keys_at(repo, from).unwrap_or_default();
+    Measure::Known(after.difference(&before).count() as i64)
+}
+
+/// Job ids under a workflow's top-level `jobs:` map.
+fn workflow_jobs(text: &str) -> Vec<String> {
+    let mut jobs = Vec::new();
+    let mut indent: Option<usize> = None;
+    let mut in_jobs = false;
+    for line in text.lines() {
+        let body = line.trim_start();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        let depth = line.len() - body.len();
+        if depth == 0 {
+            in_jobs = line.trim_end() == "jobs:";
+            continue;
+        }
+        if in_jobs && *indent.get_or_insert(depth) == depth
+            && let Some((name, _)) = body.split_once(':')
+        {
+            jobs.push(name.trim().trim_matches(['"', '\'']).to_string());
+        }
+    }
+    jobs
+}
+
+fn ci_jobs_at(repo: &Path, rev: &str) -> std::collections::BTreeSet<String> {
+    let files = git_output(repo, &["ls-tree", "-r", "--name-only", rev, "--", WORKFLOWS_PATH]).unwrap_or_default();
+    files
+        .lines()
+        .filter(|file| file.ends_with(".yml") || file.ends_with(".yaml"))
+        .flat_map(|file| {
+            let text = git_output(repo, &["show", &format!("{rev}:{file}")]).unwrap_or_default();
+            workflow_jobs(&text).into_iter().map(move |job| format!("{file}#{job}"))
+        })
+        .collect()
+}
+
+fn new_checks(repo: &Path, from: &str, to: &str) -> Measure<NewChecks> {
+    let Some(diff) = git_output(repo, &["diff", "-U0", from, to, "--", "*.rs"]) else {
+        return unknown(format!("git diff {from} {to} failed"));
+    };
+    let is_test = |line: &str| {
+        let line = line.trim_start();
+        line.starts_with("#[test]") || line.starts_with("#[tokio::test")
+    };
+    let tests = diff
+        .lines()
+        .map(|line| match line.split_at_checked(1) {
+            Some(("+", body)) if !line.starts_with("+++") && is_test(body) => 1,
+            Some(("-", body)) if !line.starts_with("---") && is_test(body) => -1,
+            _ => 0,
+        })
+        .sum::<i64>();
+    let before = ci_jobs_at(repo, from);
+    let ci_jobs = ci_jobs_at(repo, to).difference(&before).count() as i64;
+    Measure::Known(NewChecks { total: tests + ci_jobs, tests, ci_jobs })
+}
+
+fn release_shape(
+    repo: &Path,
+    release: &str,
+    published: bool,
+    recorded_publish_minutes: Option<f64>,
+    published_at: Option<DateTime<Utc>>,
+) -> (SpeedRow, ComplexityRow) {
+    let main_to_published_minutes =
+        main_to_published(repo, release, published, recorded_publish_minutes, published_at);
+    match release_range(repo, release, published) {
+        Ok((from, to)) => (
+            SpeedRow { commit_to_main: delivery_landing_spread(repo, &from, &to), main_to_published_minutes },
+            ComplexityRow {
+                lines: line_churn(repo, &from, &to),
+                config_keys: new_config_keys(repo, &from, &to),
+                checks: new_checks(repo, &from, &to),
+            },
+        ),
+        Err(reason) => (
+            SpeedRow { commit_to_main: unknown(reason.clone()), main_to_published_minutes },
+            ComplexityRow { lines: unknown(reason.clone()), config_keys: unknown(reason.clone()), checks: unknown(reason) },
+        ),
+    }
 }
 
 fn record_release(cas_root: &Path, repo: &Path, receipt: &Path) -> Result<String> {
@@ -225,6 +498,19 @@ struct EscapeRow {
     missed_stage: Option<String>,
 }
 
+/// One identified Cassy problem and where it stands now (cas-87a2).
+#[derive(Debug, Serialize)]
+struct FrictionRow {
+    reference: String,
+    severity: Option<String>,
+    title: Option<String>,
+    project: Option<String>,
+    link: Option<String>,
+    /// open, in progress, blocked, awaiting merge, fixed, closed, cancelled or filed.
+    state: &'static str,
+    status: String,
+}
+
 #[derive(Debug, Default, Serialize)]
 struct CheckRow {
     pass: u32,
@@ -272,10 +558,14 @@ struct LedgerReport {
     commit_to_main_minutes: Option<f64>,
     main_to_published_minutes: Option<f64>,
     ejections: u32,
+    /// Git-derived speed over the release range; `unknown` carries the reason.
+    speed: SpeedRow,
+    complexity: ComplexityRow,
     escapes: Vec<EscapeRow>,
     checks: BTreeMap<String, CheckRow>,
     features: BTreeMap<String, FeatureRow>,
     excluded_unscoped_measurements: usize,
+    friction: Vec<FrictionRow>,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -333,7 +623,103 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 }),
         );
     }
-    Ok(aggregate(name, published, from, to, &events))
+    let mut report = aggregate(name, published, from, to, &events);
+    let published_at = published
+        .then(|| cas_store::quality_release_events(cas_root))
+        .transpose()?
+        .and_then(|releases| {
+            releases
+                .into_iter()
+                .find(|event| event.release_version.as_deref() == Some(report.release.as_str()))
+                .map(|event| event.occurred_at)
+        });
+    (report.speed, report.complexity) = release_shape(
+        repo,
+        &report.release,
+        published,
+        report.main_to_published_minutes,
+        published_at,
+    );
+    report.friction = friction_rows(cas_root, repo, &events);
+    Ok(report)
+}
+
+/// Where a task stands: `fixed in vX` once a release tag holds its delivery.
+fn task_state(repo: &Path, task: &cas_types::Task) -> (&'static str, String) {
+    use cas_types::TaskStatus;
+    match task.status {
+        TaskStatus::Closed => crate::issue_reconcile::delivery_commits(task)
+            .into_iter()
+            .find_map(|sha| crate::issue_reconcile::release_tag_containing(repo, sha))
+            .map_or(("closed", "closed, not in a release yet".to_string()), |tag| {
+                ("fixed", format!("fixed in {tag}"))
+            }),
+        TaskStatus::Open => ("open", "open".into()),
+        TaskStatus::InProgress => ("in progress", "in progress".into()),
+        TaskStatus::Blocked => ("blocked", "blocked".into()),
+        TaskStatus::AwaitingMerge => ("awaiting merge", "awaiting merge".into()),
+        TaskStatus::Cancelled => ("cancelled", "cancelled".into()),
+    }
+}
+
+/// cas-87a2: every identified problem in the window with its found→fixed
+/// status. An issue whose local task has its own row is counted once.
+fn friction_rows(cas_root: &Path, repo: &Path, events: &[QualityEvent]) -> Vec<FrictionRow> {
+    use cas_store::FrictionSource;
+    let tasks: BTreeMap<String, cas_types::Task> = crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .map(|tasks| tasks.into_iter().map(|task| (task.id.clone(), task)).collect())
+        .unwrap_or_default();
+    let default_repo = crate::github_issue_attach::default_repo_for(cas_root);
+    let task_rows: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            QualityPayload::Friction { source: FrictionSource::Task, reference, .. }
+                if event.project_id.is_empty() => Some(reference.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for event in events {
+        let QualityPayload::Friction { source, reference, severity, project } = &event.payload
+        else {
+            continue;
+        };
+        let (state, status) = if !event.project_id.is_empty() {
+            ("filed", format!("reported by {}", event.project_id))
+        } else if *source == FrictionSource::Task {
+            tasks.get(reference).map_or(("filed", "task not found here".into()), |task| {
+                task_state(repo, task)
+            })
+        } else {
+            let fixing = tasks.values().find(|task| {
+                crate::issue_reconcile::task_issue_refs(task, default_repo.as_deref())
+                    .iter()
+                    .any(|issue| {
+                        format!("{}/{}/issues/{}", issue.owner, issue.repo, issue.number)
+                            .eq_ignore_ascii_case(reference)
+                    })
+            });
+            if fixing.is_some_and(|task| task_rows.contains(&task.id.as_str())) {
+                continue;
+            }
+            fixing.map_or(("filed", "filed; no task here yet".into()), |task| {
+                let (state, status) = task_state(repo, task);
+                (state, format!("{status} ({})", task.id))
+            })
+        };
+        rows.push(FrictionRow {
+            reference: reference.clone(),
+            severity: severity.clone(),
+            title: event.title.clone(),
+            project: project.clone(),
+            link: event.link.clone(),
+            state,
+            status,
+        });
+    }
+    rows
 }
 
 fn project_name(event: &QualityEvent) -> String {
@@ -365,10 +751,20 @@ fn aggregate(
         commit_to_main_minutes: None,
         main_to_published_minutes: None,
         ejections: 0,
+        speed: SpeedRow {
+            commit_to_main: unknown("no repository read"),
+            main_to_published_minutes: unknown("no repository read"),
+        },
+        complexity: ComplexityRow {
+            lines: unknown("no repository read"),
+            config_keys: unknown("no repository read"),
+            checks: unknown("no repository read"),
+        },
         escapes: Vec::new(),
         checks: BTreeMap::new(),
         features: BTreeMap::new(),
         excluded_unscoped_measurements: 0,
+        friction: Vec::new(),
     };
     for event in events {
         let project = project_name(event);
@@ -419,6 +815,8 @@ fn aggregate(
                     report.ejections = *ejections;
                 }
             }
+            // Status needs the task store; build_report resolves these rows.
+            QualityPayload::Friction { .. } => {}
             QualityPayload::FeatureFeedback { feature, verdict, source, injected, opened, used } => {
                 // Old backfills dated lifetime totals as new measured rows.
                 // Their keys were hashed and the rows may already be synced, so
@@ -505,14 +903,22 @@ fn render(report: &LedgerReport) -> String {
         let _ = writeln!(out, "  {kind:<16}{count:>4}");
     }
 
+    let minutes = |minutes: &f64| duration(Some(*minutes));
     let _ = writeln!(out, "\nSpeed");
+    let _ = writeln!(out, "  commit to main  {}", report.speed.commit_to_main.render(|spread| format!(
+        "median {}, p90 {} over {} deliveries",
+        minutes(&spread.median_minutes), minutes(&spread.p90_minutes), spread.deliveries)));
+    let _ = writeln!(out, "  main to publish {}", report.speed.main_to_published_minutes.render(minutes));
     if report.published {
-        let _ = writeln!(out, "  commit to main  {}", duration(report.commit_to_main_minutes));
-        let _ = writeln!(out, "  main to publish {}", duration(report.main_to_published_minutes));
         let _ = writeln!(out, "  queue ejections {}", report.ejections);
-    } else {
-        let _ = writeln!(out, "  not published yet");
     }
+
+    let _ = writeln!(out, "\nComplexity added");
+    let _ = writeln!(out, "  lines           {}", report.complexity.lines.render(|churn| format!(
+        "+{} / -{}", churn.added, churn.removed)));
+    let _ = writeln!(out, "  config keys     {}", report.complexity.config_keys.render(|keys| format!("{keys} new")));
+    let _ = writeln!(out, "  new checks      {}", report.complexity.checks.render(|checks| format!(
+        "{} ({} tests, {} CI jobs)", checks.total, checks.tests, checks.ci_jobs)));
 
     let _ = writeln!(out, "\nEscapes: {}", report.escapes.len());
     for escape in &report.escapes {
@@ -524,6 +930,25 @@ fn render(report: &LedgerReport) -> String {
             escape.found_in,
             escape.missed_stage.as_deref().unwrap_or("unknown stage"),
             escape.project,
+        );
+    }
+
+    let mut states: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for row in &report.friction {
+        *states.entry(row.state).or_default() += 1;
+    }
+    let _ = writeln!(out, "\nFriction found: {}", report.friction.len());
+    if !states.is_empty() {
+        let _ = writeln!(out, "  {}", tally(&states));
+    }
+    for row in &report.friction {
+        let severity = row.severity.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  {}{severity} {}: {}",
+            row.reference,
+            row.title.as_deref().unwrap_or("untitled"),
+            row.status,
         );
     }
 
@@ -585,6 +1010,203 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// Runs git with fixed identity and the given author/committer dates.
+    fn git_dated(repo: &Path, args: &[&str], authored: &str, committed: &str) {
+        let status = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.test")
+            .env("GIT_AUTHOR_DATE", authored)
+            .env("GIT_COMMITTER_DATE", committed)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    const REGISTRY: &str = "cas-cli/src/config/meta/seed/keys.rs";
+    const WORKFLOW: &str = ".github/workflows/ci.yml";
+
+    /// v1.0.0 (lightweight) then three deliveries to v1.1.0 (annotated, tagged
+    /// 15 min after its release commit): a merged branch whose first commit
+    /// landed 120 min later, and two direct commits that landed after 30 and
+    /// 10 min. Across the range: one new config key, two new `#[test]`s and
+    /// one removed, one new CI job.
+    fn release_fixture(repo: &Path) -> std::path::PathBuf {
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let at = |time: &str| format!("2026-10-01T{time}:00Z");
+        let commit = |message: &str, authored: &str, committed: &str| {
+            git_in(repo, &["add", "-A"]);
+            git_dated(repo, &["commit", "-q", "-m", message], &at(authored), &at(committed));
+        };
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        write(REGISTRY, "    key: \"a.one\", section: \"a\",\n");
+        write(WORKFLOW, "name: ci\njobs:\n  test:\n    runs-on: ubuntu\n");
+        write("src/lib.rs", "#[test]\nfn old() {}\n");
+        commit("base", "09:00", "09:00");
+        git_in(repo, &["tag", "v1.0.0"]);
+
+        git_in(repo, &["checkout", "-q", "-b", "feature"]);
+        write("src/feature.rs", "#[test]\nfn one() {}\n");
+        commit("feature one", "11:00", "11:00");
+        write("src/feature.rs", "#[test]\nfn one() {}\n#[test]\nfn two() {}\n");
+        commit("feature two", "11:30", "11:30");
+        git_in(repo, &["checkout", "-q", "main"]);
+        git_dated(repo, &["merge", "-q", "--no-ff", "-m", "land feature", "feature"], &at("13:00"), &at("13:00"));
+        write(REGISTRY, "    key: \"a.one\", section: \"a\",\n    key: \"a.two\", section: \"a\",\n");
+        commit("config key", "13:30", "14:00");
+        write(WORKFLOW, "name: ci\njobs:\n  test:\n    runs-on: ubuntu\n  lint:\n    runs-on: ubuntu\n");
+        write("src/lib.rs", "fn old() {}\n");
+        commit("lint job", "14:00", "14:10");
+        git_dated(repo, &["tag", "-a", "v1.1.0", "-m", "v1.1.0"], &at("14:25"), &at("14:25"));
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        cas_root
+    }
+
+    /// Commit to main is per delivery, from its first commit to its landing.
+    #[test]
+    fn report_shows_commit_to_main_median_and_p90_per_delivery() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(
+            report.speed.commit_to_main,
+            Measure::Known(LandingSpread { median_minutes: 30.0, p90_minutes: 120.0, deliveries: 3 })
+        );
+        let text = render(&report);
+        assert!(text.contains("commit to main  median 30 min, p90 120 min over 3 deliveries"), "{text}");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["speed"]["commit_to_main"]["p90_minutes"], 120.0);
+        // The first release has no earlier tag to bound it.
+        let first = render(&build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap());
+        assert!(first.contains("commit to main  unknown (no earlier tag bounds v1.0.0)"), "{first}");
+    }
+
+    /// Without a release record, an annotated tag dates the publication; a
+    /// lightweight tag leaves it unknown rather than zero.
+    #[test]
+    fn report_shows_main_to_published_from_the_tag_or_why_not() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(report.speed.main_to_published_minutes, Measure::Known(15.0));
+        assert!(render(&report).contains("main to publish 15 min"));
+        let first = build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap();
+        let json = serde_json::to_value(&first).unwrap();
+        assert_eq!(
+            json["speed"]["main_to_published_minutes"]["unknown"],
+            "no release record, and v1.0.0 is a lightweight tag"
+        );
+    }
+
+    /// Complexity added: line churn, new config registry keys, and new checks.
+    #[test]
+    fn report_shows_complexity_added_over_the_release() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = release_fixture(dir.path());
+        let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["complexity"]["lines"], serde_json::json!({"added": 7, "removed": 1}));
+        assert_eq!(json["complexity"]["config_keys"], 1);
+        assert_eq!(json["complexity"]["checks"], serde_json::json!({"total": 2, "tests": 1, "ci_jobs": 1}));
+        let text = render(&report);
+        for expected in [
+            "Complexity added",
+            "lines           +7 / -1",
+            "config keys     1 new",
+            "new checks      2 (1 tests, 1 CI jobs)",
+        ] {
+            assert!(text.contains(expected), "missing {expected}:\n{text}");
+        }
+    }
+
+    /// cas-87a2: filed Cassy problems become friction rows, a rerun adds none,
+    /// and the report shows each with its found→fixed status. An issue whose
+    /// local task has its own row counts once; feature requests are not friction.
+    #[test]
+    fn friction_backfill_and_report_show_found_to_fixed() {
+        use cas_types::{Priority, Task, TaskStatus, TaskType};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("cas-cli")).unwrap();
+        std::fs::write(repo.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        let commit = Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-q", "--allow-empty", "-m", "fix"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.test")
+            .env("GIT_AUTHOR_DATE", "2026-10-01T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-01T12:00:00Z")
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        git_in(repo, &["tag", "v1.0.0"]);
+        let fix = git(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        let mut config = crate::config::Config::load(&cas_root).unwrap_or_default();
+        config.set("issues.components.cassy", "owner/cassy").unwrap();
+        config.save(&cas_root).unwrap();
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut fixed = Task::new("cas-f1x".into(), "Shutdown loses work".into());
+        fixed.task_type = TaskType::Bug;
+        fixed.priority = Priority(0);
+        fixed.status = TaskStatus::Closed;
+        fixed.deliverables.merge_commit = Some(fix);
+        let mut open = Task::new("cas-0pen".into(), "Status lies (owner/cassy#7)".into());
+        open.task_type = TaskType::Bug;
+        let feature = Task::new("cas-feat".into(), "A new idea".into());
+        for task in [&fixed, &open, &feature] {
+            store.add(task).unwrap();
+        }
+
+        let since = Utc::now() - Duration::days(30);
+        let missing = crate::quality_ledger::backfill_friction(&cas_root, since, Path::new("/nonexistent/gh")).unwrap();
+        assert_eq!((missing.tasks, missing.issues), (2, 0));
+        assert!(missing.issues_skipped.is_some_and(|reason| reason.contains("gh issue list")));
+
+        let created = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let issues = format!(
+            r#"[{{"url":"https://github.com/owner/cassy/issues/7","title":"Status lies","createdAt":"{created}","labels":[]}},
+               {{"url":"https://github.com/owner/cassy/issues/8","title":"Exit strands commits","createdAt":"{created}","labels":[{{"name":"bug"}}]}},
+               {{"url":"https://github.com/owner/cassy/issues/9","title":"Wish","createdAt":"{created}","labels":[{{"name":"enhancement"}}]}}]"#
+        );
+        let gh = repo.join("fake-gh");
+        std::fs::write(repo.join("issues.json"), issues).unwrap();
+        std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", repo.join("issues.json").display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = crate::quality_ledger::backfill_friction(&cas_root, since, &gh).unwrap();
+        assert_eq!(found, crate::quality_ledger::FrictionBackfill { tasks: 0, issues: 2, issues_skipped: None });
+        assert_eq!(crate::quality_ledger::backfill_friction(&cas_root, since, &gh).unwrap().issues, 0);
+
+        let report = build_report(&cas_root, repo, None).unwrap();
+        let text = render(&report);
+        assert!(text.contains("Friction found: 3"), "{text}");
+        assert!(text.contains("cas-f1x [p0] Shutdown loses work: fixed in v1.0.0"), "{text}");
+        assert!(text.contains("cas-0pen [p2]"), "{text}");
+        assert!(text.contains("owner/cassy/issues/8 Exit strands commits: filed; no task here yet"), "{text}");
+        assert!(!text.contains("issues/7 ") && !text.contains("issues/9"), "{text}");
+        assert!(text.contains("filed 1, fixed 1, open 1"), "{text}");
     }
 
     /// The train's receipt becomes a release event, and the report for that

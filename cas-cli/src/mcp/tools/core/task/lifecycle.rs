@@ -169,7 +169,7 @@ fn publish_parked_delivery_branch(
         "kept locally (no origin)".to_string()
     } else {
         match git.push_branch(branch) {
-            Ok(()) => "pushed to origin, so its lane CI runs there".to_string(),
+            Ok(()) => "pushed to origin (Git acknowledged the push; CI not checked)".to_string(),
             Err(error) => format!("pushing it to origin failed: {error}"),
         }
     };
@@ -2145,6 +2145,14 @@ impl CasCore {
             &task.labels,
             None,
         );
+        crate::quality_ledger::bug_filed(
+            &self.cas_root,
+            &id,
+            &task.title,
+            task.task_type,
+            task.priority.0,
+            task.created_at,
+        );
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}{}{}{}{}",
             id,
@@ -2535,21 +2543,9 @@ impl CasCore {
             } else if !task.deliverables.merge_conflicted {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Cannot start a task that is awaiting merge. The worker work is \
-                         already complete; wait for the supervisor to merge the factory \
-                         branch, then retry task close. If review fails — the supervisor \
-                         declines the delivery, or requires an amendment after merging — \
-                         they must first run \
-                         `{tool_prefix}task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
-                         a worker cannot self-reject or start a clean parked delivery. When \
-                         the parked tip genuinely conflicts with the current target (a \
-                         merge-queue conflict dequeue or a moved target), its assigned worker \
-                         can start task {} to resolve it; Cassy measures the local target and \
-                         origin/<target>, so `git fetch origin <target>` first if that ref is stale.",
-                        req.id,
-                        req.id,
-                        tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
+                    close_ops::gate_text::awaiting_merge_start_refusal(
+                        &req.id,
+                        self.supervisor_guidance_prefix().unwrap_or(""),
                     ),
                 ));
             }

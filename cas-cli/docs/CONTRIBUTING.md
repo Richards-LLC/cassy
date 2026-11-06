@@ -1083,11 +1083,47 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 | 1 | Everything else, including skills, agents and an unmeasurable diff | In `qa.mode=batch`, one release verdict naming every delivery; an unmeasurable diff, `force-verifier` or `qa.mode=per_task` gets its own verifier | The impacted journeys |
 | 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own verifier plus an adversarial probe, even when a release verdict names it | An `Adversarial probe:` row in the task ledger, in batch mode too |
 
-Factory deliveries requiring a task verifier prepare a disposable candidate before publication. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
+Factory deliveries requiring a task verifier prepare a disposable candidate before publication. Candidate preparation binds to the fetched published `origin/<target>` tip, including when the local target carries an unpublished merge; a local-only repository uses its local target. Rolling back an unpublished local merge therefore cannot invalidate a review of an unchanged delivery when the published target advances. The merge queue still checks CI for interactions with other deliveries. The same required verifier runs outside the target lock; PASS publishes the reviewed delivery content and close consumes that approval, with no post-merge verifier or worker close retry. FAIL or an unresolved verdict holds only that delivery. Before mutation, Cassy revalidates the source, target base, task/epic/spec plan, evidence and policy; a changed candidate cannot reuse an old PASS. Unrelated sibling target advances retain approval only when the shared repository-proof overlap rule finds no reviewed-file change and the recomputed delivery content is unchanged. CHANGELOG.md, changelog.d/ and hub-web/dist/ use the shared append-only/generated exemption. The immutable mapping binds the original candidate and actual landed commit; a failed push restores its actual first parent, retaining admitted siblings. A rejected reviewed push restores only its own local merge and preserves unrelated operator edits. Source cleanup and the immutable landing mapping follow confirmed publication. Candidate preparation time is recorded once per task. Completion receipts accept an unpublished source and bind the same candidate atomically with the delivery dispatch. Outside the eligible hotfix fast lane, Tier zero and batch tier one exemptions above are unchanged. Eligible lane deliveries take their own pre-merge verifier; their trusted post-merge receipt replaces batch QA/release waiting, never that approval. Ineligible deliveries retain the normal batch verdict gate.
+
+A server-bound task verifier may finish a pre-merge review after its dispatch
+work deadline, including a TimedOut dispatch, when the same source, candidate
+tree, plan and proof remain current and no newer dispatch supersedes it. The
+record transaction rechecks that exact boundary and consumes the original
+one-time handoff. The original deadline remains in the audit; it drives missing
+verdict alerts and recovery, not the validity of completed work. Raw bearer
+capabilities and unbound handoffs retain their expiry rules. Official server
+credentials keep the existing hard 30-minute lifetime, independently of the
+10-minute dispatch work deadline; expired credentials always refuse. Changed
+or superseded candidates cannot reuse late authority.
+
+A merge queue need not publish the synthetic premerge candidate commit itself.
+Close validates that candidate's immutable task/proof and exact target/source
+parents, requires the bound delivery source in the authoritative target history,
+and reverse-checks the complete binary source-versus-reviewed-base patch in an
+isolated index at the first first-parent target commit containing that source.
+Source ancestry is still checked against the current target. Later ordinary
+edits, including edits to the same lines, do not revoke the landed approval;
+a merge that dropped delivery content and another task's candidate still refuse.
+Commit subjects and messages locate candidate metadata but grant no authority.
+
+A confirmed publication shares a portable approval through the existing project
+peer mailbox. The daemon checks the Cloud-stamped sender against the project
+supervisor registry, matches the task/source/candidate/landing, and atomically
+imports a peer-attested dispatch and verdict into the receiving store. Repository
+paths are rebound locally; acknowledging or retiring a prompt never removes the
+proof. Generic verification writes cannot claim peer authority, and replay cannot
+replace an existing cycle or revive a reopened delivery. Publication sharing is best-effort: a failed peer never changes confirmed
+publication, other peers are still attempted, and the task records the failure.
+A later publication retry can recover its abandoned outbox send with the same
+logical identity. Receipts must explicitly say approved. Permanent refusals
+(malformed, unauthorized, stale, closed or an existing local proof cycle) are
+acknowledged as rejected; only transient store, sync, registry or transport
+availability failures remain unacknowledged for retry.
+
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does and never counts as QA evidence, so QA debt still needs its own receipt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
 
 Verifier improvements stay in the verdict. A supervisor files a follow-up only for a reproduced, observable defect affecting someone today, and three or more findings under that bar are noted together with nothing filed. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -2121,6 +2157,23 @@ merge request after correcting the cause.
 
 ## Build, assembly and CI policy
 
+Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
+managed `cas` MCP server. It preserves the conversation and confirms a new
+live server PID and its recorded version. A command echo is not success.
+The exact native `/mcp reconnect cas` interaction was verified against a
+healthy, isolated stdio server on Claude Code **2.1.311, 2.1.316 and 2.1.318**.
+The minimum supported version is **2.1.311**. Older or unknown running Claude
+versions are refused as unverified; the current session's
+transcript supplies the version, rather than a potentially newer installation.
+The owning factory daemon must already run a build containing this action;
+an old daemon requires its normal update/relaunch before Commander can use it.
+Codex, Grok and unknown harnesses are refused by name. This action does not
+replace the factory daemon or implement automatic in-place server updates.
+
+Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
+Name cached or recorded state as such; a successful mutation does not establish
+that its follow-up, release publication, or installation on another host completed.
+
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
 
 ### Commands
@@ -2242,6 +2295,38 @@ carries its earlier CPU admission. Swap usage alone is not a refusal signal;
 PSI measures time lost to contention. macOS reads one-minute load with `getloadavg`
 and estimates available memory from free plus inactive pages via `host_statistics64`;
 PSI stays unavailable there.
+
+Supervisors advertise `build_capacity_v1` in existing registration and heartbeat
+metadata: free builder slots, one-minute load, CPU count and available CPU/memory
+PSI. A passive guard sample reports zero free slots if pressure, disk headroom or
+the builder cap would refuse the next build; heartbeat sampling never runs GC.
+`factory.auto_route_builds` defaults to `true`. If local admission would wait,
+a single-task `spawn_workers task_id=...` request can instead ask a live
+supervisor of the same account and repository on another machine to staff it.
+Teammates and peers whose account cannot be confirmed are never selected.
+Task creation and assignment retain their existing local behavior. Both the
+heartbeat and capacity sample must be at most 90 seconds old, with no future timestamps. Unknown or unavailable capacity retains local
+behaviour. Selection prefers the most free slots, then the lowest load per CPU;
+the result names both measurements. The existing peer outbox limits each peer
+to one new route per 90 seconds, including concurrent requests; a replay of
+the same logical ask does not consume another slot.
+
+Only open, unleased and previously unassigned build tasks are eligible. Existing
+workers keep their work, ordered task queues remain local, and `force=true` on
+spawn retains the explicit local override. Routing stores a `BUILD_ROUTE` note
+with the stable `build-route:<repo>:<task>` identity, leaves the local assignee
+empty and sends one `kind=ask` through the existing durable peer outbox with the
+full task and supervisor brief. Retries reuse its selected recipient and send
+key only while the peer is live, its heartbeat and sample remain fresh, and the
+route is less than 15 minutes old. Otherwise an expired note restores local
+admission; history still prevents routing onward. Unsent retry entries are
+cancelled when a route expires. A peer receiving a task with a route note staffs
+it locally or waits; it never routes it onward. A failed send retains the route for recovery and
+withholds local dispatch. `cas config set factory.auto_route_builds false`
+disables new automatic routes and releases existing routes to local admission.
+A forced local spawn also releases its prior automatic route.
+The peer supervisor still owns staffing and local admission; an ask grants no
+remote process-control authority.
 
 Spawn and capped Cargo admission also probe the target/scratch filesystem using
 the target-cache capacity policy. They reserve an estimated 10 GiB of growth for
@@ -3407,8 +3492,10 @@ command away.
 
 `finish` is a shared builtin skill; Claude Code exposes it as `/finish`, and the
 other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
-Update also refreshes finish in named Claude/Codex accounts and their shared
-bases. The exact old cas-f4ea command seed is removed in favor of the skill.
+Update also refreshes finish in named Claude/Codex accounts. The shared bases
+(`~/.cas/claude-base`, `~/.cas/codex-base`), which every account's `skills`
+links to, receive the full builtin set. The exact old cas-f4ea command seed is
+removed in favor of the skill.
 A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
 entrypoints untouched and skips installing its finish skill for that profile.
 An existing customized finish `SKILL.md` is preserved, even when it retains
@@ -3426,6 +3513,15 @@ account-discovery failures appear in `account_discovery_warnings` and do not
 abort default-profile or shared-base refresh.
 
 Every file in a managed builtin skill directory other than its `SKILL.md` (references, scripts, examples, templates) is owned by that skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`. The ledger keeps deleted files too: sync prunes an installed file Cassy no longer ships only when its content proves it is Cassy's (a shipped hash, the recorded baseline, or `managed_by: cas`). Retired managed agents are pruned the same way, and `cas doctor` reports installed-vs-catalog drift as `host install parity`.
+
+Builtin Markdown that only applies in this repository (Cargo and nextest
+shapes, `CONTRIBUTING`, `scripts/journey-eval.sh`, `scripts/assembly-proof.py`,
+hub-web, the merge queue) sits between whole-line (optionally indented) `<!-- cas-src:begin -->` and
+`<!-- cas-src:end -->` markers, optionally split by `<!-- cas-src:else -->`
+with a project-neutral replacement. Sync renders the cas-src branch only into
+this checkout's harness dirs; every other target, including the personal dirs
+that outrank project skills, gets the neutral branch. Markers never reach an
+installed file, and the history ledger records both renders.
 
 **After changing, adding or deleting any builtin skill file — and before cutting a release — run:**
 
@@ -3666,7 +3762,11 @@ verdict while integration proof still blocks close; an approval never waives
 missing delivery content. After a failed review, a supervisor can use
 `task action=request_changes` from AwaitingMerge or Blocked with a recorded
 parked delivery. It preserves the assignee and historical merge facts and
-invalidates the declined proof before the next implementation cycle.
+invalidates the declined proof before the next implementation cycle. The assignee
+receives a waking notice with the decision and branch handling. The response
+names the queued prompt, or explicitly reports why no worker was notified so
+the supervisor can contact it. A worker start surfaces any unread correction
+before acquiring the task; the worker reads it, then retries start.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

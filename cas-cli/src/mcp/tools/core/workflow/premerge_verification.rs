@@ -43,6 +43,9 @@ struct Promotion {
     landed_sha: String,
 }
 
+mod peer;
+pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
+
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
@@ -95,21 +98,18 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// cas-4af9: review against origin's tip when the local target merely lags
-/// it. The merge fast-forwards a lagging target before publishing, so a
-/// candidate built on the stale local ref reviews a base that never lands.
+/// Review the fetched published target. An unpublished local merge can be
+/// rolled back after a failed push; binding its SHA would invalidate an
+/// approval when the published target later advances normally (cas-015e).
+/// Local-only repositories retain their existing target fallback.
 fn review_target(repo: &Path, target: &str) -> Result<String, String> {
-    let local = git(repo, &["rev-parse", target])?;
-    let Ok(remote) = git(
+    if let Ok(remote) = git(
         repo,
         &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{target}^{{commit}}")],
-    ) else {
-        return Ok(local);
-    };
-    if remote != local && git(repo, &["merge-base", "--is-ancestor", &local, &remote]).is_ok() {
+    ) {
         return Ok(remote);
     }
-    Ok(local)
+    git(repo, &["rev-parse", target])
 }
 
 /// Refresh origin's copy of the target and refuse a diverged target before
@@ -203,9 +203,7 @@ fn task_context(task: &Task) -> serde_json::Value {
     })
 }
 
-fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+fn hash_plan_context(root: &Path, task: &Task, hash: &mut Sha256) -> Result<(), String> {
     hash.update(serde_json::to_vec(&task_context(task)).map_err(|error| error.to_string())?);
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let specs = crate::store::open_spec_store(root).map_err(|error| error.to_string())?;
@@ -230,6 +228,20 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
         linked.sort_by(|a, b| a.id.cmp(&b.id));
         hash.update(serde_json::to_vec(&linked).map_err(|error| error.to_string())?);
     }
+    Ok(())
+}
+
+fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-peer-premerge-plan-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(b"cas-premerge-candidate-v1\0");
+    hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
         "{}:{:?}",
@@ -331,6 +343,18 @@ impl Candidate {
         } else {
             self.tree_on(&target).map(|_| ())
         }
+    }
+
+    /// A late child may finish only the exact still-current reviewed candidate.
+    pub(crate) fn validate_late_verdict(&self, root: &Path, task: &Task) -> Result<(), String> {
+        self.validate(root, task)?;
+        let target = review_target(&self.repository, &self.target_branch)?;
+        if self.tree_on(&target)? != self.tree {
+            return Err(
+                "late verifier candidate tree changed; review the current candidate".into(),
+            );
+        }
+        Ok(())
     }
 
     /// Independently reviewed siblings cannot widen this delivery's approval.
@@ -574,6 +598,7 @@ impl Approval {
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
         )?;
+        self.share_published();
         Ok(Some((record.landed_sha, target)))
     }
 
@@ -618,6 +643,7 @@ impl Approval {
             } else {
                 self.promote(landed)?;
             }
+            self.share_published();
             return Ok(None);
         }
         if self.promotion()?.is_some() {
@@ -668,6 +694,9 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         verdict_id: &str,
     ) -> Result<(), McpError> {
+        if peer::verify_peer_promotion(&self.cas_root, task, dispatch, verdict_id).map_err(fail)? {
+            return Ok(());
+        }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         else {
             return Ok(());
@@ -1151,6 +1180,7 @@ mod tests {
             tree,
             context_digest: String::new(),
             proof: RepositoryProofBoundary {
+                peer_premerge: None,
                 repository_root: String::new(),
                 worktree_root: String::new(),
                 head_commit: String::new(),

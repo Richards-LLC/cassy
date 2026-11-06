@@ -76,15 +76,15 @@ pub(crate) fn pushed_delivery_tip(
         return Err(format!("{branch} is not {worker}'s delivery branch for {}", task.id));
     }
     let Some(pushed) = super::close_ops::resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}")) else {
-        return Err(format!("origin/{branch} does not exist"));
+        return Err(format!("cached origin/{branch} does not resolve; live publication is unknown"));
     };
     if pushed != tip && !super::close_ops::git_commit_is_ancestor(repo, tip, &pushed) {
-        return Err(format!("{tip} is not pushed to origin/{branch}"));
+        return Err(format!("{tip} is absent from cached origin/{branch}; live publication is unknown"));
     }
     let local = super::close_ops::resolve_branch_sha(repo, &format!("refs/heads/{branch}"));
     if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) {
         return Err(format!(
-            "{tip} is on origin/{branch} but not on {worker}'s own {branch}; a commit pushed by someone else is not the worker's delivery"
+            "{tip} is on cached origin/{branch} but not on {worker}'s local {branch}; this does not establish the worker's own delivery"
         ));
     }
     Ok(())
@@ -324,7 +324,7 @@ impl CasCore {
         parked.pending_verification = false;
         parked.pending_worktree_merge = false;
         let note = format!(
-            "[{}] Cassy parked this task at its pushed delivery tip {} on {} after merge {merge_commit}; no worker re-close is needed.",
+            "[{}] Cassy parked this task at its delivery tip {} on {} (checked against cached origin refs) after merge {merge_commit}; no worker re-close is needed.",
             chrono::Utc::now().format("%Y-%m-%d %H:%M"),
             lane.tip,
             lane.branch,
@@ -878,7 +878,7 @@ mod tests {
         let foreign_tip = git(other.path(), &["rev-parse", "HEAD"]);
         git(repo, &["fetch", "-q", "origin"]);
         let refused = pushed_delivery_tip(repo, &task, "factory/w", &foreign_tip).unwrap_err();
-        assert!(refused.contains("not on w's own factory/w"), "{refused}");
+        assert!(refused.contains("not on w's local factory/w"), "{refused}");
     }
 
     /// cas-43d2: what the one-hop verdict close could not restore or record

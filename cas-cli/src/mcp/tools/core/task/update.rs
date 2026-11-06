@@ -487,14 +487,12 @@ fn clean_idle_assignment_note(
     {
         return None;
     }
+    // cas-8aa1: only a started task holds the worktree. A queued Open task
+    // gets its own branch from its target at start, like this one.
     let active = task_store
         .ids_by_assignees_and_statuses(
             &[&worker.name, &worker.id],
-            &[
-                TaskStatus::Open,
-                TaskStatus::InProgress,
-                TaskStatus::Blocked,
-            ],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
         )
         .ok()?;
     if !active.is_empty() {
@@ -530,7 +528,7 @@ fn clean_idle_assignment_note(
         // starts on its own branch beside it, so staleness is not a reason
         // to make it wait.
         return Some(format!(
-            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch holds work \
+            "ℹ️ Worker '{name}' has no active task; {branch} has tracked files unchanged and holds work \
              outside {target_branch}. `task start` will leave it unchanged and cut \
              factory/{name}-{task_id} from the target.",
             name = worker.name,
@@ -545,7 +543,7 @@ fn clean_idle_assignment_note(
         })
     {
         return Some(format!(
-            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \
+            "ℹ️ Worker '{name}' has no active task; {branch} has tracked files unchanged and is behind \
              {target_branch}. That branch belongs to {owner_task}, so `task start` will leave it \
              unchanged and cut factory/{name}-{task_id} from the target.",
             name = worker.name,
@@ -553,7 +551,7 @@ fn clean_idle_assignment_note(
         ));
     }
     Some(format!(
-        "ℹ️ Worker '{}' has no active task and its clean {} branch is behind {}. \
+        "ℹ️ Worker '{}' has no active task; {} has tracked files unchanged and is behind {}. \
          `task start` will reset that branch to the target before work begins.",
         worker.name, branch, target_branch
     ))

@@ -558,7 +558,7 @@ impl CasService {
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
                     return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                        "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
+                        "COMMITTED: `{tool_name} action={action}` write committed ({description}). Its \
                          remaining work was still running {grace_s:.1}s after the commit and \
                          finishes in the background. Do not retry it; read the task's notes \
                          for the rest.",
@@ -568,7 +568,7 @@ impl CasService {
                 }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
-                    "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \
+                    "COMMITTED: task{task} {action} write committed ({description}). Its post-commit work \
                      (search index, reminders, the lifecycle outbox, dependents, leases) was still \
                      running {grace_s:.1}s after the commit and finishes in the background. Do not \
                      retry; `task action=show` reflects the committed state.",
@@ -1207,6 +1207,8 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "answered within the grace, not the 10s budget");
         let text = result_text(&answered);
         assert!(text.contains("COMMITTED") && text.contains("cas-note") && text.contains("Do not") && text.contains("retry"), "{text}");
+        assert!(text.contains("write committed") && !text.contains("is done"),
+            "a committed write must not claim the still-running action is done: {text}");
         assert!(!finished.load(Ordering::SeqCst), "answered while post-commit work was still running");
         for _ in 0..50 {
             if finished.load(Ordering::SeqCst) {
@@ -1468,6 +1470,8 @@ mod tests {
             .expect("a committed merge answers once its grace runs out");
         let text = format!("{answered:?}");
         assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
+        assert!(text.contains("write committed") && !text.contains("is done"),
+            "a committed merge must not claim its pending close is done: {text}");
         assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
     }
 

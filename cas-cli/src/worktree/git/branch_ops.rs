@@ -40,7 +40,7 @@ pub enum TargetPushOutcome {
     /// ref is absent, so the local ref is authoritative and creating a remote
     /// branch as a side effect of a merge is not this tool's call.
     RemoteBranchAbsent,
-    /// `origin/<branch>` already resolves to the local tip (typically a
+    /// A live origin read resolves the branch to the local tip (typically a
     /// resumed/reconciled merge that was published on an earlier attempt).
     AlreadyCurrent { sha: String },
     /// The push ran and succeeded; `origin/<branch>` now carries the tip.
@@ -95,7 +95,7 @@ impl TargetPushOutcome {
             Self::Pushed { .. } => "pushed to origin",
             Self::ProtectedDefaultBranch { .. } => "not pushed: protected default branch",
             Self::NonFastForward { .. } => "not pushed: origin moved (non-fast-forward)",
-            Self::NotPushed { .. } => "not pushed",
+            Self::NotPushed { .. } => "publication unconfirmed",
         }
     }
 
@@ -990,16 +990,33 @@ impl GitOperations {
     /// `refs/heads/<branch>` (`git ls-remote --exit-code` exits 2 for that,
     /// and only that). No time left means no answer.
     fn origin_lacks_branch(&self, branch: &str, timeout: Duration) -> bool {
+        self.origin_branch_tip(branch, timeout).is_ok_and(|tip| tip.is_none())
+    }
+
+    /// A tracking ref is a cache. Only origin's answer can establish that a
+    /// branch is still published, absent, or already at the requested tip.
+    fn origin_branch_tip(&self, branch: &str, timeout: Duration) -> Result<Option<String>> {
         if timeout.is_zero() {
-            return false;
+            return Err(GitError::CommandFailed("no time left to query origin".into()));
         }
+        let refname = format!("refs/heads/{branch}");
         let mut command = Command::new("git");
         command
-            .args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+            .args(["ls-remote", "--exit-code", "--heads", "origin", &refname])
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.repo_root);
-        Self::run_command_bounded(command, timeout)
-            .is_ok_and(|output| output.status.code() == Some(2))
+        let output = Self::run_command_bounded(command, timeout)?;
+        if output.status.code() == Some(2) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(first_line(&String::from_utf8_lossy(&output.stderr))));
+        }
+        String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+            let (sha, name) = line.split_once('\t')?;
+            (name == refname && matches!(sha.len(), 40 | 64)
+                && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| Some(sha.to_string()))
+        }).ok_or_else(|| GitError::CommandFailed(format!("origin returned no valid tip for {refname}")))
     }
 
     /// A target refresh must update its exact origin ref even when the
@@ -1078,6 +1095,7 @@ impl GitOperations {
         branch: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
+        let started = Instant::now();
         let remote_ref = format!("origin/{branch}");
         let local_sha = self.resolve_commit(branch);
 
@@ -1095,14 +1113,24 @@ impl GitOperations {
 
         match self.resolve_commit(&remote_ref) {
             Some(remote) if remote == local_sha => {
-                return TargetPushOutcome::AlreadyCurrent { sha: local_sha };
+                match self.origin_branch_tip(branch, timeout.saturating_sub(started.elapsed())) {
+                    Ok(Some(live)) if live == local_sha => {
+                        return TargetPushOutcome::AlreadyCurrent { sha: local_sha };
+                    }
+                    Ok(None) => return TargetPushOutcome::RemoteBranchAbsent,
+                    Ok(Some(_)) => {} // The cached equality is stale; attempt the real push.
+                    Err(error) => return TargetPushOutcome::NotPushed {
+                        sha: Some(local_sha), remote_sha: Some(remote),
+                        reason: format!("cached origin/{branch} matches locally, but live publication could not be verified: {error}"),
+                    },
+                }
             }
             Some(_) => {}
             // Never *create* a remote branch as a side effect of a merge.
             // cas-3937 review: a missing tracking ref may only mean this
             // clone never fetched the branch. Only an origin that answers
             // and lists no such branch makes the target local-only.
-            None if self.origin_lacks_branch(branch, timeout) => {
+            None if self.origin_lacks_branch(branch, timeout.saturating_sub(started.elapsed())) => {
                 return TargetPushOutcome::RemoteBranchAbsent;
             }
             None => {
@@ -1111,14 +1139,14 @@ impl GitOperations {
                     remote_sha: None,
                     reason: format!(
                         "origin/{branch} is not known here and origin did not confirm it lacks \
-                         `{branch}` (unreachable, or the branch was never fetched); not pushed. \
+                         `{branch}` (unreachable, or the branch was never fetched); publication unconfirmed. \
                          Fetch origin, then retry"
                     ),
                 };
             }
         }
 
-        self.publish_pinned_source_to_origin(branch, &local_sha, timeout)
+        self.publish_pinned_source_to_origin(branch, &local_sha, timeout.saturating_sub(started.elapsed()))
     }
 
     /// Publish an explicitly authorized source, including a new remote branch.

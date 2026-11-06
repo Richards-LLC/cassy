@@ -215,7 +215,15 @@ impl CloudSyncer {
             };
             let wire: Vec<QualityEventWire> = events
                 .iter()
-                .filter(|event| (event.payload.kind() == "turn") == turns)
+                // cas-87a2: Cloud has no Friction kind yet. An older endpoint
+                // may refuse a whole batch for an unknown kind, so Friction
+                // stays local rather than stall the ordinary cursor. A future
+                // lane can start its own cursor at zero; ids are idempotent.
+                .filter(|event| match event.payload.kind() {
+                    "friction" => false,
+                    "turn" => turns,
+                    _ => !turns,
+                })
                 .map(|event| {
                     let mut wire = event.to_wire();
                     wire.project_id = Some(project_id.to_string());

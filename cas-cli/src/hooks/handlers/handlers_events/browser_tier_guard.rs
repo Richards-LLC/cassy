@@ -215,6 +215,6 @@ pub(super) fn denial(input: &HookInput) -> Option<&'static str> {
     }
     let command = input.tool_input.as_ref()?.get("command")?.as_str()?;
     unfiltered(command, 0).then_some(
-        "BROWSER TEST TIER: workers and QA run affected journeys. For iteration/control use a named spec (for example: npx playwright test tests/example.spec.cjs --workers=1) or canonical --grep journey IDs; preserve original failures. Where available, use scripts/journey-eval.sh <task-artifact-dir> (default affected, four workers), or --affected <base>. Full/unfiltered browser suites are supervisor-only at epic assembly and in the merge queue; --full is refused here."
+        "BROWSER TEST TIER: workers run touched vitest files; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here."
     )
 }

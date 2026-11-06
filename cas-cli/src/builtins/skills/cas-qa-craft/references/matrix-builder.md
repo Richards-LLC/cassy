@@ -21,5 +21,5 @@ details from that issue are intentionally outside this skill.
    result, a needed evidence label, and a capture filename before the run.
    Record unchosen risks in the ledger honesty section when they matter.
 5. Run cells in order against the real build. Capture after the state settles;
-   time-box the complete pass at 30 minutes and mark every remaining cell
+   time-box the complete pass at `qa.pass_timeout_mins` and mark every remaining cell
    `NOT EXERCISED: <reason>` when the box expires.

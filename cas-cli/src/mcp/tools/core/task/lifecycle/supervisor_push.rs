@@ -496,7 +496,7 @@ pub(crate) fn queue_merged_lane_parked_notice(
         (
             format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
             format!(
-                "{}Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                "{}Task {} was merged at {merge_commit} from your delivery tip {tip} (checked against cached origin refs), so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
                 cas_store::QUIET_MESSAGE_MARKER,
                 task.id
             ),
@@ -561,6 +561,38 @@ pub(crate) fn queue_source_fix_reopen_notice(
                 task.id, task.id
             ),
             format!("Post-merge source fix returned to worker: {}", task.id),
+        )
+    })
+}
+
+/// cas-cff4: wake the assignee once per supervisor `request_changes`, with the
+/// decision and branch handling. `Err` names why no worker was told, so the
+/// supervisor's output never implies a handoff that did not happen.
+pub(crate) fn queue_request_changes_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    decision: &str,
+    branch_handling: &str,
+) -> Result<i64, String> {
+    if task.assignee.is_none() {
+        return Err("the task has no assignee".to_string());
+    }
+    let worker_name = match auto_unblock_worker_target(cas_root, task)? {
+        AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
+        AutoUnblockWorkerTarget::Skipped(reason) => return Err(reason),
+    };
+    enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
+        (
+            format!(
+                "supervisor-request-changes:{}:{}:worker:{worker_name}",
+                task.id,
+                task.updated_at.to_rfc3339()
+            ),
+            format!(
+                "Task {} is Open again: the supervisor requested changes.\nDecision: {decision}\nBranch handling: {branch_handling}\nStart task {} again, add corrective commits, then push and close as usual.",
+                task.id, task.id
+            ),
+            format!("Changes requested: {}", task.id),
         )
     })
 }
@@ -2187,6 +2219,10 @@ mod tests {
         let digest = queue.surface_for_recipient_within_budget("merge-worker", Some("sess-merge-notices"),
             HookDrain::NoticeDigest, 10, 0).unwrap().rows;
         assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![parked, closed]);
+        let parked_notice = digest.iter().find(|row| row.id == parked).unwrap();
+        // pin: the worker reading this notice must distinguish cached-ref provenance from a live push receipt.
+        assert!(parked_notice.prompt.contains("cached origin refs") && !parked_notice.prompt.contains("your pushed tip"),
+            "the notice must name the cached publication evidence: {}", parked_notice.prompt);
         for row in &digest {
             assert!(row.prompt.contains(&task.id) && row.prompt.contains("merge-tip"),
                 "the next turn must retain task and merge evidence");

@@ -26,7 +26,7 @@ use crate::types::{AgentRole, AgentStatus};
 
 mod outbox;
 mod runtime;
-pub use outbox::{OUTBOX_TTL_SECS, PeerSendError, outbox_status_text, retry_peer_send};
+pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
 pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
 
 /// Tag of the envelope line.
@@ -402,7 +402,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let (attachments, body) = split_attachments(body);
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
-    } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    } else if body.starts_with("CAS_PEER_PREMERGE_V1 ")
+        || crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
@@ -1192,7 +1193,7 @@ pub fn deliver_claimed_with(
         consumer_id,
         &RecipientHistory::default(),
         &|_, _| Ok(None),
-        on_admitted,
+        &|recipient, message| on_admitted(recipient, message).map(|()| PeerAckOutcome::Delivered),
     )
 }
 
@@ -1207,7 +1208,7 @@ fn deliver_claimed_with_history(
     consumer_id: &str,
     history: &RecipientHistory,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
-    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
+    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
     let all = match agents.list(None) {
@@ -1407,12 +1408,19 @@ fn deliver_claimed_with_history(
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {
-                if let Err(error) = on_admitted(recipient, message) {
-                    report.errors.push(format!(
-                        "peer message {} admitted, but recording it failed: {error}",
-                        message.id
-                    ));
-                    continue;
+                match on_admitted(recipient, message) {
+                    Ok(PeerAckOutcome::Delivered) => {}
+                    Ok(PeerAckOutcome::Rejected) => {
+                        report.rejected += 1;
+                        acks.push((message.id.clone(), PeerAckOutcome::Rejected));
+                        continue;
+                    }
+                    Err(error) => {
+                        report.errors.push(format!(
+                            "peer message {} admitted, but recording it failed: {error}", message.id
+                        ));
+                        continue; // Only transient recording failures are retried.
+                    }
                 }
                 match admitted {
                     EnqueueIdempotentResult::Created(id) => {
@@ -1485,6 +1493,18 @@ pub(crate) fn send_raw(
         None,
     )
 }
+
+/// Internal publication path: stable delivery identity in the existing outbox.
+pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
+    outbox::enqueue_premerge_receipt(root, message, label)
+}
+
+/// Build overflow uses a task-stable key in the existing durable outbox.
+pub(crate) fn send_build_route(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
+    outbox::enqueue_and_send(root, message, label)
+}
+
+pub(crate) use outbox::{build_route_recent_peers, cancel_build_route};
 
 /// One durable logical expiry notice, reused if reconciliation restarts after
 /// Cloud acceptance but before its split work flag is settled.

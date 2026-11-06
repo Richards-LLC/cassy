@@ -71,6 +71,14 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         });
     }
     registry.register(ConfigMeta {
+        key: "factory.auto_route_builds", section: "factory", name: "Route Build Overflow to Peers",
+        description: "When spawn admission is saturated, ask a fresh same-account, same-repo peer with free slots to staff a new task. Disable to release existing routes to local admission.",
+        value_type: ConfigType::Bool, default: "true", constraint: Constraint::None,
+        advanced: false, requires_feature: None,
+        keywords: &["factory", "build", "capacity", "peer", "routing"],
+        use_cases: &["Place build work on another machine when local builders are busy"],
+    });
+    registry.register(ConfigMeta {
         key: "factory.nice_cargo",
         section: "factory",
         name: "Lower Worker Scheduling Priority",
@@ -193,6 +201,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         use_cases: &[
             "Put worker Cargo targets and build-cache baselines on a dedicated scratch drive such as /mnt/rewind/cas",
             "Leave empty to keep targets inside each worker checkout",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.worker_local_gate",
+        section: "factory",
+        name: "Worker Local Gate",
+        description: "Shell command a factory worker's push runs from the repository root before the push leaves the machine: the project's cheap local CI (lint plus touched tests), for example `pnpm ci:local`. A failure stops the push. Empty runs nothing.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "worker", "push", "lint", "ci", "local", "gate", "pre-push"],
+        use_cases: &[
+            "Set to `pnpm ci:local` so lint and test failures stop at the worker instead of costing a CI run",
+            "Leave empty when the project has no cheap local gate",
         ],
     });
 

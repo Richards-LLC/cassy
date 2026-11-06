@@ -68,6 +68,8 @@ mod buffer_backend;
 mod client;
 pub(crate) mod daemon;
 mod director;
+#[cfg(test)]
+pub(crate) use director::merge_relay_for_parity;
 pub(crate) use director::effective_stall_threshold_secs;
 #[cfg(test)]
 pub(crate) use director::delivery_marked_ready;

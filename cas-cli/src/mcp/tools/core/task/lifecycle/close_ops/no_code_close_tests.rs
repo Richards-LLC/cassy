@@ -2306,6 +2306,16 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             // Follow the recovery instruction: hold unfinished B, switch back
             // to A's retained delivery ref, then start A without parking B.
             git(&checkout, &["switch", LANE]);
+            // The correction decision must be read before start changes a
+            // lease or status. The first attempt returns that unread notice.
+            let deferred = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+                "action":"start", "id":first.id,
+            })).unwrap())).await.unwrap_err();
+            assert!(deferred.message.contains("TASK START DEFERRED"), "{deferred}");
+            assert!(deferred.message.contains("Correct the returned delivery"), "{deferred}");
+            assert_eq!(f.task(&first.id).status, TaskStatus::Open);
+            assert_eq!(f.task(&next.id).status, TaskStatus::Blocked);
+            assert!(agents.get_lease(&first.id).unwrap().is_none());
             let resumed = call(&f.worker, serde_json::json!({
                 "action":"start", "id":first.id,
             })).await;

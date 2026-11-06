@@ -1147,7 +1147,7 @@ pub struct CoordinationRequest {
     /// Typed Commander turn kind for `target=operator`, or a worker action sent
     /// to its same-session supervisor.
     #[schemars(
-        description = "message: target=operator Commander kind: answer, status, receipt, ask, or blocker. Worker to same-session supervisor: kind=status or kind=ready requests a typed action wake."
+        description = "message: target=operator Commander kind: answer, status, receipt, ask, or blocker. Worker to same-session supervisor: kind=status requests a typed action wake."
     )]
     #[serde(default)]
     pub kind: Option<String>,

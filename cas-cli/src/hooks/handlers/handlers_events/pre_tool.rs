@@ -10342,8 +10342,6 @@ EOF
         }
     }
 
-    /// The three ordinary-worker allow-to-deny flips in the 200-call replay,
-    /// with only the artifact namespace/cwd mapped into a hermetic project.
     #[test]
     fn quoted_read_only_regex_keeps_shell_boundaries_gh_1535() {
         let command = r#"rg -n "name=\"content\"|:label=.*content|Content'|Content\"|tour" app/page.vue app/components/IdeaUnified* | head -65; ps -p 12345 -o pid=,etime=,stat=; tail -4 /task-artifacts/read-only.log"#;
@@ -10355,6 +10353,8 @@ EOF
         assert!(effects.writes.iter().any(|(path, _)| path == "/outside/file"));
     }
 
+    /// The three ordinary-worker allow-to-deny flips in the 200-call replay,
+    /// with only the artifact namespace/cwd mapped into a hermetic project.
     #[test]
     fn cas_e460_literal_shell_bodies_keep_status_pid_and_read_only_monitor_commands() {
         let mut env = TestEnvGuard::temp_home();

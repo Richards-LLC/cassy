@@ -170,6 +170,7 @@ pub struct Pane {
     pub(crate) cols: u16,
     /// Optional recording writer for session capture
     recorder: Option<Arc<Mutex<RecordingWriter>>>,
+    handoff_recording_path: Option<PathBuf>,
     /// Whether to force all rows dirty on next take (for new client sync)
     force_all_dirty: bool,
     /// Last known total scrollback lines (for scroll detection)
@@ -295,6 +296,7 @@ impl Pane {
             rows,
             cols,
             recorder: None,
+            handoff_recording_path: None,
             force_all_dirty: true,
             last_total_scrollback: info.total_scrollback,
             seq_counter: 0,

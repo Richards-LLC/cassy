@@ -445,6 +445,8 @@ impl MessageAttribution {
 /// Messages sent from TUI client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
+    /// Local daemon control; never accepted from a remote WebSocket client.
+    Reexec { binary: std::path::PathBuf, version: String, nonce: String },
     /// Attach to the session (sent on connect)
     Attach {
         /// Request full scrollback buffer
@@ -695,6 +697,7 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
     /// Local-only response. An acknowledgement exists only after both tasks drain.
     BindingIntake {
         reply: super::daemon::runtime::violet_intake::IntakeReply,

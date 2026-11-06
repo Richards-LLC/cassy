@@ -71,13 +71,15 @@ impl Pane {
         if let PaneBackend::Pty(pty) = &self.backend {
             pty.flush_input().await?;
         }
+        let snapshot = self.get_full_snapshot()?;
+        let terminal = self.terminal.handoff_bytes().map_err(|e| Error::terminal(e.to_string()))?;
         let recording_path = self.stop_recording().await?;
+        self.handoff_recording_path = recording_path.clone();
         Ok(PaneHandoff {
             id: self.id.clone(), kind: self.kind.clone(), harness: self.harness,
             title: self.title.clone(), color: self.color.clone(), focused: self.focused,
             rows: self.rows, cols: self.cols, pty,
-            snapshot: self.get_full_snapshot()?,
-            terminal: self.terminal.handoff_bytes().map_err(|e| Error::terminal(e.to_string()))?,
+            snapshot, terminal,
             scroll_offset: self.scroll_offset(), recording_path,
             exited: self.exited, exit_code: self.exit_code, exit_signal: self.exit_signal.clone(),
             total_bytes_received: self.total_bytes_received,
@@ -116,6 +118,7 @@ impl Pane {
         pane.terminal.feed(&state.terminal).map_err(|e| Error::terminal(e.to_string()))?;
         pane.terminal.scroll(-(state.scroll_offset.min(i32::MAX as u32) as i32))
             .map_err(|e| Error::terminal(e.to_string()))?;
+        pane.handoff_recording_path = state.recording_path.clone();
         pane.focused = state.focused;
         pane.color = state.color.clone();
         pane.exited = state.exited;
@@ -134,6 +137,22 @@ impl Pane {
         pane.partial_osc8 = state.partial_osc8.clone();
         pane.user_scrolled = state.scroll_offset != 0;
         Ok(pane)
+    }
+
+    pub async fn resume_recording_after_handoff(&mut self) -> Result<()> {
+        if let Some(path) = self.handoff_recording_path.clone() {
+            let writer = RecordingWriter::resume(path).await.map_err(|e| Error::recording(e.to_string()))?;
+            self.recorder = Some(Arc::new(Mutex::new(writer)));
+            self.handoff_recording_path = None;
+        }
+        Ok(())
+    }
+
+    pub fn commit_startup_brief(&mut self, state: &PaneHandoff) {
+        if let (PaneBackend::Pty(pty), Some(state)) = (&mut self.backend, &state.pty)
+            && let Some(path) = &state.startup_brief {
+            pty.adopt_startup_brief(path.clone());
+        }
     }
 
     pub fn resume_after_handoff(&mut self) -> Result<()> {

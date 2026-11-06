@@ -77,6 +77,7 @@ pub struct RecordingWriter {
     writer_handle: tokio::task::JoinHandle<Result<WriterStats, FormatError>>,
     /// Recording start time for computing timestamps
     start_time: Instant,
+    timestamp_offset_ms: u64,
     /// Last keyframe timestamp for auto-keyframe generation
     last_keyframe_ms: u64,
     /// Keyframe interval configuration
@@ -135,21 +136,40 @@ impl RecordingWriter {
             header,
             rx,
             config.compression_level,
+            None,
         ));
 
         Ok(Self {
             command_tx: tx,
             writer_handle,
             start_time: Instant::now(),
+            timestamp_offset_ms: 0,
             last_keyframe_ms: 0,
             keyframe_interval_ms: config.keyframe_interval_ms,
             file_path,
         })
     }
 
+    /// Continue a finalized recording after daemon exec. The previous file
+    /// remains intact until the continued stream is finalized atomically.
+    pub async fn resume(file_path: PathBuf) -> Result<Self, FormatError> {
+        let path = file_path.clone();
+        let (prefix, header, index) = tokio::task::spawn_blocking(move ||
+            crate::RecordingReader::open(path).map(|reader| reader.into_resume_parts()))
+            .await.map_err(|e| std::io::Error::other(e.to_string()))??;
+        let timestamp_offset_ms = index.total_duration_ms;
+        let config = WriterConfig::default();
+        let (command_tx, rx) = mpsc::channel(config.buffer_size);
+        let writer_handle = tokio::spawn(background_writer(file_path.clone(), header, rx,
+            config.compression_level, Some((prefix, index))));
+        Ok(Self { command_tx, writer_handle, start_time: Instant::now(), timestamp_offset_ms,
+            last_keyframe_ms: timestamp_offset_ms, keyframe_interval_ms: config.keyframe_interval_ms,
+            file_path })
+    }
+
     /// Get the current timestamp in milliseconds since recording start.
     fn current_timestamp_ms(&self) -> u64 {
-        self.start_time.elapsed().as_millis() as u64
+        self.timestamp_offset_ms + self.start_time.elapsed().as_millis() as u64
     }
 
     /// Write PTY output bytes to the recording.
@@ -255,25 +275,28 @@ async fn background_writer(
     header: RecordingHeader,
     mut rx: mpsc::Receiver<WriteCommand>,
     compression_level: i32,
+    resume: Option<(Vec<u8>, KeyframeIndex)>,
 ) -> Result<WriterStats, FormatError> {
-    // Create file
-    let file = File::create(&file_path).await?;
-    let std_file = file.into_std().await;
-
-    // Create zstd encoder wrapping the file
+    let staged = if resume.is_some() {
+        Some(tempfile::NamedTempFile::new_in(file_path.parent().ok_or_else(||
+            std::io::Error::other("Recording has no parent directory"))?)?)
+    } else { None };
+    let std_file = match &staged {
+        Some(file) => file.reopen()?,
+        None => File::create(&file_path).await?.into_std().await,
+    };
     let mut encoder = zstd::stream::Encoder::new(std_file, compression_level)?;
-
-    // Write header
-    let header_bytes = bincode::serialize(&header)?;
-    let header_len = header_bytes.len() as u32;
-    encoder.write_all(&header_len.to_le_bytes())?;
-    encoder.write_all(&header_bytes)?;
-
-    // Track state
-    let mut keyframe_index = KeyframeIndex::new();
-    let mut event_count: u64 = 0;
-    let mut last_timestamp_ms: u64 = 0;
-    let mut current_offset: u64 = 4 + header_bytes.len() as u64; // header_len + header
+    let (mut keyframe_index, mut current_offset) = if let Some((prefix, index)) = resume {
+        encoder.write_all(&prefix)?;
+        (index, prefix.len() as u64)
+    } else {
+        let header_bytes = bincode::serialize(&header)?;
+        encoder.write_all(&(header_bytes.len() as u32).to_le_bytes())?;
+        encoder.write_all(&header_bytes)?;
+        (KeyframeIndex::new(), 4 + header_bytes.len() as u64)
+    };
+    let mut event_count = keyframe_index.total_events;
+    let mut last_timestamp_ms = keyframe_index.total_duration_ms;
 
     // Process commands
     while let Some(cmd) = rx.recv().await {
@@ -344,6 +367,7 @@ async fn background_writer(
     // Finish compression and flush
     let std_file = encoder.finish()?;
     std_file.sync_all()?;
+    if let Some(staged) = staged { staged.persist(&file_path).map_err(|e| e.error)?; }
 
     // Get final file size
     let metadata = std::fs::metadata(&file_path)?;
@@ -407,9 +431,15 @@ mod tests {
         writer.write_output(b"Hello, ").await.unwrap();
         writer.write_output(b"World!\n").await.unwrap();
 
-        let stats = writer.close().await.unwrap();
-
-        assert_eq!(stats.total_events, 2);
+        let path = writer.file_path().clone();
+        writer.close().await.unwrap();
+        let resumed = RecordingWriter::resume(path.clone()).await.unwrap();
+        resumed.write_output(b"After exec").await.unwrap();
+        let stats = resumed.close().await.unwrap();
+        let reader = crate::RecordingReader::open(path).unwrap();
+        let events: Vec<_> = reader.read_all_events().map(|event| event.unwrap()).collect();
+        assert_eq!(events.len(), 3);
+        assert_eq!(stats.total_events, 3);
         assert!(stats.file_size > 0);
     }
 

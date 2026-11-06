@@ -74,3 +74,6 @@ mod test_env_guard;
 
 #[cfg(unix)]
 pub use pane::{PaneHandoff, PtyHandoff};
+
+#[cfg(unix)]
+pub use mux::MuxHandoff;

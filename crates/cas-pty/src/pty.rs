@@ -1011,7 +1011,7 @@ mod claude_config_dir_contract_tests {
 }
 
 /// Configuration for spawning an agent with native Claude Code Agent Teams flags.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TeamsSpawnConfig {
     /// Team name (factory session name)
     pub team_name: String,

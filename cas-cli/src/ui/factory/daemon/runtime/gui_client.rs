@@ -324,6 +324,18 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::Reexec { binary, version, nonce } => {
+                use std::os::fd::AsRawFd;
+                let reply = self.gui_clients.get(&client_id).map(|client| client.stream.as_raw_fd());
+                if let Err(error) = self.reexec(&binary, &version, reply, &nonce).await {
+                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                        message: format!("{error:#}"), client_ref: Some(nonce),
+                    }) && let Some(client) = self.gui_clients.get_mut(&client_id) {
+                        queue_frame(client, &frame);
+                    }
+                }
+            }
+
             ClientMessage::BindingIntakePause { request } => {
                 let nonce = request.nonce;
                 let result = (|| {

@@ -112,6 +112,8 @@ fn main() -> ExitCode {
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    if let Some(outcome) = cas::ui::factory::daemon::reexec::resume_inherited_daemon() { return outcome; }
+
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);
 

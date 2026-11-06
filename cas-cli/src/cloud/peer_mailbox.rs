@@ -422,6 +422,13 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         Some(PeerMessageKind::Blocker) if cross_project => Some(PeerMessageKind::Ask),
         kind => kind,
     };
+    // Incoming defaults describe the wake, not an outbound merge-holding ask.
+    // Keep untyped outbox bodies unmarked (cas-5ec1).
+    let kind = kind.or(Some(if message.in_reply_to.is_some() {
+        PeerMessageKind::Answer
+    } else {
+        PeerMessageKind::Ask
+    }));
     let envelope = render_envelope(&PeerEnvelope {
         id: message.id.clone(),
         sender_name: message.sender_name.clone(),

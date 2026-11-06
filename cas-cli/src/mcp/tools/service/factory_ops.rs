@@ -14547,6 +14547,19 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_preview_keeps_nonisolated_main_checkout_gh_1468() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(repo.path()).status().unwrap().success());
+        let mut worker = worker_named("shared-worker", "shared-worker-id");
+        worker.metadata.insert("clone_path".into(), repo.path().display().to_string());
+        let snapshot = shutdown_worker_snapshot(&repo.path().join(".cas"), &worker, &[], false, None);
+        let preview = snapshot.render();
+        assert!(preview.contains("kept (shared checkout)"), "{preview}");
+        assert!(!preview.contains("will be removed"), "{preview}");
+    }
+
+    #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {
         let repo = tempfile::tempdir().expect("test repo");
         assert!(std::process::Command::new("git")

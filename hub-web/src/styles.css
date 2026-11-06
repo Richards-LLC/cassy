@@ -3619,7 +3619,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .epic-tab:hover { background: var(--bg-hover); color: var(--ink); }
 .epic-tab[aria-selected="true"] { background: var(--bg-active); color: var(--ink); border-inline-start-color: var(--color-action); }
 .epic-tab:focus-visible, .epic-tab-panel:focus-visible, .epic-parked-toggle:focus-visible, .epic-other-projects:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-.epic-tab-name { font-size: var(--fs-meta); font-weight: var(--weight-semibold); line-height: 1.35; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.epic-tab-name { font-size: var(--fs-meta); font-weight: var(--weight-semibold); line-height: 1.35; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.epic-tab[aria-selected="true"] .epic-tab-name { display: block; overflow: visible; }
 .epic-tab-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); font-size: var(--fs-xs); }
 .epic-tab-count { font-family: var(--font-mono); white-space: nowrap; }
 .epic-tab-machine { font-size: var(--fs-xs); overflow-wrap: anywhere; }

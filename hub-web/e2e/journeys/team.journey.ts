@@ -31,10 +31,10 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
-        // The persistent epic strip keeps its place while Team scrolls to any worker.
-        const stripTop = (await page.locator("#epic-tabs").boundingBox())!.y;
+        // The rail's epic list keeps its place while Team scrolls to any worker.
+        const stripTop = width === 1280 ? (await page.locator("#epic-tabs").boundingBox())!.y : undefined;
         await panel.locator(".team-lane").last().scrollIntoViewIfNeeded();
-        expect((await page.locator("#epic-tabs").boundingBox())!.y).toBe(stripTop);
+        if (stripTop !== undefined) expect((await page.locator("#epic-tabs").boundingBox())!.y).toBe(stripTop);
         const lastLane = await panel.locator(".team-lane").last().boundingBox();
         expect(lastLane!.y + lastLane!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         await expect(page.locator(".conversation-context .release-progress")).toBeHidden();
@@ -140,7 +140,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       const train: FleetWorld = {
         agents: ["builder", "reviewer"].map((name, i) => ({ name, generation: 1, status: "active", current_task: `train-${i}`, liveness: "executing" })),
         tasks: ["Build the epic strip", "Check the release"].map((title, i) => ({ id: `train-${i}`, title, status: "in_progress", epic_id: "train", assignee: i ? "reviewer" : "builder", updated_at: new Date(journeyNow()).toISOString() })),
-        epics: [{ id: "train", title: "Release train", status: "inprogress", progress: { merged: 9, total: 14, merges_per_hour: 2 } }], focused_epic: null, spawnNames: [],
+        epics: [{ id: "train", title: "Release train", status: "inprogress", progress: { merged: 9, total: 14, merges_per_hour: 2 } }, { id: "payments", title: "EPIC: Payments cleanup", status: "open" }], focused_epic: null, spawnNames: [],
       };
       const follow: FleetWorld = {
         agents: [{ name: "remote-worker", generation: 1, status: "active", current_task: "follow-1", liveness: "waiting_for_input" }],
@@ -150,22 +150,29 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       const remote = { id: "prowl", label: "prowl", sessions: [{ name: "remote-session", supervisor: "remote-supervisor", project_dir: "/projects/follow-ups", workers: ["remote-worker"], liveness: "live" as const }] };
       const local = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, workers: ["builder", "reviewer"] })) };
       const hub = await journey.hub({ machines: [local, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: train, "remote-session": follow } });
-      await journey.stage("Read every epic above the conversation without opening progress", async () => {
+      await journey.stage("Read the pane project's epics beside the conversation", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
-        const strip = page.getByRole("tablist", { name: "Live epics across machines" });
+        // cas-0960: the epics live in Tasks & progress, the rail on desktop and its sheet on a phone.
+        if (width === 390) await page.getByRole("button", { name: "Tasks & progress" }).click();
+        const strip = page.getByRole("tablist", { name: "Live epics" });
         await expect(strip).toBeVisible();
         const busiest = strip.getByRole("tab", { name: /Release train/ });
         await expect(busiest).toHaveAttribute("aria-selected", "true");
-        await expect(busiest).toContainText("9/14");
+        await expect(busiest).toContainText("9/14 merged");
         await expect(busiest.getByRole("img", { name: "2 live workers" })).toBeVisible();
-        await expect(strip.getByRole("tab", { name: /Follow-ups/ })).toContainText("prowl");
+        // A generic "EPIC:" prefix never leaves a bare EPIC, and unknown progress is left out.
+        await expect(strip.getByRole("tab", { name: "Payments cleanup" })).toBeVisible();
+        await expect(strip).not.toContainText("/—");
+        // Other projects' epics wait behind the filter.
+        await expect(strip.getByRole("tab", { name: /Follow-ups/ })).toHaveCount(0);
         await expect(page.locator("#team-panel")).toBeHidden();
-        if (width === 390) await busiest.click();
         await expect(page.locator("#epic-tab-panel")).toContainText("Build the epic strip");
         await expect(page.locator("#epic-tab-panel")).toContainText("Building");
         if (width === 1280) {
+          // The conversation keeps the whole reading column; the epics sit to its right.
           const thread = (await page.locator(".conversation-reading.thread").boundingBox())!;
+          expect((await strip.boundingBox())!.x).toBeGreaterThanOrEqual(thread.x + thread.width);
           const monogram = (await page.locator(".conversation-reading.thread .empty .mono").boundingBox())!;
           expect(monogram.y).toBeGreaterThanOrEqual(thread.y);
           expect(monogram.y + monogram.height).toBeLessThanOrEqual(thread.y + thread.height);
@@ -191,28 +198,27 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           writeFileSync(`${process.env.EPIC_TABS_QA}/epic-tabs-${width}.html`, html);
           await page.screenshot({ path: `${process.env.EPIC_TABS_QA}/epic-tabs-${width}.png` });
         }
-        if (width === 390) await page.getByRole("button", { name: "Close epic tasks" }).click();
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
       });
-      await journey.stage("Choose the peer epic and keep the choice through a lifecycle update", async () => {
-        const strip = page.getByRole("tablist", { name: "Live epics across machines" });
+      await journey.stage("Show other projects, choose the peer epic and keep the choice through a lifecycle update", async () => {
+        await page.getByRole("button", { name: "Show 1 epic from other projects" }).click();
+        const strip = page.getByRole("tablist", { name: "Live epics" });
         const remoteTab = strip.getByRole("tab", { name: /Follow-ups/ });
+        await expect(remoteTab).toContainText("prowl");
         await remoteTab.focus(); await page.keyboard.press("Enter");
         await expect(remoteTab).toHaveAttribute("aria-selected", "true");
         await expect(page.locator("#epic-tab-panel")).toContainText("remote-worker");
+        // Parked work folds to a count until it is asked for.
+        await expect(page.locator("#epic-tab-panel")).not.toContainText("Parking");
+        await page.getByRole("button", { name: "Show 1 parked" }).click();
         await expect(page.locator("#epic-tab-panel")).toContainText("Parking");
         follow.tasks[0].delivery_state = "merged";
         follow.epics[0].progress!.merged = 3;
         await hub.announceCatalog("prowl");
         await expect(page.locator("#epic-tab-panel")).toContainText("Merged");
         await expect(remoteTab).toHaveAttribute("aria-selected", "true");
-        if (width === 390) {
-          await page.keyboard.press("Escape"); await expect(remoteTab).toBeFocused();
-          await expect(page.getByRole("dialog", { name: "Follow-ups tasks" })).toBeHidden();
-        }
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
         await expect(remoteTab).toBeVisible();
-        if (width === 390) await remoteTab.click();
         await expect(page.locator("#epic-tab-panel")).toContainText("Merged");
       });
     });

@@ -835,6 +835,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             id,
             prompt_delivered: true,
         }) if supervisor.id != "operator" => {
+            // A run can be listed after the run-less exit was relayed. The
+            // notice is already delivered, but its repair may still be new.
+            let Ok(task) = task_store.get(task_id) else {
+                return WorkerAttentionRelayOutcome::Pending;
+            };
+            if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
+                return WorkerAttentionRelayOutcome::Pending;
+            }
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
             };
@@ -3321,6 +3329,39 @@ mod worker_attention_tests {
                 && row.prompt.contains("daring-marten-11")),
             "the relay must name the count, the backlog head and its sender: {rows:?}"
         );
+    }
+
+    #[test]
+    fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "late-queue-run");
+        let cas_dir = crate::store::init_cas_dir(env.home()).unwrap();
+        register_supervisor(&cas_dir, "late-queue-run");
+        let mut worker = Agent::new_with_role("worker-id".into(), "late-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("late-queue-run".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-late-run".into(), "parked delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("late-worker".into());
+        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        task_store.add(&task).unwrap();
+        let eject = |run| enqueue_merge_queue_ejection_relay(
+            &cas_dir, "cas-late-run", "late-worker", 556, run,
+            "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
+            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+        );
+        assert!(matches!(eject(None), WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(task_store.get("cas-late-run").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        for _ in 0..2 {
+            assert!(matches!(eject(Some(601)), WorkerAttentionRelayOutcome::Persisted { .. }));
+            let repaired = task_store.get("cas-late-run").unwrap();
+            assert_eq!(repaired.status, cas_types::TaskStatus::Open);
+            // pin: repair markers account for exactly one cycle per failed run.
+            assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
+        }
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().len(), 2,
+            "late run evidence must not duplicate the already delivered relay");
     }
 
     #[test]

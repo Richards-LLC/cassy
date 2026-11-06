@@ -8276,6 +8276,12 @@ impl CasService {
                 )
                 .map_err(|error| error.to_string())
             });
+        let candidate_cleanup = tasks
+            .as_ref()
+            .map_err(|error| error.clone())
+            .and_then(|tasks| factory_candidate_binary_cleanup(
+                &artifact_root, tasks, artifact_authorized, chrono::Utc::now(),
+            ).map_err(|error| error.to_string()));
         // Artifact deletion is separate from process/cache cleanup. Unknown
         // close dates or reference evidence must preserve durable receipts.
         let eligible = if artifact_authorized {
@@ -8318,6 +8324,12 @@ impl CasService {
         );
         output.push('\n');
         output.push_str(&artifact_cleanup.render());
+        match candidate_cleanup {
+            Ok((files, bytes)) => output.push_str(&format!(
+                "\nCandidate binaries: removed_files={files} reclaimed_bytes={bytes} (closed >=48h; ledger hash and version recorded; artifacts=true force=true dry_run=false required)\n"
+            )),
+            Err(error) => output.push_str(&format!("\nCandidate binary cleanup incomplete: {error}\n")),
+        }
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
         if crate::task_simulators::supported() {
@@ -9244,6 +9256,72 @@ fn factory_trace_cleanup(
                     removed.0 += 1;
                     removed.1 += bytes;
                 }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Candidate executables are regenerable; their ledger and identity records
+/// retain the proof. This sweep is separate from whole-directory retention.
+fn factory_candidate_binary_cleanup(
+    root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    authorized: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(usize, u64)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut removed = (0, 0);
+    if !authorized {
+        return Ok(removed);
+    }
+    let eligible = tasks.iter().filter(|task| {
+        task.status == cas_types::TaskStatus::Closed
+            && task.closed_at.is_some_and(|closed| closed <= now - chrono::Duration::hours(48))
+    }).map(|task| task.id.clone()).collect();
+    let inventory = factory_artifact_inventory(root.to_path_buf(), &eligible);
+    if let Some(error) = inventory.error {
+        return Err(std::io::Error::other(error));
+    }
+    let hash_pattern = regex::Regex::new(r"(?i)\b[0-9a-f]{64}\b").unwrap();
+    let version_pattern = regex::Regex::new(r"\bcas [0-9]+\.[0-9]+\.[0-9]+\b").unwrap();
+    for path in inventory.closed {
+        let mut hashes = std::collections::BTreeSet::new();
+        let mut binaries = Vec::new();
+        for entry in walkdir::WalkDir::new(path).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.file_name() == "LEDGER.md" {
+                let ledger = std::fs::read_to_string(entry.path())?;
+                if version_pattern.is_match(&ledger) {
+                    hashes.extend(hash_pattern.find_iter(&ledger).map(|hash| hash.as_str().to_ascii_lowercase()));
+                }
+            } else if entry.file_name() == "cas" {
+                binaries.push(entry.into_path());
+            }
+        }
+        if hashes.is_empty() {
+            continue;
+        }
+        for binary in binaries {
+            let mut file = std::fs::File::open(&binary)?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0; 64 * 1024];
+            let mut bytes = 0;
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 { break; }
+                hash.update(&buffer[..count]);
+                bytes += count as u64;
+            }
+            if hashes.contains(&format!("{:x}", hash.finalize())) {
+                std::fs::remove_file(&binary)?;
+                removed.0 += 1;
+                removed.1 += bytes;
             }
         }
     }

@@ -21,6 +21,11 @@ revision.
 In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. Until that receipt exists,
 a deferred delivery reports "waiting for batch receipt".
 
+For parked deliveries already on `origin/<target>`, Cassy offers the supervisor
+the exact receipt call once per target branch and live parked task set. Unrelated
+merges that only move the target tip do not repeat it. A new task set receives
+an offer using the current target SHA; the supervisor still records the receipt.
+
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. A non-implementer walks the frozen-tip candidate (or
 deployed staging where one exists), capped per release, and writes one ledger

@@ -239,7 +239,9 @@ fn release_and_binary_skew_notices_wake_once() {
     assert_eq!(rows.len(), 4, "retrying an occurrence must not repeat its wake");
     // pin: train_ci_red is the action-envelope kind consumed by the supervisor.
     let red = rows.iter().find(|row| row.prompt.contains("train_ci_red")).unwrap();
-    assert!(red.prompt.contains("fixture::regression") && red.prompt.contains("tested-merge") && red.prompt.contains("cas-fix"));
+    for value in [&state["failures"][0], &state["head"], &state["merge_range"][0]["tasks"][0]] {
+        assert!(red.prompt.contains(value.as_str().unwrap()));
+    }
     for row in rows {
         assert_eq!(row.target, owner.name);
         assert_eq!(row.factory_session, owner.factory_session);

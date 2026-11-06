@@ -276,7 +276,7 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
     false
 }
 
-fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
+pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
     let store = crate::store::open_agent_store(cas_dir).ok()?;
     let agent = store.list(None).ok()?.into_iter().find(|agent|
         (agent.name == supervisor || agent.id == supervisor)

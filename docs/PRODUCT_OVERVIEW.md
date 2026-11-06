@@ -27,7 +27,7 @@ Managed project updates recognize the owned content Cassy previously wrote, incl
 
 ## Core Concepts
 
-A new Claude supervisor confirms its startup only after the native transcript records a turn. If its startup text remains unsent in the composer, Cassy retries Enter once; an unavailable turn signal stays unconfirmed.
+A new Claude supervisor confirms its startup only after the native transcript records a turn. If its startup text remains unsent in the composer, Cassy retries Enter once; an unavailable turn signal ends as unconfirmed after a bounded observation window.
 
 - **Provider account** - a Claude or Codex subscription identified by provider account and organization/workspace IDs, displayed by login email; `cas accounts list` shows usage, absolute resets and duplicate or login findings while legacy folder names remain launch aliases.
 - **Worker task queue** - an ordered backlog for one worker. Closing or parking starts the next eligible task on its own target branch in the current conversation by default. Opt in with `factory.restart_worker_between_tasks=true` to recycle between tasks while keeping the name, worktree and launch recipe; automatic restarts default off. MCP results report measured context occupancy at the configured threshold; unavailable harness accounting is labeled unknown. Supervisors inspect, reorder or clear pending work, and stale entries carry skip notes.

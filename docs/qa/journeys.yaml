@@ -549,7 +549,7 @@ invariants:
     check: Run hub::launch_env::tests::launch_catalog_recommends_without_opening_provider_credentials on Linux through profiles_for_project and resolve, with IN_OPEN watches on both fixture credential files; require zero opens, logged-in recommended rows and the Codex rollout plan. Run the registry, picker and provider-profile tests to preserve Claude metadata and Codex alias selection. Official status commands are private doubles in this audit; the batch candidate owns the real CLI walkthrough.
     bug: {task: cas-46db}
   HUB-J13-STARTUP-TURN:
-    statement: A fresh Claude supervisor's startup observes a native turn before reporting ok; an owned unsent composer receives only one bare submit retry, and echo or a modal never confirms startup.
+    statement: A fresh Claude supervisor's startup observes a native turn before reporting ok; an owned unsent composer receives only one bare submit retry, and echo or a modal never confirms startup. Both confirmed and final unconfirmed outcomes stop observing.
     check: Run claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10 through real startup enqueue and PTY input capture, then claude_startup_submit_owns_only_unsent_composer_cas_aa10 for empty, foreign, collapsed paste, modal and busy inputs. Native transcript records are supplied after the captured recovery CR; the fixture does not invoke a provider.
     bug: {task: cas-aa10}
   HUB-J13-STARTUP-WAKE:

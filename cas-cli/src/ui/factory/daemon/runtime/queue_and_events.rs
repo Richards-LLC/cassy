@@ -3310,6 +3310,9 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 /// cas-badb (GH #1302): a recipient should start its turn within 30 seconds.
 const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A startup receipt is final after this bounded native-turn observation.
+pub(super) const CLAUDE_STARTUP_TURN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// cas-badb (GH #1302): a recipient that still has not started a turn is
 /// nudged again every [`LIFECYCLE_RENUDGE_INTERVAL`] (60s), this many times in
 /// all, and then flagged. Five nudges from the 30s first check reach about
@@ -5202,6 +5205,13 @@ impl FactoryDaemon {
             return;
         }
         let pane = current.unwrap();
+        if now.saturating_duration_since(probe.delivered_at) >= CLAUDE_STARTUP_TURN_TIMEOUT {
+            self.record_injection_event(row_id, SUPERVISOR_STARTUP_SOURCE, &probe.target, &probe.pane,
+                "unconfirmed", Some("startup submit has no observed native turn; observation ended without resending the body".into()));
+            self.normal_delivery_probes.remove(&row_id);
+            self.queue_jobs.normal_probe_jobs.forget_row(row_id);
+            return;
+        }
         let rows: Vec<_> = (0..pane.rows()).map(|row| pane.dump_row(row).unwrap_or_default()).collect();
         if probe.nudges == 0 && evidence != NormalDeliveryTurnEvidence::RecipientBusy
             && !pane.is_composer_dirty() && !self.app.mux.pane_inject_busy(&probe.pane)
@@ -5221,14 +5231,8 @@ impl FactoryDaemon {
                     }),
                 });
         }
-        if now.saturating_duration_since(probe.delivered_at) >= Duration::from_secs(5) {
-            self.record_injection_event(row_id, SUPERVISOR_STARTUP_SOURCE, &probe.target, &probe.pane,
-                "unconfirmed", Some("startup submit has no observed native turn; the body is not resent".into()));
-        }
         if let Some(current) = self.normal_delivery_probes.get_mut(&row_id) {
-            current.next_check_at = Some(now + if now.saturating_duration_since(probe.delivered_at) < Duration::from_secs(5) {
-                Duration::from_secs(1)
-            } else { NORMAL_DELIVERY_BUSY_RECHECK });
+            current.next_check_at = Some(now + Duration::from_secs(1));
         }
     }
 

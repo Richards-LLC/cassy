@@ -86,7 +86,22 @@ pub(crate) fn read_normal_probe(
     let mut evidence = NormalDeliveryTurnEvidence::Unavailable {
         pane_output_grew: false,
     };
-    if activity == RecipientActivity::Absent || probe.startup_pane.is_some() {
+    if probe.startup_pane.is_some() {
+        // Supervisor registrations carry the project root/native session and
+        // supervisor_account_dir, not a worker clone or worker account.
+        if let Some(path) = super::supervisor_commands::supervisor_transcript(
+            cas_dir, session, &probe.pane, cas_mux::SupervisorCli::Claude,
+        ).filter(|path| path.is_file()) {
+            let latest = crate::mcp::tools::service::harness_observation::latest_turn_observations(
+                &path, cas_mux::SupervisorCli::Claude,
+            );
+            evidence = classify_normal_delivery_turn(
+                probe.delivered_at_utc, None,
+                latest.wake.map(|observation| observation.at),
+                latest.completion.map(|observation| observation.at),
+            );
+        }
+    } else if activity == RecipientActivity::Absent {
         evidence = normal_delivery_turn_evidence_io(
             cas_dir,
             &probe.pane,
@@ -94,8 +109,7 @@ pub(crate) fn read_normal_probe(
             &probe.prompt,
             false,
         );
-        if probe.startup_pane.is_none()
-            && evidence != NormalDeliveryTurnEvidence::TurnStarted
+        if evidence != NormalDeliveryTurnEvidence::TurnStarted
             && crate::ui::factory::director::idle_worker_liveness(cas_dir, &probe.pane).is_some_and(
                 |o| o.state == crate::mcp::tools::service::worker_liveness::Liveness::Executing,
             )

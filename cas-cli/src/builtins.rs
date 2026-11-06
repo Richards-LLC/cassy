@@ -4859,7 +4859,7 @@ mod tests {
             "merge queue", "merge-queue", "the queue", "cas_lane_slim", "fast row", "fast-row", "contributing", "journey-eval",
             "assembly-proof", "release.sh --hotfix", "hub-web/", "hub_e2e_port",
         ];
-        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
             let personal = temp.path().join("home").join(format!("{harness:?}"));
             let source = cas_src.join(format!(".{harness:?}"));
             sync_all_builtins_for_harness(harness, &personal).unwrap();

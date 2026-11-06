@@ -3446,7 +3446,8 @@ fn qa_ledger_init_check_and_no_overwrite() {
         }
     }
     assert_eq!(git(&["rev-parse", "HEAD"]), primary_head, "init leaves primary HEAD untouched");
-    assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head);
+    let unchanged_source = git(&["rev-parse", &format!("refs/heads/{source}")]);
+    assert_eq!(unchanged_source, source_head);
 
     #[cfg(unix)]
     {

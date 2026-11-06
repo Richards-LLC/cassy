@@ -2141,13 +2141,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
-    // Worker and verifier children keep temporary HOMEs beside their private
-    // build output, where retirement GC already discards them without copying.
-    let temporary = target_dir.join("tmp");
-    std::fs::create_dir_all(&temporary).context("create capped build temporary directory")?;
-    if temporary.canonicalize()?.parent() != Some(target_dir.canonicalize()?.as_path()) {
-        bail!("Capped build temporary directory escapes its private target");
-    }
+    // A separate short namespace leaves room for Unix socket fixture names.
+    let temporary = crate::factory_scratch::prepare_test_tmp(&cas_root, &repo)?;
     for key in ["TMPDIR", "TMP", "TEMP"] {
         command.env(key, &temporary);
     }
@@ -3269,6 +3264,16 @@ printf '%s\n' "$@" > target/cargo-args"#);
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&actual).unwrap().permissions().mode() & 0o777, 0o700);
             let _socket = std::os::unix::net::UnixListener::bind(actual.join("native-probe.sock")).unwrap();
+            for name in ["mcp::socket::tests::create_listener_refuses_a_live_socket",
+                "mcp::socket::tests::create_listener_reclaims_a_stale_socket_file",
+                "hub::idle_sync::tests::store_with_a_live_serve_is_skipped",
+                "factory_candidate_queue_tests::hung_build_kills_detached_children_releases_locks_and_reports_timeout"] {
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name, "--nocapture"]).env_remove(PROBE).output().unwrap();
+                // pin: libtest's count proves the named subprocess really ran.
+                assert!(result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                    "{name} under {actual:?}: {result:?}");
+            }
             std::fs::write(std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap().join("observed-tmp"), actual.as_os_str().as_encoded_bytes()).unwrap();
             // Replay an abandoned temporary HOME without copying a multi-GB binary.
             let temporary = tempfile::tempdir().unwrap().keep();
@@ -3338,6 +3343,12 @@ fi"#,
         assert_ne!(review_tmp, worker_tmp, "reviewer and worker temporaries stay isolated");
         let mut retired = crate::types::Agent::new("retired".into(), "worker".into());
         retired.metadata.insert("clone_path".into(), repo.to_str().unwrap().into());
+        let marker = worker_tmp.join(".cas-owner.json");
+        let owner = std::fs::read(&marker).unwrap();
+        std::fs::write(&marker, b"{}").unwrap();
+        assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).is_err());
+        assert!(worker_tmp.exists() && expected.exists(), "foreign ownership retains both roots");
+        std::fs::write(&marker, owner).unwrap();
         assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).unwrap());
         assert!(!expected.exists(), "GC reclaims retired target");
         assert!(!worker_tmp.exists(), "GC reclaims short temporary HOME");

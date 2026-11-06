@@ -523,7 +523,8 @@ async fn hung_build_kills_detached_children_releases_locks_and_reports_timeout()
         }
         let mut fixture = Fixture::new();
         let pids = fixture.temp.path().join("hung-pids");
-        let socket = fixture.temp.path().join("pids.sock");
+        let socket_dir = crate::test_paths::short_socket_tempdir();
+        let socket = socket_dir.path().join("pids.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let recorded = pids.clone();
         // SO_PEERCRED gives the test's PID view even when the build mounts a

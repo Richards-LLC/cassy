@@ -1648,7 +1648,17 @@ fn recommend_spawn_accounts(
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
-        if let Some(recommended) = selection.recommended {
+        let recommended = selection.recommended.or_else(|| {
+            if provider != crate::accounts::Provider::Codex { return None }
+            // Missing usage is not a failed login. Only use this fallback after
+            // the shared policy has excluded disabled, stale and duplicate homes,
+            // and no account with known capacity was recommended (cas-2ece).
+            selection.excluded.iter().find(|(_, reason)| reason == "usage unknown")
+                .map(|(account, reason)| crate::account_selection::Recommendation {
+                    account, reason: reason.clone(),
+                })
+        });
+        if let Some(recommended) = recommended {
             for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
@@ -13483,75 +13493,28 @@ mod spawn_lifecycle_tests {
             !error.contains(logged_out.to_str().unwrap()),
             "logged-out home must not be offered: {error}"
         );
-        // The merged account policy runs before this refusal. These fixture
-        // accounts have no usage evidence, so it must leave the worker
-        // unresolved rather than silently choosing the logged-in home.
+        // cas-2ece: a transiently missing usage report must not send the
+        // spawn back to the logged-out default when one home is logged in.
+        let default = env.home().join(".codex");
+        std::fs::create_dir_all(&default).unwrap();
         let mut unresolved = vec![spec.clone()];
         let selection_notice = recommend_spawn_accounts(
             &mut unresolved,
-            false, // The explicit cli=codex request below carries no lane.
+            false, // Direct Codex spawn without a lane or explicit account.
             &Default::default(),
             chrono::Utc::now(),
             |provider| crate::account_registry::collect_for(provider, env.home(), false),
         );
-        assert!(unresolved[0].config_dir.is_none(), "{selection_notice}");
-        assert!(selection_notice.contains("no eligible account"), "{selection_notice}");
-        // The real direct-spawn entry must reach this refusal before the
-        // legacy strict fallback can replace it with a default-home error.
-        env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        let project = env.home().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let cas_root = crate::store::init_cas_dir(&project).unwrap();
-        let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        let tasks = core.open_task_store().unwrap();
-        tasks.init().unwrap();
-        let mut epic =
-            cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
-        epic.task_type = cas_types::TaskType::Epic;
-        tasks.add(&epic).unwrap();
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core, None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core);
-        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
-            "action": "spawn_workers", "count": 1, "cli": "codex"
-        }))
-        .unwrap();
-        let direct_error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(service.factory_spawn_workers_in(
-                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"),
-                request,
-            ))
-            .expect_err("direct spawn must refuse the unselected account");
-        // pin: the refusal must retain the account policy's actual selection cause.
-        assert!(direct_error.message.contains("no eligible account"), "{direct_error}");
-        assert!(direct_error.message.contains("missing"), "the missing default home must not be reported as a logged-out selected account: {direct_error}");
-        for detail in ["config_dir", logged_in.to_str().unwrap()] {
-            assert!(
-                direct_error.message.contains(detail),
-                "missing {detail:?}: {direct_error}"
-            );
-        }
-        use cas_store::SpawnQueueStore;
-        assert!(
-            crate::store::open_spawn_queue_store(&cas_root)
-                .unwrap()
-                .peek(10)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(unresolved[0].config_dir.as_deref(), logged_in.to_str(), "{selection_notice}");
+        assert!(selection_notice.contains("usage unknown"), "{selection_notice}");
+        preflight_account_auth(&unresolved)
+            .expect("the recommended logged-in home passes spawn auth despite unknown usage");
         spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
         preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
         spec.requester_config_dir = spec.config_dir.take();
         preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
-        assert!(!env.home().join(".codex").exists());
         // An implicit default is already the worker's launch target; accepting
         // its authenticated login never chooses a different registered account.
-        let default = env.home().join(".codex");
-        std::fs::create_dir_all(&default).unwrap();
         let logged_out = preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect_err("an existing logged-out default must be distinguished from a missing directory");
         // pin: filesystem absence and affirmative login-status refusal are distinct user remedies.

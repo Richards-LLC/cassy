@@ -22332,6 +22332,7 @@ pub(crate) fn render_epic_status_report_with_stack(
         stacked_on,
         None,
         &[],
+        false,
     )
 }
 
@@ -22344,6 +22345,7 @@ pub(crate) fn render_epic_status_collection(
     collection: &EpicStatusCollection,
     stacked_on: &[String],
     retained_tasks: &[String],
+    retained_inventory_partial: bool,
 ) -> String {
     render_epic_status_report_with_stack_and_view(
         epic_id,
@@ -22352,6 +22354,7 @@ pub(crate) fn render_epic_status_collection(
         stacked_on,
         Some(collection),
         retained_tasks,
+        retained_inventory_partial,
     )
 }
 
@@ -22362,6 +22365,7 @@ fn render_epic_status_report_with_stack_and_view(
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
     retained_tasks: &[String],
+    retained_inventory_partial: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -22540,6 +22544,8 @@ fn render_epic_status_report_with_stack_and_view(
         ));
     } else if !retained_tasks.is_empty() {
         out.push_str("\n⚠️ Retained worker local work needs review; historical delivery proofs do not account for it.\n");
+    } else if retained_inventory_partial || view.is_some_and(|view| view.budget_exhausted) {
+        out.push_str("\n⚠️ Inventory incomplete; merge state is not fully known.\n");
     } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
     } else {
@@ -39572,14 +39578,14 @@ mod epic_status_gate_tests {
         assert!(collection.statuses[0].merge_evidence_note.is_none());
         assert!(collection.statuses[0].content_check_error.is_none());
 
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
         assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
     }
 
     #[test]
     fn epic_status_budget_guard_labels_unchecked_children() {
-        let dir = init_epic_repo(&[("alpha", 1)]);
+        let dir = init_epic_repo(&[("alpha", 0)]);
         let subtasks = vec![
             child("cas-c1", TaskStatus::Closed, Some("alpha")),
             child("cas-c2", TaskStatus::Closed, Some("missing")),
@@ -39598,9 +39604,25 @@ mod epic_status_gate_tests {
 
         assert!(collection.statuses.is_empty());
         assert!(collection.budget_exhausted);
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
+
+        // A retained-worktree scan can fail even when the child branch read
+        // succeeded. Unknown local work must suppress that branch's all-clear.
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks[..1], "main", dir.path(), EpicStatusOptions::full_unbounded(),
+        );
+        for inventory_partial in [true, false] {
+            let report = render_epic_status_collection(
+                "cas-epic", "main", &collection, &[], &[], inventory_partial,
+            );
+            assert_eq!(
+                report.contains("All child factory branches are merged"),
+                !inventory_partial,
+                "unknown inventory must not claim all-clear: {report}",
+            );
+        }
     }
 
     #[test]
@@ -39690,7 +39712,7 @@ mod epic_status_gate_tests {
             started.elapsed()
         );
         if collection.budget_exhausted {
-            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }

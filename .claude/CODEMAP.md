@@ -73,6 +73,7 @@
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
 - `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` - checkout-grouped cleanup intents, persisted readiness and immutable retirement snapshots.
+- `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs` - attach socket input drains before disconnect cleanup; PaneInfo snapshots include accepted/written PTY input byte counts from `crates/cas-pty/src/input_queue.rs` via `crates/cas-mux/src/pane/mod.rs`.
 - `crates/cas-pty/src/pty.rs` - private startup-brief files, verified Claude launch paths, harness argv construction and owned PTY lifetimes.
 - `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection, typed missing/version/probe failures and bounded minimum-version checks shared by the hub and PTY.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
@@ -131,12 +132,12 @@
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cas-cli/src/cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators (including durable rule-projection deletion reconciliation in `store/syncing.rs` and the active-rule cut in `store/detect.rs`), numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.
-- `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs and project-scoped integrated-delivery recovery actions at startup.
+- `cas-cli/src/supervisor_continuity.rs` - durable succession handoffs, unread Commander/Violet mail recovery and project-scoped integrated-delivery recovery actions at startup.
 - `crates/cas-store/src/history_store.rs` - batched history provenance repair and indexed worker commit-prefix lookup.
-- `crates/cas-store/src/prompt_queue_store/`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, recipient surfacing and QA maintenance.
+- `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, guarded unread-mail succession, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 
-- `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `service/pattern_ops.rs`.
+- `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `service/pattern_ops.rs`. Candidate writes require two independent completed task/verdict citations before atomically recording a bundle.
 - `crates/cas-types/src/entry/behavior.rs`, `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` - temporal validity and stakeholder provenance migration.
 
 ## QA and Commander
@@ -192,3 +193,11 @@
 - MCP: `cas-cli/src/mcp/daemon.rs` (`cas serve`); bridge: `cas-cli/src/bridge/server/` (`cas bridge serve`).
 - Commander: `hub-web/src/main.ts`; Slack services: `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts`.
 - Tests: capped named nextest filters for workers; Vitest/typecheck and affected journeys for web changes; merge queue owns the full Rust suite.
+
+## In-place factory daemon updates
+
+- `crates/cas-pty/src/adopt.rs` - owned inherited Unix master descriptors and direct-child waitpid handles.
+- `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs` - quiesced pane snapshots, drafts and launch policy restored around inherited PTYs.
+- `cas-cli/src/ui/factory/app/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs` - daemon schema preflight, sealed inherited manifest, same-PID exec and one-shot rollback.
+- `cas-cli/src/cli/factory/reexec.rs` - local socket control and per-daemon post-update outcomes.
+- `hub-web/e2e/journeys/real-hub.journey.ts` - HUB-J11 includes in-place daemon re-exec and same-PID attachment recovery.

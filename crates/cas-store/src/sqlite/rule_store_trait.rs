@@ -103,6 +103,37 @@ impl SqliteRuleStore {
         Ok(())
     }
 
+    fn preserve_live_version(
+        tx: &Connection, current: &Rule, changed_by: &Option<String>, changed_at: &str,
+    ) -> Result<()> {
+        let latest: Option<(String, String)> = tx
+            .query_row(
+                "SELECT content, status FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1",
+                params![current.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if latest.as_ref().is_none_or(|(content, status)| {
+            content != &current.content || status != &current.status.to_string()
+        }) {
+            let snapshot_json = serde_json::to_string(&current).map_err(|error| {
+                StoreError::Parse(format!("failed to serialize rule history: {error}"))
+            })?;
+            Self::insert_version(
+                tx,
+                &current.id,
+                &snapshot_json,
+                &current.content,
+                current.status,
+                changed_by,
+                changed_at,
+                "pre-upgrade live state",
+                "baseline",
+            )?;
+        }
+        Ok(())
+    }
+
     fn update_recorded(
         &self,
         rule: &Rule,
@@ -132,31 +163,7 @@ impl SqliteRuleStore {
             // state absent from history. Preserve it before the first new write
             // without rewriting any existing versions.
             let current = Self::get_on(&tx, &rule.id)?;
-            let latest: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT content, status FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1",
-                    params![rule.id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if latest.as_ref().is_none_or(|(content, status)| {
-                content != &current.content || status != &current.status.to_string()
-            }) {
-                let snapshot_json = serde_json::to_string(&current).map_err(|error| {
-                    StoreError::Parse(format!("failed to serialize rule history: {error}"))
-                })?;
-                Self::insert_version(
-                    &tx,
-                    &rule.id,
-                    &snapshot_json,
-                    &current.content,
-                    current.status,
-                    &changed_by,
-                    &changed_at,
-                    "pre-upgrade live state",
-                    "baseline",
-                )?;
-            }
+            Self::preserve_live_version(&tx, &current, &changed_by, &changed_at)?;
             let rows = tx.execute(
                 "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
@@ -487,6 +494,36 @@ impl RuleStore for SqliteRuleStore {
         let mut cleared = rule.clone();
         cleared.stakeholder = None;
         self.update_recorded(&cleared, changed_by, change_note, "update", true)
+    }
+
+    fn retire_expired_drafts(
+        &self, cutoff: chrono::DateTime<Utc>, change_note: &str,
+    ) -> Result<Vec<Rule>> {
+        // The eligibility read, status write and version append share one write
+        // lock, so a promotion committed first is never overwritten by expiry.
+        let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
+        let mut statement = tx.prepare_cached(
+            "SELECT id FROM rules WHERE status = 'draft' AND julianday(created) <= julianday(?1)",
+        )?;
+        let ids = statement.query_map([cutoff.to_rfc3339()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let changed_at = Utc::now().to_rfc3339();
+        let changed_by = Some("maintenance".to_string());
+        let mut retired = Vec::new();
+        for id in ids {
+            let mut rule = Self::get_on(&tx, &id)?;
+            Self::preserve_live_version(&tx, &rule, &changed_by, &changed_at)?;
+            tx.execute("UPDATE rules SET status = 'retired' WHERE id = ?1", [&id])?;
+            rule.status = RuleStatus::Retired;
+            let snapshot = serde_json::to_string(&rule)
+                .map_err(|error| StoreError::Parse(error.to_string()))?;
+            Self::insert_version(&tx, &id, &snapshot, &rule.content, rule.status,
+                &changed_by, &changed_at, change_note, "retire")?;
+            retired.push(rule);
+        }
+        tx.commit()?;
+        Ok(retired)
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {

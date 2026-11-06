@@ -8,8 +8,11 @@ media and light scheme, with disclosures expanded, network requests blocked
 (a blocked request fails the run) and 15 mm margins; both are checked below,
 and the A4 copy is written as `v<version>.pdf`. Its running folio prints the
 document title and "n / N" in the page's `--font-mono` stack and `--ink-muted`
-colour. If Playwright is not importable it installs it into a disposable
-workspace.
+colour. Printing uses `PLAYWRIGHT_MODULE` when set, otherwise a repository-local
+Playwright installation. It never downloads a floating package at runtime.
+When that module's headless shell is absent, its matching full Chromium can
+print with headless mode enabled. Launch failures retain the original message
+and name the selected module's exact browser-install command in text and JSON.
 
 The template declares margins, not a fixed `@page size`. Print CSS uses
 `break-before:auto` for sections and `break-inside:avoid` for cards, rows and

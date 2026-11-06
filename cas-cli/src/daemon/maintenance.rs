@@ -409,6 +409,31 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
+    // Draft probation uses the existing maintenance pass and versioned store.
+    let draft_expiry = (|| -> Result<(), CasError> {
+        let days = crate::config::Config::load(&config.cas_root)?.rules().draft_ttl_days;
+        if days == 0 { return Err(CasError::Other("rules.draft_ttl_days must be positive".into())); }
+        let Some(cutoff) = chrono::Duration::try_days(i64::from(days))
+            .and_then(|window| started_at.checked_sub_signed(window)) else {
+                // A window beyond the supported date range cannot expire a rule.
+                return Ok(());
+            };
+        let rules = crate::store::open_rule_store(&config.cas_root)?;
+        let retired = rules.retire_expired_drafts(cutoff,
+            &format!("auto-retired: not promoted within {days} days"))?;
+        if !retired.is_empty() {
+            let tasks = crate::store::open_task_store(&config.cas_root)?;
+            for rule in &retired {
+                let version = rules.list_versions(&rule.id)?.first().map(|v| v.version).unwrap_or_default();
+                crate::rule_refs::file_cleanup(&config.cas_root, tasks.as_ref(), rule,
+                    &[crate::rule_refs::RuleChange::Retired], &format!("v{version}"))
+                    .map_err(|error| CasError::Other(error.to_string()))?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = draft_expiry { errors.push(format!("Draft rule expiry failed: {error}")); }
+
     // cas-56266: an expired stakeholder review lists the rule's cited sites.
     if let Err(error) = crate::rule_refs::file_expired_review_cleanups(&config.cas_root) {
         errors.push(format!("Rule review cleanup failed: {error:#}"));
@@ -591,6 +616,48 @@ pub fn run_once(config: &DaemonConfig) -> Result<DaemonRunResult, CasError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_retires_unpromoted_drafts_and_keeps_history() {
+        use crate::store::{RuleStore, open_rule_store};
+        use cas_types::{Rule, RuleStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let store = open_rule_store(&root).unwrap();
+        for (id, age, status) in [("expired", 31, RuleStatus::Draft), ("fresh", 29, RuleStatus::Draft), ("proven", 60, RuleStatus::Proven)] {
+            let mut rule = Rule::new(id.into(), format!("Fixture policy {id}"));
+            rule.created = Utc::now() - chrono::Duration::days(age);
+            rule.status = status;
+            rule.helpful_count = if status == RuleStatus::Proven { 2 } else { 0 };
+            store.add(&rule).unwrap();
+        }
+        let proven = serde_json::to_value(store.get("proven").unwrap()).unwrap();
+        let config = DaemonConfig { cas_root: root.clone(), process_observations: false,
+            consolidate_memories: false, auto_prune: false, apply_decay: false,
+            update_entity_summaries: false, index_code: false, index_bm25: false,
+            agent_purge_age_hours: 0, ..DaemonConfig::default() };
+        let pass = run_maintenance(&config).unwrap();
+        assert!(!pass.errors.iter().any(|e| e.starts_with("Draft rule expiry failed")), "{:?}", pass.errors);
+        assert_eq!(store.get("expired").unwrap().status, RuleStatus::Retired);
+        assert_eq!(store.get("fresh").unwrap().status, RuleStatus::Draft);
+        assert_eq!(serde_json::to_value(store.get("proven").unwrap()).unwrap(), proven);
+        let history = cas_store::SqliteRuleStore::open(&root).unwrap();
+        let versions = history.list_versions("expired").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].change_note, "auto-retired: not promoted within 30 days");
+        assert_eq!(versions[1].status, RuleStatus::Draft);
+        // The existing pass reads the configured window anew, rather than a cached default.
+        let mut settings = crate::config::Config::load(&root).unwrap();
+        settings.set("rules.draft_ttl_days", "7").unwrap();
+        settings.save(&root).unwrap();
+        let pass = run_maintenance(&config).unwrap();
+        assert!(!pass.errors.iter().any(|e| e.starts_with("Draft rule expiry failed")), "{:?}", pass.errors);
+        assert_eq!(store.get("fresh").unwrap().status, RuleStatus::Retired);
+        assert_eq!(serde_json::to_value(store.get("proven").unwrap()).unwrap(), proven);
+        assert_eq!(history.list_versions("expired").unwrap().len(), 2);
+    }
 
     #[test]
     fn stale_named_codex_worker_with_live_process_is_not_reaped() {

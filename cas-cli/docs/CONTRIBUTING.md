@@ -2186,6 +2186,16 @@ merge request after correcting the cause.
 See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
 for setup, doctor and release-preflight diagnostics and manual repair.
 
+## Attach socket input diagnostics
+
+Attach `PaneInfo` snapshots report `input_bytes_received` (bytes accepted by
+that pane's input queue) and `input_bytes_written` (bytes physically written
+to its PTY master, including partial writes before a failure). Counts include
+harness input and terminal control replies; they do not establish that the
+child read the bytes. Older payloads decode with zero counts. A one-shot
+attach sender may close immediately after sending: outbound write failure
+must leave its inbound frames available for the daemon's input phase to drain.
+
 ## Build, assembly and CI policy
 
 While a release train is open in the target repository, `worktree_merge` refuses
@@ -3468,6 +3478,23 @@ checks omissions. `cas rules refs <id> --json` lists tracked sites. See
 the optional stakeholder provenance seam.
 
 Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` can be promoted after its first verified occurrence. Only an operator-authorised write from the registered non-factory operator session files its idempotent encode chore, even while draft. Agent and supervisor writes create no encode chore and name the operator command (`rule action=update id=<id> tags="<current tags>"`); previous rule authority does not grant a later writer permission to file one. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+
+Unpromoted drafts expire from their creation time during the existing maintenance
+pass. `rules.draft_ttl_days` is a positive day count, default 30; set/get/list/reset
+use the ordinary config interface. Surfacing a draft does not renew its window.
+The versioned store retires eligible drafts and records their history under the
+same write lock, with `auto-retired: not promoted within 30 days` at the default
+window. Proven rules are excluded. Filesystem/cloud projections follow the
+existing rule-store wrapper, and cited sites get the existing retirement cleanup.
+Stores without lifecycle history refuse expiry rather than discard that history.
+
+A verifier's single verdict is not a rule candidate. `rule action=observe` needs
+at least two completed verdicts from different tasks in comma-separated
+`source_ids="<task>:<verdict>,<other-task>:<other-verdict>"`. Citations are checked
+against persisted verdicts before the complete bundle is recorded atomically;
+repeated verdicts on one task do not establish independent incidents. The
+supervisor and operator still decide whether to adopt a candidate as a rule.
+
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 

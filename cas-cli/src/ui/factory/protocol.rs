@@ -445,6 +445,8 @@ impl MessageAttribution {
 /// Messages sent from TUI client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
+    /// Local daemon control; never accepted from a remote WebSocket client.
+    Reexec { binary: std::path::PathBuf, version: String, nonce: String },
     /// Attach to the session (sent on connect)
     Attach {
         /// Request full scrollback buffer
@@ -695,6 +697,7 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
     /// Local-only response. An acknowledgement exists only after both tasks drain.
     BindingIntake {
         reply: super::daemon::runtime::violet_intake::IntakeReply,
@@ -983,6 +986,12 @@ pub struct PaneInfo {
     pub title: String,
     /// Whether the pane process has exited
     pub exited: bool,
+    /// Bytes accepted by the pane's PTY input queue, including control replies.
+    #[serde(default)]
+    pub input_bytes_received: u64,
+    /// Bytes physically written to the PTY master (not proof of child consumption).
+    #[serde(default)]
+    pub input_bytes_written: u64,
 }
 
 /// Per-pane attach metadata. This deliberately contains no terminal content.

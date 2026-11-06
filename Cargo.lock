@@ -901,6 +901,7 @@ dependencies = [
  "ghostty_vt",
  "hex",
  "indexmap",
+ "libc",
  "memchr",
  "ratatui",
  "serde",
@@ -937,6 +938,7 @@ dependencies = [
 name = "cas-pty"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cas-types",
  "dirs",
  "fs2",

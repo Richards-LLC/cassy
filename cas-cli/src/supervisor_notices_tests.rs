@@ -216,3 +216,25 @@ fn superseded_session_end_preserves_epic_ownership() {
         0
     );
 }
+
+#[test]
+fn release_and_binary_skew_notices_wake_once() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut owner = Agent::new_with_role("release-owner".into(), "owner".into(), AgentRole::Supervisor);
+    owner.factory_session = Some("release-session".into());
+    open_agent_store(&root).unwrap().register(&owner).unwrap();
+    for kind in ["release_cut_ready", "release_post_publish", "factory_binary_skew"] {
+        for _ in 0..2 {
+            enqueue(&root, &Recipient::agent(&owner), kind, "release action due", "v9.99.2").unwrap();
+        }
+    }
+    let rows = open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+    assert_eq!(rows.len(), 3, "retrying an occurrence must not repeat its wake");
+    for row in rows {
+        assert_eq!(row.target, owner.name);
+        assert_eq!(row.factory_session, owner.factory_session);
+        assert!(is_action_envelope(&row.prompt));
+    }
+    assert!(!is_action_envelope("<cas-supervisor-notice kind=\"status\" notification_id=\"1\">\nFYI\n</cas-supervisor-notice>"));
+}

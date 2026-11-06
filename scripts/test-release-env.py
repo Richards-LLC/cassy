@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -311,6 +312,56 @@ esac
                      "ok   release-env"):
             self.assertIn(line, out)
         self.assertIn('mergeQueue(branch: "main")', log.read_text())
+
+
+class QueueHealth(Fixture):
+    def test_preflight_warns_only_and_reads_once_for_serial_healthy_and_unavailable(self):
+        import json
+        repo = self.root / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        git(repo, "remote", "add", "origin", "https://github.com/acme/repo.git")
+        fixture = json.loads((SCRIPTS.parent / "cas-cli/tests/fixtures/merge-queue-health.json").read_text())
+        response, log = self.root / "response.json", self.root / "calls"
+        gh = make_exe(self.root / "gh", f"#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{log}'\ncat '{response}'\n")
+        for limits, warning in [((1, 1, "ALLGREEN"), True), ((5, 5, "ALLGREEN"), True), ((8, 5, "HEADGREEN"), True), ((5, 1, "ALLGREEN"), False), (None, False)]:
+            value = json.loads(json.dumps(fixture))
+            if limits:
+                build, merge, grouping = limits
+                value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"].update(
+                    maxEntriesToBuild=build, maxEntriesToMerge=merge, groupingStrategy=grouping)
+            else:
+                value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"] = []
+            response.write_text(json.dumps(value))
+            log.write_text("")
+            result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(bool(result.stderr), warning)
+            if warning:
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertIn("gh api -X PUT repos/acme/repo/rulesets/42", result.stderr)
+                # Exercise the printed transform offline, never its gh PUT.
+                words = shlex.split(result.stderr.split("Run: ", 1)[1])
+                transform = words[words.index("jq") + 1]
+                before = json.loads((SCRIPTS.parent / "docs/branch-protection/main-ruleset.json").read_text())
+                original = json.loads(json.dumps(before))
+                queue_rule = next(r for r in before["rules"] if r["type"] == "merge_queue")
+                queue_rule["parameters"].update(max_entries_to_build=build, max_entries_to_merge=merge, min_entries_to_merge=merge, grouping_strategy=grouping)
+                fixed = subprocess.run(["jq", transform], input=json.dumps(before), capture_output=True, text=True, check=True)
+                after = json.loads(fixed.stdout)
+                self.assertEqual([r for r in after["rules"] if r["type"] != "merge_queue"],
+                                 [r for r in original["rules"] if r["type"] != "merge_queue"])
+                params = next(r["parameters"] for r in after["rules"] if r["type"] == "merge_queue")
+                self.assertEqual((params["max_entries_to_build"], params["max_entries_to_merge"], params["min_entries_to_merge"], params["grouping_strategy"]),
+                                 (max(build, 5), 1, 1, "ALLGREEN"))
+            calls = log.read_text().splitlines()
+            self.assertEqual(len(calls), 1, calls)
+            self.assertNotIn("PUT", calls[0])
+        make_exe(gh, "#!/bin/sh\necho 'API rate limit exceeded: fixture-secret' >&2\nexit 1\n")
+        result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("unavailable", result.stderr)
+        self.assertNotIn("fixture-secret", result.stderr)
 
 
 if __name__ == "__main__":

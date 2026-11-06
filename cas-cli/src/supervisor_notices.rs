@@ -247,12 +247,43 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
     Ok(())
 }
 
+/// The release step a train's supervisor is woken for (cas-dcc9, cas-61e0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReleaseNoticePhase {
+    CutReady,
+    #[allow(dead_code)] // cas-61e0 sends it on publish.
+    PostPublish,
+}
+
+impl ReleaseNoticePhase {
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Self::CutReady => "release_cut_ready",
+            Self::PostPublish => "release_post_publish",
+        }
+    }
+}
+
+/// One waking release action for the train's owning supervisor, sent once
+/// per `occurrence` (the train revision or version it is about).
+pub(crate) fn release_action(
+    root: &Path,
+    train: &cas_types::Task,
+    phase: ReleaseNoticePhase,
+    occurrence: &str,
+    detail: &str,
+) -> Result<(), crate::error::CasError> {
+    let agents = open_agent_store(root)?.list(None)?;
+    let recipient = resolve(&agents, train.epic_verification_owner.as_deref(), None);
+    enqueue(root, &recipient, phase.kind(), detail, &format!("{}:{occurrence}", train.id))
+}
+
 /// Only CAS-authored rows use this envelope; the daemon checks origin too.
 pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled"]
+    let valid_kind = ["epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

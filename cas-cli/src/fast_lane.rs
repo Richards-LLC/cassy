@@ -510,6 +510,7 @@ pub fn journey_walk(ledger: &Path, notes: &str) -> Walk {
     if decided { Walk::Done } else { Walk::Missing }
 }
 
+#[track_caller]
 fn gh(binary: &Path, cwd: &Path, args: &[&str], cap: Duration) -> Result<String, String> {
     let mut command = Command::new(binary);
     command.current_dir(cwd).env("GH_HOST", "github.com").args(args);

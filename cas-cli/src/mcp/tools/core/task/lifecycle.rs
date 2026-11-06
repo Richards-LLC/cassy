@@ -1428,6 +1428,21 @@ impl CasCore {
                     .as_ref()
                     .and_then(|(_, epic, _)| epic.clone())
             });
+        // One integration per release: with no epic, binding or explicit
+        // target, the task joins the open release train rather than the
+        // integration branch (cas-1896). An explicit target_branch is the
+        // hotfix route.
+        let (release_train, release_train_receipt) = if task_type != TaskType::Epic
+            && epic_id.is_none()
+            && active_binding.is_none()
+            && target_repo.is_none()
+            && target_branch.is_none()
+        {
+            self.release_train_for_new_task(task_store.as_ref()).await
+        } else {
+            (None, String::new())
+        };
+        let epic_id = epic_id.or_else(|| release_train.clone());
 
         // Set when the new task overlaps a sibling under its own epic; shown
         // in the create receipt, never a reason to refuse the write.
@@ -1450,7 +1465,11 @@ impl CasCore {
                     blocking_warnings.push(message);
                 }
             }
-            if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
+            // Every supervisor shares the release train; that is not a
+            // competing plan.
+            if let (Some(epic), Some(creator), None) =
+                (epic_id.as_deref(), created_by.as_deref(), release_train.as_deref())
+            {
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
                     epic,
@@ -1479,7 +1498,9 @@ impl CasCore {
                 task_store.as_ref(),
                 &req.title,
                 req.description.as_deref().unwrap_or_default(),
-                epic_id.as_deref(),
+                // Train children are unrelated fixes, so a duplicate among
+                // them still blocks as it did before they shared an epic.
+                epic_id.as_deref().filter(|_| release_train.is_none()),
                 task_type == TaskType::Epic,
             )
             .map_err(|error| McpError {
@@ -1877,6 +1898,7 @@ impl CasCore {
                 ))
                 .unwrap_or_default()
             + default_target_warning.as_deref().unwrap_or_default()
+            + &release_train_receipt
             + &issue_hint_note;
 
         if let Ok(search) = self.open_search_index() {
@@ -4460,100 +4482,121 @@ mod related_recall_response_tests {
         );
     }
 
-    /// GH #1011: a standalone task must carry the integration target from
-    /// creation; otherwise close can silently measure its delivery against main.
+    /// cas-1896: one integration per release. A standalone task joins the
+    /// open release train cut from the integration branch (main, or the
+    /// configured staging), the next task joins the same train, a landed
+    /// train closes and the next opens, and an explicit target is a hotfix.
     #[tokio::test]
-    async fn standalone_create_anchors_configured_staging_or_warns_on_detected_main() {
+    async fn standalone_create_joins_the_release_train_on_main_or_staging_cas_1896() {
         use std::process::Command;
 
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host registry");
         let temp = TempDir::new().expect("temporary project");
         let repo = temp.path();
-        for args in [
-            vec!["init", "-q", "-b", "main"],
-            vec!["config", "user.email", "test@cas.test"],
-            vec!["config", "user.name", "Cassy Test"],
-            vec!["remote", "add", "origin", "https://github.com/example/target-test.git"],
-        ] {
-            assert!(
-                Command::new("git")
-                    .args(&args)
-                    .current_dir(repo)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@cas.test"]);
+        git(&["config", "user.name", "Cassy Test"]);
+        git(&["remote", "add", "origin", "https://github.com/example/target-test.git"]);
         std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
-        for args in [
-            vec!["add", "seed.txt"],
-            vec!["commit", "-q", "-m", "seed"],
-            vec!["branch", "staging"],
-        ] {
-            assert!(
-                Command::new("git")
-                    .args(&args)
-                    .current_dir(repo)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["branch", "staging"]);
+
         let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
-        let defaulted = text(
-            core
-            .cas_task_create(Parameters(plain_task_request("No implicit main")))
-            .await
-            .expect("detected trunk still permits creation"),
-        );
-        assert!(
-            defaulted.contains("WORK TARGET DEFAULTED")
-                && defaulted.contains("`main`")
-                && defaulted.contains("epic_base_branch"),
-            "{defaulted}"
-        );
         let store = core.open_task_store().unwrap();
-        let defaulted_task = store
-            .list(None)
-            .unwrap()
-            .into_iter()
-            .find(|task| task.title == "No implicit main")
-            .expect("created task");
+        let create = |title: &'static str| {
+            let core = &core;
+            async move {
+                text(core.cas_task_create(Parameters(plain_task_request(title))).await.unwrap())
+            }
+        };
+        let task = |title: &str| {
+            store.list(None).unwrap().into_iter().find(|task| task.title == title).unwrap()
+        };
+        let trains = |integration: &str| {
+            store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.labels.iter().any(|l| l == "release-train"))
+                .filter(|t| {
+                    t.deliverables.work_target.as_ref().unwrap().target_branch == integration
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = create("Fix one").await;
+        assert!(first.contains("RELEASE TRAIN: opened"), "{first}");
+        assert!(!first.contains("WORK TARGET DEFAULTED"), "{first}");
+        let train = trains("main").pop().expect("train opened from main");
+        let lane = train.branch.clone().expect("train lane");
+        assert_eq!(git(&["rev-parse", &lane]), git(&["rev-parse", "main"]));
+        assert_eq!(task("Fix one").deliverables.work_target.unwrap().target_branch, lane);
+
+        let second = create("Fix two").await;
+        assert!(second.contains(&format!("RELEASE TRAIN: joined {}", train.id)), "{second}");
+        assert_eq!(trains("main").len(), 1, "second task joins the same train");
+        assert_eq!(task("Fix two").deliverables.work_target.unwrap().target_branch, lane);
+
+        // The release lands: children merged into the lane, the lane on main.
+        git(&["checkout", "-q", &lane]);
+        std::fs::write(repo.join("fix.txt"), "fix\n").unwrap();
+        git(&["add", "fix.txt"]);
+        git(&["commit", "-q", "-m", "fixes"]);
+        git(&["checkout", "-q", "main"]);
+        git(&["merge", "-q", "--no-ff", &lane]);
+        for title in ["Fix one", "Fix two"] {
+            let mut child = task(title);
+            child.status = TaskStatus::Closed;
+            store.update(&child).unwrap();
+        }
+        let next = create("Fix three").await;
+        assert!(next.contains(&format!("{} landed on `main`", train.id)), "{next}");
+        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
+        let open: Vec<_> = trains("main").into_iter().filter(|t| !t.is_terminal()).collect();
+        assert_eq!(open.len(), 1, "next train opens");
+        assert_ne!(open[0].id, train.id);
         assert_eq!(
-            defaulted_task
-                .deliverables
-                .work_target
-                .expect("durable detected target")
-                .target_branch,
-            "main"
+            task("Fix three").deliverables.work_target.unwrap().target_branch,
+            open[0].branch.clone().unwrap()
         );
 
+        // A hotfix names the trunk and skips the train.
+        core.cas_task_create_with_target(plain_task_request("Hotfix"), None, Some("main"), false)
+            .await
+            .unwrap();
+        assert_eq!(task("Hotfix").deliverables.work_target.unwrap().target_branch, "main");
+
+        // Staging-first repositories cut the train from staging.
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
         std::fs::write(
             repo.join(".cas/config.toml"),
             "[factory]\nepic_base_branch = \"staging\"\n",
         )
         .unwrap();
-        let configured = text(
-            core.cas_task_create(Parameters(plain_task_request("Use staging")))
-                .await
-                .expect("configured integration target permits creation"),
-        );
-        assert!(!configured.contains("WORK TARGET DEFAULTED"), "{configured}");
-        let task = store
-            .list(None)
-            .unwrap()
-            .into_iter()
-            .find(|task| task.title == "Use staging")
-            .expect("configured task");
-        assert_eq!(
-            task.deliverables
-                .work_target
-                .expect("durable target")
-                .target_branch,
-            "staging"
-        );
+        let staged = create("Use staging").await;
+        assert!(staged.contains("RELEASE TRAIN: opened"), "{staged}");
+        let staging_train = trains("staging").pop().expect("train opened from staging");
+        let staging_lane = staging_train.branch.clone().unwrap();
+        assert_eq!(git(&["rev-parse", &staging_lane]), git(&["rev-parse", "staging"]));
+        assert_eq!(task("Use staging").deliverables.work_target.unwrap().target_branch, staging_lane);
+
+        // release_train=false restores the per-task integration target.
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = false\n",
+        )
+        .unwrap();
+        let off = create("No train").await;
+        assert!(!off.contains("RELEASE TRAIN"), "{off}");
+        assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
+        assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -4913,17 +4956,26 @@ mod related_recall_response_tests {
                 .unwrap();
             let parent = store.get_parent_epic(&child.id).unwrap().map(|t| t.id);
             let inherits = matches!(case, "default" | "standalone-active");
+            // cas-1896: with no eligible binding the follow-up rides the release train.
+            let train = parent
+                .as_deref()
+                .and_then(|id| store.get(id).ok())
+                .filter(super::super::release_train::is_release_train);
+            let rides_train =
+                matches!(case, "no-lease" | "expired" | "blocked" | "other-agent" | "empty-epic");
+            assert_eq!(train.is_some(), rides_train, "{case}: {response}");
+            let train_lane = train.as_ref().and_then(|t| t.branch.clone()).unwrap_or_default();
             let expected_epic = match case {
                 "default" => Some(epic.id.clone()),
                 "explicit-epic" => Some(alternate.id.clone()),
-                _ => None,
+                _ => train.as_ref().map(|t| t.id.clone()),
             };
             assert_eq!(parent, expected_epic, "{case}: {response}");
             let expected_branch = match case {
                 "default" | "standalone-active" => LANE,
                 "explicit-epic" => "epic/alternate-release",
                 "explicit-target" => "release/operator",
-                _ => "main",
+                _ => train_lane.as_str(),
             };
             assert_eq!(
                 child

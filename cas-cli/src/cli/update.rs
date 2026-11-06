@@ -5310,10 +5310,11 @@ fn github_auth_token() -> Option<String> {
         }
     }
     // Fall back to `gh auth token`
-    std::process::Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()
+    crate::gh_budget::output(
+        std::process::Command::new("gh").args(["auth", "token"]),
+        std::time::Duration::from_secs(10),
+    )
+    .ok()
         .and_then(|o| {
             if o.status.success() {
                 String::from_utf8(o.stdout)

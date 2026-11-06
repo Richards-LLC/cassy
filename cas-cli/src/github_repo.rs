@@ -63,9 +63,41 @@ pub(crate) fn origin_slug(cwd: &Path, timeout: Duration) -> Result<Option<String
     )
 }
 
-/// One explicit lookup follows GitHub's rename/transfer redirect. Callers cache
-/// this result for all requests in the operation rather than resolving per SHA.
+/// How long a process trusts a resolved canonical repository. A rename or
+/// transfer is rare and GitHub keeps redirecting the old name meanwhile.
+const CANONICAL_TTL: Duration = Duration::from_secs(3600);
+
+type CanonicalCache = std::sync::Mutex<
+    std::collections::HashMap<(String, PathBuf), (std::time::Instant, ResolvedRepo)>,
+>;
+
+/// One explicit lookup follows GitHub's rename/transfer redirect. cas-c24e:
+/// the answer is cached per process, so a daemon tick, a merge or a close
+/// stops spending a GraphQL request on an identity that never changes.
+#[track_caller]
 pub(crate) fn resolve_slug(
+    origin: &str,
+    cwd: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<ResolvedRepo, String> {
+    static CACHE: std::sync::OnceLock<CanonicalCache> = std::sync::OnceLock::new();
+    let key = (origin.to_string(), binary.to_path_buf());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, repo)) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned())
+        && at.elapsed() < CANONICAL_TTL
+    {
+        return Ok(repo);
+    }
+    let repo = resolve_slug_uncached(origin, cwd, binary, timeout)?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (std::time::Instant::now(), repo.clone()));
+    }
+    Ok(repo)
+}
+
+#[track_caller]
+fn resolve_slug_uncached(
     origin: &str,
     cwd: &Path,
     binary: &Path,
@@ -91,6 +123,9 @@ pub(crate) fn resolve_slug(
                 "canonical GitHub repository lookup unavailable for origin {origin} (cannot start or capture gh)"
             ),
         })?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("canonical GitHub repository lookup for origin {origin}: {refusal}"));
+    }
     if !output.status.success() {
         // No stderr here: gh can include credentials in an error. The CI
         // receipt names the failed operation, not arbitrary provider output.
@@ -128,10 +163,154 @@ pub(crate) fn resolve_origin(
     resolve_slug(&origin, cwd, binary, timeout)
 }
 
+/// Advisory queue settings, never authorization to write a ruleset or merge.
+pub(crate) struct QueueReport {
+    pub warning: bool,
+    pub message: String,
+}
+
+/// Reuse one response for origin and queue diagnostics, including redirects.
+#[track_caller]
+pub(crate) fn repository_health(
+    origin: &str,
+    cwd: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<(ResolvedRepo, QueueReport), String> {
+    if !valid_slug(origin) {
+        return Err("GitHub merge queue unavailable: invalid origin".into());
+    }
+    let (owner, name) = origin.split_once('/').unwrap();
+    let mut command = Command::new(binary);
+    command.current_dir(cwd).env("GH_HOST", "github.com").args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("name={name}"),
+        "-f",
+        concat!(
+            "query=",
+            include_str!("../../scripts/github-queue-health.graphql")
+        ),
+    ]);
+    let output = run_command(&mut command, Deadline::after(timeout), timeout)
+        .map_err(|_| "GitHub merge queue unavailable: cannot run gh or request timed out")?;
+    // Provider stderr can carry credentials. Keep failure honest and bounded.
+    if !output.status.success() {
+        return Err(
+            "GitHub merge queue unavailable: authentication, rate limit or provider failure".into(),
+        );
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "GitHub merge queue unavailable: invalid JSON")?;
+    if value
+        .get("errors")
+        .is_some_and(|e| e.as_array().is_none_or(|e| !e.is_empty()))
+    {
+        return Err("GitHub merge queue unavailable: GraphQL error (possibly rate limited)".into());
+    }
+    let repo = value
+        .pointer("/data/repository")
+        .ok_or("GitHub merge queue unavailable: missing repository")?;
+    let canonical = repo
+        .get("nameWithOwner")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| valid_slug(s))
+        .ok_or("GitHub merge queue unavailable: invalid repository identity")?;
+    let report = queue_report(repo).unwrap_or_else(|error| QueueReport {
+        warning: true,
+        message: format!("merge queue unavailable: {error}"),
+    });
+    Ok((
+        ResolvedRepo {
+            origin: origin.into(),
+            canonical: canonical.into(),
+        },
+        report,
+    ))
+}
+
+fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
+    let branch = repo
+        .pointer("/defaultBranchRef/name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("default branch missing")?;
+    let rules = repo
+        .pointer("/defaultBranchRef/rules")
+        .ok_or("active rules missing")?;
+    if rules
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        return Err("active rules incomplete; no additional request made");
+    }
+    let nodes = rules
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("active rules missing")?;
+    let mut reports = Vec::new();
+    for rule in nodes.iter().filter(|r| r["type"] == "MERGE_QUEUE") {
+        let build = rule
+            .pointer("/parameters/maxEntriesToBuild")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("build limit missing")?;
+        let merge = rule
+            .pointer("/parameters/maxEntriesToMerge")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("merge limit missing")?;
+        let grouping = rule
+            .pointer("/parameters/groupingStrategy")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("grouping strategy missing")?;
+        if build >= 5 && merge == 1 && grouping == "ALLGREEN" {
+            continue;
+        }
+        let ruleset = &rule["repositoryRuleset"];
+        let id = ruleset["databaseId"].as_u64().ok_or("ruleset id missing")?;
+        let source = &ruleset["source"];
+        let endpoint = match source["__typename"].as_str() {
+            Some("Repository") => {
+                let slug = source["nameWithOwner"]
+                    .as_str()
+                    .filter(|s| valid_slug(s))
+                    .ok_or("ruleset source invalid")?;
+                format!("repos/{slug}/rulesets/{id}")
+            }
+            _ => return Err("ruleset source unsupported"),
+        };
+        // Print only. Read the complete current ruleset before an operator's
+        // PUT so unrelated protection, bypasses and higher build limits survive.
+        let fix = format!(
+            r#"gh api {endpoint} | jq '{{name,target,enforcement,conditions,bypass_actors,rules}} | (.rules[] | select(.type == "merge_queue").parameters) |= (.max_entries_to_build = ([.max_entries_to_build,5]|max) | .max_entries_to_merge = 1 | .min_entries_to_merge = 1 | .grouping_strategy = "ALLGREEN")' | gh api -X PUT {endpoint} --input -"#
+        );
+        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge=1, ALLGREEN. Run:\n{fix}"));
+    }
+    if !reports.is_empty() {
+        return Ok(QueueReport {
+            warning: true,
+            message: format!("merge queue drift on {branch}: {}", reports.join("; ")),
+        });
+    }
+    if !nodes.iter().any(|r| r["type"] == "MERGE_QUEUE") {
+        return Ok(QueueReport {
+            warning: false,
+            message: format!("merge queue not configured on {branch}; advisory not applicable"),
+        });
+    }
+    Ok(QueueReport {
+        warning: false,
+        message: format!("merge queue on {branch}: build>=5, merge=1, ALLGREEN"),
+    })
+}
+
 /// GitHub's nullable Repository.mergeQueue(branch) names the queue for this
 /// branch, including ruleset-backed queues. Do not infer one from workflows,
 /// plan names or branch protection alone. Provider errors are not absence.
 /// Schema: https://docs.github.com/en/graphql/reference/repos#repository
+#[track_caller]
 pub(crate) fn merge_queue_enabled(
     repo: &str,
     branch: &str,
@@ -150,6 +329,9 @@ pub(crate) fn merge_queue_enabled(
     ]);
     let output = run_command(&mut command, Deadline::after(timeout), timeout)
         .map_err(|_| "merge queue lookup unavailable or timed out".to_string())?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("merge queue lookup: {refusal}"));
+    }
     if !output.status.success() {
         return Err("merge queue lookup failed".into());
     }
@@ -209,6 +391,13 @@ mod tests {
             resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).unwrap();
         assert_eq!(resolved.canonical, "Richards-LLC/cassy");
         assert_eq!(resolved.origin, "pippenz/cas");
+        // cas-c24e: the identity is cached per process; GitHub is not asked again.
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 97\n");
+        assert_eq!(
+            resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).unwrap(),
+            resolved
+        );
+        let resolve_slug = resolve_slug_uncached;
         crate::test_paths::warm_stub(
             &gh,
             "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"bad/repo/extra\"}'\n",

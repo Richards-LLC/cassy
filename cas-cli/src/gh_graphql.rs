@@ -31,7 +31,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use crate::bounded_process::{Deadline, run_command};
+use crate::bounded_process::Deadline;
 
 /// Why a GitHub call did not produce data. Each variant is a *declared
 /// boundary* (spec §10.2), and each is worded so the message stored in
@@ -105,17 +105,21 @@ pub trait GraphQlTransport {
 /// The real transport: `gh api graphql`, bounded.
 pub struct GhCliTransport {
     timeout: Duration,
+    /// cas-c24e: the GitHub budget counts calls against where the transport
+    /// was built, not this file's trait method.
+    caller: &'static std::panic::Location<'static>,
 }
 
 impl GhCliTransport {
+    #[track_caller]
     pub fn new(timeout: Duration) -> Self {
-        Self { timeout }
+        Self { timeout, caller: std::panic::Location::caller() }
     }
 }
 
 impl GraphQlTransport for GhCliTransport {
     fn run(&self, query: &str, variables: &[(&str, String)]) -> Result<serde_json::Value, GhError> {
-        run_graphql(query, variables, self.timeout)
+        run_graphql_at(query, variables, self.timeout, self.caller)
     }
 }
 
@@ -125,10 +129,20 @@ impl GraphQlTransport for GhCliTransport {
 /// and booleans as such and everything else as a string, and — the reason it is
 /// used here rather than string-interpolating into the query — a variable value
 /// can never be read as query syntax.
+#[track_caller]
 pub fn run_graphql(
     query: &str,
     variables: &[(&str, String)],
     timeout: Duration,
+) -> Result<serde_json::Value, GhError> {
+    run_graphql_at(query, variables, timeout, std::panic::Location::caller())
+}
+
+fn run_graphql_at(
+    query: &str,
+    variables: &[(&str, String)],
+    timeout: Duration,
+    caller: &'static std::panic::Location<'static>,
 ) -> Result<serde_json::Value, GhError> {
     let mut command = Command::new("gh");
     command.args(["api", "graphql", "-f", &format!("query={query}")]);
@@ -136,7 +150,14 @@ pub fn run_graphql(
         command.args(["-F", &format!("{key}={value}")]);
     }
 
-    let output = match run_command(&mut command, Deadline::after(timeout), timeout) {
+    let output = match crate::bounded_process::run_command_at(
+        &mut command,
+        Deadline::after(timeout),
+        timeout,
+        std::process::Stdio::null(),
+        None,
+        caller,
+    ) {
         Ok(output) => output,
         Err(crate::bounded_process::BoundedCommandError::TimedOut) => return Err(GhError::TimedOut),
         Err(crate::bounded_process::BoundedCommandError::Io) => return Err(GhError::GhUnavailable),

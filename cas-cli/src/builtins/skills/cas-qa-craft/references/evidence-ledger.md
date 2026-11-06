@@ -16,6 +16,17 @@ describe what happened. Label evidence by how it was obtained; source reading
 and fixtures do not prove the real build. Telemetry findings cite saved sweep
 stdout and include all six parsed fields in the observed result.
 
+Run independent channel/viewport surfaces as separate walk-kit jobs with their
+own ledger, browser profile and test persona. `createLedger.record()` publishes
+`progress_at` for every result, including another observation of one defect;
+`write()` preserves that time. The existing factory refresh and `worker_status`
+flag flat QA output at `factory.stall_threshold_secs`, independently of native
+execution liveness. Legacy ledgers without this field report progress unknown.
+With one unfinished QA lane in the focused epic and an eligible idle worker,
+the director suggests splitting independent surfaces or cases. Held workers,
+pending messages, existing assignments and unresolved reviewer handoffs exclude
+a worker; dependent steps remain together. No additional poller is started.
+
 A `real-build` row that drives a compiled binary needs a binary of the build
 revision, and the header names it: path, `--version` output and SHA-256. Three
 sources qualify:

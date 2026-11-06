@@ -41,6 +41,7 @@ pub(crate) mod qa_rapid_response;
 mod provider_default;
 mod release_report;
 mod release_precheck;
+mod release_automation;
 pub mod deliverable;
 mod sweep;
 mod worktree;
@@ -466,6 +467,12 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ReleaseCommands {
+    /// Resolve the canonical train, or read a previous cut receipt
+    Context(release_automation::ContextArgs),
+    /// Arm durable release landing and publication reminders
+    Track(release_automation::TrackArgs),
+    /// Notify the owning supervisor after a published release is installed
+    Installed(release_automation::InstalledArgs),
     /// Validate any commit with the merge queue job set on hosted CI
     Precheck(release_precheck::ReleasePrecheckArgs),
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
@@ -1021,6 +1028,9 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Whoami => auth::execute(&AuthCommands::Whoami, cli),
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
+        Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),

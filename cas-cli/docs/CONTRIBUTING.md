@@ -2155,6 +2155,11 @@ so a refused push leaves the branch and checkout available for the PR route.
 A missing/moved PR identity or head never enables auto-merge; retry the same
 merge request after correcting the cause.
 
+## Advisory merge-queue health
+
+See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
+for setup, doctor and release-preflight diagnostics and manual repair.
+
 ## Build, assembly and CI policy
 
 Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
@@ -2693,9 +2698,9 @@ lane spanning that release's three epics ran every fast row in about 25 seconds.
   may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
   archive shards lack.
 - `version-literals`: fast mode also refuses the next patch, minor and major
-  version in the lane's changed files, comments included. The release gate
-  scans for the bumped version. Pre-existing next-version literals elsewhere
-  are printed as a NOTE.
+  version in the lane's added lines, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals, including
+  unchanged lines in touched files, are printed as a NOTE.
 - `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
 - `test-env` and `fixture-paths-src`: the environment failures.
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It
@@ -3207,6 +3212,13 @@ keys, legacy bare task directories and shared builds, and flags `DerivedData`
 and `target` build outputs stored as evidence. These sibling roots remain
 review-only even when artifact deletion is enabled for the current project.
 
+With `artifacts=true force=true dry_run=false`, GC also removes regular candidate
+files named `cas` after their task has been closed for at least 48 hours, when
+their actual SHA-256 matches a hash recorded in that task's `LEDGER.md` alongside
+a recorded `cas` version. It keeps the ledger, logs and checksum records, reports
+removed files and reclaimed bytes, and never follows symlinks. Open tasks, missing
+close dates and unrecorded or mismatched binary identities preserve the binary.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),
@@ -3602,6 +3614,10 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 4. Hotfix: branch from `main`, commit the fix and its changelog fragment,
    then `scripts/release.sh --hotfix` (the next patch version). It takes the
    same PR, queue and workflow path.
+   Release admission requires `maximumEntriesToMerge=1` and `ALLGREEN` on the
+   target queue; five or more builds can still run concurrently. The singleton
+   landing prevents another PR from changing the prebuilt release tree.
+
 5. The merge-queue run also runs `release-prebuild.yml` for a PR that changes
    the version: Linux `release-fast` and macOS ARM64 (LTO off) start at
    enqueue, in parallel with the tests, on hosted runners. They are not

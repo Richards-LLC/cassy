@@ -2552,6 +2552,7 @@ fn render_html(
     Ok(())
 }
 
+#[track_caller]
 fn gh_json(project_root: &Path, args: &[&str]) -> anyhow::Result<Value> {
     let binary = std::env::var_os("GH_BIN").unwrap_or_else(|| "gh".into());
     let mut command = Command::new(binary);

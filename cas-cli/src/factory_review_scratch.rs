@@ -404,6 +404,36 @@ fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
     Ok(owner)
 }
 
+/// cas-d4b7: positive evidence that a verifier is still building or testing
+/// at a dispatch's bound head: its capped verifier-lane checkout (dispatch or
+/// walk run) holds the lane lock, or was (re)entered within `window`. Each
+/// `verifier-test` attempt, including one refused for capacity, refreshes it.
+pub(crate) fn verifier_lane_active(
+    cas: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    head: &str,
+    now: chrono::DateTime<Utc>,
+    window: chrono::Duration,
+) -> bool {
+    let Ok(cas) = cas.canonicalize() else {
+        return false;
+    };
+    if !component(task_id) || !component(dispatch_id) || !component(head) {
+        return false;
+    }
+    [dispatch_id, "walk"].into_iter().any(|run| {
+        let directory = base(&cas).join(task_id).join(format!("{run}-{head}"));
+        let Ok(record) = owner(&cas, &directory) else {
+            return false;
+        };
+        record.head == head
+            && (record.last_used_at.is_some_and(|used| now - used <= window)
+                || crate::factory_worker_check::lane_is_busy(&cas, &directory.join("repo"))
+                    .unwrap_or(false))
+    })
+}
+
 /// Only marker-verified review paths widen capped admission beyond worker lanes.
 pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     // Match create's scratch base even when the caller uses an aliased root.

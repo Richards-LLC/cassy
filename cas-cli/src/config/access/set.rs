@@ -281,6 +281,12 @@ impl Config {
                     MemError::Parse(format!("Invalid boolean value for factory.strict_cli: {value}"))
                 })?;
             }
+            "factory.release_train" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.release_train = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.release_train: {value}"))
+                })?;
+            }
             "factory.target_cache_high_watermark_percent" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.target_cache_high_watermark_percent = value.parse().map_err(|_| {
@@ -419,15 +425,18 @@ impl Config {
                     ))
                 })?;
             }
-            "factory.design_review_bug_threshold" | "factory.design_review_window_hours" => {
+            "factory.design_review_bug_threshold" | "factory.design_review_window_hours" | "factory.release_train_max_age_hours" => {
                 let number: u32 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer for {key}: {value}")))?;
-                let maximum = if key == "factory.design_review_bug_threshold" { 1000 } else { 8760 };
+                let maximum = match key { "factory.design_review_bug_threshold" => 1000, "factory.release_train_max_age_hours" => 168, _ => 8760 };
                 if !(1..=maximum).contains(&number) {
                     return Err(MemError::Parse(format!("{key} must be between 1 and {maximum}")));
                 }
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                if key == "factory.design_review_bug_threshold" { factory.design_review_bug_threshold = number; }
-                else { factory.design_review_window_hours = number; }
+                match key {
+                    "factory.design_review_bug_threshold" => factory.design_review_bug_threshold = number,
+                    "factory.release_train_max_age_hours" => factory.release_train_max_age_hours = number,
+                    _ => factory.design_review_window_hours = number,
+                }
             }
             "factory.supervisor_message_debounce_secs" => {
                 let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_debounce_secs: {value}")))?;
@@ -482,6 +491,11 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let gate = value.trim();
                 factory.worker_local_gate = (!gate.is_empty()).then(|| gate.to_string());
+            }
+            "factory.release_command" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let command = value.trim();
+                factory.release_command = (!command.is_empty()).then(|| command.to_string());
             }
             "factory.scratch_root" => {
                 let root = value.trim();

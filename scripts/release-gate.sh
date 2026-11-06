@@ -888,7 +888,7 @@ check_version_literals() {
 # The next release's version, written into a lane before the bump, passes the
 # current-version scan at park and fails the release gate after the bump
 # (3.51.0: a comment naming the coming version). Fast mode refuses every next
-# patch, minor and major literal in the files this lane changes, and only notes
+# patch, minor and major literal in the lines this lane adds, and only notes
 # pre-existing ones elsewhere: another lane's literal is not this lane's fix.
 next_release_versions() {
     local major minor patch
@@ -909,9 +909,18 @@ check_next_version_literals() {
         esac
         changed+=("$file")
     done < <(git diff -z --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- "$@" 2>/dev/null)
-    if [[ "${#changed[@]}" -gt 0 ]]; then
-        hits="$(grep -nHIF "${patterns[@]}" -- "${changed[@]}" 2>/dev/null || true)"
-    fi
+    # A touched file can contain unrelated dependency fixtures from the base.
+    # Scan only added lines, retaining their current filename and line number.
+    hits="$(for file in "${changed[@]}"; do
+        git diff --no-ext-diff --no-textconv --no-color --unified=0 \
+            "${fast_base:-HEAD^}" -- "$file" |
+            awk -v file="$file" '
+                /^@@ / { split($3, hunk, /[+,]/); line = hunk[2]; next }
+                !line { next }
+                /^\+/ { print file ":" line ":" substr($0, 2); line++; next }
+                /^ / { line++ }
+            '
+    done | grep -IF "${patterns[@]}" || true)"
     if [[ -n "$hits" ]]; then
         printf '%s\n' "$hits"
         printf 'version-literals: this lane writes a next release version (%s); it fails the release gate once the version is bumped\n' \

@@ -39,6 +39,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
 `ready` and `available` are backlog
   visibility, not authorization.
 
+- One integration per release: fixes merge to the train, the train goes through the gate once.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
 - Worker peer lane: collision warnings only, within the same factory session
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.

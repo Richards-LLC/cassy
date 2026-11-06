@@ -707,10 +707,12 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
 }
 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
+#[track_caller]
 fn fetch_branch_ci(sha: &str, cwd: &Path, repo: &str, binary: &Path) -> GhApiOutput {
     gh_api_get(&format!("repos/{repo}/commits/{sha}/check-runs"), cwd, binary)
 }
 
+#[track_caller]
 fn gh_api_get(endpoint: &str, cwd: &Path, binary: &Path) -> GhApiOutput {
     let mut command = Command::new(binary);
     command
@@ -1704,6 +1706,21 @@ fn restore_unreviewed_protected_merge(
     match super::premerge_verification::restore_unpublished_merge(operations, target, base, sha) {
         Ok(()) => format!("Unconfirmed merge restored locally to {base}. Source retained for the PR route."),
         Err(error) => format!("Local rollback declined: {error}. Concurrent history and working edits were preserved; inspect the target before retrying."),
+    }
+}
+
+/// A refused landing owns only the local merge made by this attempt.
+fn restore_refused_landing(
+    operations: &crate::worktree::GitOperations,
+    target: &str,
+    base: Option<&str>,
+    attempted: &str,
+    refusal: String,
+) -> String {
+    let Some(base) = base else { return refusal };
+    match super::premerge_verification::restore_unpublished_merge(operations, target, base, attempted) {
+        Ok(()) => format!("{refusal}. Unpublished local merge restored to {base}."),
+        Err(error) => format!("{refusal}. Local rollback declined: {error}. Inspect the target before retrying."),
     }
 }
 
@@ -5859,7 +5876,9 @@ impl CasCore {
                 });
             if reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
                 approval.verify_landing(&target_tip)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                        manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), &target_tip, error,
+                    )))?;
             }
             let push_outcome = if let Some((_, published)) = reconciled_publication.as_ref() {
                 crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha: published.clone() }
@@ -6029,7 +6048,9 @@ impl CasCore {
             let landed = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
             approval.verify_landing(&landed)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                    manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), &landed, error,
+                )))?;
             Some(landed)
         } else { None };
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {

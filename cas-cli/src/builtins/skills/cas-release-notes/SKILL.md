@@ -16,6 +16,8 @@ User-thread words the lint refuses (whole words/phrases, case-insensitive):
 `registration`, `harness`, `agent`, `factory`, `worker`,
 `supervisor`, `daemon`, `epic`, `lane`.
 
+Plural forms are refused too, including `registrations`.
+
 Top-level punch: at most 25 words.
 Visible line: at most 300 characters; a `<url|label>` link counts as its label.
 <!-- release-lint:end -->

@@ -22,15 +22,20 @@ use crate::mcp::tools::types::TaskCreateRequest;
 use crate::types::{Task, TaskStatus, TaskType};
 
 pub(crate) const RELEASE_TRAIN_LABEL: &str = "release-train";
+pub(crate) const RELEASE_TRAIN_CUT_LABEL: &str = "release-train-cut";
 const RELEASE_TRAIN_TITLE: &str = "Release train vNEXT";
 
 pub(crate) fn is_release_train(task: &Task) -> bool {
     task.task_type == TaskType::Epic && task.labels.iter().any(|l| l == RELEASE_TRAIN_LABEL)
 }
 
-/// Open trains bound for `integration`, oldest first. A train cut for another
+pub(crate) fn is_cut_train(task: &Task) -> bool {
+    is_release_train(task) && task.labels.iter().any(|label| label == RELEASE_TRAIN_CUT_LABEL)
+}
+
+/// Active trains bound for `integration`, oldest first. A train cut for another
 /// integration branch (the setting changed) is left for its owner to land.
-pub(crate) fn open_trains(store: &dyn cas_store::TaskStore, integration: &str) -> Vec<Task> {
+pub(crate) fn active_trains(store: &dyn cas_store::TaskStore, integration: &str) -> Vec<Task> {
     let mut trains: Vec<Task> = store
         .list(None)
         .unwrap_or_default()
@@ -47,6 +52,12 @@ pub(crate) fn open_trains(store: &dyn cas_store::TaskStore, integration: &str) -
         .collect();
     trains.sort_by_key(|task| task.created_at);
     trains
+}
+
+/// Trains still accepting new work. A cut train remains active for its
+/// landing/installation receipts, but the next task opens another train.
+pub(crate) fn open_trains(store: &dyn cas_store::TaskStore, integration: &str) -> Vec<Task> {
+    active_trains(store, integration).into_iter().filter(|train| !is_cut_train(train)).collect()
 }
 
 fn ref_exists(repo: &Path, refname: &str) -> bool {
@@ -77,9 +88,10 @@ fn landed(store: &dyn cas_store::TaskStore, repo: &Path, train: &Task, integrati
     {
         return false;
     }
-    let Some(lane) = train.effective_epic_branch() else {
-        return false;
-    };
+    train.effective_epic_branch().is_some_and(|lane| lane_landed(repo, lane, integration))
+}
+
+fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
     let lane_refs: Vec<String> = [lane.to_string(), format!("origin/{lane}")]
         .into_iter()
         .filter(|candidate| ref_exists(repo, candidate))
@@ -96,6 +108,26 @@ fn landed(store: &dyn cas_store::TaskStore, repo: &Path, train: &Task, integrati
                     BranchContentDirection::ContentPresent { .. }
                 )
         })
+}
+
+/// Checked at target resolution and again under the delivery-target lock.
+/// Release tracking takes that same lock before persisting the cut marker.
+pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), String> {
+    let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
+    for train in store.list(None).map_err(|error| error.to_string())? {
+        if !is_cut_train(&train) {
+            continue;
+        }
+        let Some(lane) = train.effective_epic_branch() else { continue };
+        if super::repo_context::effective_epic_ref(cas_root, lane) != target {
+            continue;
+        }
+        return Err(format!(
+            "RELEASE TRAIN CUT: {target} ({}) is frozen and accepts no further merges. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
+            train.id
+        ));
+    }
+    Ok(())
 }
 
 /// Exclusive lock over train lookup, landing and opening (the
@@ -149,8 +181,11 @@ impl CasCore {
             }
         };
         let mut receipt = String::new();
-        for train in open_trains(store, &integration) {
+        for train in active_trains(store, &integration) {
             if !landed(store, &repo, &train, &integration) {
+                if is_cut_train(&train) {
+                    continue;
+                }
                 return (
                     Some(train.id.clone()),
                     format!(

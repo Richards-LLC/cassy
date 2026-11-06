@@ -6,7 +6,8 @@ use cas_types::Event;
 use crate::store::{find_cas_root_ignoring_env, open_prompt_queue_store};
 
 use crate::bridge::server::types::{
-    AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicProgressJson, StatusJson,
+    AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicCountsJson, EpicProgressJson,
+    StatusJson,
     TaskSummaryJson, session_json,
 };
 
@@ -102,6 +103,7 @@ pub(crate) fn task_summary_json(
         delivery_state: None,
         merge_check_pending: t.status == cas_types::TaskStatus::AwaitingMerge,
         progress: None,
+        counts: None,
         branch: t.branch,
         updated_at: t.updated_at.map(|at| at.to_rfc3339()),
         tip,
@@ -159,6 +161,7 @@ pub(crate) fn build_status_json(
     let agents = session_agents(session, cas_root, task_store.as_ref(), &held)?;
 
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
+    let counts = epic_counts(&data);
 
     let queue = open_prompt_queue_store(cas_root)?;
     let pending = queue.pending_count()?;
@@ -177,11 +180,42 @@ pub(crate) fn build_status_json(
         agents,
         tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
         tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
-        epics: data.epic_tasks.into_iter().map(to_task).collect(),
+        epics: data
+            .epic_tasks
+            .into_iter()
+            .map(|epic| {
+                let split = counts.get(&epic.id).copied().unwrap_or_default();
+                TaskSummaryJson { counts: Some(split), ..to_task(epic) }
+            })
+            .collect(),
         focused_epic: crate::ops::fleet::pinned_epic(&session.name),
     };
     project_deliveries(&mut status, cas_root, Some(task_store.as_ref()));
     Ok(status)
+}
+
+/// Every epic's child split from the snapshot already loaded, in one pass:
+/// the TUI's open (ready) and in-progress (in progress or parked) lists, and
+/// its delivered-closure count as merged. No proof budget can starve it.
+fn epic_counts(
+    data: &DirectorData,
+) -> std::collections::HashMap<String, EpicCountsJson> {
+    let mut counts: std::collections::HashMap<String, EpicCountsJson> = data
+        .epic_closed_counts
+        .iter()
+        .map(|(epic, &merged)| (epic.clone(), EpicCountsJson { merged, ..Default::default() }))
+        .collect();
+    for task in &data.ready_tasks {
+        if let Some(epic) = &task.epic {
+            counts.entry(epic.clone()).or_default().open += 1;
+        }
+    }
+    for task in &data.in_progress_tasks {
+        if let Some(epic) = &task.epic {
+            counts.entry(epic.clone()).or_default().in_progress += 1;
+        }
+    }
+    counts
 }
 
 /// Read the selected session directly, independent of the hub process's own
@@ -447,7 +481,12 @@ fn project_deliveries(
     let mut order: Vec<_> = (0..status.epics.len()).collect();
     order.sort_by_key(|&index| {
         let epic = Some(status.epics[index].id.as_str());
-        (status.focused_epic.as_deref() != epic, active_epic != epic)
+        // Every epic with work in progress precedes idle history, so a
+        // live epic's merge timing is never starved by old catalog rows.
+        let live = status.epics[index]
+            .counts
+            .is_some_and(|counts| counts.in_progress > 0);
+        (status.focused_epic.as_deref() != epic, active_epic != epic, !live)
     });
     for index in order {
         if started.elapsed() >= std::time::Duration::from_secs(2) {
@@ -1190,6 +1229,12 @@ mod focused_epic_tests {
             .unwrap()["progress"];
         assert_eq!(progress["total"], 37);
         assert_eq!(progress["merged"], 34);
+        // cas-9b99: every epic carries the TUI's split, past the proof budget.
+        let counts = |id: &str| status["epics"].as_array().unwrap().iter()
+            .find(|item| item["id"] == id).unwrap()["counts"].clone();
+        assert_eq!(counts(&epic.id), serde_json::json!({"open": 1, "in_progress": 36, "merged": 0}));
+        assert_eq!(counts("cas-history-0"), serde_json::json!({"open": 0, "in_progress": 1, "merged": 0}));
+        assert_eq!(counts("cas-history-295"), serde_json::json!({"open": 0, "in_progress": 0, "merged": 0}));
         assert_eq!(progress["merges_per_hour"], 33);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()

@@ -1352,7 +1352,7 @@ mod supervisor_handoff_tests {
                 let row = queue.queued_prompt(*id).unwrap().unwrap();
                 assert_eq!((row.target.as_str(), row.factory_session.as_deref()),
                     (successor, Some(next_session)), "row {id} must survive the ended recipient");
-                assert_eq!(&row.prompt, body, "preserve original content and routing instructions");
+                assert_eq!(&row.prompt, body);
                 assert!(row.processed_at.is_none(), "retargeting is not delivery");
             }
             for (id, target, session) in retained {

@@ -287,6 +287,53 @@ pub(crate) fn reclaim_scratch_for_admission(
     Ok(report)
 }
 
+/// cas-49163: a worker target unbuilt this long is idle for [`reclaim_idle`],
+/// even when the configured pressure-time window is longer.
+const IDLE_RECLAIM_SECS: u64 = 30 * 60;
+
+/// cas-49163: reclaim idle relocated worker targets and resolved review walks
+/// without waiting for the admission watermark. Runs after every park and on
+/// the canonical daemon's retention tick. Selection ignores disk pressure and
+/// does not stop at the low watermark; the newest `retention_count` idle
+/// caches stay warm, and every ownership, lock and process guard of
+/// [`cleanup_selected`] still applies.
+pub(crate) fn reclaim_idle(cas_root: &Path) -> io::Result<TargetCacheReport> {
+    reclaim_idle_at(cas_root, Path::new("/proc"))
+}
+
+pub(crate) fn reclaim_idle_at(cas_root: &Path, proc_root: &Path) -> io::Result<TargetCacheReport> {
+    let config = crate::config::Config::load(cas_root)
+        .map_err(io::Error::other)?
+        .factory();
+    let mut policy = TargetCachePolicy::from(&config);
+    policy.min_idle_secs = policy.min_idle_secs.min(IDLE_RECLAIM_SECS);
+    let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
+    let mut report =
+        inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, capacity_status, None, None)?;
+    for cache in &mut report.caches {
+        if cache.disposition == CacheDisposition::Eligible {
+            cache.disposition = CacheDisposition::Selected;
+            cache.reason = "idle beyond the reclaim window; selected without disk pressure".into();
+        }
+    }
+    report.selected_bytes = report
+        .caches
+        .iter()
+        .filter(|cache| cache.disposition == CacheDisposition::Selected)
+        .map(|cache| cache.bytes)
+        .sum();
+    cleanup_selected_with_capacity(cas_root, &mut report, policy, &[], None, proc_root, None)?;
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(review_bytes);
+    if report.reclaimed_bytes > 0 {
+        tracing::info!(
+            gb_freed = format!("{:.1}", report.reclaimed_bytes as f64 / f64::from(1u32 << 30)),
+            review_bytes,
+            "idle target caches reclaimed"
+        );
+    }
+    Ok(report)
+}
+
 fn inspect_scoped_with_probe(
     cas_root: &Path,
     policy: TargetCachePolicy,
@@ -720,8 +767,9 @@ fn cleanup_selected_with_capacity(
         let descriptors = guard
             .as_ref()
             .map_or_else(Vec::new, legacy::Guard::descriptors);
+        let probe_root = probe_root(&record.worktree, &record.path);
         if let Some(disposition) = process_block_at(
-            &record.worktree,
+            probe_root,
             &record.path,
             &descriptors,
             guard.is_some() && !explicit_unknown,
@@ -780,7 +828,7 @@ fn cleanup_selected_with_capacity(
             }
         }
         let process_block =
-            process_block_at(&record.worktree, &quarantine, &descriptors, guard.is_some() && !explicit_unknown, proc_root);
+            process_block_at(probe_root, &quarantine, &descriptors, guard.is_some() && !explicit_unknown, proc_root);
         if guard
             .as_ref()
             .is_some_and(|guard| !guard.unchanged(&quarantine))
@@ -1549,8 +1597,11 @@ fn cache_admission_at(
                     )
                 })?;
         }
+        // cas-49163: a relocated target is in use only by a process using the
+        // target itself (cargo's lock, rustc output, a test binary). A worker's
+        // MCP server or shell working in the checkout does not keep it warm.
         if let Some(disposition) =
-            process_block_at(worktree, cache, &[], cfg!(target_os = "linux"), proc_root)
+            process_block_at(cache, cache, &[], cfg!(target_os = "linux"), proc_root)
         {
             return Err((
                 disposition,
@@ -1567,7 +1618,7 @@ fn cache_admission_at(
             )
         })?;
         if let Some(disposition) = process_block_at(
-            worktree,
+            cache,
             cache,
             &guard.descriptors(),
             cfg!(target_os = "linux"),
@@ -1694,6 +1745,13 @@ fn linux_process_block(
     }
 }
 
+/// Process-evidence prefix for `cache`: the cache itself for a relocated
+/// target (it shares nothing with the checkout), else the owning checkout.
+/// After a quarantine rename the original path stays a probed prefix.
+fn probe_root<'a>(worktree: &'a Path, cache: &'a Path) -> &'a Path {
+    if relocated_target(worktree, cache) { cache } else { worktree }
+}
+
 fn process_block_at(
     worktree: &Path,
     cache: &Path,
@@ -1737,19 +1795,6 @@ pub(crate) fn review_output_in_use(path: &Path, lease: &fs::File) -> bool {
 
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
     process_uses(worktree, cache, None)
-}
-
-fn output_in_use(cache: &Path, eviction_lock: &fs::File) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        process_uses(cache, cache, Some(eviction_lock.as_raw_fd()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (cache, eviction_lock);
-        true
-    }
 }
 
 fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool {
@@ -2111,6 +2156,85 @@ mod tests {
         assert!(!quarantine.exists(), "interrupted scratch quarantine must be reclaimed");
         let rendered = crate::factory_scratch::render_relocated(&cas);
         assert!(rendered.contains(&unmanaged.display().to_string()), "unmanaged scratch review item absent: {rendered}");
+    }
+
+    /// cas-49163: without disk pressure, an idle worker target is reclaimed
+    /// past 30 minutes even though the configured window is 2 hours, despite an
+    /// unreadable process and an MCP server working in its checkout. A test
+    /// binary running from a target, a recent build and the newest idle cache
+    /// are kept.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_reclaim_frees_quiet_targets_without_pressure_cas_49163() {
+        use std::os::unix::fs::symlink;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let cas = env.home().join("repo/.cas");
+        let scratch = env.home().join("scratch");
+        fs::create_dir_all(cas.join("worktrees")).unwrap();
+        fs::write(
+            cas.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let mut targets = Vec::new();
+        for (name, minutes) in [("recent", 10), ("warm", 35), ("idle", 45), ("busy", 60)] {
+            let worker = cas.join("worktrees").join(name);
+            fs::create_dir_all(&worker).unwrap();
+            drop(owner::acquire(&cas, &worker).unwrap().unwrap());
+            let target = crate::factory_scratch::worker_target_dir(&worker);
+            fs::create_dir_all(target.join("debug/deps")).unwrap();
+            fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+            fs::write(target.join("debug/deps/integration-1"), vec![0u8; 32]).unwrap();
+            let time = filetime::FileTime::from_system_time(
+                SystemTime::now() - Duration::from_secs(minutes * 60),
+            );
+            for entry in WalkDir::new(&target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), time).unwrap();
+            }
+            targets.push((worker, target));
+        }
+        // Fake process table: an unreadable (other user's) process, an MCP
+        // server working in the idle checkout, and a test binary of `busy`.
+        let proc_root = env.home().join("proc");
+        let busy_binary = targets[3].1.join("debug/deps/integration-1");
+        for (pid, cwd, exe) in [
+            (4_000_001, None, None),
+            (4_000_002, Some(targets[2].0.clone()), Some(PathBuf::from("/usr/bin/cas"))),
+            (4_000_003, Some(PathBuf::from("/")), Some(busy_binary)),
+        ] {
+            let process = proc_root.join(pid.to_string());
+            fs::create_dir_all(process.join("fd")).unwrap();
+            fs::write(process.join("stat"), format!("{pid} (fixture) S 0 0 0 0 0 0")).unwrap();
+            fs::write(process.join("cmdline"), b"fixture\0").unwrap();
+            fs::write(process.join("maps"), b"").unwrap();
+            for (link, path) in [("cwd", cwd), ("exe", exe)] {
+                match path {
+                    Some(path) => symlink(path, process.join(link)).unwrap(),
+                    None => fs::create_dir(process.join(link)).unwrap(),
+                }
+            }
+        }
+
+        let report = reclaim_idle_at(&cas, &proc_root).unwrap();
+
+        let disposition = |target: &Path| {
+            report.caches.iter().find(|record| record.path == target).unwrap().disposition
+        };
+        assert_eq!(
+            targets.iter().map(|(_, target)| disposition(target)).collect::<Vec<_>>(),
+            [
+                CacheDisposition::RecentWrite,
+                CacheDisposition::Retained,
+                CacheDisposition::Reclaimed,
+                CacheDisposition::LiveProcess,
+            ]
+        );
+        assert!(!targets[2].1.exists(), "idle target must be deleted");
+        assert!(report.reclaimed_bytes >= 32);
+        for index in [0, 1, 3] {
+            assert!(targets[index].1.join("debug/deps/integration-1").exists());
+        }
+        assert!(targets[2].0.exists(), "the checkout itself is never touched");
     }
 
     #[cfg(unix)]

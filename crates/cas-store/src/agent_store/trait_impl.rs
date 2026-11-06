@@ -18,6 +18,17 @@ impl AgentStore for SqliteAgentStore {
     fn unregister(&self, id: &str) -> Result<()> {
         self.agent_unregister(id)
     }
+    fn session_machine(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        Ok(conn.query_row(
+            "SELECT COALESCE(
+                (SELECT machine_id FROM agents WHERE id=?1),
+                (SELECT machine_id FROM agent_session_ends WHERE agent_id=?1 ORDER BY ended_at DESC LIMIT 1)
+            )",
+            [session_id],
+            |row| row.get(0),
+        )?)
+    }
     fn list(&self, status: Option<AgentStatus>) -> Result<Vec<Agent>> {
         self.agent_list(status)
     }

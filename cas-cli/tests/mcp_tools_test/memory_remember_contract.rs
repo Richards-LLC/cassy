@@ -339,6 +339,23 @@ async fn a_new_handoff_supersedes_only_its_machine_cas_a042() {
 
     test_env.remove("CAS_AGENT_ROLE");
     let peer_store = open_store(&temp.path().join(".cas")).unwrap();
+    let authors = cas::store::open_agent_store(&temp.path().join(".cas")).unwrap();
+    let mut author = cas::types::Agent::new_with_role("legacy-local-author".into(), "author".into(), cas::types::AgentRole::Supervisor);
+    author.machine_id = Some(cas::types::Agent::get_or_generate_machine_id());
+    authors.register(&author).unwrap();
+    authors.unregister(&author.id).unwrap();
+    peer_store.add(&cas::types::Entry {
+        id: "legacy-local-handoff".into(), session_id: Some(author.id),
+        tags: vec!["handoff".into(), "role:supervisor".into()],
+        content: "Local predecessor without a host tag".into(),
+        created: chrono::Utc::now(), ..Default::default()
+    }).unwrap();
+    peer_store.add(&cas::types::Entry {
+        id: "unattributed-handoff".into(),
+        tags: vec!["handoff".into(), "role:supervisor".into()],
+        content: "Unattributed legacy handoff".into(),
+        created: chrono::Utc::now(), ..Default::default()
+    }).unwrap();
     peer_store.add(&cas::types::Entry {
         id: "peer-handoff".into(),
         tags: vec!["handoff".into(), "role:supervisor".into(), "host:peer-machine".into()],
@@ -437,6 +454,8 @@ async fn a_new_handoff_supersedes_only_its_machine_cas_a042() {
     );
     assert_eq!(second.valid_until, None);
 
+    assert!(store.get("legacy-local-handoff").unwrap().valid_until.is_some());
+    assert!(store.get("unattributed-handoff").unwrap().valid_until.is_none());
     assert!(store.get("peer-handoff").unwrap().valid_until.is_none(), "another machine's current handoff survives");
     assert!(second.tags.contains(&format!("host:{}", cas::types::Agent::get_or_generate_machine_id())));
 

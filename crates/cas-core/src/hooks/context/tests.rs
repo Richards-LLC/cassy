@@ -795,6 +795,8 @@ fn session_start_uses_local_handoff_and_labels_peer_cas_a042() {
     agents.unregister(&author.id).unwrap();
     for memory in [
         entry("handoff-peer", 0, &["handoff", "role:supervisor", "host:peer-machine"], "PEER BODY MUST NOT BE INJECTED"),
+        Entry { session_id: Some("foreign-legacy-author".into()),
+            ..entry("handoff-unattributed", 0, &["handoff", "role:supervisor"], "UNATTRIBUTED BODY MUST NOT BE INJECTED") },
         entry(
             "handoff-old",
             600,
@@ -871,6 +873,8 @@ fn session_start_uses_local_handoff_and_labels_peer_cas_a042() {
     assert!(supervisor.contains("Peer handoff (peer-machine)"), "{supervisor}");
     assert!(supervisor.contains("handoff-peer"), "{supervisor}");
     assert!(!supervisor.contains("PEER BODY MUST NOT BE INJECTED"), "{supervisor}");
+    assert!(supervisor.contains("Other handoff (unknown host)"), "{supervisor}");
+    assert!(!supervisor.contains("UNATTRIBUTED BODY MUST NOT BE INJECTED"), "{supervisor}");
 }
 
 #[test]

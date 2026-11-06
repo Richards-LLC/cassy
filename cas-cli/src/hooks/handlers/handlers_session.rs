@@ -1304,7 +1304,7 @@ mod large_artifact_staging_tests {
             let mut handoff =
                 crate::types::Entry::new(format!("budget-handoff-{role}"), handoff_body.clone());
             handoff.title = Some(format!("{role} handoff: audit fixes in flight"));
-            handoff.tags = vec!["handoff".to_string(), format!("role:{role}")];
+            handoff.tags = vec!["handoff".to_string(), format!("role:{role}"), format!("host:{}", crate::types::Agent::get_or_generate_machine_id())];
             store.add(&handoff).unwrap();
         }
         let knowledge = SqliteKnowledgeStore::open(tmp.path()).unwrap();
@@ -1418,12 +1418,12 @@ mod large_artifact_staging_tests {
                  budget; Claude Code would file it to disk and show a ~2 KB preview",
                 context.len()
             );
-            assert!(
-                context.contains("Current Handoff"),
+            assert_eq!(
+                context.contains("Current Handoff"), role != Some("worker"),
                 "{label} lost the handoff pointer entirely: {context}"
             );
-            assert!(
-                context.contains("### budget-handoff-"),
+            assert_eq!(
+                context.contains("### budget-handoff-"), role != Some("worker"),
                 "{label} must retain the saved handoff id: {context}"
             );
             match role {

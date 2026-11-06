@@ -863,7 +863,8 @@ impl CasCore {
             && let Ok(existing) = store.list()
         {
             let now = chrono::Utc::now();
-            for previous in handoff::handoffs_superseded_by(&existing, &id, role) {
+            let agents = crate::store::open_agent_store(&self.cas_root).ok();
+            for previous in handoff::handoffs_superseded_by(&existing, &id, role, agents.as_deref()) {
                 let mut previous = previous.clone();
                 handoff::mark_superseded(&mut previous, &id, now);
                 match store.update(&previous) {
@@ -882,7 +883,7 @@ impl CasCore {
 
         let mut msg = format!("Created entry: {id}");
         if let Some(role) = handoff_role.as_deref() {
-            msg.push_str(&format!("\nCurrent {role} handoff for this project."));
+            msg.push_str(&format!("\nCurrent {role} handoff for this project on this machine."));
             let verdicts = crate::quality_ledger::handoff_saved(
                 &self.cas_root,
                 &id,

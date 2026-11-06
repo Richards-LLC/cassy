@@ -388,50 +388,77 @@ pub fn build_context_with_stores(
         .filter(|role| !role.trim().is_empty())
         .or_else(|| crate::env_overlay::var("CAS_AGENT_ROLE").ok());
     let session_role = handoff::normalize_role(role_hint.as_deref());
-    if let Some(store) = stores.primary_store()
+    // Worker task briefs carry their assigned work; a role-wide handoff can
+    // belong to another worker/task and must not become startup instructions.
+    if session_role != "worker"
+        && let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()
-        && let Some(current) = handoff::current_handoff(&project_entries, &session_role)
     {
-        if !context_parts.is_empty() {
+        if let Some(current) = handoff::current_handoff(&project_entries, &session_role, stores.agent_store) {
+            if !context_parts.is_empty() {
+                context_parts.push(String::new());
+            }
+            context_parts.push(format!("## 🔁 Current Handoff ({session_role})"));
             context_parts.push(String::new());
+            context_parts.push(format!(
+                "### {} — saved {}",
+                current.id,
+                current.format_created("%Y-%m-%d %H:%MZ")
+            ));
+            if let Some(title) = current
+                .title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty())
+            {
+                context_parts.push(format!("**{title}**"));
+            }
+            context_parts.push(String::new());
+            let body = truncate(&current.content, HANDOFF_BODY_MAX_CHARS);
+            let cut = body.len() < current.content.len();
+            // The SessionStart budget splits the payload at `## ` headings, so a
+            // heading inside the handoff body would detach the rest of the body
+            // from the degradable handoff section. Demote them below `###`.
+            let body = demote_body_headings(&body);
+            total_tokens += estimate_tokens(&body) + 30;
+            context_parts.push(body);
+            context_parts.push(String::new());
+            context_parts.push(if cut {
+                format!(
+                    "_Handoff truncated. Read it in full with `mcp__cas__memory` (action: get, id: {}). Older handoffs are superseded and kept as history._",
+                    current.id
+                )
+            } else {
+                "_Newest handoff for this role on this machine. Older handoffs are superseded and kept as history._"
+                    .to_string()
+            });
+            // The handoff is its own feature, not a ranked memory: reporting it
+            // as "memory" counted it as session_context injection (cas-71b2).
+            if let Some(callback) = on_surfaced {
+                callback(&current.id, "handoff", Some(&current.preview(60)));
+            }
         }
-        context_parts.push(format!("## 🔁 Current Handoff ({session_role})"));
-        context_parts.push(String::new());
-        context_parts.push(format!(
-            "### {} — saved {}",
-            current.id,
-            current.format_created("%Y-%m-%d %H:%MZ")
-        ));
-        if let Some(title) = current
-            .title
-            .as_deref()
-            .filter(|title| !title.trim().is_empty())
+        let local_machine = cas_types::Agent::get_or_generate_machine_id().to_ascii_lowercase();
+        let mut peers: std::collections::BTreeMap<String, &Entry> = Default::default();
+        for entry in project_entries.iter().filter(|entry| handoff::is_handoff(entry)
+            && !handoff::is_superseded(entry) && handoff::handoff_role(entry) == session_role)
         {
-            context_parts.push(format!("**{title}**"));
+            let machine = handoff::handoff_machine(entry, stores.agent_store).unwrap_or_else(|| "unknown host".into());
+            if machine == local_machine { continue; }
+            if peers.get(&machine).is_none_or(|old| (&entry.created, &entry.id) > (&old.created, &old.id)) {
+                peers.insert(machine, entry);
+            }
         }
-        context_parts.push(String::new());
-        let body = truncate(&current.content, HANDOFF_BODY_MAX_CHARS);
-        let cut = body.len() < current.content.len();
-        // The SessionStart budget splits the payload at `## ` headings, so a
-        // heading inside the handoff body would detach the rest of the body
-        // from the degradable handoff section. Demote them below `###`.
-        let body = demote_body_headings(&body);
-        total_tokens += estimate_tokens(&body) + 30;
-        context_parts.push(body);
-        context_parts.push(String::new());
-        context_parts.push(if cut {
-            format!(
-                "_Handoff truncated. Read it in full with `mcp__cas__memory` (action: get, id: {}). Older handoffs are superseded and kept as history._",
-                current.id
-            )
-        } else {
-            "_Newest handoff for this role. Older handoffs are superseded and kept as history._"
-                .to_string()
-        });
-        // The handoff is its own feature, not a ranked memory: reporting it
-        // as "memory" counted it as session_context injection (cas-71b2).
-        if let Some(callback) = on_surfaced {
-            callback(&current.id, "handoff", Some(&current.preview(60)));
+        if !peers.is_empty() {
+            context_parts.push(format!("## Peer Handoffs ({session_role})"));
+            for (machine, entry) in peers {
+                let title = entry.title.as_deref().unwrap_or("untitled handoff")
+                    .split_whitespace().collect::<Vec<_>>().join(" ");
+                let label = if machine == "unknown host" { "Other handoff" } else { "Peer handoff" };
+                let line = format!("- {label} ({machine}): {} — {}", entry.id, truncate(&title, 120));
+                total_tokens += estimate_tokens(&line);
+                context_parts.push(line);
+            }
+            context_parts.push(String::new());
         }
     }
 

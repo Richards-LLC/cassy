@@ -1,4 +1,4 @@
-//! Session handoffs: one current handoff per project and role (GH #992,
+//! Session handoffs: one current handoff per project, machine and role (GH #992,
 //! cas-0339).
 //!
 //! A handoff is the note an outgoing session leaves for the next one. It is a
@@ -8,7 +8,7 @@
 //! lives in.
 //!
 //! Handoffs are never merged or overwritten. Saving a new one *supersedes* the
-//! previous current handoff for the same role: the old entry keeps its content
+//! previous current handoff for the same machine and role: the old entry keeps its content
 //! as history but gains a `superseded` tag and a `superseded-by:<id>` link, its
 //! validity ends, and it drops out of the active tier. Session start injects
 //! only the newest non-superseded handoff for the session's role, and never
@@ -64,14 +64,30 @@ pub fn is_superseded(entry: &Entry) -> bool {
     entry.archived || entry.is_expired()
 }
 
-/// The current handoff for `role` among `entries`: the newest handoff of that
-/// role that is not superseded. Ties on `created` go to the larger id, so the
-/// choice is stable.
-pub fn current_handoff<'a>(entries: &'a [Entry], role: &str) -> Option<&'a Entry> {
+fn host_tag(tag: &str) -> Option<&str> {
+    let (kind, value) = tag.trim().split_once(':')?;
+    kind.eq_ignore_ascii_case("host").then_some(value.trim())
+}
+
+/// Saved host, or the local author's retained identity for legacy handoffs.
+/// Unknown authors are never assumed to belong to the reading machine.
+pub fn handoff_machine(entry: &Entry, agents: Option<&dyn cas_store::AgentStore>) -> Option<String> {
+    entry.tags.iter().find_map(|tag| host_tag(tag).filter(|host| !host.is_empty()).map(str::to_string))
+        .or_else(|| agents?.session_machine(entry.session_id.as_deref()?).ok().flatten())
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+}
+
+/// Newest unsuperseded handoff for this role and machine. Legacy entries need
+/// attributable author provenance; peer/unscoped bodies are never current.
+pub fn current_handoff<'a>(
+    entries: &'a [Entry], role: &str, agents: Option<&dyn cas_store::AgentStore>,
+) -> Option<&'a Entry> {
     let role = normalize_role(Some(role));
-    entries
-        .iter()
+    let machine = cas_types::Agent::get_or_generate_machine_id().to_ascii_lowercase();
+    entries.iter()
         .filter(|entry| is_handoff(entry) && !is_superseded(entry) && handoff_role(entry) == role)
+        .filter(|entry| handoff_machine(entry, agents).as_deref() == Some(machine.as_str()))
         .max_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)))
 }
 
@@ -92,6 +108,9 @@ pub fn tag_new_handoff(tags: &mut Vec<String>, role: Option<&str>) -> String {
     if !has_role {
         tags.push(format!("{ROLE_TAG_PREFIX}{}", normalize_role(role)));
     }
+    // The saving server is authoritative, including when caller tags name a peer.
+    tags.retain(|tag| host_tag(tag).is_none());
+    tags.push(format!("host:{}", cas_types::Agent::get_or_generate_machine_id()));
     let probe = Entry {
         tags: tags.clone(),
         ..Default::default()
@@ -100,13 +119,16 @@ pub fn tag_new_handoff(tags: &mut Vec<String>, role: Option<&str>) -> String {
 }
 
 /// The handoffs a new handoff `new_id` of `role` supersedes: every other
-/// current handoff of the same role.
+/// current handoff of the same role and attributable machine.
 pub fn handoffs_superseded_by<'a>(
     entries: &'a [Entry],
     new_id: &str,
     role: &str,
+    agents: Option<&dyn cas_store::AgentStore>,
 ) -> Vec<&'a Entry> {
     let role = normalize_role(Some(role));
+    let Some(machine) = entries.iter().find(|entry| entry.id == new_id)
+        .and_then(|entry| handoff_machine(entry, agents)) else { return Vec::new() };
     entries
         .iter()
         .filter(|entry| {
@@ -114,6 +136,7 @@ pub fn handoffs_superseded_by<'a>(
                 && is_handoff(entry)
                 && !is_superseded(entry)
                 && handoff_role(entry) == role
+                && handoff_machine(entry, agents).as_deref() == Some(machine.as_str())
         })
         .collect()
 }
@@ -151,7 +174,13 @@ mod tests {
     fn handoff(id: &str, minutes_ago: i64, tags: &[&str], content: &str) -> Entry {
         Entry {
             id: id.to_string(),
-            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            tags: {
+                let mut tags: Vec<String> = tags.iter().map(|tag| tag.to_string()).collect();
+                if !tags.iter().any(|tag| host_tag(tag).is_some()) {
+                    tags.push(format!("host:{}", cas_types::Agent::get_or_generate_machine_id()));
+                }
+                tags
+            },
             content: content.to_string(),
             created: Utc::now() - Duration::minutes(minutes_ago),
             ..Default::default()
@@ -177,15 +206,15 @@ mod tests {
             handoff("note", 1, &["summary"], "not a handoff"),
         ];
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", None).map(|e| e.id.as_str()),
             Some("new")
         );
         assert_eq!(
-            current_handoff(&entries, "Worker").map(|e| e.id.as_str()),
+            current_handoff(&entries, "Worker", None).map(|e| e.id.as_str()),
             Some("worker")
         );
         assert_eq!(
-            current_handoff(&entries, "director").map(|e| e.id.as_str()),
+            current_handoff(&entries, "director", None).map(|e| e.id.as_str()),
             None
         );
     }
@@ -209,12 +238,12 @@ mod tests {
             },
         ];
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", None).map(|e| e.id.as_str()),
             Some("legacy")
         );
         entries[2].tags.push("superseded-by:later".into());
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", None).map(|e| e.id.as_str()),
             Some("keep")
         );
     }
@@ -233,8 +262,8 @@ mod tests {
             handoff("peer", 1, &["handoff", "role:supervisor", "host:peer-machine"], "peer"),
             handoff("sup-new", 0, &["handoff", "role:supervisor", "host:local-machine"], "the new one"),
         ];
-        for entry in &mut entries[..3] { entry.tags.push("host:local-machine".into()); }
-        let ids: Vec<_> = handoffs_superseded_by(&entries, "sup-new", "supervisor")
+        for entry in &mut entries[..3] { entry.tags.retain(|tag| host_tag(tag).is_none()); entry.tags.push("host:local-machine".into()); }
+        let ids: Vec<_> = handoffs_superseded_by(&entries, "sup-new", "supervisor", None)
             .into_iter()
             .map(|entry| entry.id.as_str())
             .collect();
@@ -263,6 +292,7 @@ mod tests {
             [
                 "handoff",
                 "role:supervisor",
+                &format!("host:{}", cas_types::Agent::get_or_generate_machine_id()),
                 "superseded",
                 "superseded-by:new"
             ]
@@ -274,14 +304,15 @@ mod tests {
 
     #[test]
     fn tagging_a_new_handoff_adds_the_kind_and_the_session_role_once() {
-        let mut tags = vec!["summary".to_string()];
+        let host = format!("host:{}", cas_types::Agent::get_or_generate_machine_id());
+        let mut tags = vec!["summary".to_string(), "host:wrong-machine".into()];
         assert_eq!(tag_new_handoff(&mut tags, Some(" Worker ")), "worker");
-        assert_eq!(tags, ["summary", "handoff", "role:worker"]);
+        assert_eq!(tags, ["summary", "handoff", "role:worker", host.as_str()]);
         assert_eq!(tag_new_handoff(&mut tags, Some("supervisor")), "worker");
-        assert_eq!(tags, ["summary", "handoff", "role:worker"]);
+        assert_eq!(tags, ["summary", "handoff", "role:worker", host.as_str()]);
 
         let mut untagged = Vec::new();
         assert_eq!(tag_new_handoff(&mut untagged, None), "supervisor");
-        assert_eq!(untagged, ["handoff", "role:supervisor"]);
+        assert_eq!(untagged, ["handoff", "role:supervisor", host.as_str()]);
     }
 }

@@ -283,6 +283,31 @@ mod tests {
         merge_refusal(root, sender, "cosmic-shark-29", None, &MergeSubject { pr: Some(pr), ..Default::default() })
     }
 
+    #[tokio::test]
+    async fn unlinked_peer_answer_releases_the_worktree_merge_gate_cas_7435() {
+        let (_env, _temp, root, conn) = fixture();
+        crate::store::open_task_store(&root).unwrap()
+            .add(&cas_types::Task::new("cas-7435".into(), "peer boundary".into())).unwrap();
+        let supervisor = cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "cosmic-shark-29".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        sent_ask(&conn, "ask-7435", "Please relay the file boundary for cas-7435 before merging.");
+        let before = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the unanswered ask must hold the real MCP merge path");
+        assert!(before.message.contains("UNANSWERED PEER ASK"), "{before}");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["peer:lively-cheetah-57@prowl", "cosmic-shark-29",
+                "<cas-peer-message v=\"1\" id=\"answer-7435\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"cassy\" kind=\"answer\"/>\nRelayed the file boundary."],
+        ).unwrap();
+        let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the missing source remains subject to normal merge guards");
+        assert!(!after.message.contains("UNANSWERED PEER ASK"), "arrived answer must release the ask: {after}");
+    }
+
     /// Verifiers ver-37f17bf1f171 and ver-aaa79541a589: any way an ask writes
     /// the PR number holds that PR; a different number does not.
     #[test]

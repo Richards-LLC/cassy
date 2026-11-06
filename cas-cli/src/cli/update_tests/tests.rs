@@ -2750,10 +2750,11 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
         "9.99.1",
     )
     .expect("running sessions get a notice");
-    assert!(notice.contains("2 running factory session(s) keep their current build"), "{notice}");
-    assert!(notice.contains("pinned-session keep spawning workers"), "{notice}");
-    assert!(notice.contains("older-session started before build pinning and cannot spawn"), "{notice}");
-    assert!(notice.contains("9.99.1") && notice.contains("cas factory kill <session>"), "{notice}");
+    assert!(notice.contains("2 running factory session(s)"), "{notice}");
+    assert!(notice.contains("pinned-session"), "{notice}");
+    assert!(notice.contains("older-session"), "{notice}");
+    assert!(notice.contains("9.99.1") && notice.contains("cas factory reexec --session <session>"), "{notice}");
+    assert!(notice.contains("relaunch required"), "{notice}");
 }
 
 // One real Git repo carries the seven downstream drift shapes from cas-6718.

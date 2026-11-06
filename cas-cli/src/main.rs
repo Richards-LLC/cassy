@@ -8,6 +8,18 @@ use std::process::ExitCode;
 use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
+    // Preflight has no configuration, telemetry or store side effects.
+    let preflight_args: Vec<_> = std::env::args_os().collect();
+    if preflight_args.len() == 5 && preflight_args[1] == "factory"
+        && preflight_args[2] == "handoff-check" && preflight_args[3] == "--schema" {
+        return match preflight_args[4].to_str().and_then(|value| value.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid handoff schema"))
+            .and_then(cas::ui::factory::daemon_handoff_check) {
+                Ok(reply) => { println!("{reply}"); ExitCode::SUCCESS }
+                Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
+            };
+    }
+
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-factory-build-id"))
     {
@@ -111,6 +123,19 @@ fn main() -> ExitCode {
     // the factory daemon after it has already bound its unix socket — leaving
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if let Ok(fd) = std::env::var("CAS_DAEMON_HANDOFF_FD") {
+        let fallback = std::env::var("CAS_DAEMON_HANDOFF_FALLBACK").ok().as_deref() == Some("1");
+        let rollback = std::env::var_os("CAS_DAEMON_ROLLBACK_BINARY").map(std::path::PathBuf::from);
+        // SAFETY: main has not started threads. Remove process-only markers
+        // here, before the shared adoption code creates runtime workers.
+        unsafe {
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FD");
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FALLBACK");
+            std::env::remove_var("CAS_DAEMON_ROLLBACK_BINARY");
+        }
+        return cas::ui::factory::resume_inherited_daemon(fd, fallback, rollback);
+    }
 
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);

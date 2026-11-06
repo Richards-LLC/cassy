@@ -2176,6 +2176,16 @@ merge request after correcting the cause.
 See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
 for setup, doctor and release-preflight diagnostics and manual repair.
 
+## Attach socket input diagnostics
+
+Attach `PaneInfo` snapshots report `input_bytes_received` (bytes accepted by
+that pane's input queue) and `input_bytes_written` (bytes physically written
+to its PTY master, including partial writes before a failure). Counts include
+harness input and terminal control replies; they do not establish that the
+child read the bytes. Older payloads decode with zero counts. A one-shot
+attach sender may close immediately after sending: outbound write failure
+must leave its inbound frames available for the daemon's input phase to drain.
+
 ## Build, assembly and CI policy
 
 While a release train is open in the target repository, `worktree_merge` refuses

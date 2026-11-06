@@ -1986,6 +1986,8 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
                 focused: true,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             }],
             epic_id: Some("cas-epic".into()),
             epic_title: Some("Commander".into()),
@@ -2105,6 +2107,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: false,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );
@@ -2123,6 +2127,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: true,
                 title: "Supervisor".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );

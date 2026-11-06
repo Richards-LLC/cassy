@@ -52,6 +52,9 @@ unicode-width = "0.2"
 # Fast SIMD byte search for hot scanner paths (e.g. update_alt_screen ESC fast-path)
 memchr = "2.7.6"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 

@@ -73,6 +73,7 @@
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
 - `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` - checkout-grouped cleanup intents, persisted readiness and immutable retirement snapshots.
+- `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs` - attach socket input drains before disconnect cleanup; PaneInfo snapshots include accepted/written PTY input byte counts from `crates/cas-pty/src/input_queue.rs` via `crates/cas-mux/src/pane/mod.rs`.
 - `crates/cas-pty/src/pty.rs` - private startup-brief files, verified Claude launch paths, harness argv construction and owned PTY lifetimes.
 - `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection, typed missing/version/probe failures and bounded minimum-version checks shared by the hub and PTY.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
@@ -192,3 +193,11 @@
 - MCP: `cas-cli/src/mcp/daemon.rs` (`cas serve`); bridge: `cas-cli/src/bridge/server/` (`cas bridge serve`).
 - Commander: `hub-web/src/main.ts`; Slack services: `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts`.
 - Tests: capped named nextest filters for workers; Vitest/typecheck and affected journeys for web changes; merge queue owns the full Rust suite.
+
+## In-place factory daemon updates
+
+- `crates/cas-pty/src/adopt.rs` - owned inherited Unix master descriptors and direct-child waitpid handles.
+- `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs` - quiesced pane snapshots, drafts and launch policy restored around inherited PTYs.
+- `cas-cli/src/ui/factory/app/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs` - daemon schema preflight, sealed inherited manifest, same-PID exec and one-shot rollback.
+- `cas-cli/src/cli/factory/reexec.rs` - local socket control and per-daemon post-update outcomes.
+- `hub-web/e2e/journeys/real-hub.journey.ts` - HUB-J11 includes in-place daemon re-exec and same-PID attachment recovery.

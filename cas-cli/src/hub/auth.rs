@@ -234,6 +234,7 @@ impl Scope {
 
 pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
     match message {
+        ClientMessage::Reexec { .. } => None,
         ClientMessage::Input { .. }
         | ClientMessage::InputFocused { .. }
         | ClientMessage::Focus { .. }

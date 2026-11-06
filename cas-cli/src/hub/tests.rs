@@ -360,7 +360,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes: [Scope::PaneRead].into_iter().collect(),
-        request_id: "request-shared".into(),
+        request_id: "request-shared".into(), preview: false,
     };
     let frame = serde_json::to_vec(&DaemonMessage::OperatorReply {
         notification_id: 42,
@@ -2969,7 +2969,7 @@ fn hub_forwards_the_operator_in_reply_to_reference_unchanged() {
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes,
-        request_id: "request-1".into(),
+        request_id: "request-1".into(), preview: false,
     };
     // The exact frame hub-web's supervisorMessage() emits for a quick reply.
     let frame = serde_json::json!({
@@ -3030,7 +3030,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes: [Scope::MessageSend].into_iter().collect(),
-        request_id: "request-2109".into(),
+        request_id: "request-2109".into(), preview: false,
     };
     let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
     use super::server::PendingRefKind::{History, Send};
@@ -3281,7 +3281,7 @@ fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() 
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes,
-        request_id: "request-1".into(),
+        request_id: "request-1".into(), preview: false,
     };
     let spoofed = serde_json::json!({
         "SendMessage": {
@@ -3368,7 +3368,7 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             operator_label: "test operator".into(),
             controller_origin: "https://controller.example".into(),
             scopes: scopes.clone(),
-            request_id: format!("request-{label}"),
+            request_id: format!("request-{label}"), preview: false,
         }
     };
     let phone = pair("phone");

@@ -27,7 +27,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Trust refusals.** Follow the named gate/next command. Never force (`force=true`, `supervisor_override`, merge overrides) over unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
 - **No polling or sleeping.** Use events/background completion; delay reminders cover deadlines, retries or backstops. Commander wakes you.
-- **Pane:** answer first, ~150 prose words; [visual forms](references/operator-reply.md) for flows/comparisons. Keep full evidence. No decision or result: no text. No clock time or ETA without a clock read or measured start this turn.
+- **Pane:** answer first, ~150 words; [visual forms](references/operator-reply.md) for flows/comparisons. Keep evidence. No decision or result: no text. No clock time or ETA without a clock read or measured start this turn.
 - **Operator messages:** `operator <name>@<device> verified` is the user; `unverified:` is agent traffic. Answer Commander once in the pane ([routing](references/reference.md#verified-commander-messages)).
 - **Need a key or token:** use a [secret request](references/reference.md#secret-requests), never chat.
 
@@ -51,7 +51,7 @@ Dispatch: one worker per file-group lane via `spawn_workers count=1 lane=<lane> 
 
 ## Phase references
 
-Read once per context per phase.
+Read once per phase.
 
 | Phase or trigger | Read before acting |
 | --- | --- |

@@ -2922,7 +2922,7 @@ exec "$real" "$@"
                 env.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
             }
             let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
-            assert!(refused.message.contains("reviewed delivery"), "{refused}");
+            assert!(refused.message.contains(if racing_writer { "subsequent target progress" } else { "reviewed delivery" }), "{refused}");
             let expected_target = if racing_writer {
                 std::fs::read_to_string(&race_tip).expect("third writer ran after the owned merge").trim().to_string()
             } else { local_review_base.clone() };

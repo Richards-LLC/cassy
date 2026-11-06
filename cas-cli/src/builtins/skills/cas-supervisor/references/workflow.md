@@ -261,13 +261,7 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    the epic's single full-suite run on the tree that lands; skip it when CI already ran it. Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Without check-runs on the exact default-branch SHA, run the project's full suite (the commands its CLAUDE.md or AGENTS.md names) on that SHA. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
    <!-- cas-src:end -->
 5. Put every review, precheck and QA finding that needs worker action into one batch: a bounded epic-child fix-round task per worker, started together, each description carrying the finding, fix, acceptance criteria and proof command.
-6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR, or rerun the local gate and record a fresh `ASSEMBLY_PROOF` from its real exit code:
-
-   ```bash
-   <assembly gate command> > <artifacts_root>/<project-key>/<epic-id>/assembly-gate.log 2>&1; echo $?
-   ```
-
-   Never pipe the test run to `tail`; that captures the pipe status, not the test status.
+6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR.
 7. Once the gate passes, reclaim each lane's worktree:
 
    ```text

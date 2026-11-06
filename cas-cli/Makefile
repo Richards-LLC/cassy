@@ -232,6 +232,7 @@ test-ci-tiers:
 	cd .. && node --test scripts/visual-qa-secrets.test.mjs
 	cd .. && python3 scripts/test-qa-candidate-build.py
 	cd .. && python3 scripts/test-ci-queue-flakes.py
+	cd .. && python3 scripts/test-train-ci.py
 	cd .. && python3 scripts/test-sow-delivery-report.py
 	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py

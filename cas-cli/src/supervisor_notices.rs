@@ -251,6 +251,7 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReleaseNoticePhase {
     CutReady,
+    #[allow(dead_code)] // cas-61e0 sends it on publish.
     PostPublish,
 }
 

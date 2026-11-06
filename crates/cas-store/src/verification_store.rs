@@ -2292,7 +2292,8 @@ fn correct_parked_delivery_proof_scope_inner(
     })
 }
 
-/// Record a supervisor's negative review of a parked AwaitingMerge delivery.
+/// Record a negative review of a parked AwaitingMerge delivery. Review text
+/// never grants import authority, including when it quotes command markers.
 ///
 /// This is deliberately separate from generic task updates: the delivery proof
 /// lock must not prevent recording a negative verdict — recording a failed
@@ -2311,6 +2312,21 @@ pub fn request_changes_for_parked_delivery(
     task_id: &str,
     supervisor_agent_id: &str,
     reason: &str,
+) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_with_merge_sources(
+        cas_dir, task_id, supervisor_agent_id, reason, &[],
+    )
+}
+
+/// The authenticated supervisor adapter supplies explicit immutable import
+/// grants. Other review/rejection callers use the text-inert wrapper above.
+/// Never derive authority from `reason`: it can contain quoted findings.
+pub fn request_changes_for_parked_delivery_with_merge_sources(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -2386,6 +2402,22 @@ pub fn request_changes_for_parked_delivery(
         })?;
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    // Typed grants come only from the supervisor adapter, never review prose.
+    for source in source_commits {
+        if !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StoreError::Parse("merge_source requires a full immutable commit SHA".into()));
+        }
+        let work_target = deliverables.work_target.clone().ok_or_else(||
+            StoreError::Parse("merge_source requires a declared task work target".into()))?;
+        let commit = source.to_ascii_lowercase();
+        if !deliverables.authorized_merge_sources.iter().any(|known|
+            known.commit == commit && known.work_target == work_target)
+        {
+            deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                commit, supervisor_id: supervisor_agent_id.to_string(), work_target,
+            });
+        }
+    }
     let blocked_parked = status == TaskStatus::Blocked.to_string()
         && (deliverables.parked_branch.is_some()
             || deliverables.factory_branch_anchor.is_some()

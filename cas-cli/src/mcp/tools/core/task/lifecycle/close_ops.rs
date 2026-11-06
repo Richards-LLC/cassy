@@ -6741,11 +6741,11 @@ impl CasCore {
             return Some(candidate);
         }
         let foreign_since = self.sibling_lease_boundary(task_store, task);
-        parked_anchor_advance_with_target_is_attributable(
+        parked_anchor_advance_for_task_is_attributable(
             repo_path,
             recorded,
             &candidate,
-            &task.id,
+            task,
             foreign_since,
             &target,
         )
@@ -7088,11 +7088,11 @@ impl CasCore {
                 recorded,
                 measured_tip,
                 named_final_tip,
-            ) && parked_anchor_advance_with_target_is_attributable(
+            ) && parked_anchor_advance_for_task_is_attributable(
                 repo_path,
                 recorded,
                 &tip,
-                &task.id,
+                task,
                 self.sibling_lease_boundary(task_store, task),
                 &target,
             )
@@ -7167,8 +7167,8 @@ impl CasCore {
         let (target, _) = preferred_live_target_ref_for_delivery(repo, parent_branch, task.delivery_mode);
         (self.tip_is_own_task_lineage_with_receipt(
             task_store, task, repo, Some(&branch), recorded, Some(&tip), true,
-        ) && parked_anchor_advance_with_target_is_attributable(
-            repo, recorded, &tip, &task.id,
+        ) && parked_anchor_advance_for_task_is_attributable(
+            repo, recorded, &tip, task,
             self.sibling_lease_boundary(task_store, task), &target,
         )).then(|| format!(
             "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the locally measured attributable delivery tip is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
@@ -7258,11 +7258,11 @@ impl CasCore {
         else {
             return false;
         };
-        parked_anchor_advance_with_target_is_attributable(
+        parked_anchor_advance_for_task_is_attributable(
             repo_path,
             &fork,
             tip,
-            &task.id,
+            task,
             self.sibling_lease_boundary(task_store, task),
             target,
         ) && no_other_open_anchor_between(task_store, task, repo_path, &fork, tip)
@@ -13334,16 +13334,30 @@ impl CasCore {
                 format!("task request_changes requires registered supervisor identity: {error}"),
             )
         })?;
+        // Only this supervisor request is a command. QA/verifier findings and
+        // queue-ejection detail reach the store as inert review text.
+        let source_commits = req.reason.split_whitespace()
+            .filter_map(|word| word.strip_prefix("merge_source="))
+            .map(|source| {
+                if !matches!(source.len(), 40 | 64)
+                    || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "merge_source requires a full immutable commit SHA"));
+                }
+                Ok(source.to_ascii_lowercase())
+            }).collect::<Result<Vec<_>, _>>()?;
 
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
         // proof boundary was merged, unbound, or legacy — exactly the states a
         // failed review produces. Boundary shape is reported, never gating.
-        let outcome = cas_store::request_changes_for_parked_delivery(
+        let outcome = cas_store::request_changes_for_parked_delivery_with_merge_sources(
             &self.cas_root,
             &task.id,
             &supervisor_id,
             &req.reason,
+            &source_commits,
         )
         .map_err(|error| {
             Self::error(
@@ -22704,6 +22718,10 @@ fn own_lane_subjects(
     let mut args = vec!["log", "--no-merges", "--format=%H%x1f%s", range.as_str()];
     let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
     args.extend(negated.iter().map(String::as_str));
+    let upstream = task.deliverables.work_target.as_ref()
+        .map(|target| task_attribution::upstream_refs(repo_path, &target.target_branch, task))
+        .unwrap_or_default();
+    args.extend(upstream.iter().map(String::as_str));
     args.push("--");
     let mut subjects = Vec::new();
     for record in git_stdout_lines(repo_path, &args)? {
@@ -25245,6 +25263,35 @@ fn parked_anchor_advance_with_target_is_attributable(
     foreign_since: Option<i64>,
     target_ref: &str,
 ) -> bool {
+    let upstream: Vec<_> = task_attribution::released_trunk_ref(repo_path, target_ref).into_iter().collect();
+    parked_anchor_advance_with_upstream_is_attributable(
+        repo_path, recorded, candidate, task_id, foreign_since, target_ref, &upstream,
+    )
+}
+
+fn parked_anchor_advance_for_task_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task: &Task,
+    foreign_since: Option<i64>,
+    target_ref: &str,
+) -> bool {
+    let upstream = task_attribution::upstream_refs(repo_path, target_ref, task);
+    parked_anchor_advance_with_upstream_is_attributable(
+        repo_path, recorded, candidate, &task.id, foreign_since, target_ref, &upstream,
+    )
+}
+
+fn parked_anchor_advance_with_upstream_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+    target_ref: &str,
+    upstream: &[String],
+) -> bool {
     if parked_anchor_advance_is_attributable(repo_path, recorded, candidate, task_id, foreign_since)
     {
         return true;
@@ -25294,7 +25341,6 @@ fn parked_anchor_advance_with_target_is_attributable(
     };
     // cas-3d57: a sync merge of the released trunk after park is upstream,
     // under the same rule cas-985f applies before park.
-    let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
     commits.last().is_some_and(|(_, parents, _, _)| {
         parents
@@ -25304,8 +25350,8 @@ fn parked_anchor_advance_with_target_is_attributable(
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
-                    || released.as_deref().is_some_and(|upstream| {
-                        git_commit_is_ancestor(repo_path, parent, upstream)
+                    || upstream.iter().any(|reference| {
+                        git_commit_is_ancestor(repo_path, parent, reference.trim_start_matches('^'))
                     })
             });
         (target_import

@@ -535,6 +535,14 @@ pub struct FactoryBranchStart {
     pub base_sha: String,
 }
 
+/// Immutable upstream import approved by an authenticated request_changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizedMergeSource {
+    pub commit: String,
+    pub supervisor_id: String,
+    pub work_target: WorkTarget,
+}
+
 /// Host where a recorded epic lane was bound to its task. Diagnostic provenance
 /// only: current publication is always observed from Git, never from this row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,6 +693,9 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_start: Option<FactoryBranchStart>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorized_merge_sources: Vec<AuthorizedMergeSource>,
+
     /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
     /// merge proof, but the declined commits remain this task's work and must
@@ -798,6 +809,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_start: Option<FactoryBranchStart>,
     #[serde(default)]
+    authorized_merge_sources: Vec<AuthorizedMergeSource>,
+    #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
@@ -838,6 +851,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
             factory_branch_start: value.factory_branch_start,
+            authorized_merge_sources: value.authorized_merge_sources,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             parked_branch: value.parked_branch,
@@ -1246,6 +1260,7 @@ impl TaskDeliverables {
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
             && self.factory_branch_start.is_none()
+            && self.authorized_merge_sources.is_empty()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
@@ -1851,6 +1866,11 @@ mod tests {
         task.deliverables
             .historical_factory_branch_anchors
             .push("a".repeat(40));
+        task.deliverables.authorized_merge_sources.push(AuthorizedMergeSource {
+            commit: "c".repeat(40),
+            supervisor_id: "supervisor".into(),
+            work_target: task.deliverables.factory_branch_start.as_ref().unwrap().work_target.clone(),
+        });
         let encoded = serde_json::to_value(&task).unwrap();
         assert_eq!(
             encoded["deliverables"]["historical_factory_branch_anchors"][0],
@@ -1866,9 +1886,11 @@ mod tests {
             decoded.deliverables.factory_branch_start,
             task.deliverables.factory_branch_start
         );
+        assert_eq!(decoded.deliverables.authorized_merge_sources, task.deliverables.authorized_merge_sources);
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.historical_factory_branch_anchors.is_empty());
         assert!(legacy.factory_branch_start.is_none());
+        assert!(legacy.authorized_merge_sources.is_empty());
     }
 
     #[test]

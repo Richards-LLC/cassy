@@ -311,6 +311,7 @@ fn restore_flags(originals: &[(RawFd, i32)]) {
 }
 fn exec_image(binary: &Path, manifest: RawFd, fallback: bool, rollback: &Path) -> std::io::Error {
     std::process::Command::new(binary)
+        .arg0(std::env::args_os().next().unwrap_or_default())
         .args(std::env::args_os().skip(1))
         .env(HANDOFF_ENV, manifest.to_string())
         .env(FALLBACK_ENV, if fallback { "1" } else { "0" })

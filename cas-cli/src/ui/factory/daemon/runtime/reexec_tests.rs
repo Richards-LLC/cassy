@@ -104,6 +104,7 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         runtime.block_on(async {
             let mut daemon = daemon(&root);
             daemon.app.set_factory_session("provision-test".into());
+            crate::ui::factory::SessionManager::new().ensure_dir().unwrap();
             let gui = crate::ui::factory::gui_socket_path("provision-test");
             if gui.exists() { std::fs::remove_file(&gui).unwrap(); }
             daemon.gui_listener = std::os::unix::net::UnixListener::bind(gui).unwrap();
@@ -124,7 +125,7 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
                 daemon.app.supervisor_name(), &[], None, Some(root.parent().unwrap().to_str().unwrap()), None);
             crate::ui::factory::SessionManager::new().save_daemon_metadata(metadata, &root).unwrap();
             std::fs::write(root.join("before.json"), serde_json::to_vec(&serde_json::json!({
-                "pid": std::process::id(), "panes": daemon.app.mux.panes().map(|pane| (pane.id(), pane.process_group_id())).collect::<Vec<_>>()
+                "pid": std::process::id(), "argv": std::env::args_os().collect::<Vec<_>>(), "panes": daemon.app.mux.panes().map(|pane| (pane.id(), pane.process_group_id())).collect::<Vec<_>>()
             })).unwrap()).unwrap();
             std::fs::write(root.join("ready"), "ready").unwrap();
             loop {
@@ -245,6 +246,10 @@ pub(crate) async fn finish_exec_probe(
     let before: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("before.json"))?)?;
     assert_eq!(before["pid"].as_u64(), Some(std::process::id() as u64));
+    assert_eq!(
+        before["argv"],
+        serde_json::to_value(std::env::args_os().collect::<Vec<_>>())?
+    );
     let panes = before["panes"].as_array().unwrap();
     for original in panes {
         let name = original[0].as_str().unwrap();

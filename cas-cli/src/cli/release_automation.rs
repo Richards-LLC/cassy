@@ -541,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn a_cut_train_sends_new_tasks_to_a_fresh_train_cas_2b8d() {
         use rmcp::handler::server::wrapper::Parameters;
-        let env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, train, _, args) = fixture();
         let _cwd = env.enter_dir(temp.path());
@@ -566,7 +566,7 @@ mod tests {
     }
     #[test]
     fn release_tracking_owner_fallback_never_blocks() {
-        for (recorded_owner, peer_available) in [(false, true), (false, false), (true, false)] {
+        for (recorded_owner, peer_available, reminder_error) in [(false, true, false), (false, false, false), (true, false, false), (true, true, true)] {
             let (temp, root, mut train, owner, args) = fixture();
             if !recorded_owner {
                 train.epic_verification_owner = None;
@@ -577,12 +577,19 @@ mod tests {
                     .unregister(&owner.id)
                     .unwrap();
             }
+            if reminder_error {
+                open_reminder_store(&root).unwrap();
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+                    "CREATE TRIGGER deny_reminder BEFORE INSERT ON reminders BEGIN SELECT RAISE(ABORT, 'fixture reminder unavailable'); END;"
+                ).unwrap();
+            }
             track_on_train(&args, &root, temp.path(), &train).unwrap();
             let pending = open_reminder_store(&root)
                 .unwrap()
                 .list_all_pending()
                 .unwrap();
-            assert_eq!(pending.len(), if peer_available { 2 } else { 0 });
+            assert_eq!(pending.len(), if peer_available && !reminder_error { 2 } else { 0 });
+            assert!(open_task_store(&root).unwrap().get(&train.id).unwrap().labels.iter().any(|label| label == "release-train-cut"));
         }
     }
 

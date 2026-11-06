@@ -77,7 +77,7 @@
 - `crates/cas-pty/src/claude_binary.rs` - native-first Claude selection, typed missing/version/probe failures and bounded minimum-version checks shared by the hub and PTY.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
-- `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
+- `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merged-delivery approval recovery, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - no-progress watchdog: supervisor wake at 45 min, operator page at 90.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - prompt readiness, attributed director queue envelopes with immutable delivery-tip context, queued input and recipient receipts.

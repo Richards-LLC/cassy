@@ -1130,6 +1130,49 @@ fn enqueue_delivery_pr_merged_wake(
         actor: None,
     });
 
+    // cas-ffd5: a merged receipt is not a reusable pre-merge approval. Use
+    // close's exact-cycle selection before issuing its worker instruction.
+    if !release_wait {
+        use crate::mcp::tools::core::task::lifecycle::close_ops::{
+            close_cycle_verdict, required_verification_type,
+        };
+        let task = crate::store::open_task_store_cached(cas_dir)
+            .and_then(|store| store.get(task_id))
+            .map_err(|error| format!("could not read merged task: {error}"))?;
+        let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id)
+            .map_err(|error| format!("could not read merged delivery proof cycle: {error}"))?;
+        let verifications = crate::store::open_verification_store(cas_dir)
+            .map_err(|error| format!("could not open verification store: {error}"))?;
+        let legacy = if task.task_type == cas_types::TaskType::Epic {
+            verifications.get_latest_for_task_by_type(task_id, cas_types::VerificationType::Epic)
+        } else {
+            verifications.get_latest_for_task(task_id)
+        }.map_err(|error| format!("could not read merged delivery verdict: {error}"))?;
+        let verdict = close_cycle_verdict(cas_dir, dispatch.as_ref(), legacy.as_ref())
+            .map_err(|error| format!("could not resolve merged delivery verdict: {error}"))?;
+        let approved = verdict.is_some_and(|verdict| {
+            verdict.verification_type == required_verification_type(task.task_type)
+                && matches!(verdict.status,
+                    cas_types::VerificationStatus::Approved | cas_types::VerificationStatus::Skipped)
+        });
+        if !approved {
+            let branch = task.deliverables.parked_branch.as_deref()
+                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
+                .unwrap_or(worker);
+            let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+            let detail = format!(
+                "PR #{pr_number} for {task_id} merged at {merge_commit}, but no reusable pre-merge verdict is recorded. Supervisor recovery: {prefix}factory action=worktree_merge id={branch} task_id={task_id} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {prefix}task action=request_changes id={task_id} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Do not ask the worker to repeat close; close cannot create approval."
+            );
+            let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
+            return match enqueue_worker_attention_relay_detail_with_key(
+                cas_dir, "delivery_pr_approval_missing", worker, Some(task_id), None,
+                |_| detail.clone(), &key, Some(&key),
+            ) {
+                WorkerAttentionRelayOutcome::Persisted { .. } => Ok(()),
+                _ => Err("could not persist merged delivery approval recovery".into()),
+            };
+        }
+    }
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
@@ -1390,7 +1433,7 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
             continue;
         }
         let detail = format!(
-            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. The worker was already told to close; inspect or recover the task.",
+            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. Inspect its pre-merge approval and reconcile the existing candidate and promotion before requesting another close.",
             task.id,
             task.status,
             age.as_secs() / 60,

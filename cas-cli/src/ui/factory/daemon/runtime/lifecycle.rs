@@ -3634,7 +3634,9 @@ mod worker_attention_tests {
                 .filter(|row| row.prompt.contains(id)).collect();
             assert_eq!(rows.len(), 1, "one recovery per immutable merge");
             assert_eq!(rows[0].target, "supervisor", "missing approval belongs to supervisor recovery");
+            // pin: executable supervisor recovery must bind the exact delivery branch and task.
             assert!(rows[0].prompt.contains(&format!("factory action=worktree_merge id={} task_id={id}", observation.branch)));
+            // pin: the incident was an impossible executable worker close instruction.
             assert!(!rows[0].prompt.contains(&format!("close {id} with commit_receipt=")));
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
             assert_eq!(task_store.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);

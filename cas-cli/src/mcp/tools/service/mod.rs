@@ -619,7 +619,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory operations: workers/task queues, epics, worktrees, servers, loops, notices, leases and GC. train_merge id=<epic> queues parked deliveries in task_ids order (default updated time), holds single merges and resumes after review. worker_queue inspects/reorders/clears pending task_ids; ordered spawns use isolated checkouts. clear_context verifies a transcript reset or errors. Workers manage only owned servers. Neon: supervisor only, one branch/task, deleted at close; DATABASE_URL stays in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent require an authenticated supervisor. Identity/messages/reminders: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers, loops, notices, leases, GC. train_merge id=<epic>: queue parked task_ids in order (default updated time); hold single merges, resume after review. worker_queue: list/reorder/clear pending task_ids; ordered spawns isolate checkouts. clear_context requires transcript reset. Workers: own servers only. Neon: supervisor only, one branch/task, delete at close; DATABASE_URL in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent: supervisor auth required. Identity/messages/reminders: coordination."
     )]
     pub async fn factory(
         &self,

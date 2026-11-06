@@ -2321,7 +2321,7 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
         (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::Closed, false, &actor, "regression found")),
         (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::AwaitingMerge, true, &actor, "reset review scope")),
         (TaskStatus::Open, audit::proof_scope_fix_note(action_at, &actor, "correct proof", "Proof targets widened.")),
-        (TaskStatus::InProgress, audit::merge_recovery_note(action_at, "factory/replay-cas-96ce4")),
+        (TaskStatus::InProgress, audit::merge_recovery_note(action_at, "factory/replay-cas-96ce4", cas_types::DeliveryMode::PushBranch)),
         (TaskStatus::Open, cas_store::request_changes_audit_note(parked_at, "Correct delivery", "prior commits remain")),
         (TaskStatus::Open, audit::reset_note(action_at, TaskStatus::AwaitingMerge, Some("worker"), false, "dead-session recovery")),
     ] {

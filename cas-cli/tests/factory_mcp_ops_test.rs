@@ -10738,13 +10738,11 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         after.notes.contains("inside the worker worktree")
             && after
                 .notes
-                .to_lowercase()
-                .contains("rebase factory/swift-fox")
-            && after.notes.contains("current integration target tip")
-            && after.notes.contains("push")
-            && after.notes.contains("re-park")
-            && after.notes.contains("merge_request=true"),
-        "merge recovery must prescribe worktree-only rebase, push, and re-park: {}",
+                .contains("Merge the current integration target tip into")
+            && after.notes.contains("never rebase")
+            && after.notes.contains("push, then re-park")
+            && !after.notes.contains("merge_request=true"),
+        "merge recovery must preserve the anchor and use the push_branch park signal: {}",
         after.notes
     );
     assert!(
@@ -10988,10 +10986,17 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         assert!(text.contains("MERGE CONFLICT"), "{mode}: {text}");
         assert!(text.contains("factory/brave-otter"), "{mode}: {text}");
         // pin: anchored recovery must preserve history and route the completion signal by mode.
-        assert!(text.contains("Merge the current integration target tip into"), "{mode}: {text}");
+        assert!(
+            text.contains("Merge the current integration target tip into"),
+            "{mode}: {text}"
+        );
         assert!(text.contains("never rebase"), "{mode}: {text}");
         assert!(text.contains("`task start`"), "{mode}: {text}");
-        assert_eq!(text.contains("merge_request=true"), mode == DeliveryMode::LocalMerge, "{mode}: {text}");
+        assert_eq!(
+            text.contains("merge_request=true"),
+            mode == DeliveryMode::LocalMerge,
+            "{mode}: {text}"
+        );
         match mode {
             DeliveryMode::PushBranch => assert!(text.contains("push, then re-park"), "{text}"),
             DeliveryMode::LocalMerge => assert!(text.contains("keep the branch local"), "{text}"),

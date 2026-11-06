@@ -1,93 +1,72 @@
-# Verification kit generator
+# Shared walk kit
 
-Generate a repo-tracked, harness-neutral verification kit so a QA pass starts
-from a proven launch recipe and a map of user-facing features instead of
-rediscovering both. The kit is two parts:
+Use one versioned harness per project, shared by every worker. Copy the shipped
+`cas-qa-craft/scripts/walk-kit.mjs` once to the project's tracked
+`scripts/qa/walk-kit.mjs`; commit its project adapter beside it. Import the same
+copy throughout the release. Every produced ledger row includes `kit:<version>`.
+Update that copy deliberately between releases; no separate drift check is needed.
 
-- `docs/qa/verify.md`: how to launch, check, drive, capture and clean up.
-- `docs/qa/features/`: a `README.md` index plus one file per user-facing
-  feature (template: [feature-template.md](feature-template.md)).
+The kit adapts gabber's proven walk primitives without its authentication,
+SQL, phone or host logic. Project adapters own those boundaries and cleanup.
+Keep secrets in memory and use the project's existing fixture tools.
 
-**Background chore only.** Generating or repairing the kit never blocks a task
-close, a merge or a QA gate. No close path waits on it. Run it as its own task
-or in otherwise idle time; if a delivery needs QA before the kit exists, run
-the normal procedure in `SKILL.md` without it.
+## Launch
 
-## 1. Interview the repo
+Keep `docs/qa/verify.md` as the shared launch, readiness, Doctor, Drive, Evidence
+and Cleanup recipe. Name the timeout, base URL, isolated state, binary or server
+receipt, and the command that starts it. Register long-lived processes through
+`cas-servers`. Never replace the launch recipe with a per-worker runtime.
 
-Answer five questions from the code, the README, package scripts, Makefiles,
-CI config and existing tests. Write each answer as a command or a path, not a
-description. Mark an answer `unknown` rather than guessing.
+Map user-facing features in `docs/qa/features/`: a README index and one file per
+feature using [feature-template.md](feature-template.md). Each entry path gets
+its own row, ordered by real traffic. Check the map with:
 
-| Question | What to find |
-| --- | --- |
-| Surface | Who uses it and through what: web app, CLI, TUI, API, desktop, mobile. |
-| Run | The one command that starts it locally, its port or binary path, required env vars (names only, never values). |
-| Drive | How an agent operates it: Playwright against a URL, the real binary with arguments, HTTP requests. |
-| Observe | Where a run leaves evidence: logs, a database, stdout, screenshots, telemetry. |
-| Isolate | How to run without touching shared state: a temp data dir, a test database, a sandbox account, a spare port. |
-
-## 2. Write `docs/qa/verify.md`
-
-Use exactly these five H2 sections, in this order:
-
-- **Launch**: the command, run in the background, and the readiness signal:
-  the log line, HTTP status or file that proves the app is up. Name the
-  timeout. Register long-lived processes through `cas-servers`.
-- **Doctor**: read-only health checks that run against the launched app
-  (a health URL, `--version`, a status command). A Doctor step never writes
-  data, migrates or resets anything.
-- **Drive**: the smallest command that exercises one real user path, plus the
-  conventions an agent follows (base URL, login helper, test account source).
-- **Evidence**: where screenshots, traces, logs and terminal captures go and
-  which command produces each. Launch plus Doctor output is the producing
-  command an evidence bundle cites.
-- **Cleanup**: **kill only what you started; evidence survives.** Stop the
-  processes Launch started (by the PID or registered server name it recorded),
-  remove temp data the run created, and keep every capture.
-
-## 3. Write `docs/qa/features/`
-
-List the user-facing features from routes, commands, menu entries and
-navigation. One feature is something a user would name ("Billing settings",
-"Export to CSV"), not a component. Write one file per feature with the five
-H2s from the template: **Sub-features**, **How to get to it** (the user's
-point of view, every entry point on its own line), **Driving it**,
-**Gotchas**, **Touches** (source globs, one per bullet, in backticks). Put
-routes and selectors under Driving it in backticks so the static check can
-grep them.
-
-Write `docs/qa/features/README.md` as the index: one line per feature file,
-linked by filename.
-
-Run the static check and fix every failure before the self-proof:
-
-```
+```sh
 node <skills-dir>/cas-qa-craft/scripts/check-feature-map.mjs --root .
 ```
 
 `<skills-dir>` is `.claude/skills`, `.codex/skills` or `.grok/skills`.
 
-## 4. Self-proof once
+## Drive
 
-Prove the kit works by following it literally, with a hard cap of about
-**15 minutes**:
+Import these functions from the project's pinned copy:
 
-1. Launch, and wait for the readiness signal.
-2. Doctor.
-3. One drive: the first feature file's first Driving it step.
-4. Cleanup.
+- `requireBuild({backend: sha, frontend: sha}, readBuild)` reads actual served
+  identities at start and end. Missing or moved SHAs hold the walk; no fallback.
+- `waitForReply(page, options)` receives pre-send IDs, measured `sentAt` and a
+  `readThread(page)` adapter returning `{id,user,working,visible,text}` bubbles.
+  It waits past typing, skeletons and hidden replies, then measures
+  `firstReplyMs`; record that result with the row. Polling observes state;
+  fixed sleeps never substitute for a completed visible reply.
+- `frameMessage(page, text, file, adapters)` uses `locateMessage(page,text)`
+  and `readVisibleText(page)` to scroll, verify viewport intersection and save
+  the frame, its hash and visible text.
+- `openDraft(page,url,expected,options)` uses `readDraft(page)` returning
+  `{itemId,visible,working,text}`. It opens the delivered URL and waits for real
+  content; a PASS requires readiness and no missing expected text.
+- `shouldRun(step,open)` permits `ifAsked` answers only for the current question.
 
-Record the result at the top of `docs/qa/verify.md`:
-`Self-proof: <date> <commit> clean`. If any step fails or the cap expires,
-write `Self-proof: <date> <commit> blocked: <step and error>`, commit the kit
-as it is, and stop. A blocked kit is still useful, and the next maintenance
-sweep ([maintain.md](maintain.md)) picks it up.
+Project browser creation stays headless. Adapters enforce the project's target
+allowlist, authentication and fixture policy; the kit never starts a browser or
+reads credentials itself.
 
-## 5. Using the kit in a QA pass
+## Evidence
 
-Map rows feed the exploration matrix. For a touched feature, each entry point
-under "How to get to it" is its own row; a row passes only through its own
-entry point. "Verified via another entry point" does not count. A failed
-Driving it step is triaged in the same round as doc drift, harness gap or
-product regression (definitions in [maintain.md](maintain.md)).
+`createLedger({file,task,build,scope,surface})` writes schema 2. Before acting,
+call `expect(id,{cell,expected,cite,quote})` with a spec `path:line` and its
+quoted words. An uncited expectation becomes a spec question, never FAIL.
+
+Call `record({id,channel,view,sent,verdict,observed,frame,claims,reply,draft,defect})`
+with the exact `sent.text` and `sent.url`. Graded rows require readable frames
+inside the ledger directory and claims that appear in their visible text.
+Database read-back corroborates the visible result. A failed step names its
+`cas-*` defect; the kit merges that cause across widths/channels, refuses reused
+frames and conflicting verdicts, and atomically rewrites the ledger after each
+row. Fixtures use `label: 'fixture'`; they never prove a live build.
+
+## Cleanup
+
+In `finally`, call the project's existing cleanup adapter and stop only the
+servers or PIDs this walk started. Keep captures and read cleanup results back.
+Run `cas qa ledger check <path> --task <id>` before submission. Mark unrun cells
+`NOT EXERCISED: <reason>` and retain automation errors in Honesty.

@@ -181,6 +181,9 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
         if fence.is_some() {
             continue;
         }
+        if header && line.starts_with("schema:") {
+            report.error(n, None, "schema", "ledger_schema", "schema header appears after the matrix", "put schema: 2 before the evidence matrix");
+        }
         if !header {
             if let Some(version) = line.strip_prefix("schema:") {
                 if declared_schema || !matches!(version.trim(), "1" | "2") {
@@ -580,6 +583,9 @@ mod tests {
             ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
             ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
             ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
+            ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),
             ("", "Legacy expectation", "database: row saved", "PASS", None),
         ] {
             let pass = usize::from(verdict == "PASS");
@@ -653,6 +659,7 @@ mod tests {
             ),
             (base.replace("capture.txt", "../outside.txt"), "capture"),
             (base.replace("capture.txt", "missing.txt"), "capture"),
+            (format!("{base}schema: 2\n"), "ledger_schema"),
         ] {
             std::fs::write(&path, body).unwrap();
             let report = check(&path, 1);

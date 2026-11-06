@@ -43,16 +43,13 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    capture judgment. List each returned line, row ID, field and message in the
    verification summary, record rejection, and stop. Use the candidate
    revision's command when reviewing a change to the parser itself.
-3. Keep the JSON report as proof of the structural check. The executable owns
-   grammar, counts, labels and task-derived breadth.
+3. Keep the JSON report. Schema 2 requires cited `path:line` expectations and
+   `visible:`, `terminal:` or `http:` outcomes; DB-only PASSes fail. Legacy receipts remain valid.
 
-4. If the shared check passes, open every capture referenced by a `PASS` row
-   with the available image-capable or terminal-capture reader. Judge the
-   capture itself, not its filename, ledger prose, or source code. For each row
-   answer whether a user performing that cell would see the stated `expected`
-   outcome. If the capture does not show that outcome, downgrade that row to
-   `FAIL` in the verification summary and state the capture path and reason;
-   never silently leave it as `PASS` and do not edit the worker's ledger.
+4. Open every PASS capture and its cited source line. Judge the visible result
+   against that source: database rows, charges or a stored draft cannot prove what
+   the user sees. An unsupported expectation is a spec question. Record misleading
+   PASSes as FAIL with capture path and reason; never edit the worker's ledger.
    Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
    never as `PASS`.
 5. `NOT EXERCISED` rows are owed work, not failures. List each such row in the

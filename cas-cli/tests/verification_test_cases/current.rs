@@ -555,6 +555,8 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             Some((verdict.created_at - dispatched_at).num_milliseconds() as u64),
             "direct answers use dispatch elapsed time and preserve it on retry"
         );
+        // The JSON-backed ledger stores fractional minutes. Compare at the
+        // measurement's millisecond precision, not floating-point bit equality.
         assert!(
             cas_store::quality_events_between(&fixture.root, None, None)
                 .unwrap()
@@ -562,7 +564,7 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
                 .any(|event| event.task_id.as_deref() == Some(task_id.as_str())
                     && matches!(&event.payload, cas_store::QualityPayload::CheckRun {
                         minutes: Some(minutes), ..
-                    } if *minutes == verdict.duration_ms.unwrap() as f64 / 60_000.0)),
+                    } if (*minutes * 60_000.0).round() as u64 == verdict.duration_ms.unwrap())),
             "automatic duration must reach the verifier measurement ledger"
         );
         assert!(

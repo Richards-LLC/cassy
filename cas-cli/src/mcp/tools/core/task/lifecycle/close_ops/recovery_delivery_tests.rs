@@ -552,6 +552,57 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     assert!(task_attribution::started_delivery(repo, &continued).err().unwrap().contains("foreign commit"));
 }
 
+/// GH #1558: an ordinary close after pushing a target merge must bind the
+/// merged tip, without asking the worker for an explicit commit receipt.
+#[tokio::test]
+async fn fresh_close_after_pushed_target_merge_binds_tip_without_receipt_cas_d81b() {
+    let mut env = TestEnvGuard::temp_home();
+    for merge_target in [false, true] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+        let mut task = tasks.get(TASK).unwrap();
+        task.deliverables.parked_branch = None;
+        task.deliverables.historical_factory_branch_anchors.clear();
+        tasks.update(&task).unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(&f.worker_path, &["push", "-q", "origin", "main", BRANCH]);
+        if merge_target {
+            // The default merge subject carries no task id and introduces
+            // only target commits after the commit-hook predecessor anchor.
+            git(&f.worker_path, &["merge", "-q", "--no-ff", "main"]);
+            git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert_eq!(git(repo, &["rev-parse", &format!("origin/{BRANCH}")]), tip);
+        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some(format!("PASS {tip}: final pushed delivery")),
+            commit_receipt: None,
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            search_manifest: None,
+        })).await.unwrap());
+        let parked = tasks.get(TASK).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(tip.as_str()));
+        let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].bound_head, tip);
+        if merge_target {
+            assert!(parked.deliverables.historical_factory_branch_anchors.contains(&f.predecessor));
+        }
+    }
+}
+
 /// GH #1389: the first final close must use the pushed receipt, even when a
 /// commit hook saved its predecessor before the worker synchronized the target.
 #[tokio::test]

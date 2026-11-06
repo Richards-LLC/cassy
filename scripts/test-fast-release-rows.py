@@ -614,12 +614,18 @@ class FastRows(unittest.TestCase):
         config = (self.repo / ".git/config.worktree").read_bytes()
         self.assertEqual(self.install_hooks().returncode, 0)
         self.assertEqual((self.repo / ".git/config.worktree").read_bytes(), config)
-        self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
+        self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n" * 40)
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
         self.write("scripts/test-example.py", "raise SystemExit('fixture diagnostic: prebuild poll expired')\n")
         self.commit()
-        refused = self.push()
+        base = "origin/epic/release-train-with-a-long-name"
+        command(self.repo, "git", "update-ref", "refs/remotes/" + base, self.base)
+        refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
+        # pin: push diagnostics name the full comparison ref and offending source line.
+        self.assertIn(f"(base {base})", refused.stderr)
+        self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
+        self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
         self.assertIn("FIX version-literals: ", refused.stderr)
         self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
         self.assertIn("FAIL ci-script-tests-changed", refused.stderr)
@@ -631,6 +637,7 @@ class FastRows(unittest.TestCase):
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
+        self.assertIn("fixture diagnostic: prebuild poll expired", refused.stderr)
         # pin: FAIL plus the row id is the gate's public diagnostic protocol.
         self.assertIn("FAIL ci-script-tests-changed", (logs / "gate.log").read_text())
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())

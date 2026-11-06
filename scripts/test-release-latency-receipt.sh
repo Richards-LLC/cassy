@@ -46,6 +46,11 @@ case "$1 $2" in
         printf '%s\n' "${FAKE_RELEASE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
         ;;
       *event=merge_group*)
+        # cas-738f: an unbounded history lookup cannot return reliable evidence.
+        if [[ "$2" != *head_sha=* && "$2" != *'created=%3E%3D2026-10-15'* ]]; then
+          echo 'queue history lookup must start at the first child date' >&2
+          exit 1
+        fi
         cat "${FAKE_MERGE_GROUP_RUNS_JSON:-${FAKE_EMPTY_RUNS_JSON:?}}"
         ;;
       *branch=main*)

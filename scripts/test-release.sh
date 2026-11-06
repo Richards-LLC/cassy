@@ -34,6 +34,9 @@ printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
 state="${FAKE_GH_STATE:?}"
 case "$1 $2" in
   "repo view") echo example/repo ;;
+  "release view") exit 1 ;;
+  "release create") ;;
+  "api repos/"*) echo '{}' ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
@@ -534,6 +537,40 @@ cp "$parent/.git/config" "$tmp/parent-config.before"
 ) || bad 'the bare-fixture test passes under exported hook variables'
 check 'cmp -s "$tmp/parent-config.before" "$parent/.git/config"' 'a bare fixture under an exported GIT_DIR leaves the parent config untouched'
 check '[[ "$(git -C "$parent" rev-list --count HEAD)" -eq 1 && -z "$(git -C "$parent" tag)" ]]' 'a bare fixture under an exported GIT_DIR adds no commit or tag to the parent'
+
+# A one-item hotfix is an ordinary train cut, queue landing and publication.
+one_item_hotfix_train() {
+    local fixture="$tmp/one-item-hotfix" branch="epic/one-item-hotfix" version cut landed
+    clone_epic "$fixture" "$branch" one-hotfix
+    [[ "$(git -C "$fixture" rev-list --count origin/main..HEAD)" == 1 ]] || return 1
+    version="$(run "$fixture" --next-version --hotfix | sed -n 's/^version=//p')"
+    write_valid_draft "$tmp/one-hotfix-notes.md"
+    mkdir -p "$tmp/one-hotfix-state" "$tmp/one-hotfix-assets"
+    FAKE_GH_STATE="$tmp/one-hotfix-state" FAKE_GH_LOG="$tmp/one-hotfix-gh.log" \
+        FAKE_CAS_LOG="$tmp/one-hotfix-cas.log" \
+        run "$fixture" --hotfix --notes "$tmp/one-hotfix-notes.md" >"$tmp/one-hotfix.log" 2>&1 || { cat "$tmp/one-hotfix.log"; return 1; }
+    cut="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$(git -C "$fixture" log -1 --format=%s)" == "release: v$version" &&
+       "$(git -C "$tmp/origin.git" rev-parse "refs/heads/$branch")" == "$cut" ]] || return 1
+    grep -q "^pr create --base main --head $branch " "$tmp/one-hotfix-gh.log" &&
+        [[ "$(grep -c '^pr merge ' "$tmp/one-hotfix-gh.log")" == 1 ]] &&
+        grep -q "^release track --commit $cut --version $version " "$tmp/one-hotfix-cas.log" || return 1
+    # Stand in only for the external merge queue's landing, then invoke the
+    # same publisher as the release workflow against its exact landed SHA.
+    git -C "$fixture" switch --quiet main
+    git -C "$fixture" merge --quiet --no-ff -m 'queue landing' "$branch"
+    git -C "$fixture" push --quiet origin main
+    landed="$(git -C "$fixture" rev-parse HEAD)"
+    printf 'fixture linux archive\n' >"$tmp/one-hotfix-assets/cas-x86_64-unknown-linux-gnu.tar.gz"
+    printf 'fixture macos archive\n' >"$tmp/one-hotfix-assets/cas-aarch64-apple-darwin.tar.gz"
+    (cd "$fixture" && GITHUB_REPOSITORY=example/repo FAKE_GH_LOG="$tmp/one-hotfix-gh.log" \
+        "$script_dir/release-publish.sh" --version "$version" --sha "$landed" \
+        --assets "$tmp/one-hotfix-assets" --notes-out "$tmp/one-hotfix-published.md") >>"$tmp/one-hotfix.log" 2>&1 || { cat "$tmp/one-hotfix.log"; return 1; }
+    [[ "$(git -C "$tmp/origin.git" rev-parse "refs/tags/v$version^{}")" == "$landed" ]] &&
+        grep -q "^release create v$version " "$tmp/one-hotfix-gh.log" &&
+        grep -q 'one-hotfix shipped' "$tmp/one-hotfix-published.md"
+}
+check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

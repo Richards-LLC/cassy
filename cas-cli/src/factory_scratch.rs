@@ -10,6 +10,81 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+
+/// Short enough to leave room for Unix socket filenames. Full checkout identity
+/// lives in the private directory's marker, rather than its pathname.
+pub(crate) fn test_tmp_dir(cas_dir: &Path, worktree: &Path) -> PathBuf {
+    let root = configured_scratch_root(cas_dir).unwrap_or_else(|| cas_dir.to_path_buf());
+    let checkout = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
+    let key = hex::encode(Sha256::digest(checkout.as_os_str().as_encoded_bytes()));
+    root.join("t").join(&key[..16])
+}
+
+fn test_tmp_owner(cas_dir: &Path, worktree: &Path) -> io::Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "cas_root": cas_dir.canonicalize()?,
+        "worktree": worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf()),
+    }))
+}
+
+fn owned_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<Option<PathBuf>> {
+    let path = test_tmp_dir(cas_dir, worktree);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let expected = path.parent().unwrap().parent().unwrap().canonicalize()?
+        .join("t").join(path.file_name().unwrap());
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || path.canonicalize()? != expected {
+        return Err(io::Error::other("capped temporary directory escapes scratch ownership"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(io::Error::other("capped temporary directory must have mode 0700"));
+        }
+    }
+    let marker = path.join(".cas-owner.json");
+    if !std::fs::symlink_metadata(&marker)?.is_file()
+        || serde_json::from_slice::<serde_json::Value>(&std::fs::read(marker)?)
+            .map_err(io::Error::other)? != test_tmp_owner(cas_dir, worktree)? {
+        return Err(io::Error::other("capped temporary directory has a different owner"));
+    }
+    Ok(Some(path))
+}
+
+pub(crate) fn prepare_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<PathBuf> {
+    let path = test_tmp_dir(cas_dir, worktree);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    if path.parent().unwrap().canonicalize()?
+        != path.parent().unwrap().parent().unwrap().canonicalize()?.join("t") {
+        return Err(io::Error::other("capped temporary parent escapes scratch ownership"));
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&path) {
+        Ok(()) => std::fs::write(path.join(".cas-owner.json"),
+            serde_json::to_vec(&test_tmp_owner(cas_dir, worktree)?).map_err(io::Error::other)?)?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(error),
+    }
+    owned_test_tmp(cas_dir, worktree)?.ok_or_else(|| io::Error::other("capped temporary directory disappeared"))
+}
+
+/// Called only while the existing lane/lifetime locks and process guards hold.
+pub(crate) fn reclaim_test_tmp(cas_dir: &Path, worktree: &Path) -> io::Result<()> {
+    if let Some(path) = owned_test_tmp(cas_dir, worktree)? {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
 
 /// The configured scratch root for one Cassy store, if it relocates anything.
 /// A value that is not absolute, or a config that cannot load, keeps the

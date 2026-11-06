@@ -114,6 +114,7 @@
         "shutdown_workers",
         "spawn_workers",
         "sync_all_workers",
+        "train_merge",
         "transfer_claim",
         "worker_activity",
         "worker_queue",

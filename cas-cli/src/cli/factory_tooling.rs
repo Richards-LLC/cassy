@@ -146,6 +146,11 @@ pub fn update_gitignore(cwd: &Path) -> Result<bool> {
 /// Full factory tooling setup
 /// Returns a summary string of what was done
 pub fn setup_factory_tooling(cwd: &Path) -> Result<String> {
+    setup_factory_tooling_excluding(cwd, &[])
+}
+
+pub(crate) fn setup_factory_tooling_excluding(cwd: &Path, excluded: &[std::path::PathBuf]) -> Result<String> {
+    let allowed = |path: &str| !excluded.iter().any(|conflict| cwd.join(path).starts_with(conflict));
     if std::env::var("CAS_SKIP_FACTORY_TOOLING").ok().as_deref() == Some("1") {
         return Ok("skipped".to_string());
     }
@@ -154,15 +159,15 @@ pub fn setup_factory_tooling(cwd: &Path) -> Result<String> {
 
     // Create Cassy-managed helper templates only.
 
-    if create_env_template(cwd)? {
+    if allowed(".env.worktree.template") && create_env_template(cwd)? {
         results.push(".env.worktree.template");
     }
 
-    if create_boot_script(cwd)? {
+    if allowed("scripts/worktree-boot.sh") && create_boot_script(cwd)? {
         results.push("scripts/worktree-boot.sh");
     }
 
-    if update_gitignore(cwd)? {
+    if allowed(".gitignore") && update_gitignore(cwd)? {
         results.push(".gitignore updated");
     }
 

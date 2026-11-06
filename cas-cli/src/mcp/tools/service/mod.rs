@@ -619,7 +619,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory operations: workers/task queues, epics, worktrees, servers, loops, notices, leases and GC. worker_queue inspects/reorders/clears pending task_ids; ordered spawns use isolated checkouts. clear_context verifies a transcript reset or errors. Workers manage only owned servers. Neon: supervisor only, one branch/task, deleted at close; DATABASE_URL stays in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent require an authenticated supervisor. Identity/messages/reminders: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers, loops, notices, leases, GC. train_merge id=<epic>: queue parked task_ids in order (default updated time); hold single merges, resume after review. worker_queue: list/reorder/clear pending task_ids; ordered spawns isolate checkouts. clear_context requires transcript reset. Workers: own servers only. Neon: supervisor only, one branch/task, delete at close; DATABASE_URL in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent: supervisor auth required. Identity/messages/reminders: coordination."
     )]
     pub async fn factory(
         &self,
@@ -1269,6 +1269,7 @@ impl CasService {
                         "reason",
                     ])
                 }
+                "train_merge" => Some(&["action", "id", "task_ids"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
                 "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
@@ -1366,6 +1367,15 @@ impl CasService {
 
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => heap_future(|| this.coordination_peers(req)).await,
+
+                "train_merge" => {
+                    let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;
+                    let inner = this.inner.clone();
+                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref()))
+                        .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                        .map(Self::success)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
+                }
 
                 // cas-72d3: journaled external Slack-thread authority.
                 "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim"

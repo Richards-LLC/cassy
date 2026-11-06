@@ -10,13 +10,15 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
+import { epicTabs, type EpicSessionProgress } from "./progress-model";
+import { renderEpicTabs } from "./epic-tabs";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { pendingSessionLabel, reconcileCatalog, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -150,6 +152,7 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
+let pendingReload: { machineId: string; session: string; birth?: string } | undefined;
 let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
@@ -165,7 +168,7 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
         }
       },
       send: message => connections.get(machineId)?.send(session, message) ?? false,
-      changed: () => updateConversationViews(),
+      changed: () => { updateConversationViews(); renderConversationList(); },
     });
     supervisorCommands.set(key, commands);
   }
@@ -179,6 +182,35 @@ function supervisorCommandUnavailable(machineId: string, session: string): strin
   if (!machine.scopes.includes("pane-input")) return "This browser was paired without command control. Pair again with pane:input.";
   if (conversationConnection(machineId, session)?.phase !== "live") return "Commands work once the conversation is connected.";
   return undefined;
+}
+/** A card click attaches its own supervisor, then uses the existing command
+ * controller. A new selection or session birth cannot inherit that intent. */
+async function reloadCassy(row: ConversationRow): Promise<void> {
+  const item = sessions.get(row.machineId)?.find(item => item.name === row.session);
+  if (!item || item.ended) return;
+  pendingReload = { machineId: row.machineId, session: row.session, birth: item.started_at };
+  renderConversationList();
+  try {
+    if (selectedMachineId !== row.machineId || selectedSession !== row.session || conversationConnection(row.machineId, row.session)?.phase !== "live") await openSession(row.machineId, row.session);
+    runPendingReload(row.machineId, row.session);
+  } catch (error) {
+    if (pendingReload?.machineId === row.machineId && pendingReload.session === row.session) pendingReload = undefined;
+    toast(String(error)); renderConversationList();
+  }
+}
+function runPendingReload(machineId: string, session: string): void {
+  const intent = pendingReload;
+  if (!intent || intent.machineId !== machineId || intent.session !== session) return;
+  const current = sessions.get(machineId)?.find(item => item.name === session);
+  if (selectedMachineId !== machineId || selectedSession !== session || !current || current.ended || current.started_at !== intent.birth) {
+    pendingReload = undefined; renderConversationList(); return;
+  }
+  if (conversationConnection(machineId, session)?.phase !== "live") return;
+  pendingReload = undefined;
+  if (current.harness !== "claude") { toast("Reload Cassy requires Claude Code."); renderConversationList(); return; }
+  void supervisorCommandSession(machineId, session).run("mcp", false)
+    .then(() => countUsage("supervisor.command"))
+    .catch(error => { toast(String(error)); renderConversationList(); });
 }
 function bindSlashCommands(input: HTMLTextAreaElement): void {
   const machineId = selectedMachineId; const session = selectedSession;
@@ -583,7 +615,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
-      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandReceipts: () => supervisorCommandSession(threadMachineId, threadSession).visibleReceipts,
+      commandDismiss: ref => supervisorCommandSession(threadMachineId, threadSession).dismiss(ref),
       commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
@@ -724,6 +757,7 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (pendingReload && (next?.machineId !== pendingReload.machineId || next.session !== pendingReload.session)) pendingReload = undefined;
   if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
     releasePaneControl(selectedMachineId, selectedSession);
   }
@@ -855,7 +889,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Native lifecycle changes need no fleet mutation or Show work reader.
       // The existing health heartbeat refreshes the open session's status,
       // independently of a slow catalog read and without subscribing to output.
-      if (state.phase === "live" && selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
+      if (state.phase === "live") refreshEpicSessions(machine.id);
       // A refused pairing is terminal truth, even between animation frames.
       // Clear stale working ink with the same state change as Needs pairing.
       if (state.authFailure) {
@@ -948,6 +982,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase !== "live") liveSendApprovals.delete(key);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
+      if (state.phase === "live") queueMicrotask(() => runPendingReload(machine.id, session));
+      else if ((state.phase === "failed" || state.phase === "backoff") && pendingReload?.machineId === machine.id && pendingReload.session === session) {
+        pendingReload = undefined; toast("Reload Cassy was not sent. Try again once connected."); renderConversationList();
+      }
       // cas-ff22: answers in flight on the old socket never come; a live
       // attach re-reads the newest work of whatever shows it.
       if (attachWasLive && state.phase !== "live") workPicture.disconnected(machine.id, session);
@@ -996,7 +1034,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (listed, freshnessThresholdSecs, stopped) => {
-      const items = reconcileCatalog(sessions.get(machine.id) ?? [], listed, stopped);
+      const previous = new Map((sessions.get(machine.id) ?? []).map(item => [item.name, item]));
+      const items = reconcileCatalog([...previous.values()], listed, stopped);
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
       // cas-9846: the machine answered; its cached catalog gives way, and the
       // live one is kept for the next reload during an outage.
@@ -1015,6 +1054,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);
       sessions.set(machine.id, items);
+      // A peer's retained events refresh the catalog too (cas-c4b7). Only a
+      // new or revived destination needs status here; existing sessions keep
+      // their own event invalidations and the independent health heartbeat.
+      for (const item of items) {
+        const before = previous.get(item.name);
+        if (sessionReachable(item) && (!before || !sessionReachable(before) || before.started_at !== item.started_at)) {
+          void loadStatus(machine.id, item.name);
+        }
+      }
       const stoppedSelection = selectedMachineId === machine.id && selectedSession !== undefined
         && !items.some(item => item.name === selectedSession && sessionRunning(item));
       if (stoppedSelection) commitSelection({ machineId: machine.id });
@@ -1033,12 +1081,17 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
+      // The epic strip reads peer sessions without attaching their output.
+      // Only the event's session is invalidated, and overlapping reads coalesce.
+      if (typeof event.session === "string" && sessions.get(machine.id)?.some(item => item.name === event.session && sessionRunning(item))) {
+        void loadStatus(machine.id, event.session);
+      }
       // A retained peer-session burst does not change this conversation's
       // controls. Reading them for each peer event floods the signed HTTP lane
       // (cas-c971). Events without a session still invalidate machine-wide state.
       if (selectedMachineId === machine.id && selectedSession &&
           (typeof event.session !== "string" || event.session === selectedSession)) {
-        void loadStatus(machine.id, selectedSession);
+        if (typeof event.session !== "string") refreshEpicSessions(machine.id);
         void loadLease(machine.id, selectedSession);
       }
     },
@@ -1113,7 +1166,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onSupervisorCommandSupport: (session, supported) => { supervisorCommandSession(machine.id, session).supported = supported; slashCommands?.palette.sync(); },
-    onSupervisorCommandReceipt: (session, receipt) => supervisorCommandSession(machine.id, session).receive(receipt),
+    onSupervisorCommandReceipt: (session, receipt) => {
+      const commands = supervisorCommandSession(machine.id, session);
+      const requested = commands.receipts.get(receipt.client_ref)?.command === "mcp";
+      commands.receive(receipt);
+      if (requested && receipt.command === "mcp" && receipt.phase === "observed") void connections.get(machine.id)?.refreshSessions();
+    },
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
@@ -2195,6 +2253,15 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
 }
 
 const statusRefresh = new StatusRefresh();
+// One in-flight status read plus one trailing invalidation per session. A peer
+// event burst must not recreate the old unbounded signed HTTP fan-out.
+const epicStatusReads = new Map<string, Promise<void>>();
+const epicStatusAgain = new Set<string>();
+function refreshEpicSessions(machineId: string): void {
+  for (const session of sessions.get(machineId) ?? []) {
+    if (sessionRunning(session) && !session.dormant && !session.unreachable) void loadStatus(machineId, session.name);
+  }
+}
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
   const connection = connections.get(machineId);
@@ -2202,7 +2269,11 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
   const key = sessionKey(machineId, session);
   if (!connection || !machine) { if (statusPending.delete(key)) render(); return; }
   if (!statuses.has(key)) statusPending.add(key);
-  await statusRefresh.request(key, () => connection.status(session), (status) => {
+  if (epicStatusReads.has(key)) {
+    epicStatusAgain.add(key);
+    return epicStatusReads.get(key);
+  }
+  const read = statusRefresh.request(key, () => connection.status(session), (status) => {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
@@ -2217,7 +2288,12 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     statusFailures.add(key);
     statusPending.delete(key);
     render();
+  }).finally(() => {
+    epicStatusReads.delete(key);
+    if (epicStatusAgain.delete(key)) void loadStatus(machineId, session);
   });
+  epicStatusReads.set(key, read);
+  await read;
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
@@ -4625,6 +4701,7 @@ function renderRegions(context: RegionContext): void {
   renderConversationList();
   renderAttention();
   renderStatus(context.status);
+  syncEpicTabs();
   syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
   syncTeamView(context.status, context.liveRegions.staleNotice);
@@ -4846,7 +4923,7 @@ function renderConversationList(): void {
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4862,7 +4939,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { reload: row => { void reloadCassy(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
@@ -5492,6 +5569,44 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
   teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
 }
 
+// A tab choice belongs to the browser, never to factory focus_epic.
+let epicChoice: string | undefined;
+let epicSheetOpen = false;
+function syncEpicTabs(): void {
+  const root = document.getElementById("epic-tabs");
+  if (!root) return;
+  const sources: EpicSessionProgress[] = [];
+  const unavailable = new Set<string>();
+  for (const [machineId, roster] of sessions) {
+    const machine = machines.get(machineId);
+    if (!machine) continue;
+    for (const session of roster.filter(item => sessionRunning(item) && !item.dormant)) {
+      const key = sessionKey(machineId, session.name);
+      const status = statuses.get(key);
+      if (statusFailures.has(key)) unavailable.add(machine.label);
+      if (!status) continue;
+      sources.push({ project: session.cloud_project_id ?? session.project ?? session.project_dir ?? key,
+        machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
+        roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
+        tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
+        epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0,
+        stale: statusFailures.has(key) || session.stale === true || session.unreachable === true
+          || connectionStates.get(machineId)?.phase !== "live" || connectionStates.get(machineId)?.degraded === true,
+      });
+    }
+  }
+  const tabs = epicTabs(sources);
+  if (epicChoice && !tabs.some(tab => tab.key === epicChoice)) epicChoice = undefined;
+  renderEpicTabs(root, tabs, { choice: epicChoice, phone: phoneLayout(), sheetOpen: epicSheetOpen,
+    notice: unavailable.size ? `Epic status unavailable on ${[...unavailable].join(", ")}.` : undefined,
+    retry: () => { for (const machineId of machines.keys()) refreshEpicSessions(machineId); },
+    select: key => { epicChoice = key; epicSheetOpen = true; syncEpicTabs(); },
+    close: () => { epicSheetOpen = false; syncEpicTabs();
+      root.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+    },
+  });
+}
+
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
@@ -5780,7 +5895,7 @@ function bindEvents(): void {
   const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
   if (commands) commands.onclick = () => {
     const input = document.querySelector<HTMLTextAreaElement>("#message-text");
-    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(commands); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };

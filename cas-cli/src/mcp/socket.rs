@@ -605,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_listener_refuses_a_live_socket() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_paths::short_socket_tempdir();
         let _owner = create_listener(dir.path()).expect("first bind wins");
 
         let err = create_listener(dir.path()).expect_err("second bind must be refused");
@@ -614,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_listener_reclaims_a_stale_socket_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_paths::short_socket_tempdir();
         let owner = create_listener(dir.path()).unwrap();
         // Owner "dies" without cleanup: the socket file survives but nothing
         // is listening on it.

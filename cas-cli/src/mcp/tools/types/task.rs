@@ -396,7 +396,7 @@ pub struct TaskRequestChangesRequest {
 
     /// Required supervisor verdict and branch-handling instruction
     #[schemars(
-        description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery."
+        description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery. To authorize an upstream release or sibling import, include merge_source=<full immutable commit SHA>; the grant stays bound to this task's declared target."
     )]
     pub reason: String,
 }

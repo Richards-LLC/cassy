@@ -729,7 +729,8 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub task_id: Option<String>,
 
-    /// Ordered task queue for one spawned worker, or replacement pending IDs for worker_queue.
+    /// Ordered task queue for one spawned worker, replacement pending IDs for
+    /// worker_queue, or exact parked delivery order for train_merge id=<epic>.
     #[serde(default)]
     pub task_ids: Option<Vec<String>>,
 

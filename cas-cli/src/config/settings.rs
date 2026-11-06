@@ -1107,6 +1107,10 @@ pub struct FactoryConfig {
     #[serde(default = "default_true")]
     pub release_train: bool,
 
+    /// Operator intent inherited by worker and reviewer briefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_mode: Option<String>,
+
     /// Refuse to silently fall back when a resolved worker/supervisor spec
     /// requests Codex but Codex is unavailable — bail with an actionable
     /// error instead of rewriting to Claude (cas-7199 / cas-a487). OR'd
@@ -1375,6 +1379,7 @@ impl Default for FactoryConfig {
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
             release_train: true,
+            focus_mode: None,
             strict_cli: false,
             target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),

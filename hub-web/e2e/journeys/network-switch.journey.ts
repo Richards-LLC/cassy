@@ -1249,6 +1249,8 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     }, { prior, tail });
     await hub.waitFor(() => hub.catalogFetchCount("atlas") > catalogsBeforeReplay);
     await clock.advance(1);
+    // cas-c4b7: even the catalog fetched by this replay must leave the
+    // unchanged selected session's status alone, before any heartbeat is due.
     expect(controlReads.length, "peer replay must not reload the open session's controls").toBe(0);
     for (let step = 0; step < 12; step++) {
       await clock.advance(1_000);

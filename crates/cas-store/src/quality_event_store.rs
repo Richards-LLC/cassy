@@ -788,6 +788,30 @@ mod tests {
     }
 
     #[test]
+    fn estimates_roundtrip_with_retained_ledger_history() {
+        let dir = tempfile::tempdir().unwrap();
+        record_quality_event(dir.path(), &intervention("existing")).unwrap();
+        for (key, payload) in [
+            ("estimate", serde_json::json!({"kind":"estimate", "subject_kind":"pipeline",
+                "subject":"merge_queue:abc1234", "typical_minutes":16.0, "bad_day_minutes":31.0,
+                "evidence_count":5, "references":[{"id":"run:1","minutes":16.0}], "recipient":"operator"})),
+            ("outcome", serde_json::json!({"kind":"estimate_outcome", "estimate_id":"estimate-id",
+                "subject":"merge_queue:abc1234", "actual_minutes":12.0, "inside_range":true,
+                "below_typical":true, "reason":"below_typical"})),
+        ] {
+            let payload: QualityPayload = serde_json::from_value(payload).expect("estimate kind supported");
+            let event = NewQualityEvent::new(key, payload);
+            assert!(record_quality_event(dir.path(), &event).unwrap());
+            assert!(!record_quality_event(dir.path(), &event).unwrap());
+        }
+        let events = quality_events_after(dir.path(), 0, 10).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].payload.kind(), "intervention");
+        assert_eq!(events[1].to_wire().payload.kind(), "estimate");
+        assert_eq!(events[2].to_wire().payload.kind(), "estimate_outcome");
+    }
+
+    #[test]
     fn ledger_is_append_only_and_refacts_collapse() {
         let dir = tempfile::tempdir().unwrap();
         assert!(record_quality_event(dir.path(), &intervention("a")).unwrap());

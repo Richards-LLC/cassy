@@ -304,14 +304,21 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
     // Conventional task scopes/prefixes and trailing task annotations claim
     // ownership; a task named in explanatory prose after ':' is context.
     let prefix = subject.split_once(':').map_or(subject, |(prefix, _)| prefix);
-    let annotation = subject.rsplit_once('(')
-        .and_then(|(_, suffix)| suffix.strip_suffix(')')).unwrap_or("");
+    let mut trailing = subject.trim_end();
+    let mut foreign_annotation = false;
+    while let Some((rest, annotation)) = trailing.strip_suffix(')')
+        .and_then(|text| text.rsplit_once('('))
+        .or_else(|| trailing.strip_suffix(']').and_then(|text| text.rsplit_once('[')))
+    {
+        foreign_annotation |= references_foreign_task(annotation, identity);
+        trailing = rest.trim_end();
+    }
     !identity
         .task_id
         .as_deref()
         .is_some_and(|id| message_references_task(subject, id))
         && (references_foreign_task(prefix, identity)
-            || references_foreign_task(annotation, identity))
+            || foreign_annotation)
 }
 
 /// GH #1151: whether `commit` is another task's work under the subject rule

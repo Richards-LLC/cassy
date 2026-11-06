@@ -1336,9 +1336,14 @@ pub(crate) fn reconcile_blocked_task_alert(
             && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
                 + chrono::Duration::minutes(5)
         {
-            emit(true, Some(
-                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
-            ))?;
+            let reason = if task.deliverables.no_delivery_close_intent.as_ref()
+                .is_some_and(|intent| intent.dispatch_id == dispatch.id)
+            {
+                "Verification was approved, but automatic no-delivery close is still held after five minutes; inspect the live assignment and holds, then finish its close."
+            } else {
+                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close."
+            };
+            emit(true, Some(reason))?;
         }
         if matches!(dispatch.state,
             cas_types::VerificationDispatchState::Pending

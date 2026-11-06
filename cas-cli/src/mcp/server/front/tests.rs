@@ -129,7 +129,7 @@ fn backend(version: &str, fails: bool, calls: Arc<Mutex<Vec<(String, Value)>>>,
         }
     });
     Backend { input: Box::new(front_in), output: Box::new(front_out),
-        control_input: Box::new(front_control_in), control_output: Box::new(front_control_out), child: None, image: None }
+        control_input: Box::new(front_control_in), control_output: Box::new(front_control_out), child: None, image: None, retry_after_drain: None }
 }
 
 #[tokio::test]

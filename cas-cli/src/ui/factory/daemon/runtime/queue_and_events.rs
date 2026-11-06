@@ -15643,7 +15643,8 @@ mod tests {
     fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        std::fs::write(cas_dir.join("config.toml"), "[factory]\nfocus_mode='visible chunks first'\n").unwrap();
+        let focus = "visible chunks first";
+        std::fs::write(cas_dir.join("config.toml"), format!("[factory]\nfocus_mode='{focus}'\n")).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
         task.description = "Apply rule-177 to the SMS send path.".into();
         // cas-d8295: only a stakeholder rule's citation asks for markers.
@@ -15677,7 +15678,7 @@ mod tests {
             .unwrap()
             .remove(0)
             .prompt;
-        assert!(prompt.contains("visible chunks first"), "{prompt}");
+        assert!(prompt.contains(focus), "{prompt}");
         assert!(cas_mux::missing_contract_elements(&prompt, cas_mux::ContractRole::Worker).is_empty(),
             "the single spawn message must include the worker startup contract");
         deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,

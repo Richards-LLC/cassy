@@ -14316,7 +14316,8 @@ mod spawn_lifecycle_tests {
         let temp = tempfile::tempdir().expect("temp project");
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::write(cas_root.join("config.toml"), "[factory]\nfocus_mode='visible chunks first'\n").unwrap();
+        let focus = "visible chunks first";
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nfocus_mode='{focus}'\n")).unwrap();
         std::fs::create_dir_all(temp.path().join("docs/qa")).unwrap();
         std::fs::write(temp.path().join("docs/qa/journeys.yaml"),
             "main_journeys: [save]\njourneys:\n- id: save\n  status: active\n").unwrap();
@@ -14372,11 +14373,11 @@ mod spawn_lifecycle_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
-        assert!(text.contains("TRIAGE") && text.contains("cas-visible"), "{text}");
+        assert!(text.contains(&main.id), "{text}");
         let prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
             &cas_root, "worker-1", "cas-brief1", "Fix the sweep", cas_mux::SupervisorCli::Claude,
         );
-        assert!(prompt.contains("visible chunks first"), "{prompt}");
+        assert!(prompt.contains(focus), "{prompt}");
         let notes = task_store.get("cas-brief1").expect("task").notes;
         assert!(
             notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),

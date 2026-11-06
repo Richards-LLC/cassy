@@ -5900,6 +5900,7 @@ mod communication_summary_tests {
         let agents = crate::store::open_agent_store(&root).unwrap();
         let mut lead = cas_types::Agent::new("lead-affc".into(), supervisor.clone());
         lead.role = cas_types::AgentRole::Supervisor;
+        lead.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         lead.factory_session = Some(session.clone());
         agents.register(&lead).unwrap();
         crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
@@ -5909,6 +5910,7 @@ mod communication_summary_tests {
             env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
         let worker_pid = pty.process_group_id().unwrap();
+        crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
         daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
             worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
         ).unwrap());
@@ -5948,6 +5950,14 @@ mod communication_summary_tests {
         }
         if receipt.ended.reason != "prompt_input_exit" {
             failures.push(format!("wrong exit reason: {}", receipt.ended.reason));
+        }
+        let durable = serde_json::to_value(&receipt).unwrap();
+        if !durable["ended"]["worker_states"].as_array().is_some_and(|rows| rows.iter().any(|row| {
+            row.as_str().is_some_and(|line| line.contains(worker) && line.contains(&task.id)
+                && line.contains("dirty_files=1") && line.contains("unpushed_commits=1")
+                && line.contains("stopped"))
+        })) {
+            failures.push(format!("missing durable worker state: {durable}"));
         }
         assert_eq!(std::fs::read_to_string(repo.join("dirty.txt")).unwrap(), "keep this\n");
         assert!(failures.is_empty(), "{}", failures.join("\n"));

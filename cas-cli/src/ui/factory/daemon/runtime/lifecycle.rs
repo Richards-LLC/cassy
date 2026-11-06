@@ -3998,7 +3998,6 @@ impl FactoryDaemon {
                             .collect();
                         if let Err(error) = crate::train_guardrails::notify_train_cuts(
                             &watch_cas_dir,
-                            &session_name,
                             &queued_trains,
                             chrono::Utc::now(),
                         ) {

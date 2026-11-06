@@ -250,13 +250,11 @@ pub(crate) async fn drop_child(
 /// whose PR is in the merge queue now; a train in the queue is being cut.
 pub(crate) fn notify_train_cuts(
     cas_dir: &Path,
-    session: &str,
     queued: &BTreeSet<String>,
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let max_age_hours = crate::config::Config::load(cas_dir)?.factory().release_train_max_age_hours;
     let tasks = crate::store::open_task_store(cas_dir)?;
-    let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
     let mut sent = 0;
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
         let Some(train) = train_lane(&epic).map(str::to_string) else { continue };
@@ -275,9 +273,8 @@ pub(crate) fn notify_train_cuts(
             .count();
         let age = now - first.created_at;
         let cut = format!("`git switch {train} && scripts/release.sh` (cas-cut-release)");
-        let (kind, occurrence, detail) = if in_flight == 0 {
+        let (occurrence, detail) = if in_flight == 0 {
             (
-                "train_ready",
                 last.merge_commit_sha.clone(),
                 format!(
                     "Release train {train} ({}) is ready to cut: {} reviewed fixes merged, none in \
@@ -288,8 +285,7 @@ pub(crate) fn notify_train_cuts(
             )
         } else if age >= chrono::Duration::hours(i64::from(max_age_hours)) {
             (
-                "train_max_age",
-                first.created_at.to_rfc3339(),
+                format!("max-age:{}", first.created_at.to_rfc3339()),
                 format!(
                     "Release train {train} ({}) reached its {max_age_hours} h max age: {} reviewed \
                      fixes merged, first {} min ago; {in_flight} still in flight ride the next train. \
@@ -302,9 +298,13 @@ pub(crate) fn notify_train_cuts(
         } else {
             continue;
         };
-        let recipient =
-            supervisor_notices::resolve(&agents, epic.epic_verification_owner.as_deref(), Some(session));
-        supervisor_notices::enqueue(cas_dir, &recipient, kind, &detail, &format!("{}:{occurrence}", epic.id))?;
+        supervisor_notices::release_action(
+            cas_dir,
+            &epic,
+            supervisor_notices::ReleaseNoticePhase::CutReady,
+            &occurrence,
+            &detail,
+        )?;
         sent += 1;
     }
     Ok(sent)

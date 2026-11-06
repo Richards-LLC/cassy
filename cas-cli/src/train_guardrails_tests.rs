@@ -138,11 +138,11 @@ fn cut_notice_is_sent_once_when_ready_and_once_at_max_age_cas_dcc9() {
     let none = BTreeSet::new();
     let now = Utc::now();
 
-    notify_train_cuts(&cas_dir, "factory-session", &none, now).unwrap();
+    notify_train_cuts(&cas_dir, &none, now).unwrap();
     assert!(notices().is_empty(), "a child in progress on a young train waits");
     let later = now + chrono::Duration::hours(3);
     for _ in 0..2 {
-        notify_train_cuts(&cas_dir, "factory-session", &none, later).unwrap();
+        notify_train_cuts(&cas_dir, &none, later).unwrap();
     }
     assert_eq!(notices().len(), 1, "one max-age notice");
     assert!(notices()[0].payload.contains("max age"), "{}", notices()[0].payload);
@@ -151,11 +151,17 @@ fn cut_notice_is_sent_once_when_ready_and_once_at_max_age_cas_dcc9() {
     let mut b = tasks.get("cas-b").unwrap();
     b.status = TaskStatus::Closed;
     tasks.update(&b).unwrap();
-    notify_train_cuts(&cas_dir, "factory-session", &BTreeSet::from([TRAIN.to_string()]), now).unwrap();
+    notify_train_cuts(&cas_dir, &BTreeSet::from([TRAIN.to_string()]), now).unwrap();
     assert_eq!(notices().len(), 1, "a train in the merge queue is already being cut");
     for _ in 0..2 {
-        notify_train_cuts(&cas_dir, "factory-session", &none, now).unwrap();
+        notify_train_cuts(&cas_dir, &none, now).unwrap();
     }
     assert_eq!(notices().len(), 2, "one ready notice");
     assert!(notices()[1].payload.contains("scripts/release.sh"), "{}", notices()[1].payload);
+    let prompts = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts.iter().all(|p| p.target == "supervisor" && crate::supervisor_notices::is_action_envelope(&p.prompt)),
+        "cut notices wake an idle supervisor: {prompts:?}"
+    );
 }

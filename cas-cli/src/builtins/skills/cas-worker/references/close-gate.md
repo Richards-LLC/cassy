@@ -111,6 +111,10 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
+- Report deliverable: commit the `cas-html-reports` triplet (`<basename>.md`,
+  `<basename>.brief.md` and `<basename>.html`) and cite it in the close reason.
+  The brief's `## Critique` table must meet the floor (distinctiveness, fit and
+  hierarchy each ≥ 4, no 0); a visual-QA PASS alone cannot close a report.
 - Risk: read task `risk` and `proof_targets`. Full Rust execution is
   the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.

@@ -6595,7 +6595,7 @@ async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
     let now = chrono::Utc::now();
     let binary = b"recorded candidate binary";
     let hash = format!("{:x}", Sha256::digest(binary));
-    let ledger = format!("Candidate: candidate/cas; --version: cas 4.1.0\nSHA-256: {hash}\n");
+    let ledger = format!("Candidate: candidate/cas; --version: cas 9.99.0\nSHA-256: {hash}\n");
     let store = env.task_store();
     for (id, status, age, recorded) in [
         ("cas-c001", TaskStatus::Closed, Some(49), true),

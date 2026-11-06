@@ -19,10 +19,22 @@ therefore retained in the fan-in, not dropped.
 ## 2. Merge queue
 
 [`main-ruleset.json`](main-ruleset.json) requires `Fast Validation`, blocks branch
-deletion and force-pushes, and requires GitHub's merge queue. The queue is single-entry
-(`min/max entries to merge = 1`, zero fill wait, one concurrent build) so it supplies a
-merged-tree revalidation without batching a second PR onto the headline latency path. It uses
-`ALLGREEN`, so each entry in any future group must pass its required checks.
+deletion and force-pushes, and requires GitHub's merge queue. The queue permits at
+least five concurrent builds and up to five entries per merge group, with a minimum
+of one entry and zero fill wait. It uses `ALLGREEN`, so every entry in a group
+must pass its required checks. Higher build/merge limits remain valid.
+
+`cas setup --project <dir>` and `cas doctor` read the default branch's active queue
+rules and report drift below 5/5 or away from `ALLGREEN`. Origin identity and queue
+health share one bounded GitHub request per invocation. The release preflight uses
+the same GraphQL document and prints one warning on drift or unavailable access
+(including rate limits); it never fails a release for this advisory check.
+Diagnostics only print a repair command. That command reads the full ruleset,
+changes only the queue limits/grouping and preserves higher limits and other rules.
+Neither setup, doctor nor release preflight writes the ruleset automatically.
+
+Schema: [active rules on a ref](https://docs.github.com/en/graphql/reference/git#ref),
+[queue rule parameters](https://docs.github.com/en/graphql/reference/pulls#mergequeueparameters).
 
 Apply or update command (capture the response as the after receipt):
 

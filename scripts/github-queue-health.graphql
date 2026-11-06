@@ -1,0 +1,31 @@
+# One read for canonical origin and active default-branch queue rules.
+# Ref.rules includes only applicable active repository/organization rulesets.
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    defaultBranchRef {
+      name
+      rules(first: 100) {
+        pageInfo { hasNextPage }
+        nodes {
+          type
+          parameters {
+            ... on MergeQueueParameters {
+              maxEntriesToBuild
+              maxEntriesToMerge
+              groupingStrategy
+            }
+          }
+          repositoryRuleset {
+            databaseId
+            source {
+              __typename
+              ... on Repository { nameWithOwner }
+              ... on Organization { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}

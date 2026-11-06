@@ -313,5 +313,36 @@ esac
         self.assertIn('mergeQueue(branch: "main")', log.read_text())
 
 
+class QueueHealth(Fixture):
+    def test_preflight_warns_only_and_reads_once_for_serial_healthy_and_unavailable(self):
+        import json
+        repo = self.root / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        git(repo, "remote", "add", "origin", "https://github.com/acme/repo.git")
+        fixture = json.loads((SCRIPTS.parent / "cas-cli/tests/fixtures/merge-queue-health.json").read_text())
+        response, log = self.root / "response.json", self.root / "calls"
+        gh = make_exe(self.root / "gh", f"#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{log}'\ncat '{response}'\n")
+        for build, merge, grouping, warning in [(1, 1, "ALLGREEN", True), (5, 5, "ALLGREEN", False), (8, 5, "HEADGREEN", True), (5, 1, "ALLGREEN", True)]:
+            fixture["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"].update(
+                maxEntriesToBuild=build, maxEntriesToMerge=merge, groupingStrategy=grouping)
+            response.write_text(json.dumps(fixture))
+            log.write_text("")
+            result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(bool(result.stderr), warning)
+            if warning:
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertIn("gh api -X PUT repos/acme/repo/rulesets/42", result.stderr)
+            calls = log.read_text().splitlines()
+            self.assertEqual(len(calls), 1, calls)
+            self.assertNotIn("PUT", calls[0])
+        make_exe(gh, "#!/bin/sh\necho 'API rate limit exceeded: fixture-secret' >&2\nexit 1\n")
+        result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("unavailable", result.stderr)
+        self.assertNotIn("fixture-secret", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

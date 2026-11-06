@@ -99,6 +99,11 @@
 - `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
 
+## GitHub health
+
+- `cas-cli/src/github_repo.rs` - explicit origin binding and bounded, report-only default-branch queue health shared by setup/doctor; one query reads canonical identity and applicable active rules.
+- `scripts/github-queue-health.graphql`, `scripts/github_queue_health.py` - shared embedded query and advisory release preflight; warns on drift/unavailable access without writing settings or failing release.
+
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.

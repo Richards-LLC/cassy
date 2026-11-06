@@ -128,6 +128,157 @@ pub(crate) fn resolve_origin(
     resolve_slug(&origin, cwd, binary, timeout)
 }
 
+/// Advisory queue settings, never authorization to write a ruleset or merge.
+pub(crate) struct QueueReport {
+    pub warning: bool,
+    pub message: String,
+}
+
+/// Reuse one response for origin and queue diagnostics, including redirects.
+pub(crate) fn repository_health(
+    origin: &str,
+    cwd: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<(ResolvedRepo, QueueReport), String> {
+    if !valid_slug(origin) {
+        return Err("GitHub merge queue unavailable: invalid origin".into());
+    }
+    let (owner, name) = origin.split_once('/').unwrap();
+    let mut command = Command::new(binary);
+    command.current_dir(cwd).env("GH_HOST", "github.com").args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("name={name}"),
+        "-f",
+        concat!(
+            "query=",
+            include_str!("../../scripts/github-queue-health.graphql")
+        ),
+    ]);
+    let output = run_command(&mut command, Deadline::after(timeout), timeout)
+        .map_err(|_| "GitHub merge queue unavailable: cannot run gh or request timed out")?;
+    // Provider stderr can carry credentials. Keep failure honest and bounded.
+    if !output.status.success() {
+        return Err(
+            "GitHub merge queue unavailable: authentication, rate limit or provider failure".into(),
+        );
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "GitHub merge queue unavailable: invalid JSON")?;
+    if value
+        .get("errors")
+        .is_some_and(|e| e.as_array().is_none_or(|e| !e.is_empty()))
+    {
+        return Err("GitHub merge queue unavailable: GraphQL error (possibly rate limited)".into());
+    }
+    let repo = value
+        .pointer("/data/repository")
+        .ok_or("GitHub merge queue unavailable: missing repository")?;
+    let canonical = repo
+        .get("nameWithOwner")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| valid_slug(s))
+        .ok_or("GitHub merge queue unavailable: invalid repository identity")?;
+    let report = queue_report(repo).unwrap_or_else(|error| QueueReport {
+        warning: true,
+        message: format!("merge queue unavailable: {error}"),
+    });
+    Ok((
+        ResolvedRepo {
+            origin: origin.into(),
+            canonical: canonical.into(),
+        },
+        report,
+    ))
+}
+
+fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
+    let branch = repo
+        .pointer("/defaultBranchRef/name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("default branch missing")?;
+    let rules = repo
+        .pointer("/defaultBranchRef/rules")
+        .ok_or("active rules missing")?;
+    if rules
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        return Err("active rules incomplete; no additional request made");
+    }
+    let nodes = rules
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("active rules missing")?;
+    let mut reports = Vec::new();
+    for rule in nodes.iter().filter(|r| r["type"] == "MERGE_QUEUE") {
+        let build = rule
+            .pointer("/parameters/maxEntriesToBuild")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("build limit missing")?;
+        let merge = rule
+            .pointer("/parameters/maxEntriesToMerge")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("merge limit missing")?;
+        let grouping = rule
+            .pointer("/parameters/groupingStrategy")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("grouping strategy missing")?;
+        if build >= 5 && merge >= 5 && grouping == "ALLGREEN" {
+            continue;
+        }
+        let ruleset = &rule["repositoryRuleset"];
+        let id = ruleset["databaseId"].as_u64().ok_or("ruleset id missing")?;
+        let source = &ruleset["source"];
+        let endpoint = match source["__typename"].as_str() {
+            Some("Repository") => {
+                let slug = source["nameWithOwner"]
+                    .as_str()
+                    .filter(|s| valid_slug(s))
+                    .ok_or("ruleset source invalid")?;
+                format!("repos/{slug}/rulesets/{id}")
+            }
+            Some("Organization") => {
+                let org = source["login"]
+                    .as_str()
+                    .filter(|s| valid_slug(&format!("{s}/repo")))
+                    .ok_or("ruleset source invalid")?;
+                format!("orgs/{org}/rulesets/{id}")
+            }
+            _ => return Err("ruleset source unsupported"),
+        };
+        // Print only. Read the complete current ruleset before an operator's
+        // PUT so unrelated protection, bypasses and higher limits survive.
+        let fix = format!(
+            r#"gh api {endpoint} | jq '{{name,target,enforcement,conditions,bypass_actors,rules}} | (.rules[] | select(.type == "merge_queue").parameters) |= (.max_entries_to_build = ([.max_entries_to_build,5]|max) | .max_entries_to_merge = ([.max_entries_to_merge,5]|max) | .grouping_strategy = "ALLGREEN")' | gh api -X PUT {endpoint} --input -"#
+        );
+        reports.push(format!("ruleset {id}: build={build}, merge={merge}, grouping={grouping}; expected build>=5, merge>=5, ALLGREEN. Run: {fix}"));
+    }
+    if !reports.is_empty() {
+        return Ok(QueueReport {
+            warning: true,
+            message: format!("merge queue drift on {branch}: {}", reports.join("; ")),
+        });
+    }
+    if !nodes.iter().any(|r| r["type"] == "MERGE_QUEUE") {
+        return Ok(QueueReport {
+            warning: true,
+            message: format!(
+                "merge queue not configured on {branch}; expected build>=5, merge>=5, ALLGREEN (report only)"
+            ),
+        });
+    }
+    Ok(QueueReport {
+        warning: false,
+        message: format!("merge queue on {branch}: build>=5, merge>=5, ALLGREEN"),
+    })
+}
+
 /// GitHub's nullable Repository.mergeQueue(branch) names the queue for this
 /// branch, including ruleset-backed queues. Do not infer one from workflows,
 /// plan names or branch protection alone. Provider errors are not absence.

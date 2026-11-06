@@ -4365,8 +4365,8 @@ fn github_origin_check(project: &Path) -> Option<Check> {
     };
     let binary = crate::github_repo::gh_binary();
     Some(
-        match crate::github_repo::resolve_slug(&origin, project, &binary, timeout) {
-            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => {
+        match crate::github_repo::repository_health(&origin, project, &binary, timeout) {
+            Ok((repo, queue)) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => {
                 Check::new("GitHub origin", CheckStatus::Warning, {
                     let url = format!("https://github.com/{}.git", repo.canonical);
                     let remedy = crate::worktree::GitOperations::git_remedies([&[
@@ -4375,22 +4375,20 @@ fn github_origin_check(project: &Path) -> Option<Check> {
                     .map(|[command]| command)
                     .unwrap_or_else(|refusal| refusal);
                     format!(
-                        "origin repository moved: {} -> {}; CI uses the canonical repository. Run:\n{remedy}",
-                        repo.origin, repo.canonical
+                        "origin repository moved: {} -> {}; CI uses the canonical repository. {}. Run:\n{remedy}",
+                        repo.origin, repo.canonical, queue.message
                     )
                 })
             }
-            Ok(repo) => Check::new(
+            Ok((repo, queue)) => Check::new(
                 "GitHub origin",
-                CheckStatus::Ok,
-                format!("origin repository is current: {}", repo.canonical),
+                if queue.warning { CheckStatus::Warning } else { CheckStatus::Ok },
+                format!("origin repository is current: {}; {}", repo.canonical, queue.message),
             ),
             Err(error) => Check::new(
                 "GitHub origin",
                 CheckStatus::Warning,
-                format!(
-                    "origin repository could not be checked: {error}. Run `gh repo view {origin} --json nameWithOwner`"
-                ),
+                format!("origin repository could not be checked: {error}. Run `cas doctor` after GitHub access recovers"),
             ),
         },
     )
@@ -7000,6 +6998,14 @@ mod tests {
         assert_eq!(queue.list_most_retried_pending(3, 10).unwrap().len(), 1);
     }
 
+    fn healthy_github_fixture(slug: &str) -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/merge-queue-health.json")).unwrap();
+        value["data"]["repository"]["nameWithOwner"] = slug.into();
+        value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"]["maxEntriesToBuild"] = 5.into();
+        value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"]["maxEntriesToMerge"] = 5.into();
+        value
+    }
+
     #[cfg(unix)]
     #[test]
     fn github_origin_doctor_warns_on_move_and_preserves_json_remedy_cas_28c8() {
@@ -7032,7 +7038,7 @@ mod tests {
         let gh = temp.path().join("gh");
         crate::test_paths::warm_stub(
             &gh,
-            "#!/bin/sh\n[ \"$1 $2 $3\" = 'repo view pippenz/cas' ] || exit 97\nprintf '%s' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'\n",
+            &format!("#!/bin/sh\nprintf '%s' '{}'\n", healthy_github_fixture("Richards-LLC/cassy")),
         );
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let check = github_origin_check(temp.path()).unwrap();
@@ -7051,7 +7057,7 @@ mod tests {
         );
         crate::test_paths::warm_stub(
             &gh,
-            "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"Pippenz/Cas\"}'\n",
+            &format!("#!/bin/sh\nprintf '%s' '{}'\n", healthy_github_fixture("Pippenz/Cas")),
         );
         assert!(matches!(
             github_origin_check(temp.path()).unwrap().status,
@@ -7078,9 +7084,9 @@ mod tests {
         let response = temp.path().join("response.json");
         let log = temp.path().join("calls");
         let fixture: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/merge-queue-health.json")).unwrap();
-        crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat '{}'\n", log.display(), response.display()));
+        crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{}'\ncat '{}'\n", log.display(), response.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
-        for (build, merge, grouping, warning) in [(1, 1, "ALLGREEN", true), (5, 5, "ALLGREEN", false), (8, 5, "HEADGREEN", true)] {
+        for (build, merge, grouping, warning) in [(1, 1, "ALLGREEN", true), (5, 5, "ALLGREEN", false), (8, 5, "HEADGREEN", true), (5, 1, "ALLGREEN", true)] {
             let mut value = fixture.clone();
             value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"] = serde_json::json!({"maxEntriesToBuild":build,"maxEntriesToMerge":merge,"groupingStrategy":grouping});
             fs::write(&response, serde_json::to_vec(&value).unwrap()).unwrap();

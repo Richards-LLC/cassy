@@ -6133,6 +6133,7 @@ mod communication_summary_tests {
         agent.role = cas_types::AgentRole::Worker;
         agent.factory_session = Some(session.clone());
         agent.pid = Some(worker_pid);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, worker_pid);
         agent.metadata.insert("clone_path".into(), repo.display().to_string());
         agents.register(&agent).unwrap();
         let tasks = crate::store::open_task_store_local(&root).unwrap();

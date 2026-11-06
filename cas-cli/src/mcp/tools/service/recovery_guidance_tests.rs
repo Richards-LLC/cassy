@@ -372,10 +372,12 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
         .find(|line| line.starts_with("| cas-aa11 |"))
         .unwrap();
     assert!(
-        !row.contains("merged ("),
-        "retained ahead-of-receipt work must not read clean: {status}"
+        row.contains("merged (squash, ancestry lost)"),
+        "retained work must not hide the historical delivery proof: {status}"
     );
-    assert!(row.contains("retained local work"), "{status}");
+    assert!(!status.contains("✓ All child factory branches are merged"), "{status}");
+    let unproven = status.lines().find(|line| line.starts_with("| cas-ee55 |")).unwrap();
+    assert!(unproven.contains("retained local work"), "{status}");
     assert!(
         status.contains("Retained worker") && status.contains("unpushed=1"),
         "{status}"

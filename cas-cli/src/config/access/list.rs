@@ -173,6 +173,7 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.focus_mode".into(), factory.focus_mode.clone().unwrap_or_default()),
             ("factory.slot_id".into(), factory.slot_id.clone().unwrap_or_default()),
             ("factory.claude.worker_mcp".into(), factory.claude.worker_mcp.as_str().into()),
             ("factory.claude.remote_control".into(), factory.claude.remote_control.to_string()),

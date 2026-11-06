@@ -217,6 +217,10 @@ impl Config {
                     .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
             }
             // Factory build contention
+            "factory.focus_mode" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).focus_mode =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
+            }
             "factory.slot_id" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).slot_id =
                     (!value.trim().is_empty()).then(|| value.trim().to_string());

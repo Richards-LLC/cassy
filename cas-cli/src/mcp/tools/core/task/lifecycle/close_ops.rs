@@ -22457,12 +22457,14 @@ fn render_epic_status_report_with_stack_and_view(
             "content dropped".to_string()
         } else if s.content_check_error.is_some() {
             "content unknown".to_string()
-        } else if retained_tasks.contains(&s.task_id) {
-            "retained local work".to_string()
         } else if s.content_evolution_note.is_some() {
             "merged (content evolved)".to_string()
         } else if s.merge_evidence_note.is_some() {
             "merged (squash, ancestry lost)".to_string()
+        } else if retained_tasks.contains(&s.task_id) {
+            // Historical delivery proof and later local work are independent.
+            // Keep unproven retained work visible without hiding proven delivery.
+            "retained local work".to_string()
         } else if s.refs_unresolved {
             "? (no ref)".to_string()
         } else if s.factory_branch.is_some() {
@@ -22487,7 +22489,6 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let reconciled = statuses
         .iter()
-        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.merge_evidence_note.as_deref())
         .collect::<Vec<_>>();
     if !reconciled.is_empty() {
@@ -22498,7 +22499,6 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let evolved = statuses
         .iter()
-        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.content_evolution_note.as_deref())
         .collect::<Vec<_>>();
     if !evolved.is_empty() {

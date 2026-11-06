@@ -39,7 +39,36 @@ def literals(shape, source, path):
             except (ValueError, SyntaxError):
                 pass
         if isinstance(body, str) and body.strip():
-            yield start, body
+            yield start, end, body
+
+
+def removed_spans(repo, base, path, source):
+    """Old-side hunk spans; a multiline literal may start before its hunk."""
+    offsets = [0]
+    for line in source.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    diff = git(repo, 'diff', '--no-ext-diff', '--no-color', '--unified=0', base, '--', path)
+    spans = []
+    for match in re.finditer(r'^@@ -(\d+)(?:,(\d+))? ', diff, re.M):
+        start, count = int(match[1]), int(match[2] or 1)
+        if count:
+            spans.append((offsets[start - 1], offsets[start + count - 1]))
+    return spans
+
+
+def schema_literal(value):
+    """DDL is one schema contract, never a bag of shared column fragments."""
+    return re.match(r'\s*(?:--[^\n]*\n\s*)*(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b',
+                    value, re.I) is not None
+
+
+def assertion_spans(shape, source):
+    ts = shape.tokens(source)
+    ends = shape.pairs(ts)
+    return [(ts[i + 2].start, ts[ends[i + 2]].end)
+            for i in range(len(ts) - 2)
+            if re.fullmatch(r'(?:debug_|prop_)?assert\w*|expect', ts[i].value)
+            and ts[i + 1].value == '!' and i + 2 in ends]
 
 
 def changed_string_matches(repo, base):
@@ -53,17 +82,21 @@ def changed_string_matches(repo, base):
         old = git(repo, 'show', f'{base}:{path}')
         current = repo / path
         new = current.read_text() if current.is_file() else ''
-        removed.update({value for _, value in literals(shape, old, path)} -
-                       {value for _, value in literals(shape, new, path)})
+        changed = removed_spans(repo, base, path, old)
+        removed.update({value for start, end, value in literals(shape, old, path)
+                        if any(start < right and end > left for left, right in changed)} -
+                       {value for _, _, value in literals(shape, new, path)})
     hits = set()
     if not removed:
         return []
     # format! receipts often have tests pinning one rendered field rather
     # than the full template, e.g. "To: cosmic-bear" from "To: {target}".
-    fragments = {part.strip() for value in removed if '\n' in value or '{' in value
+    fragments = {part.strip() for value in removed
+                 if not schema_literal(value) and ('\n' in value or '{' in value)
                  for part in re.split(r'\{[^{}]*\}|\n', value)
                  if len(part.strip()) >= 3}
-    needles = removed | fragments
+    fragments = sorted(fragments, key=lambda value: (-len(value), value))
+    needles = removed | set(fragments)
     for path in filter(None, git(repo, 'ls-files', '-z').split('\0')):
         source_path = repo / path
         if not source_path.is_file() or path.startswith('vendor/'):
@@ -81,11 +114,18 @@ def changed_string_matches(repo, base):
         if not any(value in source or repr(value)[1:-1] in source for value in needles):
             continue
         names = list(re.finditer(r'\b(?:async\s+)?fn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(', source)) if rust else []
-        for start, value in literals(shape, source, path):
-            if value not in removed and not any(fragment in value for fragment in fragments):
+        assertions = None
+        for start, end, value in literals(shape, source, path):
+            matched = value if value in removed else next((part for part in fragments if part in value), None)
+            if matched is None:
                 continue
             preceding = [name for name in names if name.start() < start]
             if rust:
+                if schema_literal(value):
+                    if assertions is None:
+                        assertions = assertion_spans(shape, source)
+                    if not any(left <= start and end <= right for left, right in assertions):
+                        continue
                 if not preceding:
                     continue
                 name = preceding[-1]
@@ -98,7 +138,7 @@ def changed_string_matches(repo, base):
             else:
                 prefix_lines = source[:start].splitlines()
                 label = (prefix_lines[-1].strip()[:100] if prefix_lines else '') or '<test file>'
-            hits.add((path, source.count('\n', 0, start) + 1, label))
+            hits.add((path, source.count('\n', 0, start) + 1, label, matched))
     return sorted(hits)
 
 
@@ -126,8 +166,9 @@ def main():
     subprocess.run([sys.executable, str(repo / 'scripts/check-test-shape.py'),
                     '--changed-since', base], check=True)
     hits = changed_string_matches(repo, base)
-    for path, line, name in hits:
-        print(f'Worker changed-string warning: {path}:{line} test {name}; run or update this assertion before push', flush=True)
+    for path, line, name, fragment in hits:
+        print(f'Worker changed-string warning: {path}:{line} test {name}; run or update this assertion before push'
+              f'; matched {fragment!r}', flush=True)
     with tempfile.TemporaryDirectory(prefix='worker-proof-guards-') as temporary:
         guard_count = Path(temporary) / 'count'
         verified(args.verified_script, args.cargo,

@@ -161,17 +161,32 @@ class QueueRecovery(unittest.TestCase):
                     self.assertLess(receipt['rerun_seconds'],30)
                     self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
 
+    def test_train_uses_queue_recovery_and_publication(self):
+        self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
+        self.env['GITHUB_EVENT_NAME'] = 'push'
+        for engine in ('rust', 'playwright'):
+            with self.subTest(engine=engine):
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                shutil.rmtree(self.repo/'receipts', ignore_errors=True)
+                result = self.run_queue(engine, event='push')
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertEqual(len(self.calls()), 2)
+                self.assertEqual(json.loads((self.repo/'receipts/receipt.json').read_text())['outcome'], 'FLAKY')
+                published = self.reconcile()
+                self.assertEqual(published.returncode, 0, published.stdout+published.stderr)
+        self.assertEqual(len(self.issues), 2)
+
     def test_non_queue_events_never_rerun(self):
         for engine in ('rust','playwright'):
             for event in ('workflow_dispatch', 'push'):
                 with self.subTest(engine=engine, event=event):
-                    self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
+                    self.env['GITHUB_REF'] = 'refs/heads/epic/ordinary-fixture'
                     (self.repo/'attempts.jsonl').unlink(missing_ok=True)
                     result = self.run_queue(engine,event=event)
                     self.assertNotEqual(result.returncode,0)
                     self.assertEqual(len(self.calls()),1)
                     if engine == 'rust':
-                        self.assertEqual('--profile' in self.calls()[0], event == 'push')
+                        self.assertNotIn('--profile', self.calls()[0])
 
     def test_missing_rerun_report_preserves_the_initial_failure(self):
         self.env['FIXTURE_MISSING_RERUN_REPORT'] = '1'

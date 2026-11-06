@@ -173,55 +173,49 @@ stop that followed escalates.
 ## 5. Check names are pinned
 
 The context string in the JSON is an exact match for the job `name:` value in
-`.github/workflows/ci.yml`. GitHub matches required checks **by name string**. Renaming a job
+`.github/workflows/full-validation.yml` (train/queue) or the reusable `.github/workflows/ci.yml` (other events). GitHub matches required checks **by name string**. Renaming a job
 without updating this file silently makes the required check un-reportable, and every affected
 ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs once. See the
 "CI check names are pinned" section in [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
-## 3. Merge-queue full-gate reuse (cas-4cb8)
+## 3. One full validation graph for train and queue
 
-Release 3.47.0's queue entry spent 15.5 of its 19.4 minutes in the preflight
-job (`docs/ci/merge-queue-time.md`). Commander web took 587 s of that, the
-release publication guards 260 s, and the compile checks 72 s. The suite
-shards ran in parallel. All of it re-proved tree `f1bab7758`, which the
-release train's full gate had already proven, except for one thing: the
-full gate runs no Commander journeys. This section records the review behind
-the reuse, which skips only what the full gate proved.
+`.github/workflows/full-validation.yml` handles release-train pushes and
+`merge_group` through the same reusable `.github/workflows/ci.yml`. Its outer
+`Fast Validation` job preserves the required context. A newer train push cancels
+its predecessor. Both events select Commander journeys against the last release,
+run every registered script/CI-tier test, Commander vitest/typecheck/build,
+preflight, doctests and the complete Rust archive/shards. Quarantine and one
+rerun, including durable flake publication, apply equally to train and queue.
 
-### Required contexts and how each is satisfied
+The full-set fan-in emits `train-full-gate/receipt.json` with schema 2, exact
+source tree, main baseline, required/actual job outcomes and elapsed seconds.
+`cas/full-gate` is posted only after that fan-in succeeds. Consumers also require
+a successful completed GitHub workflow and its `Full-set gate` job; a status
+alone, legacy Rust-only artifact or missing job cannot authorize a cut or reuse.
+`scripts/release.sh` checks this receipt for a train’s starting tree before preparing
+release metadata. An explicit non-train hotfix keeps its emergency path, discloses
+that it has no train receipt, and receives the complete queue graph without reuse. An unchanged prepared retry retains the original starting tip.
 
-| Required context | On a queue tree with a matching full-gate receipt | Otherwise |
-| --- | --- | --- |
-| `Fast Validation` | Reports success only if the preflight job succeeds. The rollup's "Report the full-gate receipt reused by this merge-queue run" step requires `PREFLIGHT == success`. The suite build, shards, fan-in and doctest jobs are skipped (`run-fast-validation == 'false'`). The preflight runs, minus the steps the full gate proved. | All lanes run, and the rollup requires each to succeed (unchanged). |
+### Queue reuse
 
-`Fast Validation` reports on the `merge_group` SHA. Full-gate reuse does not
-restore the removed macOS queue job; the 30-minute response timeout applies
-to the required context.
+`scripts/check-ci-merge-queue-validation.sh` delegates to the same receipt
+consumer in `scripts/train-ci.py`. The PR head must have the queue tree. A
+completed green source must be its ancestor, and its main baseline must equal
+the queue event's base SHA. The entire remaining diff may contain only version
+fields, matching lock versions, CHANGELOG/fragments, CODEMAP, builtin reference
+history and release notes. A version-generated `hub-web/dist` delta is allowed
+only with a version bump and is rebuilt and checked in the queue compile step.
+Any product change, moved main, partial/legacy proof or uncertainty runs the full
+graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
-### What the preflight still runs on reuse
-
-| Preflight step | On reuse | Why |
-| --- | --- | --- |
-| Commander web: typecheck, unit tests, build, visual QA, dist drift | skipped | Full-gate rows `hub-web-tests`, `hub-web-visual-qa`, `hub-web-dist-drift` |
-| Commander journeys (`npm run journeys -- --workers=4`) | **runs**, unless a matching `cas/full-journeys` receipt (cas-9f70, below) | The full gate has no journeys row |
-| Release publication guards (`make -C cas-cli test-ci-tiers`) | skipped | Full-gate row `ci-script-tests` runs the same target (it includes `test-cas-install.sh`) |
-| `cargo check -p cas`, portable ISA audit test, `cargo build -p cas --no-default-features` | **run** | Cheap (72 s on 3.47.0); the no-MCP-proxy build has no full-gate row |
-| Installer fixtures, trust-boundary checks, toolchain setup | run | Unchanged, seconds |
-
-On a normal validation run, the full default-feature suite archive compiles
-the same tree, so preflight skips `cargo check -p cas`. The separate
-no-default-features build and its terminal-restoration consumer still run.
-
-The suite shards and doctests are skipped. The full gate's `nextest`,
-`workspace-tests` and `doctests` rows proved them on this tree.
-
-The expected saving on a release like 3.47.0 is the 260 s of publication
-guards, plus the Commander non-journey work, off the preflight critical path.
-The queue then waits on its remaining Fast Validation dependencies.
-Measuring the real saving takes one live queue run, recorded under the next
-release's `release-latency.receipt`. With a matching full-journeys receipt
-(cas-9f70, below) the journeys are skipped too, and the queue waits on
-the Linux compile checks.
+On reuse, the queue runs Rust compile/no-default-features build, a source-built
+CLI smoke, and a web asset rebuild/drift check. CI tiers, web tests, journeys,
+Rust suite and doctests are already covered by the full-set source proof and do
+not run again. The target is under eight minutes; the live release ledger records
+the measured result rather than assuming it. Train and queue wall clocks are
+measured from the GitHub run start through the required fan-in, and the daemon
+records them in the friction ledger once per train/run attempt.
 
 ### macOS Check latency: a warm cache from main
 
@@ -242,111 +236,11 @@ The original cold-cache measurements (PR #1191: Linux about 8m20s, Darwin
 `scripts/ci_tiers/test-policy.py` checks both main-cache behavior and exclusion
 of ordinary and full-gate-reuse queue events.
 
-### What counts as a receipt
+### Receipt implementation and evidence
 
-`scripts/check-ci-merge-queue-validation.sh` (the
-`fast-validation-main-push-dedupe` job) sets `reuse-source=full-gate` on
-`merge_group` only when every one of these holds. If anything is missing or
-ambiguous, it runs the full validation:
-
-1. The queue ref is `gh-readonly-queue/<base>/pr-<N>-<sha>`, and PR `<N>`
-   resolves to a head SHA.
-2. That head's tree is the queue tree (`HEAD^{tree}`), so the PR was up to date
-   with `main` and the queue merge changed nothing. A batched or rebased entry
-   has a different tree and runs in full.
-3. The newest `cas/full-gate` status on that head is `success`, with the
-   description exactly `PASS tree=<queue tree>`. A later failing status
-   supersedes an earlier pass.
-
-The release train posts that status in `--pipeline`
-(`post_full_gate_tree_receipt`). It does so right after pushing the commit
-that `gate.full.sha` proved: a full `release-gate.sh` run, not `--only`, on
-that exact SHA. The pipeline already refuses a stale or partial gate, so the
-status is only ever posted for a tree the full gate passed.
-
-### Full-journeys receipt (cas-9f70)
-
-The Commander step skips the journeys only when the guard also sets
-`journeys-reuse=true`. That requires the full-gate receipt above. It also
-requires the newest `cas/full-journeys` status on the same head to be
-`success`, with the description exactly `PASS tree=<queue tree>`. A missing,
-failed, superseded or other-tree status leaves `journeys-reuse=false`, and the
-journeys run. A journeys status without a full-gate receipt skips nothing.
-
-The train posts it in `--pipeline` (`post_full_journeys_tree_receipt`), right
-after the full-gate status. It needs a receipt from
-`scripts/journey-eval.sh <run-dir>/journeys --full`, the supervisor's
-assembly run, or a receipt named by `CAS_RELEASE_TRAIN_JOURNEY_RECEIPT`. The
-proven revision's `scripts/journey-receipt.py verify-full` judges it. It
-refuses anything that is not all of the following:
-
-- a schema-1 `journey-eval` receipt with scope `full`;
-- `suite_exit` 0, with no runner errors;
-- every result `PASS`, with at least one passed attempt and no failed or
-  skipped attempt;
-- a head commit whose tree is the release tree, byte for byte;
-- a selection that is exactly the full catalog, re-derived by the release
-  revision's own `scripts/journeys-for-diff.py --all`.
-
-A refused or missing receipt posts nothing and logs why. The queue then runs
-the journeys. A receipt that a full run reused from the background evaluator
-(cas-bb5e) at a different tip passes only if that tip has the same full tree.
-
-### Trust
-
-A `cas/full-gate` status can be posted by anyone with write access to the
-repository: the same people who can push to `main`'s queue in the first place.
-The status is a claim about one tree, checked against the queue tree byte for
-byte, so a stale or mistyped claim cannot cover different code. The same holds
-for `cas/full-journeys`.
-
-The journeys receipt is produced on the supervisor's host, not on the GitHub
-runner. Both run the Chromium build pinned by `@playwright/test`, and that pin
-is part of the tree. A host-only difference, such as fonts or CPU speed, could
-pass locally and fail on the runner. The full gate already accepts the same
-trade for the Rust suite. Any PR whose tree has no receipt still runs the
-journeys on the runner.
-
-### Proof
-
-- Fixture proof: `scripts/ci_tiers/executable-contracts.sh` drives the guard
-  with a fake `gh`. A matching receipt sets `reuse-source=full-gate`. A tree
-  mismatch, a receipt naming another tree, a failed or superseded status,
-  another context, no status, an API error, or a queue ref without a PR
-  number all run the full validation.
-- `scripts/ci_tiers/test-policy.py` pins the workflow on reuse:
-  - only the suite and doctests are skipped;
-  - the preflight still runs the journeys and compile checks;
-  - only the publication guards and the gate-covered Commander steps are
-    skipped;
-  - the rollup requires the preflight;
-  - `macOS Check` is skipped on both ordinary and full-gate-reuse queue entries.
-- Dry run against the live API: the guard was pointed at 3.47.0's PR #1134
-  (head `f084dd7b5`, tree `f1bab7758`, the queue tree). It resolved the head
-  and matched the tree, found no `cas/full-gate` status (none was posted
-  then), and kept the full validation. Record:
-  `~/.cas/artifacts/<project>/cas-4cb8/dry-run.{log,output}`.
-- `scripts/test-release-train.sh` checks that `--pipeline` posts the status for
-  the proven SHA and its tree.
-- cas-9f70 fixture proof: `executable-contracts.sh` checks that a matching
-  `cas/full-journeys` status sets `journeys-reuse=true`. The following leave
-  it false, so the journeys run:
-  - the full-gate receipt alone;
-  - a journeys status for another tree;
-  - a failed or superseded journeys status;
-  - a journeys status without the full gate;
-  - a PR head tree mismatch;
-  - an API error.
-- `test-policy.py` runs the real Commander step body with stub `npm`/`npx`:
-  - both receipts: no journeys and no `npm ci`;
-  - the full gate only: the journeys run;
-  - a journeys receipt without the full gate: the whole step runs.
-- `test-release-train.sh` drives `verify-full` with these receipts:
-  - accepted: a valid one, and one whose head is a different commit with
-    the same tree;
-  - refused: another tree, affected scope, a missing catalog ID, a failed
-    row, a non-zero suite exit, runner errors, an unknown head, garbage, and
-    a missing file.
-
-  It also checks that `--pipeline` posts `cas/full-journeys` for a verified
-  receipt, and refuses and logs a receipt for the parent tree.
+The producer and consumer live in `scripts/train-ci.py`. Workflow graph parity,
+partial/legacy/wrong-tree refusal, plumbing reuse versus main movement, and the
+actual release entry-point refusal are exercised in the registered policy,
+train-CI, flake and release tests. `train_ci::tests` exercises measured durations
+through the real friction store. Live train and queue proofs are recorded in the
+release ledger after this source change lands.

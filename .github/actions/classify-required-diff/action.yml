@@ -1,6 +1,9 @@
 name: Classify required CI diff
 description: Fail-closed classification for required CI jobs.
 inputs:
+  full-set:
+    description: Run the complete shared train/queue graph against the last release.
+    default: "false"
   base-sha:
     description: Commit on the base side of the comparison.
     required: true
@@ -24,6 +27,12 @@ outputs:
   web-check-needed:
     description: Whether the Commander web build and tests must run.
     value: ${{ steps.classify.outputs.web-check-needed }}
+  journeys-check-needed:
+    description: Whether Commander inputs changed since the cumulative base.
+    value: ${{ steps.classify.outputs.journeys-check-needed }}
+  main-baseline:
+    description: Main commit against which this tree was validated.
+    value: ${{ steps.classify.outputs.main-baseline }}
   web-dist-check-needed:
     description: Whether this tree must match committed Commander release assets.
     value: ${{ steps.classify.outputs.web-dist-check-needed }}
@@ -45,6 +54,9 @@ runs:
     - id: classify
       shell: bash
       env:
+        FULL_SET: ${{ inputs.full-set }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         FULL_VALIDATION: ${{ startsWith(github.ref, 'refs/heads/precheck/') }}
         TRAIN_RUST: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') }}
         BASE_SHA: ${{ inputs.base-sha }}
@@ -54,7 +66,15 @@ runs:
         # including an ancestry-only merge with no content changes.
         class=rust-touched
         merge_base=''
-        if [[ "${FULL_VALIDATION:-false}" == true ]]; then
+        main_baseline="${QUEUE_BASE:-}"
+        if [[ -z "$main_baseline" ]]; then
+          main_baseline="$(git rev-parse "origin/${DEFAULT_BRANCH:-main}" 2>/dev/null || true)"
+        fi
+        if [[ "${FULL_SET:-false}" == true ]]; then
+          # The train is cumulative, so yesterday's edits remain selected.
+          release_tag="$(git describe --tags --match 'v[0-9]*' --abbrev=0 "$main_baseline" 2>/dev/null || true)"
+          if [[ -n "$release_tag" ]]; then merge_base="$(git rev-parse "$release_tag^{commit}")"; fi
+        elif [[ "${FULL_VALIDATION:-false}" == true ]]; then
           # A hosted queue precheck proves the full job set at any SHA.
           # An empty comparison deliberately retains conservative coverage below.
           merge_base=''
@@ -92,7 +112,10 @@ runs:
 
         # The train receives one complete Rust result at each newest tip,
         # including a docs-only tip. Web selection stays path-scoped below.
-        if [[ "${TRAIN_RUST:-false}" == true ]]; then
+        if [[ "${FULL_SET:-false}" == true ]]; then
+          class=rust-touched
+          rust_unaffected=false
+        elif [[ "${TRAIN_RUST:-false}" == true ]]; then
           if python3 scripts/train-ci.py prepared >/dev/null 2>&1; then
             class=version-bump
             rust_unaffected=true
@@ -142,6 +165,9 @@ runs:
           echo "::notice title=CI bridge check::No comparable base; running Slack bridge checks"
         fi
 
+        journeys_check_needed="$web_check_needed"
+        if [[ "${FULL_SET:-false}" == true ]]; then web_check_needed=true; fi
+        printf 'journeys-check-needed=%s\nmain-baseline=%s\n' "$journeys_check_needed" "$main_baseline" >> "$GITHUB_OUTPUT"
         printf 'comparison-base=%s\n' "$merge_base" >> "$GITHUB_OUTPUT"
         printf 'class=%s\n' "$class" >> "$GITHUB_OUTPUT"
         printf 'rust-unaffected=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"

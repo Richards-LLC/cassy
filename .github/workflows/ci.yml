@@ -32,16 +32,20 @@ on:
   # The protected-default merge queue creates a synthetic merged-tree ref. Its
   # required contexts must report on that ref or queue entries time out rather
   # than proving the tree that will actually land.
-  merge_group:
   # cas-32e9: factory/** pushes start in lane.yml. A slim lane runs there
   # alone; with CAS_LANE_SLIM unset, lane.yml calls this workflow, so the
   # factory conditions below still apply to those pushes.
   workflow_call:
+    inputs:
+      full-set:
+        type: boolean
+        default: false
   push:
     branches:
       - main
       - staging
       - "epic/**"
+      - "!epic/release-train-**"
     tags:
       - "v*"
   schedule:
@@ -86,6 +90,8 @@ jobs:
       docs-only: ${{ steps.classify-diff.outputs.class == 'docs-only' }}
       rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
       web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
+      journeys-check-needed: ${{ steps.classify-diff.outputs.journeys-check-needed }}
+      main-baseline: ${{ steps.classify-diff.outputs.main-baseline }}
       web-dist-check-needed: ${{ steps.classify-diff.outputs.web-dist-check-needed }}
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
       script-tests-needed: ${{ steps.script-tests.outputs.needed }}
@@ -100,6 +106,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
@@ -256,7 +263,6 @@ jobs:
     name: Fast Validation — merge-queue runner route
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -291,7 +297,6 @@ jobs:
     name: Fast Validation — main-push tree dedupe
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -307,6 +312,8 @@ jobs:
       reuse-source: ${{ steps.tree-dedupe.outputs.reuse-source }}
       journeys-reuse: ${{ steps.tree-dedupe.outputs.journeys-reuse }}
       journeys-prior-url: ${{ steps.tree-dedupe.outputs.journeys-prior-url }}
+      receipt-head: ${{ steps.tree-dedupe.outputs.receipt-head }}
+      receipt-tree: ${{ steps.tree-dedupe.outputs.receipt-tree }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -321,6 +328,7 @@ jobs:
         name: Check for successful merge-queue validation of this tree
         env:
           GH_TOKEN: ${{ github.token }}
+          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: scripts/check-ci-merge-queue-validation.sh
 
   # Factory pushes and PRs that do not target the protected default branch get
@@ -353,13 +361,13 @@ jobs:
   scoped-validation-fast:
     name: Scoped Validation (fast)
     if: >-
-      (needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push'
+      !inputs.full-set && ((needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/'))
       || (needs.ci-diff.outputs.script-tests-needed == 'true'
       && (github.event_name == 'pull_request'
       || (github.event_name == 'push' && github.ref != 'refs/heads/main'
       && !startsWith(github.ref, 'refs/tags/'))
-      || needs.ci-diff.outputs.rust-unaffected == 'true'))
+      || needs.ci-diff.outputs.rust-unaffected == 'true')))
     needs: ci-diff
     permissions:
       contents: read
@@ -529,11 +537,11 @@ jobs:
   scoped-validation:
     name: Scoped Validation (factory/PR)
     if: >-
-      needs.ci-diff.outputs.class != 'docs-only'
+      !inputs.full-set && (needs.ci-diff.outputs.class != 'docs-only'
       && ((github.event_name == 'pull_request'
       && github.base_ref != github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && startsWith(github.ref, 'refs/heads/factory/')))
+      && startsWith(github.ref, 'refs/heads/factory/'))))
     needs: ci-diff
     permissions:
       contents: read
@@ -793,7 +801,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -811,6 +820,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
@@ -884,7 +894,7 @@ jobs:
 
       - name: Test portable x86_64 ISA audit
         if: >-
-          ${{ !cancelled()
+          ${{ needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
@@ -902,16 +912,25 @@ jobs:
         if: >-
           ${{ !cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && success() }}
+          && success() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' }}
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+          FULL_SET: ${{ inputs.full-set }}
         run: |
           export CAS_TEST_BINARY="${CARGO_TARGET_DIR:-target}/debug/cas"
           test -x "$CAS_TEST_BINARY"
           comparison=(--all)
-          if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
+          if [[ "${FULL_SET:-false}" != true && -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
           python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
             --only scripts/test-factory-client-terminal.py
+
+      - name: Smoke the source-built CLI and compile release assets
+        if: needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' && success()
+        run: |
+          "${CARGO_TARGET_DIR:-target}/debug/cas" --version
+          npm ci --prefix hub-web --no-audit --no-fund
+          npm run --prefix hub-web build
+          git diff --exit-code -- hub-web/dist
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -938,7 +957,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
@@ -952,10 +972,12 @@ jobs:
         with:
           full-tier: 'true'
           base-sha: ${{ needs.ci-diff.outputs.comparison-base }}
+          full-set: ${{ inputs.full-set }}
 
       - name: Test release publication guards
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+          FULL_SET: ${{ inputs.full-set }}
         run: |
           if ! python3 -c 'import yaml' 2>/dev/null; then
             python3 -m venv "$RUNNER_TEMP/ci-tiers-venv"
@@ -966,7 +988,7 @@ jobs:
           # markdown-lint row tests; scripts/markdownlint.py runs it.
           npm ci --no-audit --no-fund
           comparison=(--all)
-          if [[ -n "$BASE_SHA" ]]; then comparison+=(--scope-base "$BASE_SHA"); fi
+          if [[ "${FULL_SET:-false}" != true && -n "$BASE_SHA" ]]; then comparison+=(--scope-base "$BASE_SHA"); fi
           python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}"
 
   fast-validation-slack-bridge:
@@ -974,13 +996,13 @@ jobs:
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.bridge-check-needed == 'true'
-      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
-      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
@@ -1008,7 +1030,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     defaults:
@@ -1071,7 +1094,7 @@ jobs:
     name: Fast Validation — Commander journeys ${{ matrix.shard }}/6
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.ci-diff.outputs.web-check-needed == 'true'
+      && needs.ci-diff.outputs.journeys-check-needed == 'true'
       && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       || (needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
       && needs.fast-validation-main-push-dedupe.outputs.journeys-reuse != 'true'))
@@ -1079,7 +1102,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     permissions:
       contents: read
@@ -1134,7 +1158,6 @@ jobs:
     name: Fast Validation — suite archive build
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1167,6 +1190,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
@@ -1359,7 +1383,6 @@ jobs:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1386,6 +1409,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit
@@ -1439,7 +1463,7 @@ jobs:
               --out "target/train-suite/$SHARD"
           fi
           initial_status="$suite_status"
-          if [[ "$GITHUB_EVENT_NAME" == merge_group && -f "target/queue-flakes/rust-$SHARD/receipt.json" ]]; then
+          if [[ -f "target/queue-flakes/rust-$SHARD/receipt.json" ]]; then
             initial_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["initial_status"])' "target/queue-flakes/rust-$SHARD/receipt.json")"
           fi
           if [[ -x scripts/ci-test-impact.py ]]; then
@@ -1483,7 +1507,7 @@ jobs:
           make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
 
       - name: Publish queue rust recovery receipts
-        if: always() && github.event_name == 'merge_group'
+        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
         uses: actions/upload-artifact@v4
         with:
           name: queue-flakes-rust-${{ matrix.shard }}
@@ -1496,7 +1520,7 @@ jobs:
   queue-flake-publication:
     name: Queue flake publication
     if: >-
-      always() && github.event_name == 'merge_group'
+      always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
       && (needs.fast-validation-suite-shards.result != 'skipped'
       || needs.fast-validation-journeys.result != 'skipped')
     needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-suite-shards, fast-validation-journeys]
@@ -1519,7 +1543,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUST_UNAFFECTED: ${{ needs.ci-diff.outputs.rust-unaffected }}
           RUN_SUITE: ${{ needs.fast-validation-main-push-dedupe.outputs.run-fast-validation }}
-          WEB_NEEDED: ${{ needs.ci-diff.outputs.web-check-needed }}
+          WEB_NEEDED: ${{ needs.ci-diff.outputs.journeys-check-needed }}
           JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
         run: |
           expected=()
@@ -1547,7 +1571,6 @@ jobs:
     name: Fast Validation — full suite
     if: >-
       always() && needs.ci-diff.outputs.class != 'docs-only'
-      && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.class == 'version-bump')
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1605,7 +1628,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -1623,6 +1647,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
@@ -1700,7 +1725,7 @@ jobs:
   # doctests pass. On a main PR it is a cheap hosted admission receipt; the
   # canonical merged tree receives the exhaustive validation before it lands.
   fast-validation:
-    name: Fast Validation
+    name: ${{ inputs.full-set && 'Full-set gate' || 'Fast Validation' }}
     if: >-
       always() && (needs.ci-diff.outputs.class != 'docs-only'
       || needs.ci-diff.outputs.script-tests-needed == 'true' || needs.ci-diff.result != 'success')
@@ -1710,7 +1735,8 @@ jobs:
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs:
       - ci-diff
       - scoped-validation-fast
@@ -1737,6 +1763,10 @@ jobs:
     concurrency:
       group: fast-validation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
+    permissions:
+      contents: read
+      actions: read
+      statuses: write
     runs-on: ubuntu-latest
     steps:
       - name: Require selected script suites
@@ -1758,7 +1788,7 @@ jobs:
           echo "Fast Validation is deferred to the canonical merge-queue tree."
 
       - name: Require durable queue flake publication
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
         env:
           PUBLICATION: ${{ needs.queue-flake-publication.result }}
         run: |
@@ -1826,11 +1856,11 @@ jobs:
           [[ "$SLACK_BRIDGE" == success || "$SLACK_BRIDGE" == skipped ]]
           [[ "$JOURNEYS" == success || "$JOURNEYS" == skipped ]]
           if [[ "$JOURNEYS_REUSE" == true ]]; then
-            journeys="the Commander journeys were reused from the train's full journeys run ($JOURNEYS_PRIOR_URL)"
+            journeys="the cumulative journey selection is covered by the train's full-set receipt ($JOURNEYS_PRIOR_URL)"
           else
             journeys="the Commander journeys ran on the queue tree"
           fi
-          echo "::notice title=Fast Validation reused the full gate::The release train's full gate proved this exact tree ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, doctests and gate-covered preflight steps; $journeys; the Linux compile checks ran; Release Prebuild owns pre-publish macOS proof."
+          echo "::notice title=Fast Validation reused the full gate::The release train's full-set receipt covers this source plus checked release plumbing ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, CI tiers, web tests and doctests; $journeys; source-built smoke and compile checks ran; Release Prebuild owns pre-publish macOS proof."
           echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. On the queue tree, $journeys; the Linux compile checks ran; Release Prebuild owns pre-publish macOS proof." >> "$GITHUB_STEP_SUMMARY"
 
       # This artifact is published only after the merge-group Fast Validation
@@ -1862,6 +1892,40 @@ jobs:
           path: merge-queue-validation-receipt.txt
           retention-days: 30
           if-no-files-found: error
+
+      - uses: actions/checkout@v4
+        if: inputs.full-set
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Record full-set receipt and wall clock
+        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          MAIN_BASELINE: ${{ needs.ci-diff.outputs.main-baseline }}
+        run: |
+          python3 scripts/train-ci.py full-collect --evidence target/full-gate \
+            --jobs-json "$NEEDS_JSON" --main-baseline "$MAIN_BASELINE" \
+            --started-at "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)"
+      - name: Publish complete full-set receipt
+        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-full-gate
+          overwrite: true
+          path: target/full-gate/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish tree-bound full gate status
+        if: inputs.full-set && github.event_name == 'push' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=success -f context=cas/full-gate -f "description=PASS tree=$tree" \
+            -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # Advisory lint, split out of Fast Validation so a lint pass never sits on the
   # critical path of the job that answers "do the tests pass?" (GH #142).
@@ -1973,6 +2037,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: ./.github/actions/classify-required-diff
         with:
+          full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit

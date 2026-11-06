@@ -3,6 +3,40 @@ mod cases {
     use crate::harness::SupervisorCli;
     use crate::pane::{Pane, PaneKind};
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pane_handoff_keeps_scrollback_draft_and_live_pty() {
+        let pty = crate::Pty::spawn("handoff-pane", crate::PtyConfig {
+            command: "sh".into(),
+            args: vec!["-c".into(), "read line; printf 'after:%s\\n' \"$line\"; read end".into()],
+            rows: 4, cols: 30, ..Default::default()
+        }).unwrap();
+        let mut pane = Pane::with_pty("handoff-pane", PaneKind::Worker, pty, 4, 30, SupervisorCli::Codex).unwrap();
+        for row in 0..12 { pane.feed(format!("line-{row}\r\n").as_bytes()).unwrap(); }
+        pane.feed(b"\x1b[31mred\x1b[0m").unwrap();
+        pane.deliver_user_input(b"draft", crate::UserInputKind::KeyStream).await.unwrap();
+        let pid = pane.process_group_id();
+        let handoff = pane.prepare_handoff().await.unwrap();
+        let rows_before: Vec<_> = (0..pane.scrollback_info().total_scrollback)
+            .map(|row| pane.terminal.dump_screen_row(row).unwrap()).collect();
+        let mut restored = Pane::from_handoff(&handoff).unwrap();
+        assert_eq!(restored.process_group_id(), pid);
+        assert_eq!(restored.pty_winsize(), Some((4, 30)));
+        assert!(restored.is_composer_dirty(), "a live operator draft must keep its hold");
+        assert_eq!((0..restored.scrollback_info().total_scrollback)
+            .map(|row| restored.terminal.dump_screen_row(row).unwrap()).collect::<Vec<_>>(), rows_before);
+        restored.resume_after_handoff().unwrap();
+        restored.deliver_user_input(b"-continued\r", crate::UserInputKind::KeyStream).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                restored.drain_output();
+                if restored.dump_viewport().unwrap().contains("after:draft-continued") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("input must still reach the same child after handoff");
+        restored.kill_tree_force();
+    }
+
     #[test]
     fn test_pane_kind_as_str() {
         assert_eq!(PaneKind::Worker.as_str(), "worker");

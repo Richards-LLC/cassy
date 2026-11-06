@@ -2503,7 +2503,7 @@ async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
 #[tokio::test]
 async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
     let mut env = test_env();
-    for foreign_continuation in [false, true] {
+    for continuation in ["generated", "foreign", "spoofed"] {
         let f = rebound_merge_fixture(&mut env).await;
         run_git(&["switch", "main"], &f.repo.root);
         std::fs::write(f.repo.root.join("released.txt"), "released upstream\n").unwrap();
@@ -2530,10 +2530,16 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         run_git(&["add", generated], &f.worker);
         run_git(&["commit", "-m", "build(builtins): regenerate reference-history from merged history", "-m",
             &format!("Rebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9])], &f.worker);
-        if foreign_continuation {
+        if continuation != "generated" {
             std::fs::write(f.worker.join("foreign.txt"), "another task's work\n").unwrap();
             run_git(&["add", "foreign.txt"], &f.worker);
-            run_git(&["commit", "-m", "feat(cas-abcd): unrelated continuation"], &f.worker);
+            let (subject, body) = if continuation == "foreign" {
+                ("feat(cas-abcd): unrelated continuation", "Another task's delivery")
+            } else {
+                ("build(builtins): regenerate reference-history from merged history",
+                 "Rebuilt by scripts/regenerate-generated-artifacts.sh after merging HEAD (cas-fb11).")
+            };
+            run_git(&["commit", "-m", subject, "-m", body], &f.worker);
         }
         let head = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
         run_git(&["push", "origin", &f.branch], &f.worker);
@@ -2543,7 +2549,7 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         })))).await.unwrap();
         let text = get_text(&closed);
         let parked = tasks.get(&task.id).unwrap();
-        if foreign_continuation {
+        if continuation != "generated" {
             assert_eq!(parked.status, TaskStatus::InProgress, "foreign continuation must refuse before park: {text}");
             assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
             continue;

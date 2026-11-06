@@ -3683,6 +3683,11 @@ is not parked for merge. A valid integrated `commit_receipt` proves delivery
 even after a suffixed promotion branch was deleted and the canonical task
 branch never existed. If that receipt is invalid, close reports its validation
 reason before parking; `merged_into` does not override the declared work target.
+First park binds the validated pushed branch HEAD, including pre-park target
+freshness merges and canonical regeneration commits restricted to their known
+generated outputs. A generator's provenance task ID is not delivery ownership.
+If the continuation cannot be attributed, close refuses before parking or
+requesting QA; it never silently parks an older content boundary as the source tip.
 After rebasing a parked delivery, push the rewritten tip and re-run close with
 checks for that exact tip before requesting its merge. Close preserves the full
 parked patch set, allows attributable corrections while the worker exclusively

@@ -3207,6 +3207,13 @@ keys, legacy bare task directories and shared builds, and flags `DerivedData`
 and `target` build outputs stored as evidence. These sibling roots remain
 review-only even when artifact deletion is enabled for the current project.
 
+With `artifacts=true force=true dry_run=false`, GC also removes regular candidate
+files named `cas` after their task has been closed for at least 48 hours, when
+their actual SHA-256 matches a hash recorded in that task's `LEDGER.md` alongside
+a recorded `cas` version. It keeps the ledger, logs and checksum records, reports
+removed files and reclaimed bytes, and never follows symlinks. Open tasks, missing
+close dates and unrecorded or mismatched binary identities preserve the binary.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),

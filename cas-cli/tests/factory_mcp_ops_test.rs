@@ -6603,6 +6603,7 @@ async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
         ("cas-c003", TaskStatus::Closed, Some(47), true),
         ("cas-c004", TaskStatus::Closed, None, true),
         ("cas-c005", TaskStatus::Closed, Some(49), false),
+        ("cas-c006", TaskStatus::Closed, Some(49), true),
     ] {
         let mut task = Task::new(id.into(), "candidate owner".into());
         task.status = status;
@@ -6618,6 +6619,14 @@ async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
     // Same name with different bytes is not the binary the ledger recorded.
     std::fs::create_dir_all(root.join("cas-c001/other")).unwrap();
     std::fs::write(root.join("cas-c001/other/cas"), "unrecorded binary").unwrap();
+    std::fs::write(root.join("cas-c006/LEDGER.md"), format!("SHA-256: {hash}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        let external = base.join("outside-project");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("cas"), binary).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("cas-c001/linked-candidate")).unwrap();
+    }
 
     let mut request = factory_req("gc_cleanup");
     request.full = Some(true);
@@ -6642,11 +6651,13 @@ async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
     assert_eq!(std::fs::read_to_string(root.join("cas-c001/build.log")).unwrap(), "build completed");
     // pin: the original binary checksum record must survive reclamation.
     assert_eq!(std::fs::read_to_string(root.join("cas-c001/candidate/SHA256SUMS")).unwrap(), format!("{hash}  cas\n"));
-    for id in ["cas-c002", "cas-c003", "cas-c004", "cas-c005"] {
+    for id in ["cas-c002", "cas-c003", "cas-c004", "cas-c005", "cas-c006"] {
         assert_eq!(std::fs::read(root.join(id).join("candidate/cas")).unwrap(), binary,
             "open/recent/unknown-date/unrecorded candidate must stay: {id}");
     }
     assert!(root.join("cas-c001/other/cas").is_file());
+    #[cfg(unix)]
+    assert_eq!(std::fs::read(base.join("outside-project/cas")).unwrap(), binary);
 }
 
 #[tokio::test]

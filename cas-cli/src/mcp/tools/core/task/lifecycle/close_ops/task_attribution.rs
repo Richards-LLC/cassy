@@ -3749,6 +3749,9 @@ mod tests {
             "fix cas-cli build and cas-core integration",
         );
         commit(p, "foreign.rs", "foreign\n", "cas-a1b2: unrelated task");
+        // cas-26d0: squash PR numbers must not hide earlier trailing task tags.
+        commit(p, "squashed.rs", "foreign\n", "fix: unrelated delivery (cas-a1b2) (#123)");
+        commit(p, "bracketed.rs", "foreign\n", "fix: unrelated delivery [cas-a1b2] (#124)");
         commit(
             p,
             "explicit.rs",
@@ -3764,7 +3767,7 @@ mod tests {
             "crate wording must remain attributed: {stat}"
         );
         assert!(
-            !stat.contains("foreign.rs"),
+            !stat.contains("foreign.rs") && !stat.contains("squashed.rs") && !stat.contains("bracketed.rs"),
             "other task IDs must remain excluded: {stat}"
         );
         assert!(

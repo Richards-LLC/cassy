@@ -398,11 +398,11 @@ mod tests {
         let index = SearchIndex::in_memory().unwrap();
         let task = Task {
             id: "cas-apostrophe".into(),
-            title: "viral idea narrates request back you're looking for idea echo".into(),
+            title: "viral idea narrates request back you're looking for idea echo workers tasks 90s".into(),
             ..Default::default()
         };
         index.index_task(&task).unwrap();
-        for query in [task.title.as_str(), "you're", "title:\"you're looking\"", "'looking for' AND echo"] {
+        for query in [task.title.as_str(), "you're", "title:\"you're looking\"", "'looking for' AND echo", "workers' tasks", "'90s"] {
             let results = index.search_unified(&SearchOptions {
                 query: query.into(), doc_types: vec![DocType::Task], ..Default::default()
             }).unwrap_or_else(|error| panic!("{query:?}: {error}"));

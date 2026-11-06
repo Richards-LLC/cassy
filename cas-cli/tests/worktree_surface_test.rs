@@ -2834,8 +2834,8 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
 /// delivery also edits, so the reviewed tree no longer recomputes, yet the
 /// patch the merge adds is unchanged. Far and context-only edits rebind
 /// the one approval with a receipt; a target that lands one of the
-/// delivery's hunks itself changes the delivered patch, so it still
-/// dispatches a fresh review.
+/// delivery's hunks itself and edits elsewhere changes both the tree and
+/// the delivered patch, so it still dispatches a fresh review.
 #[tokio::test]
 async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
     let mut env = test_env();
@@ -2845,11 +2845,14 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    for (case, line, edit) in [
-        ("full-context", 18, "target 18"),
-        ("zero-context", 5, "target 5"),
-        ("changed patch", 12, "delivered 12"),
-    ] {
+    let cases: [(&str, &[(usize, &str)]); 3] = [
+        ("full-context", &[(18, "target 18")]),
+        ("zero-context", &[(5, "target 5")]),
+        // The target lands one delivered hunk itself plus a far edit, so the
+        // tree differs and the delivered patch lacks that hunk.
+        ("changed patch", &[(12, "delivered 12"), (18, "target 18")]),
+    ];
+    for (case, target_edits) in cases {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2892,7 +2895,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let writer = fixture.cas_root.join("target-writer");
         run_git(&["worktree", "add", "--detach", writer.to_str().unwrap(), "refs/remotes/origin/epic/rebound"],
             &fixture.repo.root);
-        std::fs::write(writer.join("shared.rs"), shared(&[(line, edit)])).unwrap();
+        std::fs::write(writer.join("shared.rs"), shared(target_edits)).unwrap();
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
@@ -2919,7 +2922,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
-            shared(&[(3, "delivered 3"), (12, "delivered 12"), (line, edit)]).trim_end(), "{case}");
+            shared(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
     }
 }
 

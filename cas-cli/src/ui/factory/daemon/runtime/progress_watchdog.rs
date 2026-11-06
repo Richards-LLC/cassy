@@ -100,6 +100,87 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
 mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
 
+    #[test]
+    fn only_locally_actionable_work_pages_cas_c1fb() {
+        use cas_store::{EpicSplit, SplitDirection, SplitState};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "base"]);
+        git(&["checkout", "-b", "factory/delivery"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        git(&["branch", "epic/train"]);
+        git(&["update-ref", "refs/remotes/origin/epic/peer-train", &anchor]);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+
+        // Replay the peer release wait with zero live workers, then prove
+        // that an unmerged delivery and a silent local worker still page.
+        for (case, target, status, page) in [
+            ("contained", "epic/train", TaskStatus::AwaitingMerge, false),
+            ("origin-contained", "epic/peer-train", TaskStatus::AwaitingMerge, false),
+            ("held", "main", TaskStatus::AwaitingMerge, false),
+            ("peer-handoff", "main", TaskStatus::AwaitingMerge, false),
+            ("unmerged", "main", TaskStatus::AwaitingMerge, true),
+            ("missing-target", "epic/missing", TaskStatus::AwaitingMerge, true),
+            ("local-work", "epic/train", TaskStatus::InProgress, true),
+        ] {
+            let session = format!("cas-c1fb-{case}");
+            env.set("CAS_FACTORY_SESSION", &session);
+            let mut supervisor = Agent::new(format!("{session}-supervisor"), format!("supervisor-{case}"));
+            (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(session.clone()));
+            agents.register(&supervisor).unwrap();
+            let mut worker = Agent::new(format!("{session}-worker"), format!("worker-{case}"));
+            (worker.role, worker.status, worker.factory_session) = (
+                AgentRole::Worker,
+                if status == TaskStatus::InProgress { AgentStatus::Active } else { AgentStatus::Shutdown },
+                Some(session.clone()),
+            );
+            agents.register(&worker).unwrap();
+            let mut task = Task::new(format!("cas-c1fb-{case}"), "Release train delivery".into());
+            (task.status, task.assignee) = (status, Some(worker.name.clone()));
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.parked_branch = Some("factory/delivery".into());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: target.into(),
+            });
+            if case == "held" {
+                task.notes = "[2026-11-06 18:00] ✅ DECISION hold the merge for the peer release train".into();
+            }
+            tasks.add(&task).unwrap();
+            if case == "peer-handoff" {
+                cas_store::insert_epic_split(&cas_dir, &EpicSplit {
+                    id: "split-c1fb".into(), epic_id: "cas-peer-epic".into(),
+                    local_agent_id: supervisor.id.clone(), peer_agent_id: "peer-supervisor".into(),
+                    peer_name: "peer".into(), peer_machine: "other-host".into(),
+                    direction: SplitDirection::Outgoing, mine: vec![], theirs: vec![task.id.clone()],
+                    state: SplitState::Accepted, reason: None, message_id: None,
+                    expires_at: now + chrono::Duration::days(1), created_at: now,
+                    decided_at: Some(now), decided_by: Some(supervisor.id.clone()),
+                    cleanup_pending: false, expiry_notice_pending: false,
+                }).unwrap();
+            }
+            for minutes in [0, 45, 90] {
+                super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
+            }
+            let rows = queue.peek_all(100).unwrap();
+            let pages = rows.iter().filter(|row| row.target == "operator" && row.prompt.contains(&task.id)).count();
+            assert_eq!(pages, usize::from(page), "{case}: wrong operator escalation");
+            let wakes = rows.iter().filter(|row| row.target == "supervisor" && row.prompt.contains(&task.id)).count();
+            assert_eq!(wakes, usize::from(page), "{case}: wrong local stall wake");
+        }
+    }
+
     /// GH #1500 / #1302: an overnight with a live, heartbeating but silent
     /// peer and an idle supervisor whose only wake is event-based. The
     /// supervisor is woken once at 45 min, the operator is paged once at

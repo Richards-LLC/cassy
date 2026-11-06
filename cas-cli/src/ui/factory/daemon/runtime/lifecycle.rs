@@ -4966,9 +4966,24 @@ impl FactoryDaemon {
             .unwrap_or_default().into_iter()
             .filter(|record| record.factory_session == self.session_name)
             .collect::<Vec<_>>();
+        let mut names = worker_names;
+        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
+        names.sort(); names.dedup();
+        // Measure while registrations and worktrees still identify the work.
+        let agents = open_agent_store(self.app.cas_dir()).and_then(|store| store.list(None))
+            .unwrap_or_default();
+        let worker_states: Vec<_> = names.iter().map(|name| {
+            let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name
+                && agent.factory_session.as_deref() == Some(self.session_name.as_str())).collect();
+            let state = rows.iter().max_by_key(|agent| agent.last_heartbeat)
+                .map(|agent| crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent))
+                .unwrap_or_else(|| format!("{name}: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable)"));
+            (name.clone(), state, rows.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>())
+        }).collect();
         let mut ended = crate::ui::factory::session::SessionEndOutcome {
             at: String::new(), reason: "unknown".into(),
             workers_stopped: Vec::new(), orphans: Vec::new(), unverified: Vec::new(),
+            worker_states: Vec::new(),
         };
         // Hooks may already have unregistered the supervisor; retain their original reason.
         if let Ok(store) = cas_store::SqliteAgentStore::open(self.app.cas_dir())
@@ -4987,21 +5002,28 @@ impl FactoryDaemon {
         for record in &ownership {
             self.app.untrack_worker_process_group_if_gone(record.pgid).await;
         }
-        let mut names = worker_names;
-        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
-        names.sort(); names.dedup();
-        for name in names {
+        for (name, state, agent_ids) in worker_states {
             let records: Vec<_> = ownership.iter().filter(|record| record.worker_name == name).collect();
             use crate::ui::factory::process_groups::{ProcessGroupStatus, status};
-            if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
-                ended.orphans.push(name);
+            let outcome = if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
+                ended.orphans.push(name.clone());
+                "still running; tasks retained".to_string()
             } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
-                ended.workers_stopped.push(name);
+                ended.workers_stopped.push(name.clone());
+                let release = |holder: &str| crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), holder);
+                let released = release(&name) + agent_ids.iter().filter(|id| **id != name)
+                    .map(|id| release(id)).sum::<usize>();
+                format!("stopped; recovered_tasks={released}")
             } else {
-                ended.unverified.push(name);
-            }
+                ended.unverified.push(name.clone());
+                "stop unverified; tasks retained for recovery".to_string()
+            };
+            ended.worker_states.push(format!("{state}; {outcome}"));
         }
         ended.at = chrono::Utc::now().to_rfc3339();
+        let shutdown_report = if ended.worker_states.is_empty() { String::new() } else {
+            format!("\r\nFactory session ended ({}).\r\n{}\r\n", ended.reason, ended.worker_states.join("\r\n"))
+        };
         if let Err(error) = self.session_manager.record_ended(&self.session_name, ended) {
             tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
@@ -5044,6 +5066,7 @@ impl FactoryDaemon {
         let cleanup = b"\x1b[?25h\x1b[?1049l";
         for client in self.clients.values_mut() {
             let _ = client.stream.write_all(cleanup);
+            let _ = client.stream.write_all(shutdown_report.as_bytes());
         }
 
         Ok(())

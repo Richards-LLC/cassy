@@ -35,10 +35,12 @@ fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
 /// `npx` download or a PATH lookup.
 fn assert_markdownlint_clean_with_python(repo_root: &Path, files: &[&Path], python: &str) {
     let mut command = ProcessCommand::new(python);
-    command.arg(repo_root.join("scripts/markdownlint.py")).args([
-        "--config",
-        repo_root.join(".markdownlint-cli2.jsonc").to_str().unwrap(),
-    ]);
+    command
+        .arg(repo_root.join("scripts/markdownlint.py"))
+        .args([
+            "--config",
+            repo_root.join(".markdownlint-cli2.jsonc").to_str().unwrap(),
+        ]);
     for file in files {
         command.arg(file);
     }
@@ -82,7 +84,6 @@ fn install_fake_gh(project: &TempDir) -> PathBuf {
 
 #[cfg(unix)]
 fn install_fake_gh_version(project: &TempDir, version: &str) -> PathBuf {
-
     let path = project.path().join("fake-gh");
     cas::test_paths::warm_stub(
         &path,
@@ -106,7 +107,6 @@ esac
 
 #[cfg(unix)]
 fn install_followup_fake_gh(project: &TempDir) -> PathBuf {
-
     let path = project.path().join("fake-gh-followup");
     cas::test_paths::warm_stub(
         &path,
@@ -123,9 +123,94 @@ case "$1 $2" in
     ;;
   *) exit 1 ;;
 esac
-"##
+"##,
     );
     path
+}
+
+#[cfg(unix)]
+#[test]
+fn pdf_launch_failure_reaches_text_and_json_cas_9988() {
+    let project = TempDir::new().unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "feature/report"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/project.git",
+        ],
+    ] {
+        assert!(
+            ProcessCommand::new("git")
+                .current_dir(project.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(
+        project.path().join("CHANGELOG.md"),
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Fixed\n\n- PDF launch diagnostics.\n",
+    )
+    .unwrap();
+    cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    let fake_gh = install_fake_gh(&project);
+    let module = project.path().join("playwright.cjs");
+    fs::write(&module, r#"
+module.exports = { chromium: {
+  executablePath: () => '/missing/chromium/chrome',
+  async launch() {
+    throw new Error("browserType.launch: Executable doesn't exist at /missing/chromium_headless_shell/headless_shell\nlaunch diagnostic retained");
+  }
+} };
+"#).unwrap();
+    // The launch fails before PDF inspection. Keep that boundary available
+    // without making this diagnostic test require the native PDF checker.
+    let python = project.path().join("test-python");
+    fs::create_dir(&python).unwrap();
+    fs::write(python.join("pymupdf.py"), "").unwrap();
+    for json in [false, true] {
+        let mut command = cas_cmd(&project);
+        command
+            .env("GH_BIN", &fake_gh)
+            .env("PLAYWRIGHT_MODULE", &module)
+            .env("PYTHONPATH", &python);
+        if json {
+            command.arg("--json");
+        }
+        let result = command
+            .args(["release", "report", "3.19.0", "--pdf"])
+            .assert()
+            .code(2);
+        let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+        for message in [
+            "browserType.launch: Executable doesn't exist",
+            "launch diagnostic retained",
+            "install chromium-headless-shell",
+        ] {
+            assert!(stderr.contains(message), "{stderr}");
+        }
+        if json {
+            let value: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+            assert_eq!(value["status"], "error");
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("browserType.launch: Executable doesn't exist"),
+                "{value}"
+            );
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("install chromium-headless-shell"),
+                "{value}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -134,15 +219,26 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let project = TempDir::new().unwrap();
     for args in [
         vec!["init", "-q", "-b", "feature/report"],
-        vec!["remote", "add", "origin", "git@github.com:example/project.git"],
-        vec!["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/project.git",
+        ],
+        vec![
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        ],
     ] {
-        assert!(ProcessCommand::new("git")
-            .current_dir(project.path())
-            .args(args)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            ProcessCommand::new("git")
+                .current_dir(project.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     fs::write(
         project.path().join("CHANGELOG.md"),
@@ -207,7 +303,10 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert!(source.contains("[#705](https://github.com/example/project/issues/705)"));
     assert!(source.contains("sha256:abc123"));
     assert!(html.contains("<html lang=\"en\">"));
-    assert!(html.contains("--bg:#F7F4EE") && !html.contains("/*cas:brand*/"), "{html}");
+    assert!(
+        html.contains("--bg:#F7F4EE") && !html.contains("/*cas:brand*/"),
+        "{html}"
+    );
     assert!(html.contains("data-change-map=\"1\""));
     assert!(html.contains("data-area=\"Sessions\""));
     assert!(html.contains("2 GitHub issues closed with this release"));
@@ -223,7 +322,12 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     use sha2::{Digest, Sha256};
     let cas_root = project.path().join(".cas");
     let mut config = cas::config::Config::load(&cas_root).unwrap();
-    config.set("factory.artifacts_root", project.path().join("artifacts").to_str().unwrap()).unwrap();
+    config
+        .set(
+            "factory.artifacts_root",
+            project.path().join("artifacts").to_str().unwrap(),
+        )
+        .unwrap();
     config.save(&cas_root).unwrap();
     let pair_dir = cas::deliverable::pairs::task_dir(&config, &cas_root, "cas-report");
     fs::create_dir_all(&pair_dir).unwrap();
@@ -275,7 +379,10 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     for title in ["Unpaired change", "Unavailable change"] {
         assert!(!html.contains(&format!("alt=\"After: {title}\"")), "{html}");
     }
-    assert!(!html.contains("Pair: cas-"), "capture metadata leaked into Now text");
+    assert!(
+        !html.contains("Pair: cas-"),
+        "capture metadata leaked into Now text"
+    );
     assert!(html.contains("Source: capture receipt."));
 }
 
@@ -295,9 +402,13 @@ fn cli_release_report_falls_back_from_renderer_without_link_arguments_cas_692a()
     .unwrap()
     .replace("/home/pippenz/", "~/");
     fs::write(output.join("v3.19.0.md"), exemplar).unwrap();
-    let installed = project.path().join(".claude/skills/cas-release-report/scripts");
+    let installed = project
+        .path()
+        .join(".claude/skills/cas-release-report/scripts");
     fs::create_dir_all(&installed).unwrap();
-    fs::write(installed.join("render.py"), r#"
+    fs::write(
+        installed.join("render.py"),
+        r#"
 # Previous managed renderer supports these source formats:
 # front matter needs a closing
 # ['area', 'changes', 'what changed']
@@ -308,7 +419,8 @@ parser.add_argument('--output', required=True)
 parser.add_argument('--project-root')
 args = parser.parse_args()
 raise RuntimeError('obsolete renderer must be replaced by builtin')
-"#)
+"#,
+    )
     .unwrap();
     cas_cmd(&project)
         .args(["--json", "release", "report", "3.19.0", "--out", "reports"])
@@ -404,7 +516,14 @@ esac
     let output = cas_cmd_at(project.path(), home.path(), &xdg)
         .env("GH_BIN", &fake_gh)
         .env("CAS_RELEASE_REPORT_POLL_SECS", "1")
-        .args(["--json", "release", "report", "3.19.0", "--out", "docs/release-reports"])
+        .args([
+            "--json",
+            "release",
+            "report",
+            "3.19.0",
+            "--out",
+            "docs/release-reports",
+        ])
         .arg("--latency-receipt")
         .arg(&receipt)
         .assert()
@@ -415,15 +534,20 @@ esac
     let result: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(result["green_to_published_seconds"], 300, "{result}");
     // cas-1a83: Evidence URLs are links in the HTML, not escaped `<…>` text.
-    let html = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.html")).unwrap();
+    let html =
+        fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.html")).unwrap();
     assert!(
         html.contains(r#"<a href="https://github.com/example/project/pull/901">"#),
         "the release PR must render as a link"
     );
-    assert!(!html.contains("&lt;https://"), "an Evidence URL rendered as text");
+    assert!(
+        !html.contains("&lt;https://"),
+        "an Evidence URL rendered as text"
+    );
     assert_eq!(result["issue_count"], 2, "{result}");
     assert_eq!(result["change_count"], 3);
-    let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
+    let source =
+        fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
     assert!(
         source.contains(
             "Release receipt (relative to `~/.cas/artifacts`): `cas-fixture/release-latency.receipt`."
@@ -444,8 +568,16 @@ esac
     );
     // pin: page one ends where the renderer's fixed "What you can do now" section starts
     let page_one = &source[..source.find("## What you can do now").unwrap()];
-    for zero in ["| 0 |", "no listed issues", "issue-bearing", "verified closure"] {
-        assert!(!page_one.contains(zero), "page one shows {zero:?}:\n{page_one}");
+    for zero in [
+        "| 0 |",
+        "no listed issues",
+        "issue-bearing",
+        "verified closure",
+    ] {
+        assert!(
+            !page_one.contains(zero),
+            "page one shows {zero:?}:\n{page_one}"
+        );
     }
 }
 
@@ -720,26 +852,44 @@ release_train_announce_posted_block
     );
     assert!(receipt_text.contains("<https://example.test/user-1>"));
     // pin: the POSTED block shows the operator's Eastern 12-hour time (cas-5389)
-    assert!(receipt_text.contains("1 January 2099 · 7:00 PM ET"), "{receipt_text}");
+    assert!(
+        receipt_text.contains("1 January 2099 · 7:00 PM ET"),
+        "{receipt_text}"
+    );
     assert!(!receipt_text.contains("UTC"), "{receipt_text}");
     assert_markdownlint_clean(&repo_root, &[&report_path, &announce_path]);
 }
-
 
 #[cfg(unix)]
 #[test]
 fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a() {
     let project = TempDir::new().unwrap();
     fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
-    fs::write(project.path().join("docs/release-notes/v9.99.1.md"), "# Release notes\n\nCloses #705, #746.\n").unwrap();
+    fs::write(
+        project.path().join("docs/release-notes/v9.99.1.md"),
+        "# Release notes\n\nCloses #705, #746.\n",
+    )
+    .unwrap();
     cas_cmd(&project).args(["init", "--yes"]).assert().success();
     let mut config = cas::config::Config::load(&project.path().join(".cas")).unwrap();
     config.set("issues.repo", "example/project").unwrap();
     config.save(&project.path().join(".cas")).unwrap();
     // A captured release input keeps the historical shape stable after version bumps.
     let grouped = include_str!("fixtures/changelog_grouped_387.md");
-    assert_eq!(grouped.lines().filter(|line| line.starts_with("### ")).count(), 7);
-    assert_eq!(grouped.lines().filter(|line| line.starts_with("- **")).count(), 27);
+    assert_eq!(
+        grouped
+            .lines()
+            .filter(|line| line.starts_with("### "))
+            .count(),
+        7
+    );
+    assert_eq!(
+        grouped
+            .lines()
+            .filter(|line| line.starts_with("- **"))
+            .count(),
+        27
+    );
     let legacy = "## [9.99.1] - 2026-10-28\n\n### Fixed — factory reminder probes (#705)\n- External probes run apart from the daemon loop.\n  - **Details** stay part of this single change.\n\n### Changed — task coordination (#746)\n- A refusal lists every missing requirement.\n\n### Added — Violet push-wake\n\n- Mentions wake the supervisor.\n- Watched channels are read periodically.\n- **Behavior change:** push-wake is on by default.\n\n### Added — remote supervisors\n\nSetup guide and walkthrough.\n\n- **Peer discovery** lists supervisors.\n- **Peer messaging** reaches them.\n";
     // Select the published source by version, then use a reserved
     // fixture version so release bumps cannot change this regression's input.
@@ -750,46 +900,127 @@ fn cli_release_report_counts_grouped_387_entries_and_preserves_issues_cas_711a()
     let historical = format!("## [9.99.8] - 2026-10-29\n\n{}", historical.body);
     for (version, body, expected, retained_titles, excluded_titles) in [
         ("9.99.1", grouped, 27, &[][..], &[][..]),
-        ("9.99.1", legacy, 5, &["Factory reminder probes", "Task coordination", "Violet push-wake", "Peer discovery", "Peer messaging"][..], &[][..]),
+        (
+            "9.99.1",
+            legacy,
+            5,
+            &[
+                "Factory reminder probes",
+                "Task coordination",
+                "Violet push-wake",
+                "Peer discovery",
+                "Peer messaging",
+            ][..],
+            &[][..],
+        ),
         // Exercise the historical source through acquisition, front matter,
         // Markdown assembly and the renderer, rather than a hand-built table.
-        ("9.99.8", historical.as_str(), 40, &[][..], &["Team refresh after reassignment", "Codex Clear can stay unconfirmed"][..]),
-        ("9.99.1", "## [9.99.1] - 2026-10-29\n\n### Fixed — runtime behavior\n- **Worker resumes** — Now: the worker resumes.\n\n### Documentation — release records\n- **Prior release record** — Now: the report is committed.\n\n### Tests — regression checks\n- **Readiness regression** — Now: tests await readiness.\n\n### Known limits — outstanding work\n- **Refresh flicker** — Still occurs.\n\n### Known limitations — unresolved behavior\n- **Delayed refresh** — Still occurs.\n\n### Changed\n- **Clear receipts** — Now: receipts confirm completion.\n", 2, &[][..], &["Prior release record", "Readiness regression", "Refresh flicker", "Delayed refresh"][..]),
+        (
+            "9.99.8",
+            historical.as_str(),
+            40,
+            &[][..],
+            &[
+                "Team refresh after reassignment",
+                "Codex Clear can stay unconfirmed",
+            ][..],
+        ),
+        (
+            "9.99.1",
+            "## [9.99.1] - 2026-10-29\n\n### Fixed — runtime behavior\n- **Worker resumes** — Now: the worker resumes.\n\n### Documentation — release records\n- **Prior release record** — Now: the report is committed.\n\n### Tests — regression checks\n- **Readiness regression** — Now: tests await readiness.\n\n### Known limits — outstanding work\n- **Refresh flicker** — Still occurs.\n\n### Known limitations — unresolved behavior\n- **Delayed refresh** — Still occurs.\n\n### Changed\n- **Clear receipts** — Now: receipts confirm completion.\n",
+            2,
+            &[][..],
+            &[
+                "Prior release record",
+                "Readiness regression",
+                "Refresh flicker",
+                "Delayed refresh",
+            ][..],
+        ),
     ] {
         fs::write(
-            project.path().join(format!("docs/release-notes/v{version}.md")),
+            project
+                .path()
+                .join(format!("docs/release-notes/v{version}.md")),
             "# Release notes\n\nCloses #705, #746.\n",
-        ).unwrap();
+        )
+        .unwrap();
         let fake_gh = install_fake_gh_version(&project, version);
-        fs::write(project.path().join("CHANGELOG.md"), format!("# Changelog\n\n{body}")).unwrap();
+        fs::write(
+            project.path().join("CHANGELOG.md"),
+            format!("# Changelog\n\n{body}"),
+        )
+        .unwrap();
         let output = cas_cmd(&project)
             .env("GH_BIN", &fake_gh)
             .args(["--json", "release", "report", version, "--refresh-sources"])
-            .assert().success().get_output().stdout.clone();
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
         let report: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(report["change_count"], expected, "{report}");
-        assert_eq!(report["issue_count"], 2, "official GitHub count is independent: {report}");
-        let source = fs::read_to_string(project.path().join(format!("docs/release-reports/v{version}.md"))).unwrap();
+        assert_eq!(
+            report["issue_count"], 2,
+            "official GitHub count is independent: {report}"
+        );
+        let source = fs::read_to_string(
+            project
+                .path()
+                .join(format!("docs/release-reports/v{version}.md")),
+        )
+        .unwrap();
         // pin: generated reports retain the renderer's YAML front-matter contract.
-        assert!(source.starts_with(&format!("---\nversion: {version}\n")), "real report front matter: {source}");
+        assert!(
+            source.starts_with(&format!("---\nversion: {version}\n")),
+            "real report front matter: {source}"
+        );
         if version == "9.99.8" {
             // pin: published 3.88 filed two docs/test entries under Fixed; do not reinterpret history.
-            assert!(source.contains("| Changes listed | 40 | 8 added, 26 fixed, 6 changed;"), "{source}");
-            for title in ["Previous-release records are complete", "Regression checks follow the current interface"] {
+            assert!(
+                source.contains("| Changes listed | 40 | 8 added, 26 fixed, 6 changed;"),
+                "{source}"
+            );
+            for title in [
+                "Previous-release records are complete",
+                "Regression checks follow the current interface",
+            ] {
                 // pin: keep both published historical entries in the report prose.
-                assert!(source.contains(title), "historical docs/test entry must remain in prose: {title}");
+                assert!(
+                    source.contains(title),
+                    "historical docs/test entry must remain in prose: {title}"
+                );
             }
         }
         let prose = source.split_once("## Under the hood").unwrap().1;
         for title in excluded_titles {
-            assert!(prose.contains(title), "excluded entry must remain in prose: {title}");
-            assert!(!report["change_areas"].to_string().contains(title), "excluded entry must not be plotted: {title}");
+            assert!(
+                prose.contains(title),
+                "excluded entry must remain in prose: {title}"
+            );
+            assert!(
+                !report["change_areas"].to_string().contains(title),
+                "excluded entry must not be plotted: {title}"
+            );
         }
-        let html = fs::read_to_string(project.path().join(format!("docs/release-reports/v{version}.html"))).unwrap();
-        assert_eq!(html.matches("data-change=\"").count(), expected, "one rendered mark per shipped change");
+        let html = fs::read_to_string(
+            project
+                .path()
+                .join(format!("docs/release-reports/v{version}.html")),
+        )
+        .unwrap();
+        assert_eq!(
+            html.matches("data-change=\"").count(),
+            expected,
+            "one rendered mark per shipped change"
+        );
         for title in retained_titles {
             // pin: the report must retain the legacy heading as its plotted change title.
-            assert!(html.contains(&format!("<title>{title}</title>")), "missing legacy change title: {title}");
+            assert!(
+                html.contains(&format!("<title>{title}</title>")),
+                "missing legacy change title: {title}"
+            );
         }
     }
 }

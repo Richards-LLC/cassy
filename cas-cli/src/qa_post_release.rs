@@ -290,7 +290,7 @@ mod tests {
         let service = crate::mcp::CasService::new(core, None);
         let request = |kind: &str| serde_json::from_value(serde_json::json!({
             "action": "batch_receipt", "verification_type": kind,
-            "task_ids": ["cas-live"], "staging_sha": newest,
+            "task_ids": ["cas-live"], "staging_sha": target_tip,
             "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
         })).unwrap();
         let text = |response: rmcp::model::CallToolResult| response.content.iter()

@@ -306,7 +306,20 @@ mod tests {
     #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
-        for status in ["approved", "rejected", "supervisor_call", "malformed"] {
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        env.set("CAS_TEST_HUB_PATH", &bin);
+        env.remove("CODEX_HOME");
+        let account = env.home().join(".codex-review");
+        std::fs::create_dir_all(account.join("sessions")).unwrap();
+        std::fs::write(account.join("auth.json"), "{}").unwrap();
+        std::fs::write(account.join("sessions/usage.jsonl"), serde_json::json!({
+            "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
+                "primary": {"used_percent": 20.0, "window_minutes": 10080,
+                    "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
+            }}
+        }).to_string()).unwrap();
+        for status in ["harness_failed", "approved", "rejected", "supervisor_call", "malformed"] {
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             let run = |args: &[&str]| super::super::tests::run(repo, args);
@@ -402,8 +415,24 @@ mod tests {
             std::fs::write(&response_path, response).unwrap();
             env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
             use std::os::unix::fs::PermissionsExt;
-            let script = directory.join("fixture-provider");
-            std::fs::write(&script, "#!/bin/sh\ncat \"$CAS_TEST_VERIFIER_RESPONSE\"\n").unwrap();
+            let script = bin.join("codex");
+            env.set("CAS_TEST_VERIFIER_STATUS", status);
+            std::fs::write(&script, r#"#!/bin/sh
+if [ "$1" = login ]; then
+    [ -f "$CODEX_HOME/auth.json" ] || exit 1
+    echo 'Logged in using ChatGPT'
+    exit 0
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
+    echo 'old diagnostic excluded from bounded tail' >&2
+    i=0; while [ "$i" -lt 12 ]; do echo 'retrying transport' >&2; i=$((i+1)); done
+    echo '401 Unauthorized: Missing bearer or basic authentication in header' >&2
+    exit 1
+fi
+[ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
+[ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
+cat "$CAS_TEST_VERIFIER_RESPONSE"
+"#).unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
             env.set("CAS_TEST_PREMERGE_HARNESS", &script);
             // Exercise the dispatch handler used by worktree_merge, replacing
@@ -422,8 +451,8 @@ mod tests {
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
-            if status == "malformed" {
-                assert!(verdict.is_none(), "malformed output cannot approve");
+            if matches!(status, "malformed" | "harness_failed") {
+                assert!(verdict.is_none(), "failed transport cannot approve");
             } else {
                 let verdict = verdict.unwrap_or_else(|| {
                     panic!(
@@ -467,11 +496,16 @@ mod tests {
                     1,
                     "{status}: exactly one actionable notice: {prompts:?}"
                 );
-                assert!(prompts[0].prompt.contains(if status == "malformed" {
-                    "invalid verifier response"
-                } else {
-                    "operator draft probe"
-                }));
+                assert!(prompts[0].prompt.contains(match status {
+                    "malformed" => "invalid verifier response",
+                    "harness_failed" => "401 Unauthorized: Missing bearer or basic authentication in header",
+                    _ => "operator draft probe",
+                }), "{status}: {:?}", prompts[0]);
+                if status == "harness_failed" {
+                    assert!(!prompts[0].prompt.contains("old diagnostic excluded"));
+                    assert!(std::fs::read_to_string(output.with_file_name("harness.log"))
+                        .unwrap().contains("old diagnostic excluded"));
+                }
             }
             eprintln!(
                 "AUTOMATIC_VERIFIER row={status} hand_launches=0 dispatch={} candidate={}",

@@ -187,10 +187,8 @@ pub(crate) fn sanitize_nested_fences(text: String) -> String {
 /// Common secret-shaped patterns matched against whitespace-delimited tokens.
 ///
 /// Conservative — false negatives are safer than false positives when
-/// rewriting assistant output. Ordered most-specific first.
+/// rewriting assistant output.
 static SECRET_PATTERNS: &[&str] = &[
-    // Anthropic / OpenAI style: sk-<alphanum>
-    "sk-",
     // GitHub PATs
     "ghp_",
     "gho_",
@@ -208,6 +206,12 @@ static SECRET_PATTERNS: &[&str] = &[
     "-----BEGIN ",
 ];
 
+// A credential starts at a word boundary and has a long key run. Hyphens
+// and underscores also cover project/provider-prefixed SK credentials.
+static SK_KEY_PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\bsk-[A-Za-z0-9_-]{20,}\b").expect("valid SK key pattern")
+});
+
 const REDACTION_PLACEHOLDER: &str = "[REDACTED]";
 
 /// Scan `text` for secret-shaped tokens and replace each matching
@@ -215,22 +219,14 @@ const REDACTION_PLACEHOLDER: &str = "[REDACTED]";
 ///
 /// Returns `(possibly_modified_text, was_modified)`.
 pub(crate) fn redact_secrets(text: String) -> (String, bool) {
-    let mut result = text.clone();
-    let mut modified = false;
-
-    for pattern in SECRET_PATTERNS {
-        if result.contains(pattern) {
-            result = redact_token_containing(&result, pattern);
-            modified = true;
-        }
-    }
-
+    let result = redact_secret_tokens(&text);
+    let modified = result != text;
     (result, modified)
 }
 
-/// Replace every whitespace-delimited token that contains `pattern` with
+/// Replace every whitespace-delimited token matching a secret shape with
 /// `[REDACTED]`, preserving the surrounding whitespace.
-fn redact_token_containing(text: &str, pattern: &str) -> String {
+fn redact_secret_tokens(text: &str) -> String {
     // Split preserving whitespace separators so we can stitch back together.
     text.split_inclusive(|c: char| c.is_whitespace())
         .map(|chunk| {
@@ -238,7 +234,9 @@ fn redact_token_containing(text: &str, pattern: &str) -> String {
             // trailing separator off so we can check the word independently.
             let word = chunk.trim_end_matches(|c: char| c.is_whitespace());
             let suffix = &chunk[word.len()..];
-            if word.contains(pattern) {
+            if SK_KEY_PATTERN.is_match(word)
+                || SECRET_PATTERNS.iter().any(|pattern| word.contains(*pattern))
+            {
                 format!("{REDACTION_PLACEHOLDER}{suffix}")
             } else {
                 chunk.to_string()
@@ -305,12 +303,24 @@ mod inner_tests {
     // --- redact_secrets ---
 
     #[test]
-    fn sk_token_redacted() {
-        let (out, changed) =
-            redact_secrets("key: sk-abcdef1234567890abcdef1234567890".to_string());
-        assert!(changed);
-        assert!(!out.contains("sk-"), "sk- must be gone: {out}");
-        assert!(out.contains(REDACTION_PLACEHOLDER));
+    fn sk_token_redacted_without_mangling_words_cas_c1ff() {
+        for ordinary in [
+            "The disk-limit fix landed on main",
+            "risk-label ask-me task-id disk-space ask-me-raw getpulsecard.com/ask-pulse",
+            "sk-short sk-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+            &format!("disk-{} risk-{} ask-{}", "a".repeat(32), "a".repeat(32), "a".repeat(32)),
+        ] {
+            assert_eq!(redact_secrets(ordinary.to_string()), (ordinary.to_string(), false));
+        }
+        for fake in [
+            "sk-abcdef1234567890abcdef1234567890".to_string(),
+            format!("sk-proj-{}", "aB_9-".repeat(12)),
+            format!("sk-ant-api03-{}", "aB_9-".repeat(12)),
+        ] {
+            let text = format!("disk-limit\tkey: \"{fake}\"\nask-me risk-label");
+            assert_eq!(redact_secrets(text),
+                ("disk-limit\tkey: [REDACTED]\nask-me risk-label".to_string(), true));
+        }
     }
 
     #[test]

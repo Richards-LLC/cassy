@@ -131,13 +131,50 @@ def is_exact_text_pin(body, context):
     return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 
+def rust_assertion_diagnostics(source):
+    """Yield formatting-argument spans, leaving assertion operands in scope."""
+    ts = tokens(source)
+    ps = pairs(ts)
+    for i, token in enumerate(ts):
+        if token.string or token.value not in (
+            'assert', 'assert_eq', 'assert_ne',
+            'debug_assert', 'debug_assert_eq', 'debug_assert_ne',
+        ):
+            continue
+        if i + 2 not in ps or ts[i + 1].value != '!':
+            continue
+        close = ps[i + 2]
+        operands = 1 if token.value in ('assert', 'debug_assert') else 2
+        j = i + 3
+        arg_start, angles = j, 0
+        while j < close:
+            if not ts[j].string:
+                # Type arguments can contain commas outside (), [] and {}.
+                if ts[j].value == '<' and (angles or j == arg_start or ts[j - 1].value == '::'):
+                    angles += 1
+                elif ts[j].value == '>' and angles and ts[j - 1].value != '-':
+                    angles -= 1
+                elif ts[j].value == ',' and not angles:
+                    operands -= 1
+                    arg_start = j + 1
+                    if operands == 0:
+                        yield ts[j].end, ts[close].start
+                        break
+            if j in ps:
+                j = ps[j]
+            j += 1
+
+
 def lint_text_pins(source, path, ranges=None, changed_lines=None):
     """Find brittle prose pins in a conventional test file, independent of language."""
     if not is_test_file(path) and not ranges:
         return []
     hits = []
     literals = list(text_literals(source, path))
+    diagnostics = list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs' else []
     for start, end, body in literals:
+        if any(left <= start < right for left, right in diagnostics):
+            continue
         if ranges and not any(left <= start < right for left, right in ranges):
             continue
         start_line = source.count('\n', 0, start) + 1

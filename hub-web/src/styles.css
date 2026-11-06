@@ -3608,3 +3608,50 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-account-entry { min-width: 0; }
 .launch-account-entry > .account-usage-check { margin-inline: var(--space-3); }
 @media print { .account-usage-check button { display: none; } }
+
+/* Live epic strip: remains above the thread while its reading region scrolls. */
+.epic-tabs { flex: none; min-width: 0; background: var(--bg-panel); color: var(--ink); border-radius: var(--radius-card); margin: var(--space-2) var(--space-3); border: 1px solid var(--line-subtle); }
+.epic-tab-strip { display: flex; overflow-x: auto; gap: var(--space-1); padding: var(--space-1); scrollbar-width: thin; }
+.epic-tab { flex: 0 0 auto; display: grid; grid-template-columns: auto auto auto; align-items: center; gap: var(--space-1) var(--space-2); min-height: var(--rail-item-min); max-width: min(36ch, 80vw); padding: var(--space-2) var(--space-3); border: 0; border-bottom: 2px solid transparent; border-radius: var(--radius-card); background: transparent; color: var(--ink-mid); text-align: left; }
+.epic-tab[aria-selected="true"] { background: var(--bg-active); color: var(--ink); border-bottom-color: var(--color-action); }
+.epic-tab:focus-visible, .epic-tab-panel:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.epic-tab-name { font-size: var(--fs-meta); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.epic-tab-count { font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; }
+.epic-tab-machine { grid-column: 1 / -1; font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.epic-worker-dots { display: flex; flex-wrap: wrap; gap: var(--space-1); max-width: 8ch; }
+.epic-worker-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--state-ok); color: var(--bg-panel); border: 1px solid var(--state-ok); }
+.epic-worker-dot.waiting { background: transparent; color: var(--state-ok); }
+.epic-tab-panel { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line-subtle); max-height: 24vh; overflow-y: auto; }
+.epic-tab-panel h2 { margin: 0; font-size: var(--fs-md); font-weight: var(--weight-semibold); }
+.epic-panel-summary, .epic-tabs-empty { margin: var(--space-1) 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-xs); }
+.epic-tabs-empty { padding: 0 var(--space-3); }
+.epic-task-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: var(--fs-meta); }
+.epic-task-table th { color: var(--ink-mid); font-size: var(--fs-xs); font-weight: var(--weight-medium); text-align: left; }
+.epic-task-table :is(th, td) { padding: var(--space-2) var(--space-1); border-bottom: 1px solid var(--line-subtle); vertical-align: top; overflow-wrap: anywhere; }
+.epic-task-table :is(th, td):first-child { width: 28%; }
+.epic-task-table :is(th, td):last-child { width: 20%; }
+.epic-task-worker { font-family: var(--font-mono); font-size: var(--fs-xs); }
+.epic-task-worker small { display: block; color: var(--ink-mid); font-family: var(--font-ui); }
+.epic-task-state { font-weight: var(--weight-medium); }
+.epic-sheet { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 75dvh; box-sizing: border-box; margin: 0; padding: var(--space-4) max(var(--space-3), env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) max(var(--space-3), env(safe-area-inset-left)); background: var(--bg-panel); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; overflow-y: auto; }
+.epic-sheet::backdrop { background: var(--overlay-backdrop); }
+.epic-sheet .epic-tab-panel { max-height: none; padding: var(--space-3) 0; border: 0; }
+.epic-sheet-close { display: block; margin-left: auto; min-height: var(--rail-item-min); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .epic-tabs { margin-left: max(var(--space-2), env(safe-area-inset-left)); margin-right: max(var(--space-2), env(safe-area-inset-right)); }
+}
+@media (forced-colors: active) {
+  .epic-tab[aria-selected="true"] { border-bottom-color: Highlight; }
+  .epic-worker-dot { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+  .epic-worker-dot.waiting { background: Canvas; }
+}
+@media print {
+  .epic-tab-strip { flex-wrap: wrap; overflow: visible; }
+  .epic-tab-panel, .epic-sheet { position: static; max-height: none; overflow: visible; }
+}
+.epic-status-notice { margin: var(--space-2) var(--space-3); color: var(--ink-mid); font-size: var(--fs-xs); }
+/* Team already has the detailed staffing view; the epic strip stays visible. */
+.conversation-main.team-open .epic-tabs > .epic-tab-panel { display: none; }
+/* Empty-thread content fits the smaller reading region below the epic ledger. */
+.epic-tabs ~ .conversation-pane-slot .thread .empty { padding: var(--space-4); gap: var(--space-2); }
+.epic-tabs ~ .conversation-pane-slot .thread .empty .mono { width: var(--space-12); height: var(--space-12); font-size: var(--fs-lg); }

@@ -27,6 +27,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
+   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`, and pass the audit's printed included task IDs to `batch_receipt`.
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.

@@ -96,3 +96,80 @@ export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[])
   const live: Record<string, string> = { executing: "Executing", waiting_for_input: "Waiting", awaiting_first_prompt: "Waiting", budget_aborted: "Budget stopped", stalled: "Stalled" };
   return live[agent?.liveness ?? ""] ?? statusLabel(agent?.status);
 }
+
+/** Existing status snapshots from the running sessions on paired machines. */
+export interface EpicSessionProgress {
+  readonly project: string;
+  readonly machine: string;
+  readonly machineLabel: string;
+  readonly session: string;
+  readonly supervisor: string;
+  readonly roster: readonly string[];
+  readonly agents: readonly FleetAgent[];
+  readonly tasks: readonly ProgressTask[];
+  readonly epics: readonly ReleaseEpic[];
+  readonly stale: boolean;
+  readonly received: number;
+}
+export interface EpicTab {
+  readonly key: string;
+  readonly epic: ReleaseEpic;
+  readonly machines: readonly string[];
+  readonly workers: readonly { name: string; machine: string; state: string }[];
+  readonly rows: readonly { task: ProgressTask; worker: string; machine: string; state: string }[];
+  readonly inFlight: number;
+  readonly stale: boolean;
+}
+
+/** Display the task's delivery truth before worker liveness; never infer a merge from closure. */
+function epicTaskState(task: ProgressTask, worker: WorkerProgress | undefined): string {
+  if (task.delivery_state === "merged") return "Merged";
+  if (statusLabel(task.status) === "Awaiting merge") return "Parking";
+  if (["Open", "Ready"].includes(statusLabel(task.status))) return "Ready";
+  const state = worker ? workerState(worker, [task]) : statusLabel(task.status);
+  return state === "Executing" ? "Building" : state;
+}
+
+/** Project identity groups a shared epic across machines; same IDs in other projects stay separate. */
+export function epicTabs(sources: readonly EpicSessionProgress[]): EpicTab[] {
+  const tabs = new Map<string, { epic: ReleaseEpic; machines: Set<string>; workers: Map<string, EpicTab["workers"][number]>; rows: Map<string, EpicTab["rows"][number]>; stale: boolean }>();
+  const latest = new Map<string, ReleaseEpic>();
+  // Prefer the newest authoritative task/progress snapshot when sessions overlap.
+  for (const source of [...sources].sort((a, b) => b.received - a.received)) {
+    const workers = workerProgress(source.roster, source.agents, source.tasks, source.supervisor);
+    for (const epic of source.epics) {
+      const key = JSON.stringify([source.project, epic.id]);
+      if (!latest.has(key)) latest.set(key, epic);
+      if (!["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification"].includes(statusLabel(latest.get(key)?.status))) continue;
+      let tab = tabs.get(key);
+      if (!tab) {
+        tab = { epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true };
+        tabs.set(key, tab);
+      } else if (!tab.epic.progress && epic.progress) tab.epic = { ...tab.epic, progress: epic.progress };
+      tab.machines.add(source.machineLabel);
+      tab.stale &&= source.stale;
+      const tasks = source.tasks.filter(task => task.epic_id === epic.id);
+      const groups = taskGroups(tasks, [epic], [], true);
+      for (const task of groups.filter(group => group.label !== "Finished").flatMap(group => group.tasks)) {
+        const worker = workers.find(item => item.currentTask === task.id)
+          ?? (task.assignee ? workers.find(item => item.name === task.assignee || item.agent?.id === task.assignee) : undefined);
+        if (!tab.rows.has(task.id)) tab.rows.set(task.id, { task, worker: worker?.name ?? task.assignee ?? "Unassigned", machine: source.machineLabel, state: epicTaskState(task, worker) });
+      }
+      for (const worker of workers.filter(item => tasks.some(task => task.id === item.currentTask))) {
+        const agent = worker.agent;
+        const live = agent && !["dead", "offline"].includes(agent.liveness ?? "")
+          && !["Stopped", "Offline"].includes(statusLabel(agent.status))
+          && (agent.liveness !== undefined || ["Active", "Idle", "Paused"].includes(statusLabel(agent.status)));
+        if (!source.stale && live) tab.workers.set(`${source.machine}:${worker.name}`, { name: worker.name, machine: source.machineLabel, state: workerState(worker, tasks) });
+      }
+    }
+  }
+  return [...tabs].map(([key, tab]) => ({ key, epic: tab.epic, machines: [...tab.machines], workers: [...tab.workers.values()], rows: [...tab.rows.values()], stale: tab.stale,
+    inFlight: [...tab.rows.values()].filter(({ task }) => task.delivery_state !== "merged" && ["In progress", "Awaiting merge", "Awaiting verification"].includes(statusLabel(task.status))).length,
+  })).sort((a, b) => b.inFlight - a.inFlight || b.workers.length - a.workers.length || a.key.localeCompare(b.key));
+}
+
+/** A manual choice survives changing activity, but cannot pin an epic after it closes. */
+export function selectedEpicTab(tabs: readonly EpicTab[], choice?: string): string | undefined {
+  return tabs.find(tab => tab.key === choice)?.key ?? tabs[0]?.key;
+}

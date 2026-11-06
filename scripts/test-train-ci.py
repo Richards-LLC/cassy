@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import yaml
 
 SCRIPT = Path(__file__).with_name('train-ci.py').resolve()
 GH = '''#!/usr/bin/env python3
@@ -24,6 +25,7 @@ elif args[:2]==['run','download']:
 elif args[0]=='api':
  endpoint=next(a.lstrip('/') for a in args if a.lstrip('/').startswith('repos/'))
  if '/actions/artifacts?' in endpoint: print(json.dumps({'artifacts':data.get('job_artifacts',[])}))
+ elif endpoint.endswith('/artifacts'): print(json.dumps({'artifacts':data.get('job_outputs',[])}))
  elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
  elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
@@ -95,14 +97,40 @@ class TrainReceipts(unittest.TestCase):
 
 
     def test_same_tree_requeue_reuses_only_successful_job_receipts(self):
+        # Execute the actual composite's shell, not a parallel CLI wiring.
+        action=yaml.safe_load((SCRIPT.parent.parent/'.github/actions/full-gate-job/action.yml').read_text())
+        body=action['runs']['steps'][0]['run']
+        (self.repo/'scripts').mkdir()
+        shutil.copyfile(SCRIPT,self.repo/'scripts/train-ci.py')
+        self.git('add','scripts')
+        self.git('commit','-qm','receipt command')
+        self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
         inputs='{"selection":"all","matrix":1}'
         downloads={}; artifacts=[]; jobs=[]
         producer=self.env['GITHUB_SHA']
+        def composite(phase,slot,status='success',selection=inputs,requires=''):
+            output=self.root/'github-output'
+            output.write_text('')
+            result=subprocess.run(['bash','-e','-o','pipefail','-c',body],cwd=self.repo,
+                env={**self.env,'PHASE':phase,'JOB':slot,'JOB_NAME':slot,'BINDING':selection,
+                    'STATUS':status,'REQUIRES_ARTIFACT':requires,'GITHUB_OUTPUT':str(output),
+                    'GITHUB_WORKSPACE':str(self.repo),'GH_BIN':str(self.gh)},capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            return dict(line.split('=',1) for line in output.read_text().splitlines())
         for slot,status in [('scripts','success'),('rust','failure')]:
-            out=self.root/slot
-            saved=self.run_cli('job-save','--repo',self.repo,'--job',slot,'--job-name',slot,
-                '--inputs',inputs,'--status',status,'--out',out)
+            recovery=self.repo/'target/queue-flakes/step/receipt.json'
+            recovery.parent.mkdir(parents=True,exist_ok=True)
+            recovery.write_text(json.dumps({'schema':1,'run_id':'101','head':producer,
+                'tree':self.git('rev-parse','HEAD^{tree}'),'outcome':'FLAKY','runner':'step',
+                'shard':slot,'flaky':[],'attempts':[]}))
+            reports=self.repo/'target/train-suite/1'
+            reports.mkdir(parents=True,exist_ok=True)
+            (reports/'shard.json').write_text(json.dumps({'schema':1,'run_id':'101','run_attempt':1,
+                'branch':self.env['GITHUB_REF_NAME'],'head':producer,'shard':'1/3','status':0,'tests':1,'failures':[]}))
+            (reports/'native.log').write_text('complete original output')
+            saved=composite('save',slot,status)
             name=saved['artifact']
+            shutil.copytree(self.repo/f'target/full-gate-job-{slot}',self.root/slot)
             downloads[name]=slot
             artifacts.append({'id':len(artifacts)+1,'name':name,'expired':False,
                 'workflow_run':{'id':101,'head_sha':producer}})
@@ -112,12 +140,39 @@ class TrainReceipts(unittest.TestCase):
                 'path':'.github/workflows/full-validation.yml','status':'completed','conclusion':'failure'}}))
         self.git('commit','--allow-empty','-qm','same tree requeue')
         self.env.update(GITHUB_SHA=self.git('rev-parse','HEAD'),GITHUB_RUN_ID='102')
-        def check(slot, selection=inputs):
-            return self.run_cli('job-check','--repo',self.repo,'--job',slot,'--job-name',slot,
-                '--inputs',selection,'--out',self.root/'restore'/slot,'--gh',self.gh)['reused']
+        shutil.rmtree(self.repo/'target')
+        def check(slot, selection=inputs,requires=''):
+            return composite('restore',slot,selection=selection,requires=requires)['reused']=='true'
         self.assertTrue(check('scripts'))
         self.assertFalse(check('rust'))
+        restored=json.loads((self.repo/'target/queue-flakes/reused/0/receipt.json').read_text())
+        self.assertEqual((restored['run_id'],restored['observation_run_id']),('102','101'))
+        self.assertEqual(json.loads((reports/'shard.json').read_text())['head'],self.env['GITHUB_SHA'])
+        self.assertEqual((reports/'native.log').read_text(),'complete original output')
+        self.run_cli('job-save','--repo',self.repo,'--job','scripts','--job-name','scripts',
+            '--inputs',inputs,'--status','success','--out',self.repo/'target/full-gate-job-scripts')
+        exported=self.run_cli('job-export','--repo',self.repo,'--evidence',self.repo/'target/full-gate-job-scripts',
+            '--out',self.root/'exported')
+        self.assertEqual(exported['observations'],1)
         self.assertFalse(check('scripts','{"selection":"changed"}'))
+        self.assertFalse(check('scripts',requires='expired-suite-archive'))
+        forge=self.root/'forge.json'
+        provider=json.loads(forge.read_text())
+        provider['job_outputs']=[{'name':'suite-archive','expired':False}]
+        forge.write_text(json.dumps(provider))
+        self.assertTrue(check('scripts',requires='suite-archive'))
+        provider['job_outputs'][0]['expired']=True
+        forge.write_text(json.dumps(provider))
+        self.assertFalse(check('scripts',requires='suite-archive'))
+        provider['job_jobs'][0]['conclusion']='failure'
+        forge.write_text(json.dumps(provider))
+        self.assertFalse(check('scripts'))
+        provider['job_jobs'][0]['conclusion']='success'
+        provider['job_run']['path']='.github/workflows/untrusted.yml'
+        forge.write_text(json.dumps(provider))
+        self.assertFalse(check('scripts'))
+        provider['job_run']['path']='.github/workflows/full-validation.yml'
+        forge.write_text(json.dumps(provider))
         self.commit('different tree')
         self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
         self.assertFalse(check('scripts'))

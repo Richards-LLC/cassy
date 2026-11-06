@@ -180,6 +180,11 @@ def job_save(args):
         'recovery':recovery,'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
     if reused.get('reused_from'):
         result['reused_from']=reused['reused_from']
+    # Keep the native train reports with their job, so a cache hit can feed
+    # the existing full-suite collector without inventing a second approval.
+    reports=args.repo/'target/train-suite'
+    if reports.is_dir():
+        shutil.copytree(reports,args.out/'train-suite',dirs_exist_ok=True)
     write(previous,result)
     return result
 
@@ -207,6 +212,8 @@ def job_check(args):
             with tempfile.TemporaryDirectory() as temporary:
                 command([args.gh,'run','download',run_id,'--name',expected['artifact'],'--dir',temporary],args.repo)
                 record=json.loads((Path(temporary)/'receipt.json').read_text())
+                reports={str(path.relative_to(Path(temporary)/'train-suite')):path.read_bytes()
+                    for path in (Path(temporary)/'train-suite').rglob('*') if path.is_file()}
             if any(record.get(key)!=value for key,value in expected.items()) or record.get('outcome')!='PASS':
                 continue
             if record.get('run_id')!=run_id or record.get('head')!=run.get('head_sha'):
@@ -222,6 +229,18 @@ def job_check(args):
                     continue
             if any(item.get('tree')!=expected['tree'] or item.get('outcome') not in ('PASS','FLAKY') for item in record.get('recovery',[])):
                 continue
+            native=[json.loads(body) for name,body in reports.items() if name.endswith('shard.json')]
+            if any(row.get('head')!=record['head'] or row.get('run_id')!=run_id or
+                   row.get('status')!=0 or not row.get('tests') or row.get('failures') for row in native):
+                continue
+            for name,body in reports.items():
+                target=args.repo/'target/train-suite'/name
+                target.parent.mkdir(parents=True,exist_ok=True)
+                if name.endswith('shard.json'):
+                    row=json.loads(body)
+                    write(target,{**row,**identity(),'reused_from':run_id})
+                else:
+                    target.write_bytes(body)
             # Rebind transport identity only. Keep the observation's original
             # run so a cached flake never counts as a new independent failure.
             for index,recovery in enumerate(record.get('recovery',[])):
@@ -249,6 +268,8 @@ def job_export(args):
         if record.get('run_id')!=os.environ['GITHUB_RUN_ID'] or record.get('tree')!=tree:
             raise ValueError('job receipt does not belong to the evaluated run/tree')
         for recovery in record.get('recovery',[]):
+            if recovery.get('tree')!=tree or recovery.get('run_id')!=os.environ['GITHUB_RUN_ID'] or recovery.get('head')!=os.environ['GITHUB_SHA']:
+                raise ValueError('recovery observation does not belong to the evaluated run/tree')
             write(args.out/str(count)/'receipt.json',recovery)
             count+=1
     return {'observations':count}

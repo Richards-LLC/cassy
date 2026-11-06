@@ -182,15 +182,17 @@ class QueueRecovery(unittest.TestCase):
         script.write_text("""import os,pathlib,sys
 p=pathlib.Path('step-count'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
 case=os.environ['STEP_CASE']
-if case in ('cleanup','mixed-summary'):
- print('19 passed, 0 failed' if case=='cleanup' else 'Tests 1 passed | 1 failed',flush=True)
+if case in ('cleanup','native-cleanup','mixed-summary','late-assertion'):
+ print({'cleanup':'19 passed, 0 failed','native-cleanup':'\\x1b[32mSummary [0.01s] 19 tests run: 19 passed\\x1b[0m',
+        'mixed-summary':'Tests 1 passed | 1 failed','late-assertion':'19 passed, 0 failed'}[case],flush=True)
+ if case=='late-assertion': print('AssertionError: parent harness failed',flush=True)
  print('rm: cannot remove fixture: Directory not empty',file=sys.stderr)
  sys.exit(1)
 failed=n==1 or case=='persistent'
 print('0 passed, 1 failed' if failed else '1 passed, 0 failed',flush=True)
 sys.exit(int(failed))
 """)
-        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL')]:
+        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('native-cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL'),('late-assertion',1,2,'FAIL')]:
             with self.subTest(case=case):
                 shutil.rmtree(self.repo/'receipts',ignore_errors=True)
                 (self.repo/'step-count').unlink(missing_ok=True)
@@ -207,7 +209,7 @@ sys.exit(int(failed))
                     self.assertEqual(published.returncode,0,published.stdout+published.stderr)
                     self.assertEqual(len(self.issues),1)
                     self.assertIn('flaky-quarantine',[label['name'] for label in self.issues[0]['labels']])
-                elif case=='cleanup':
+                elif case in ('cleanup','native-cleanup'):
                     self.assertIn('warning',result.stdout.lower())
 
     def test_non_queue_events_never_rerun(self):

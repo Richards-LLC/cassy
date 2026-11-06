@@ -217,8 +217,10 @@ def cleanup_after_pass(log):
     A nested child summary or an assertion after a summary cannot forgive the
     parent failure. Unknown infrastructure errors retain their failure status.
     """
-    lines = log.read_text(errors='replace').splitlines()
-    summary = re.compile(r'^(?:\s*[1-9]\d* passed,\s*0 failed|\s*Tests\s+[1-9]\d* passed(?:\s+\(\d+\))?|OK)\s*$')
+    lines = re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace')).splitlines()
+    summary = re.compile(r'^(?:\s*[1-9]\d* passed,\s*0 failed|\s*Tests\s+[1-9]\d* passed(?:\s+\(\d+\))?|'
+        r'\s*Summary\s+\[[^\]]+\]\s+[1-9]\d* tests? run:\s+[1-9]\d* passed(?:, 0 failed)?(?:, \d+ skipped)?|'
+        r'test result: ok\. [1-9]\d* passed; 0 failed;[^\n]*|OK)\s*$')
     cleanup = re.compile(r'^(?:rm:|rmdir:|cleanup(?: error| warning| failed)?:)', re.I)
     for index in range(len(lines)-1, -1, -1):
         if summary.fullmatch(lines[index]):
@@ -407,8 +409,9 @@ def reconcile(args):
             labels.update(['flaky','priority:p1'])
             if test['runner']=='step' or len(set(state['runs']))>=2: labels.add('flaky-quarantine')
             runs = '\n'.join(f'- https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{r}' for r in state['runs'])
-            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'
-                    'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n'
+            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'+
+                    ('The step remains covered on later trees; its quarantine issue tracks the recovered failure.\n\n' if test['runner']=='step' else
+                     'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n')+
                     f'Test id: `{key}`\n\nIndependent runs:\n{runs}\n\n'
                     f'Evaluated commit: {receipt["head"]}\n\nLatest initial failure:\n'
                     '```text\n'+test['output'][:16000].replace('```','` ` `').replace('<!--','&lt;!--')+'\n```\n\n'
@@ -426,7 +429,7 @@ def reconcile(args):
                     issue = found[0]
                 issues.append(issue)
             saved = issue_state(issue)
-            if run_id not in saved['runs'] or (len(set(state['runs']))>=2 and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
+            if run_id not in saved['runs'] or ((test['runner']=='step' or len(set(state['runs']))>=2) and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
                 raise ValueError('GitHub did not persist the flake observation/quarantine')
             published.append({'test':key,'issue':issue['html_url'],'runs':saved['runs'],
                               'quarantined':'flaky-quarantine' in [l['name'] for l in issue['labels']]})

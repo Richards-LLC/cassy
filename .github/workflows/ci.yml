@@ -817,6 +817,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-preflight
+          job-name: Fast Validation — preflight (no test suite)
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
@@ -839,42 +852,42 @@ jobs:
           ./scripts/check-cassy-actions-runner-isolation.sh
 
       - name: Test portable installer fixtures
-        if: needs.ci-diff.outputs.rust-unaffected == 'true'
-        run: ./scripts/test-cas-install.sh
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (needs.ci-diff.outputs.rust-unaffected == 'true') }}"
+        run: python3 scripts/ci-queue-flakes.py step --id portable-installer -- ./scripts/test-cas-install.sh
 
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected == 'true') }}"
         env:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "Rust work skipped for $DIFF_CLASS diff."
 
       - if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted' }}
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
 
       - name: Set up shared self-hosted Rust toolchain
         if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Verify private self-hosted sccache
         if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -885,34 +898,34 @@ jobs:
       # check when reusing a full-gate receipt instead of building that archive.
       - name: Check
         if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true' }}
+          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true') }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo check -p cas
+        run: python3 scripts/ci-queue-flakes.py step --id rust-check -- cargo check -p cas
 
       - name: Test portable x86_64 ISA audit
         if: >-
-          ${{ needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
-          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
-        run: ./scripts/test-check-portable-x86_64-isa.sh
+          ${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true') }}
+        run: python3 scripts/ci-queue-flakes.py step --id portable-isa -- ./scripts/test-check-portable-x86_64-isa.sh
 
       - name: Build (without MCP proxy)
         if: >-
-          ${{ !cancelled()
-          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true') }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --no-default-features
+        run: python3 scripts/ci-queue-flakes.py step --id rust-no-proxy-build -- cargo build -p cas --no-default-features
 
       # Reuse the binary this lane just built. Script-only PR checks never
       # compile Rust or download a previous release to claim current coverage.
       - name: Test factory terminal restoration with the source-built CLI
         if: >-
-          ${{ !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && success() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' }}
+          && success() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true') }}
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
           FULL_SET: ${{ inputs.full-set }}
@@ -925,7 +938,7 @@ jobs:
             --only scripts/test-factory-client-terminal.py
 
       - name: Smoke the source-built CLI and compile release assets
-        if: needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' && success()
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' && success()) }}"
         run: |
           "${CARGO_TARGET_DIR:-target}/debug/cas" --version
           npm ci --prefix hub-web --no-audit --no-fund
@@ -933,7 +946,7 @@ jobs:
           git diff --exit-code -- hub-web/dist
 
       - name: Report sccache stats
-        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.
@@ -943,6 +956,20 @@ jobs:
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-preflight
+          job-name: Fast Validation — preflight (no test suite)
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # The release, CI and factory machinery's own tests. They compile no Rust.
   # Visual-QA tool fixtures follow their registered inputs; full assembly
@@ -968,13 +995,28 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-ci-tiers
+          job-name: Fast Validation — CI tiers
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - uses: ./.github/actions/run-script-suite-tests
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
         with:
           full-tier: 'true'
           base-sha: ${{ needs.ci-diff.outputs.comparison-base }}
           full-set: ${{ inputs.full-set }}
 
       - name: Test release publication guards
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
           FULL_SET: ${{ inputs.full-set }}
@@ -990,6 +1032,19 @@ jobs:
           comparison=(--all)
           if [[ "${FULL_SET:-false}" != true && -n "$BASE_SHA" ]]; then comparison+=(--scope-base "$BASE_SHA"); fi
           python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}"
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-ci-tiers
+          job-name: Fast Validation — CI tiers
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
 
   fast-validation-slack-bridge:
     name: Fast Validation — Slack bridge
@@ -1011,12 +1066,40 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-slack-bridge
+          job-name: Fast Validation — Slack bridge
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - name: Build and test the Slack bridge
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
         working-directory: slack-bridge
         run: |
           npm ci
-          npm test
+          python3 ../scripts/ci-queue-flakes.py step --id bridge-units -- npm test
           npm run build
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-slack-bridge
+          job-name: Fast Validation — Slack bridge
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # Commander checks that need no browser fan-out. cas-4cb8: the full gate
   # proved all of them on a full-gate queue tree, so that tree skips this job.
@@ -1043,26 +1126,41 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-web
+          job-name: Fast Validation — Commander web
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - name: Install Commander dependencies
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
         run: npm ci
 
       - name: Typecheck Commander
-        run: npm run typecheck
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
+        run: python3 ../scripts/ci-queue-flakes.py step --id web-typecheck -- npm run typecheck
 
       - name: Test Commander units
-        if: ${{ !cancelled() }}
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()) }}"
         run: |
-          npm test
+          python3 ../scripts/ci-queue-flakes.py step --id npm-units -- npm test
           # cas-4ce5: the journeys' failure upload really matches files in the hidden .results dir.
-          bash ../scripts/test-ci-journey-evidence-upload.sh
+          python3 ../scripts/ci-queue-flakes.py step --id journey-evidence-fixture -- bash ../scripts/test-ci-journey-evidence-upload.sh
 
       - name: Build Commander and check the committed bundle
         id: build
-        if: ${{ !cancelled() }}
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()) }}"
         env:
           CHECK_COMMITTED_DIST: ${{ needs.ci-diff.outputs.web-dist-check-needed }}
         run: |
-          npm run build
+          python3 ../scripts/ci-queue-flakes.py step --id web-build -- npm run build
           # Only source-only lanes defer committed output to release.sh prepare.
           # Missing policy retains equality, including unknown comparison bases.
           if [[ "$CHECK_COMMITTED_DIST" != false ]]; then
@@ -1071,7 +1169,7 @@ jobs:
           fi
 
       - name: Visual QA
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled() && steps.build.outcome == 'success') }}"
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
@@ -1082,7 +1180,21 @@ jobs:
           fi
           # Use the full pinned browser we installed, rather than a system
           # Chrome or Playwright's default headless shell.
-          CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')" npm run visual-qa
+          CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')" python3 ../scripts/ci-queue-flakes.py step --id web-visual-qa -- npm run visual-qa
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-web
+          job-name: Fast Validation — Commander web
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # User journeys (docs/qa/journeys.md) against the committed bundle, on the
   # Chromium build pinned by @playwright/test, in six hosted shards of two
@@ -1120,7 +1232,21 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-journeys-${{ matrix.shard }}
+          job-name: Fast Validation — Commander journeys ${{ matrix.shard }}/6
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - name: Run Commander journeys shard ${{ matrix.shard }}/6
+        if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
         working-directory: hub-web
         env:
           SHARD: ${{ matrix.shard }}
@@ -1139,7 +1265,7 @@ jobs:
       # One artifact serves the queue fan-in and diagnosis. Infrastructure
       # failures can leave native reports without producing receipt.json.
       - name: Upload Commander journey evidence and recovery receipts
-        if: always()
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}"
         uses: actions/upload-artifact@v4
         with:
           name: queue-flakes-playwright-${{ matrix.shard }}
@@ -1150,6 +1276,20 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-journeys-${{ matrix.shard }}
+          job-name: Fast Validation — Commander journeys ${{ matrix.shard }}/6
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
@@ -1180,12 +1320,28 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_STRIP: debuginfo
       CARGO_PROFILE_TEST_STRIP: debuginfo
+    outputs:
+      producer-run: ${{ steps.job-receipt.outputs.producer_run || github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-suite-build
+          job-name: Fast Validation — suite archive build
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          requires-artifact: fast-validation-suite-archive
 
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
@@ -1209,14 +1365,14 @@ jobs:
           ./scripts/check-cassy-actions-runner-isolation.sh
 
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected == 'true') }}"
         env:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "Rust suite archive build skipped for $DIFF_CLASS diff."
 
       - if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite-archive
@@ -1225,24 +1381,24 @@ jobs:
 
       - name: Set up shared self-hosted Rust toolchain
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Install nextest
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         uses: taiki-e/install-action@nextest
 
       - name: Verify private self-hosted sccache
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         # cas-065a: cache isolation stays observable, but its TCP failure must
         # not block the merge queue while the server defect is investigated.
         continue-on-error: true
@@ -1253,8 +1409,8 @@ jobs:
 
       - name: Disable sccache for the self-hosted suite archive
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         # cas-065a: the cache is an optimization, not a merge-queue prerequisite.
         run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
@@ -1273,17 +1429,17 @@ jobs:
       # (debug = 1) still applies. Only archive production and its advisory
       # main cache producer share this profile.
       - name: Build full suite archive
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: &suite-archive-command |
           if [[ -f scripts/cas-test-targets.py ]]; then
             python3 scripts/cas-test-targets.py cas-cli --check
           fi
           mkdir -p target/train-suite-build
           set -o pipefail
-          cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
+          python3 scripts/ci-queue-flakes.py step --id suite-archive -- cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
 
       - name: Preserve complete train suite build log
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}"
         uses: actions/upload-artifact@v4
         with:
           name: train-suite-build
@@ -1294,14 +1450,14 @@ jobs:
       # `cas` resolve it from target/debug/. Package that runner separately:
       # upload-artifact intentionally does not preserve executable mode bits.
       - name: Package CLI runner
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: |
           tar -C "${CARGO_TARGET_DIR:-target}/debug" \
             --transform='s,^cas$,target/debug/cas,' \
             -czf fast-validation-suite-runner.tar.gz cas
 
       - name: Upload full suite archive and CLI runner
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         uses: actions/upload-artifact@v4
         with:
           name: fast-validation-suite-archive
@@ -1314,7 +1470,7 @@ jobs:
       # This lane compiles the whole workspace test graph, so its hit rate is
       # the single best predictor of the required critical path.
       - name: Report sccache stats
-        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.
@@ -1324,6 +1480,20 @@ jobs:
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-suite-build
+          job-name: Fast Validation — suite archive build
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # Cache maintenance is intentionally outside the archive -> shards ->
   # required fan-in graph. A main tree already proven by the queue may prime
@@ -1406,6 +1576,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-suite-shards-${{ matrix.shard }}
+          job-name: Fast Validation — suite shard ${{ matrix.shard }}/3
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
@@ -1413,24 +1596,26 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected == 'true') }}"
         env:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "Rust suite shard skipped for $DIFF_CLASS diff."
 
       - name: Install nextest
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         uses: taiki-e/install-action@nextest
 
       - name: Download full suite archive
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         uses: actions/download-artifact@v4
         with:
           name: fast-validation-suite-archive
+          run-id: ${{ needs.fast-validation-suite-build.outputs.producer-run || github.run_id }}
+          github-token: ${{ github.token }}
           path: .
 
       - name: Restore executable CLI runner
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: |
           tar -xzf fast-validation-suite-runner.tar.gz
           test -x target/debug/cas
@@ -1442,7 +1627,7 @@ jobs:
       # Insta also resolves snapshots at runtime from its producer path, so
       # pin its workspace root to this hosted checkout.
       - name: Test full suite shard ${{ matrix.shard }}/3
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
           SHARD: ${{ matrix.shard }}
@@ -1483,7 +1668,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish full-suite recall evidence
-        if: always()
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}"
         uses: actions/upload-artifact@v4
         with:
           name: ci-test-impact-${{ github.run_id }}-full-${{ matrix.shard }}
@@ -1494,7 +1679,7 @@ jobs:
       # Running the protocol binary again through the real-store guard catches
       # a future test that forgets to replace its inherited CAS_ROOT.
       - name: Prove MCP protocol tests leave the ambient store untouched
-        if: steps.classify-diff.outputs.rust-unaffected != 'true' && matrix.shard == 1
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true' && matrix.shard == 1) }}"
         run: |
           set -euo pipefail
           guard_dir="$(mktemp -d)"
@@ -1504,10 +1689,10 @@ jobs:
           export CAS_ROOT="$guard_dir/.cas"
           export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
           export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
-          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
+          python3 scripts/ci-queue-flakes.py step --id real-store-guard -- make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
 
       - name: Publish queue rust recovery receipts
-        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))) }}"
         uses: actions/upload-artifact@v4
         with:
           name: queue-flakes-rust-${{ matrix.shard }}
@@ -1516,14 +1701,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-suite-shards-${{ matrix.shard }}
+          job-name: Fast Validation — suite shard ${{ matrix.shard }}/3
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
+
   # Writable credentials live only in the hosted fan-in, never in test processes.
   queue-flake-publication:
     name: Queue flake publication
     if: >-
       always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
-      && (needs.fast-validation-suite-shards.result != 'skipped'
-      || needs.fast-validation-journeys.result != 'skipped')
-    needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-suite-shards, fast-validation-journeys]
+      && needs.ci-diff.outputs.class != 'docs-only'
+    needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-preflight, fast-validation-ci-tiers, fast-validation-slack-bridge, fast-validation-web, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-docs, fast-validation-journeys]
     runs-on: ubuntu-latest
     permissions:
       contents: write # Atomic publication lock ref; no evaluated-tree edits.
@@ -1536,8 +1734,10 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          pattern: queue-flakes-*
-          path: target/queue-flake-receipts
+          pattern: full-gate-job-*
+          path: target/full-gate-jobs
+      - name: Export job recovery observations
+        run: python3 scripts/train-ci.py job-export --evidence target/full-gate-jobs --out target/queue-flake-receipts
       - name: Persist every recovered failure before allowing a green queue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1553,8 +1753,8 @@ jobs:
           if [[ "$WEB_NEEDED" == true && ( "$RUN_SUITE" == true || "$JOURNEYS_REUSE" != true ) ]]; then
             for shard in 1 2 3 4 5 6; do expected+=(--expect "playwright:$shard/6"); done
           fi
-          # All Rust shards can legitimately skip without producing receipts.
-          if (( ${#expected[@]} == 0 )); then exit 0; fi
+          # Script-only jobs can publish recovered failures without native shards.
+          if (( ${#expected[@]} == 0 )) && [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
           python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
             --receipts target/queue-flake-receipts "${expected[@]}"
       - uses: actions/upload-artifact@v4
@@ -1644,6 +1844,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-docs
+          job-name: Fast Validation — doctests
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
@@ -1666,34 +1879,34 @@ jobs:
           ./scripts/check-cassy-actions-runner-isolation.sh
 
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected == 'true') }}"
         env:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "Doctests skipped for $DIFF_CLASS diff."
 
       - if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-docs
 
       - name: Set up shared self-hosted Rust toolchain
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Verify private self-hosted sccache
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -1703,13 +1916,13 @@ jobs:
       # nextest does not run doctests; keep this separate so it never waits
       # behind the partitioned suite.
       - name: Test doctests
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: scripts/run-verified-tests.sh test -p cas --doc
+        run: python3 scripts/ci-queue-flakes.py step --id doctests -- scripts/run-verified-tests.sh test -p cas --doc
 
       - name: Report sccache stats
-        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.
@@ -1719,6 +1932,20 @@ jobs:
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-docs
+          job-name: Fast Validation — doctests
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
+
 
   # The repository ruleset requires this exact check name. On merge_group it
   # reports success only after preflight, all exhaustive nextest shards, and
@@ -1898,6 +2125,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        with:
+          pattern: full-gate-job-*
+          path: target/full-gate/jobs
       - name: Record full-set receipt and wall clock
         if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
         env:

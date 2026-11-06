@@ -178,7 +178,7 @@
 - **CI:** `.github/workflows/ci.yml`, `.github/actions/run-script-suite-tests/`, `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` and script regression tests.
 - **Release reuse:** `scripts/release-cache-key.py`, `scripts/find-release-prebuild.sh`, `.github/workflows/release-prebuild.yml`, `.github/workflows/release.yml` - dependency keys, queue archives, advisory main-cache priming and publication.
 - **Host tooling:** `scripts/install-on-publish.sh`, `scripts/qa-rig/commander-two-machine/`, `ops/systemd/` and `docs/ci/`.
-- **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
+- **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`, `scripts/check-test-shape.py` and `scripts/test-check-test-shape.py` (Rust source/text-pin checks distinguish Git inputs and expect diagnostics from returned-text expectations).
 - `scripts/check-scoped-test-surface.sh` - committed-path proof discovery with bounded Git pattern batches.
 - `docs/release-reports/` - versioned Markdown, brief, standalone HTML, PDF, visual QA and publication receipts, including restored v3.99.1 evidence.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/` and `hub-web/DESIGN.md`.

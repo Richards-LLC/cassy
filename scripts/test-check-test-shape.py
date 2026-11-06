@@ -78,6 +78,16 @@ def test_workflow_command():
         )
         self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
 
+    def test_git_inputs_and_expect_diagnostics_cas_26f3(self):
+        for rejected, code in [
+            (False, '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
+            (False, '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),
+            (True, '#[test] fn t() { assert_eq!(git(&["show", &format!("refs/heads/{source}")]), "When a test fails, name the responsible boundary and preserve its first result."); }'),
+            (True, '#[test] fn t() { assert!(source.contains("uses: actions/checkout@v4")); }'),
+        ]:
+            with self.subTest(code=code):
+                self.assertEqual(bool(self.hits(code, 'tests/probe.rs')), rejected)
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',

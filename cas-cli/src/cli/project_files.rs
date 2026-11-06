@@ -79,7 +79,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
-    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
+    let Some(_) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
@@ -88,22 +88,16 @@ fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
         // Detached or unreadable HEAD is not permission to create history.
         return Ok(false);
     };
-    if matches!(branch.as_str(), "main" | "master" | "staging" | "develop" | "trunk")
-        || branch.starts_with("epic/")
-        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
-    {
-        return Ok(false);
+    // Sync owns managed commits on named branches, including main and train
+    // branches. Never complete someone else's merge/rebase/sequencer operation.
+    crate::config::Config::load(cas_root)?;
+    for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"] {
+        let path = git(root, &["rev-parse", "--path-format=absolute", "--git-path", state])?;
+        if Path::new(text(&path)?.trim()).exists() {
+            return Ok(false);
+        }
     }
-    let config = crate::config::Config::load(cas_root)?;
-    let configured_base = config.factory().epic_base_branch;
-    Ok(!configured_base.as_deref().is_some_and(|base| {
-        let normalized = base
-            .strip_prefix("refs/heads/")
-            .or_else(|| base.strip_prefix("refs/remotes/origin/"))
-            .or_else(|| base.strip_prefix("origin/"))
-            .unwrap_or(base);
-        base == branch || normalized == branch
-    }))
+    Ok(true)
 }
 
 // Read the effective rules (including nested/global ignores) without touching
@@ -353,7 +347,6 @@ pub(crate) struct Reconcile {
     root: PathBuf,
     index: BTreeMap<String, (String, Vec<u8>)>,
     before: BTreeMap<String, Option<Vec<u8>>>,
-    staged_before: bool,
     index_signature: Vec<u8>,
     pub report: Report,
 }
@@ -569,12 +562,10 @@ impl Reconcile {
         }
         conflicts.sort();
         conflicts.dedup();
-        let staged_before = !git(root, &["diff", "--cached", "--name-only", "-z"])?.is_empty();
         Ok(Some(Self {
             root: root.into(),
             index,
             before,
-            staged_before,
             index_signature,
             report: Report {
                 outcome: if conflicts.is_empty() {
@@ -619,12 +610,10 @@ impl Reconcile {
             std::fs::write(receipt, body)?;
         }
         let paths = ignored_paths(root, harnesses);
-        let mut changed = BTreeSet::new();
         for (path, (_, bytes)) in &self.index {
             if self.allows(".gitignore") && self.allows(path) && (ignored(path, &paths) || (!root.join(path).exists() && cassy_body(path, bytes))) {
                 git(root, &["update-index", "--force-remove", "--", path])?;
                 self.report.untracked += 1;
-                changed.insert(path.clone());
             }
         }
         // Render configuration from the INDEX's project content, never from
@@ -664,7 +653,6 @@ impl Reconcile {
             };
             if desired != indexed {
                 self.stage(path, &desired)?;
-                changed.insert((*path).to_string());
             }
         }
         for path in [".env.worktree.template", "scripts/worktree-boot.sh"] {
@@ -679,7 +667,6 @@ impl Reconcile {
                     };
                     if bytes == expected.as_bytes() {
                         self.stage(path, &bytes)?;
-                        changed.insert(path.into());
                     }
                 }
             }
@@ -689,22 +676,23 @@ impl Reconcile {
             .filter(|b| !b.is_empty())
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
-        self.report.staged = changed.len();
-        self.report.outcome = if changed.is_empty() {
-            if self.staged_before && drift(root, harnesses)? > 0 {
-                "staged"
-            } else {
-                "current"
-            }
-        } else if self.staged_before || !self.report.conflicts.is_empty()
-            || pending.iter().any(|p| !changed.contains(p))
+        self.report.staged = pending.len();
+        self.report.outcome = if pending.is_empty() {
+            "current"
+        } else if !self.report.conflicts.is_empty()
             || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
                 self.report.commit_warning = Some(
                     "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
                 );
                 false
             })
+            || !staged_sync_only(root).unwrap_or(false)
         {
+            if self.report.commit_warning.is_none() {
+                self.report.commit_warning = Some(
+                    "Changes remain staged; review git diff --cached before committing.".into(),
+                );
+            }
             "staged"
         } else {
             // No repository configuration is changed. Normal Git hooks still
@@ -718,7 +706,7 @@ impl Reconcile {
                     "user.email=cassy@localhost",
                     "commit",
                     "-m",
-                    crate::worktree::git::MANAGED_RECONCILE_SUBJECT,
+                    crate::worktree::git::MANAGED_SYNC_SUBJECT,
                 ],
             ) {
                 Ok(_) => {
@@ -780,6 +768,52 @@ impl Reconcile {
         )?;
         Ok(())
     }
+}
+
+/// True only when every staged blob/mode can be produced from HEAD by sync.
+/// In particular, a managed path may also contain staged project content.
+/// Read-only: callers use this both for commit admission and merge recovery.
+pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
+    let harnesses = harnesses(root);
+    let Some(plan) = Reconcile::begin(root, &harnesses)? else { return Ok(false); };
+    if !plan.report.conflicts.is_empty() { return Ok(false); }
+    let pending = git(root, &["diff", "--cached", "--name-only", "-z"])?;
+    if pending.is_empty() { return Ok(false); }
+    let committed: BTreeMap<_, _> = TRACKED.iter().filter_map(|path| {
+        git(root, &["show", &format!("HEAD:{path}")]).ok().map(|bytes| ((*path).to_string(), bytes))
+    }).collect();
+    let projected = configuration_projection_excluding(root, &committed, &[])?;
+    let ignored_paths = ignored_paths(root, &harnesses);
+    for path in pending.split(|b| *b == 0).filter(|path| !path.is_empty()) {
+        let path = text(path)?;
+        let head = git(root, &["ls-tree", "HEAD", "--", path])?;
+        let head_mode = text(&head)?.split_whitespace().next();
+        let Some((mode, indexed)) = plan.index.get(path) else {
+            // Sync untracks generated files, retaining their working copies.
+            let retired = !root.join(path).exists()
+                && git(root, &["show", &format!("HEAD:{path}")]).is_ok_and(|bytes| cassy_body(path, &bytes));
+            if (ignored(path, &ignored_paths) || retired)
+                && matches!(head_mode, Some("100644" | "100755")) { continue; }
+            return Ok(false);
+        };
+        let expected_mode = head_mode.unwrap_or(if path.ends_with(".sh") { "100755" } else { "100644" });
+        if mode != expected_mode || !matches!(mode.as_str(), "100644" | "100755") { return Ok(false); }
+        let expected = if matches!(path, ".env.worktree.template" | "scripts/worktree-boot.sh") && head.is_empty() {
+            if path.ends_with(".sh") { crate::cli::factory_tooling::BOOT_SCRIPT.as_bytes().to_vec() }
+            else { crate::cli::factory_tooling::ENV_TEMPLATE.as_bytes().to_vec() }
+        } else if !TRACKED.contains(&path) {
+            return Ok(false);
+        } else if matches!(path, ".gitignore" | "CLAUDE.md" | "AGENTS.md") {
+            let (a, b) = if path == ".gitignore" { (IGNORE_BEGIN, IGNORE_END) } else { (BEGIN, END) };
+            let Some(owned) = block(text(indexed)?, a, b)? else { return Ok(false); };
+            let baseline = committed.get(path).map(Vec::as_slice).unwrap_or_default();
+            replace_block(text(baseline)?, owned, a, b)?.into_bytes()
+        } else {
+            std::fs::read(projected.path().join(path))?
+        };
+        if *indexed != expected { return Ok(false); }
+    }
+    Ok(true)
 }
 
 fn configuration_projection_excluding(

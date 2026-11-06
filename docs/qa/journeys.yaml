@@ -376,6 +376,10 @@ invariants:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
+  HUB-J5-QUIET-MERGE-HEADS-UP:
+    statement: Automatic about-to-merge notices stay in the peer inbox as receipts without waking the idle supervisor.
+    check: 'Run cloud::peer_merge::tests::cas_a131_note_is_sent_once_per_tip_and_not_on_retry through mailbox rendering and envelope parsing; require kind=receipt and wakes_idle=false while preserving once-per-tip delivery and the informational body.'
+    bug: {task: cas-4e00}
   HUB-J5-SEND-WITHOUT-PANE-LEASE:
     statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
     check: 'Run hub::server::upstream_unavailable_tests and the HUB-J5 message-only/Send again journey parts;

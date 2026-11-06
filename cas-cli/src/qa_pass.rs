@@ -1430,7 +1430,7 @@ pub fn follow_up_task(
     task.description = follow_up_description(delivery, pass, issue, ledger_path);
     task.notes = crate::mcp::tools::core::task::lifecycle::review_loop::origin_note(
         &format!("qa:{}", delivery.id),
-        &issue.repro,
+        issue.triage.repro.as_deref().unwrap_or(&issue.repro),
         &issue.affected,
     );
     task.priority = cas_types::Priority(4);

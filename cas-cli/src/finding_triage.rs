@@ -40,17 +40,20 @@ pub(crate) fn finding_labels(labels: &mut Vec<String>, triage: &FindingTriage) {
 
 /// Unclassified legacy findings are theoretical too. Ordinary untriaged work
 /// retains its existing priority. A caller's manual priority never wins over axes.
-pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>) -> Option<Priority> {
+pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &str) -> Option<Priority> {
     if !labels.iter().any(|l| l == "from-finding" || l.starts_with("severity:") || l.starts_with("reach:")) {
         return None;
     }
-    let reproduced = labels.iter().any(|l| l == "runtime-repro");
+    let repro = notes.lines().filter_map(|line| line.split_once("Repro:").map(|(_, text)| text.trim()))
+        .find(|text| !text.is_empty()).map(str::to_owned);
+    labels.retain(|label| label != "runtime-repro");
+    let reproduced = repro.is_some();
     let mut triage = FindingTriage {
         severity: label_value(labels, "severity:").and_then(|s| serde_json::from_value(serde_json::json!(s)).ok()).unwrap_or(FindingSeverity::Broken),
         reach: label_value(labels, "reach:").and_then(|s| serde_json::from_value(serde_json::json!(s)).ok())
             .unwrap_or(if reproduced { FindingReach::Secondary } else { FindingReach::Theoretical }),
         journey: label_value(labels, "journey:"),
-        repro: reproduced.then(|| "Runtime reproduction recorded with the finding".into()),
+        repro,
     };
     let main = normalize_finding(root, &mut triage);
     let priority = triage.priority(main);
@@ -61,7 +64,7 @@ pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>) -> Option<
 }
 
 pub(crate) fn apply(root: &Path, task: &mut Task) {
-    if let Some(priority) = normalize_labels(root, &mut task.labels) { task.priority = priority; }
+    if let Some(priority) = normalize_labels(root, &mut task.labels, &task.notes) { task.priority = priority; }
 }
 
 pub(crate) fn focus_brief(root: &Path) -> String {

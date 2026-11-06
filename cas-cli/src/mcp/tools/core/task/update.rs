@@ -1571,7 +1571,8 @@ impl CasCore {
             triaged_labels.extend(labels.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
         }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
-            crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels)
+            crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
+                &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
         } else { None };
         let requested_priority = derived_priority.or_else(|| req.priority.map(|priority| Priority(priority.min(4) as i32)));
         let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);

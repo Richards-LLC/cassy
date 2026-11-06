@@ -782,7 +782,8 @@ async fn gabber_findings_derive_priority_and_ready_order() {
         let result = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "create", "title": title, "risk": "none", "task_type": "bug",
             "priority": 0, "finding_origin": "verification:ver-7e87d441000d",
-            "labels": format!("severity:{severity},reach:{reach},journey:{journey}"),
+            "labels": format!("severity:{severity},reach:{reach},journey:{journey}{}",
+                if title == "Unreachable resumed pending voice" { ",runtime-repro" } else { "" }),
             "repro": repro.then_some("Run the journey; observe the broken output"),
             "affected": "the person using save or chat",
         })).unwrap())).await.expect("findings remain recordable even without a runtime repro");

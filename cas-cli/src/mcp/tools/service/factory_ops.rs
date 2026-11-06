@@ -14332,6 +14332,7 @@ mod spawn_lifecycle_tests {
         theoretical.labels = vec!["from-finding".into(), "reach:theoretical".into(), "severity:broken".into()];
         task_store.update(&theoretical).unwrap();
         let mut main = Task::new("cas-visible".into(), "Save fails for everyone".into());
+        main.notes = "Repro: Save fails for the person using the main journey".into();
         main.labels = vec!["reach:main".into(), "severity:broken".into(), "journey:save".into(), "runtime-repro".into()];
         task_store.add(&main).unwrap();
         #[cfg(feature = "mcp-proxy")]

@@ -46,7 +46,9 @@ pub(super) fn linux_evidence_many(
                 opaque = Some(pid);
             }
             Ok(Evidence::Idle) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&process) => {}
+            // A PID can exit after stat is opened: Linux then returns ESRCH,
+            // not NotFound. Its vanished directory proves it cannot use output.
+            Err(_) if vanished(&process) => {}
             Err(_) => unavailable = true,
         }
     }

@@ -44,6 +44,7 @@ impl Config {
                 "slack.violet_bot_user_ids".to_string(),
                 self.get("slack.violet_bot_user_ids").unwrap(),
             ),
+            ("rules.draft_ttl_days".into(), self.rules().draft_ttl_days.to_string()),
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
             ("sync.target".to_string(), self.sync.target.clone()),
@@ -861,6 +862,9 @@ impl Config {
             ),
         ]
     }
+
+    /// Draft rule lifecycle defaults.
+    pub fn rules(&self) -> RulesConfig { self.rules.unwrap_or_default() }
 
     /// Get skill validation sandbox policy with defaults.
     pub fn skill_validation(&self) -> SkillValidationConfig {

@@ -1069,3 +1069,74 @@ export fn ghostty_simd_decode_utf8_until_control_seq(
     output_count.* = out_i;
     return i;
 }
+
+// A snapshot cannot reconstruct a half-decoded code point or control string.
+// Refuse that cut and resume the old reader rather than dropping prefix bytes.
+export fn ghostty_vt_terminal_handoff_ready(terminal_ptr: ?*anyopaque) callconv(.c) bool {
+    if (terminal_ptr == null) return false;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return handle.stream.parser.state == .ground and handle.stream.utf8decoder.state == 0;
+}
+
+// Emit both screens, including hidden primary scrollback, using Ghostty's own
+// VT formatter so graphemes, wide cells, hyperlinks and styles survive exec.
+export fn ghostty_vt_terminal_handoff(terminal_ptr: ?*anyopaque) callconv(.c) ghostty_vt_bytes_t {
+    if (!ghostty_vt_terminal_handoff_ready(terminal_ptr)) return .{ .ptr = null, .len = 0 };
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    const alloc = std.heap.c_allocator;
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+    var settings: terminal.formatter.TerminalFormatter = .init(&handle.terminal, .vt);
+    settings.content = .none;
+    settings.extra = .all;
+    settings.extra.screen = .none;
+    settings.format(&builder.writer) catch return .{ .ptr = null, .len = 0 };
+    // Restore content with an unrestricted scrolling region and margins.
+    builder.writer.writeAll("\x1b[r\x1b[?69l\x1b[?6l\x1b[?47l\x1b[H") catch return .{ .ptr = null, .len = 0 };
+    formatHandoffScreen(handle.terminal.screens.get(.primary).?, &builder.writer) catch return .{ .ptr = null, .len = 0 };
+    if (handle.terminal.screens.get(.alternate)) |screen| {
+        // Preserve the original alternate-screen mode, rather than leaving
+        // legacy mode 47 enabled for an application that only requested 1049.
+        const enter: []const u8 = if (handle.terminal.screens.active_key == .alternate and
+            !handle.terminal.modes.get(.alt_screen_legacy)) enter: {
+            if (handle.terminal.modes.get(.alt_screen_save_cursor_clear_enter)) break :enter "\x1b[?1049l\x1b[?1049h\x1b[H";
+            if (handle.terminal.modes.get(.alt_screen)) break :enter "\x1b[?1047l\x1b[?1047h\x1b[H";
+            break :enter "\x1b[?47h\x1b[H";
+        } else "\x1b[?47h\x1b[H";
+        builder.writer.writeAll(enter) catch return .{ .ptr = null, .len = 0 };
+        formatHandoffScreen(screen, &builder.writer) catch return .{ .ptr = null, .len = 0 };
+    }
+    if (handle.terminal.screens.active_key == .primary) {
+        builder.writer.writeAll("\x1b[?47l") catch return .{ .ptr = null, .len = 0 };
+    }
+    settings.extra.palette = false;
+    settings.extra.modes = false;
+    settings.extra.screen = .all;
+    settings.format(&builder.writer) catch return .{ .ptr = null, .len = 0 };
+    const slice = builder.toOwnedSlice() catch return .{ .ptr = null, .len = 0 };
+    return .{ .ptr = slice.ptr, .len = slice.len };
+}
+
+fn formatHandoffScreen(screen: *const terminal.Screen, writer: *std.Io.Writer) !void {
+    var formatter: terminal.formatter.ScreenFormatter = .init(screen, .{ .emit = .vt, .unwrap = true, .trim = false });
+    try formatter.format(writer);
+    // The formatter deliberately trims trailing blank rows. Reinsert them so
+    // empty history and the live screen's absolute row positions stay intact.
+    var trailing: usize = 0;
+    var total: usize = 0;
+    var node_opt = screen.pages.pages.first;
+    while (node_opt) |node| {
+        for (0..node.data.size.rows) |y| {
+            total += 1;
+            if (terminal.page.Cell.hasTextAny(node.data.getCells(node.data.getRow(y)))) {
+                trailing = 0;
+            } else trailing += 1;
+        }
+        node_opt = node.next;
+    }
+    const missing = if (total == trailing and trailing > 0) trailing - 1 else trailing;
+    for (0..missing) |_| try writer.writeAll("\r\n");
+    formatter.content = .none;
+    formatter.extra = .all;
+    try formatter.format(writer);
+}

@@ -523,6 +523,14 @@ const server = createServer(async (req, res) => {
           await stop(daemon);
           return { daemonPid: daemon.pid };
         }
+        case "/daemon-reexec": {
+          const daemonPid = state.daemon.pid;
+          const { stdout } = await cas(["--json", "factory", "reexec", "--session", state.session]);
+          const receipt = JSON.parse(stdout);
+          if (receipt.pid !== daemonPid || receipt.fallback)
+            throw Error("owned fixture daemon did not adopt in place");
+          return { daemonPid, receipt };
+        }
         case "/daemon-start": {
           const daemon = startDaemon(data.session);
           return { daemonPid: daemon.pid };

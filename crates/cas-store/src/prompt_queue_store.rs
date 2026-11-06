@@ -3191,7 +3191,7 @@ pub trait PromptQueueStore: Send + Sync {
         Ok(0)
     }
 
-    /// cas-d85c3: move a verified phone (`paired_device`, `operator_verified`) message that never
+    /// Move verified phone mail or daemon-stamped Violet activity/watch mail that never
     /// reached an ended supervisor to the successor that claimed its handoff,
     /// including the successor's factory session, so its delivery lane and
     /// Commander thread carry it. Only an unread row moves: no ack, no
@@ -8031,7 +8031,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         successor: &str,
         successor_session: Option<&str>,
     ) -> Result<Vec<i64>> {
-        if predecessor.trim().is_empty() || successor.trim().is_empty() || predecessor == successor
+        if predecessor.trim().is_empty() || successor.trim().is_empty()
+            || (predecessor == successor && predecessor_session == successor_session)
         {
             return Ok(Vec::new());
         }
@@ -8039,7 +8040,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let still_live = if agents_table_exists(&tx)? {
-                "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.name = q.target
+                "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.name = ?1
                      AND a.factory_session IS q.factory_session AND a.status IN ('active', 'idle'))"
             } else {
                 ""
@@ -8049,10 +8050,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "SELECT q.id FROM prompt_queue q
                      WHERE q.processed_at IS NULL AND q.acked_at IS NULL
                        AND q.transport_delivered_at IS NULL
-                       AND q.origin_kind = 'paired_device' AND q.operator_verified = 1
-                       AND q.target = ?1 AND q.factory_session IS ?2
+                       AND ((q.origin_kind = 'paired_device' AND q.operator_verified = 1)
+                            OR (q.origin_kind = 'daemon'
+                                AND (q.source GLOB 'violet-activity:*' OR q.source GLOB 'violet-watch:*')))
+                       AND (q.target = ?1 OR (q.target = 'supervisor' AND ?2 IS NOT NULL))
+                       AND q.factory_session IS ?2
                        AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
-                            WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                            WHERE seen.prompt_id = q.id AND seen.recipient IN (?1, 'supervisor')
                               AND NOT (seen.source = 'transport_claimed'
                                        AND seen.delivered_at IS NULL
                                        AND seen.teams_body_fallback_at IS NULL))
@@ -8070,7 +8074,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 // The predecessor's unconfirmed claim is the only receipt left;
                 // the predecessor has ended, so nothing it held can be read.
                 tx.execute(
-                    "DELETE FROM prompt_queue_recipient_seen WHERE prompt_id = ? AND recipient = ?",
+                    "DELETE FROM prompt_queue_recipient_seen WHERE prompt_id = ? AND recipient IN (?, 'supervisor')",
                     params![id, predecessor],
                 )?;
                 tx.execute(
@@ -8079,7 +8083,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          last_pending_reason = NULL, last_pending_detail = ?,
                          deferred_inbox_at = NULL, deferred_inbox_bytes = NULL,
                          wake_gate_declines = 0
-                     WHERE id = ? AND processed_at IS NULL AND target = ?",
+                     WHERE id = ? AND processed_at IS NULL AND target IN (?, 'supervisor')",
                     params![successor, successor_session, detail, id, predecessor],
                 )?;
             }
@@ -10982,6 +10986,40 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims() {
+        use crate::AgentStore;
+        let (temp, queue) = create_test_store();
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut ending = cas_types::Agent::new_with_role(
+            "ending-id".into(), "ending".into(), cas_types::AgentRole::Supervisor,
+        );
+        ending.factory_session = Some("old-session".into());
+        agents.register(&ending).unwrap();
+        let mut carried = Vec::new();
+        for (key, receipt) in [("claimed", SurfacingSource::TransportClaimed),
+            ("seen", SurfacingSource::HookSurfaced)] {
+            let result = queue.enqueue_idempotent("violet-watch:C_TEST", "supervisor", key,
+                Some("old-session"), None, None, key, Some(&QueueOrigin::Daemon)).unwrap();
+            let EnqueueIdempotentResult::Created(id) = result else { panic!("new row") };
+            queue.record_recipient_surfaced(id, "supervisor", receipt).unwrap();
+            carried.push(id);
+        }
+        assert!(queue.retarget_operator_rows_to_successor("ending", Some("old-session"),
+            "ending", Some("new-session")).unwrap().is_empty(), "a live predecessor keeps alias mail");
+        agents.unregister(&ending.id).unwrap();
+        assert!(queue.retarget_operator_rows_to_successor("ending", Some("old-session"),
+            "ending", Some("old-session")).unwrap().is_empty(), "same identity is a no-op");
+        assert_eq!(queue.retarget_operator_rows_to_successor("ending", Some("old-session"),
+            "ending", Some("new-session")).unwrap(), vec![carried[0]]);
+        assert_eq!(queue.recipient_receipt(carried[0], "supervisor").unwrap(), None);
+        assert_eq!(queue.recipient_receipt(carried[1], "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+        let delivered = queue.poll_unseen_for_recipient("ending", Some("new-session"), 10).unwrap();
+        assert_eq!(delivered.iter().map(|row| row.id).collect::<Vec<_>>(), vec![carried[0]]);
+        assert!(queue.poll_unseen_for_recipient("ending", Some("new-session"), 10).unwrap().is_empty());
     }
 
     fn cas_7af8_assert_relay_expiry(kind: &str) {

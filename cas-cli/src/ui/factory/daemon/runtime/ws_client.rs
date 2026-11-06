@@ -410,6 +410,14 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::Reexec { nonce, .. } => {
+                if let Some(frame) = ws_encode(&DaemonMessage::Error {
+                    message: "Daemon reexec requires the local factory socket".into(), client_ref: Some(nonce),
+                }) && let Some(client) = self.ws_clients.get_mut(&client_id) {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
+
             ClientMessage::BindingIntakePause { request: super::violet_intake::PauseRequest { nonce, .. } }
             | ClientMessage::BindingIntakeStatus { nonce } => {
                 let reply = super::violet_intake::IntakeReply::refused(nonce, "binding intake control requires the local Unix GUI socket; WS/relay refused");

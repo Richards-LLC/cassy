@@ -445,6 +445,22 @@ fn test_rule_history_and_tombstone_delete() {
     let restored = store.get("rule-history-01").unwrap();
     assert_eq!(restored.content, "original content");
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
+
+    let mut proven = Rule::new("rule-proven-expiry-guard".into(), "Established policy".into());
+    proven.status = cas_types::RuleStatus::Proven;
+    store.add(&proven).unwrap();
+    let cutoff = Utc::now() + Duration::days(1);
+    let note = "auto-retired: not promoted within 30 days";
+    let expired = store.retire_expired_drafts(cutoff, note).unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].id, restored.id);
+    assert_eq!(expired[0].content, restored.content);
+    assert_eq!(store.get(&proven.id).unwrap().status, cas_types::RuleStatus::Proven);
+    let versions = store.list_versions(&restored.id).unwrap();
+    assert_eq!(versions[0].change_note, note);
+    assert_eq!(versions[0].operation, "retire");
+    assert!(store.retire_expired_drafts(cutoff, note).unwrap().is_empty());
+    assert_eq!(store.list_versions(&restored.id).unwrap().len(), versions.len());
 }
 
 #[test]

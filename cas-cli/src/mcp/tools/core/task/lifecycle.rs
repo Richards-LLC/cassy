@@ -3754,8 +3754,7 @@ impl CasCore {
             // Save start-only instructions before budgeting; full show cannot
             // otherwise recover warnings computed only during this start.
             let advisory = format!(
-                "{}{}{}{}{}{}",
-                peer_notes,
+                "{}{}{}{}{}",
                 blocker_warning,
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 unanchored_warning.unwrap_or_default(),
@@ -3765,7 +3764,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{advisory}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{advisory}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -3804,7 +3803,7 @@ impl CasCore {
                 );
                 task_store.append_note(&task.id, &note).map_err(|error| Self::error(
                     ErrorCode::INTERNAL_ERROR,
-                    format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
+                    format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{peer_notes}{advisory}", task.id),
                 ))?;
                 saved = read_saved()?;
                 saved.notes.find(&note).ok_or_else(|| Self::error(
@@ -3834,13 +3833,16 @@ impl CasCore {
                 clipping.excerpt(&execution_state.unwrap_or_default(), 120),
                 clipping.excerpt(&cited_pointer, 220),
             );
+            // Reserve peer ownership warnings before budgeting bulky guidance.
+            // Remote assignees and peer holds must stay visible at task start.
             let prefix = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}",
                 task.id,
                 clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
                 source_readback,
+                peer_notes,
             );
             let hint = read_hint(&task.id, "show", true);
             let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());

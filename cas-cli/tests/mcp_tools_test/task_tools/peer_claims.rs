@@ -1480,6 +1480,14 @@ async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
 async fn in_progress_elsewhere_names_the_remote_assignee() {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    // cas-0fd1e: long fixture paths must not push ownership warnings into notes.
+    // Keep the original inline-holder assertions independent of host TMPDIR.
+    let long_tmp = tempfile::Builder::new()
+        .prefix(&"start-safety-path-".repeat(6))
+        .tempdir()
+        .unwrap();
+    assert!(long_tmp.path().as_os_str().len() >= 80);
+    env.set("TMPDIR", long_tmp.path());
     let cloud = FakeCloud::start();
     let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
     let mut task = Task::new("cas-p009".into(), "pulled".into());

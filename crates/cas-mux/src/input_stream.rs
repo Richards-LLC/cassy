@@ -6,12 +6,12 @@
 //! delimiters are submit transitions. Delimiters may be split across packets.
 
 /// Streaming bracketed-paste detector for keystream submit classification (cas-4b99).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BracketedPasteTracker {
     state: PasteTrackState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum PasteTrackState {
     /// Outside paste. `partial` = matched prefix length of [`PASTE_START`].
     Normal { partial: u8 },

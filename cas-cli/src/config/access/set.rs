@@ -557,6 +557,11 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.ai_enrichment.effort = value.trim().to_string();
             }
+            "rules.draft_ttl_days" => {
+                let days = value.parse::<u32>()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+                self.rules.get_or_insert_with(RulesConfig::default).draft_ttl_days = days;
+            }
             // Sync section
             "sync.enabled" => {
                 self.sync.enabled = value

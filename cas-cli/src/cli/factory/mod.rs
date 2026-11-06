@@ -14,6 +14,7 @@ mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
 mod queries;
+pub(crate) mod reexec;
 mod remote_attach;
 // cas-728b: pub(crate) (not private) so the director's stall-detection
 // confirmation step (ui/factory/director/events.rs) can call
@@ -751,6 +752,11 @@ pub enum TrainCommand {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Check whether this binary can adopt an inherited daemon manifest.
+    #[command(hide = true)]
+    HandoffCheck { #[arg(long)] schema: u32 },
+    /// Load the installed build without stopping panes or changing the daemon PID.
+    Reexec { #[arg(long)] session: Option<String> },
     /// Operator: resume an epic after reviewing its design against the plan.
     DesignReviewLift {
         epic: String,
@@ -1309,6 +1315,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 }
                 Ok(())
             }
+            FactoryCommands::HandoffCheck { schema } => {
+                println!("{}", crate::ui::factory::daemon::reexec::handoff_check(*schema)?);
+                Ok(())
+            }
+            FactoryCommands::Reexec { session } => reexec::execute(session.as_deref(), cli),
             FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
             FactoryCommands::CiWatchDryRun { minutes, session } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("ci-watch-dry-run requires a Cassy project"))?;

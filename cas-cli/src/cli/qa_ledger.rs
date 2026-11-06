@@ -110,7 +110,21 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .filter(|j| j.status == "live")
                 .map(|j| (j.id, j.name))
                 .collect::<Vec<_>>();
-            let revision = crate::qa_impact::io::git(&repo, &["rev-parse", "HEAD"])?;
+            let source = task
+                .deliverables
+                .factory_branch_start
+                .as_ref()
+                .map(|start| start.branch.as_str())
+                .or(task.deliverables.parked_branch.as_deref());
+            let revision = match source {
+                Some(branch) => {
+                    crate::qa_impact::io::resolve_ref(&repo, &format!("refs/heads/{branch}"))
+                        .with_context(|| {
+                            format!("resolve recorded task source branch {branch:?} for {id}")
+                        })?
+                }
+                None => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
+            };
             let body = crate::qa_ledger::scaffold(&task, &journeys, revision.trim());
             let paths = crate::config::resolved_factory_artifact_paths(
                 cas_root,

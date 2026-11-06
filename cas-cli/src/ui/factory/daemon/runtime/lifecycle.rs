@@ -795,6 +795,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         task_store.get(task_id).ok().as_ref(),
         worker,
         failed_run_id,
+        occurrence,
         exit,
     );
     let key = format!(
@@ -976,10 +977,23 @@ impl MergeQueueRepair {
             .collect()
     }
 
+    /// cas-f2ea: runs named by earlier ejection notes (another occurrence),
+    /// including ones repaired by hand before any repair marker existed.
+    fn noted_runs(notes: &str, occurrence: &str) -> Vec<u64> {
+        const RUN: &str = "after failed merge_group run ";
+        let this = format!("(merge-queue-ejection occurrence={occurrence})");
+        notes
+            .split("\n\n")
+            .filter(|note| note.contains("(merge-queue-ejection occurrence=") && !note.contains(&this))
+            .filter_map(|note| note.split(RUN).nth(1)?.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
+            .collect()
+    }
+
     fn decide(
         task: Option<&cas_types::Task>,
         worker: &str,
         failed_run_id: Option<u64>,
+        occurrence: &str,
         exit: MergeQueueExit<'_>,
     ) -> Self {
         let (Some(task), Some(run)) = (task, failed_run_id) else {
@@ -996,7 +1010,7 @@ impl MergeQueueRepair {
         if !parked
             || !current_tip
             || exit.group_mate_failed
-            || recorded.iter().any(|seen| *seen >= run)
+            || recorded.iter().chain(&Self::noted_runs(&task.notes, occurrence)).any(|seen| *seen >= run)
         {
             return Self::None;
         }
@@ -3465,6 +3479,38 @@ mod worker_attention_tests {
         assert!(paged.len() == 1 && paged[0].prompt.contains("cas-fc35"), "{paged:?}");
     }
 
+    /// cas-f2ea: a task repaired by hand (an ejection note, no repair
+    /// marker) is re-parked. GitHub still lists the old red run under a new
+    /// queue exit; that is not a cycle. The next real failure is the first
+    /// cycle, so the task returns Open instead of paging the operator.
+    #[test]
+    fn manual_repair_old_run_is_seen_and_the_next_failure_is_cycle_one_cas_f2ea() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "manual-repair")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "manual-repair");
+        let mut worker = Agent::new_with_role("worker-id".into(), "calm-owl".into(), AgentRole::Worker);
+        worker.factory_session = Some("manual-repair".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-manual".into(), "hand-repaired delivery".into());
+        (task.status, task.assignee) = (cas_types::TaskStatus::AwaitingMerge, Some("calm-owl".into()));
+        task.deliverables.factory_branch_anchor = Some("3333cccc".into());
+        task.notes = "[2026-11-05 19:30] 🚫 BLOCKER Delivery PR #1537 for cas-manual left the merge queue after failed merge_group run 500. (merge-queue-ejection occurrence=queue-exit:2026-11-05T19:30:00Z).\n\n[2026-11-05 19:40] decision: changes requested by supervisor.".into();
+        tasks.add(&task).unwrap();
+        let eject = |run, at: &str| enqueue_merge_queue_ejection_relay(&cas_dir, "cas-manual", "calm-owl", 1537,
+            Some(run), &format!("queue-exit:{at}"), None, MergeQueueExit { head_sha: "3333cccc", group_mate_failed: false });
+        let operator = || crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap()
+            .into_iter().filter(|row| row.target == "operator").count();
+
+        assert!(matches!(eject(500, "2026-11-06T00:05:00Z"), WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(tasks.get("cas-manual").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        assert_eq!(operator(), 0, "the old run is not a cycle");
+        assert!(matches!(eject(501, "2026-11-06T00:30:00Z"), WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(tasks.get("cas-manual").unwrap().status, cas_types::TaskStatus::Open);
+        assert_eq!(operator(), 0, "the first real failure returns the task, it does not page");
+    }
+
     #[test]
     fn cas_160f_unregistered_or_sessionless_worker_cannot_wake_ambient_supervisor() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "local-watcher")]);
@@ -4019,6 +4065,8 @@ impl FactoryDaemon {
         let mut last_auto_merge_membership = std::collections::BTreeSet::new();
         // cas-73fa: run-less queue exits awaiting their confirming poll.
         let mut last_held_queue_exits = std::collections::BTreeSet::new();
+        // cas-f2ea: failed-run job and log lookups survive polls.
+        let failed_run_lookups = super::merge_queue_ejection::FailedRunLookups::default();
         // cas-e753 (GH #1145): Violet push-wake. Claims run on the blocking
         // pool every 15 s; channel sweeps run as their own task so a slow
         // Violet read never holds up the next claim.
@@ -4266,6 +4314,7 @@ impl FactoryDaemon {
                     let previously_queued = last_merge_queue_membership.clone();
                     let previously_armed = last_auto_merge_membership.clone();
                     let previously_held = last_held_queue_exits.clone();
+                    let failed_run_lookups = failed_run_lookups.clone();
                     let mut watched_branches =
                         std::collections::BTreeSet::from(["main".to_string()]);
                     if let Some(manager) = self.app.worktree_manager() {
@@ -4346,14 +4395,14 @@ impl FactoryDaemon {
                         let ejections = std::mem::take(&mut queue_poll.ejections)
                             .into_iter()
                             .map(|ejection| {
-                                let job = super::merge_queue_ejection::failing_job(
+                                let job = failed_run_lookups.failing_job(
                                     &transport,
                                     ejection.failed_run_id,
                                 );
-                                let group_mate = super::merge_queue_ejection::ahead_failed_same_job(
+                                let group_mate = failed_run_lookups.ahead_may_be_cause(
                                     &transport,
                                     ejection.failed_run_id,
-                                    ejection.ahead_failed_run_id,
+                                    ejection.ahead,
                                 );
                                 (ejection, job, group_mate)
                             })

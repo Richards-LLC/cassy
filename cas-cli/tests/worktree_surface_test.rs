@@ -2844,7 +2844,11 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
 #[tokio::test]
 async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
     let mut env = test_env();
-    for (unpublished_merge, overlaps_delivery) in [(true, false), (false, false), (true, true)] {
+    for (unpublished_merge, overlaps_delivery, racing_writer) in [
+        (true, false, false), (false, false, false), (true, true, false),
+        #[cfg(unix)]
+        (true, true, true),
+    ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2891,10 +2895,44 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
         let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
         if overlaps_delivery {
+            // The real merge returns its own SHA, then a third writer advances
+            // the same target before the handler observes the landing.
+            let race_tip = fixture.cas_root.join("third-writer-tip");
+            #[cfg(unix)]
+            if racing_writer {
+                use std::os::unix::fs::PermissionsExt;
+                let bin = fixture.cas_root.join("git-race-bin");
+                std::fs::create_dir_all(&bin).unwrap();
+                let real_git = String::from_utf8(Command::new("sh").args(["-c", "command -v git"])
+                    .output().unwrap().stdout).unwrap();
+                let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+                let armed = bin.join("merged");
+                let script = format!(r#"#!/bin/sh
+real={real}
+if [ "$1" = update-ref ] && [ "$2" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
+  "$real" "$@" || exit $?
+  touch {armed}
+  exit 0
+fi
+if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = 'epic/rebound^{{commit}}' ] && [ -f {armed} ]; then
+  rm {armed}
+  printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
+  "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
+  "$real" -C {target} rev-parse HEAD > {tip}
+fi
+exec "$real" "$@"
+"#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
+                std::fs::write(bin.join("git"), script).unwrap();
+                std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                env.set("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+            }
             let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
-            assert!(refused.message.contains("reviewed delivery"), "{refused}");
-            assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), local_review_base,
-                "cas-4c92: refused landing must restore the exact pre-merge target: {refused}");
+            assert!(refused.message.contains(if racing_writer { "subsequent target progress" } else { "reviewed delivery" }), "{refused}");
+            let expected_target = if racing_writer {
+                std::fs::read_to_string(&race_tip).expect("third writer ran after the owned merge").trim().to_string()
+            } else { local_review_base.clone() };
+            assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), expected_target,
+                "refused landing may undo only its own merge, never a third writer: {refused}");
             assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), published_base);
             assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip);
             continue;

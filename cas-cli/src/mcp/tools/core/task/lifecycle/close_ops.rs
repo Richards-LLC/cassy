@@ -102,16 +102,26 @@ fn request_close_verification_dispatch(
     supervisor_recovery: bool,
     no_delivery_intent: Option<(&str, Option<&str>)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
-    let persist = || -> cas_store::Result<cas_types::VerificationDispatch> {
+    let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
         cas_store::shared_db::install_busy_handler(&conn)?;
         let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
-        let dispatch = cas_store::create_verification_dispatch_bound_with_conn(
+        let (dispatch, already_active) = match cas_store::create_verification_dispatch_bound_with_conn(
             &tx, task_id, requester_id, owner_id, boundary,
             chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
             supervisor_recovery,
-        )?;
-        if let Some((reason, expected_assignee)) = no_delivery_intent {
+        ) {
+            Ok(dispatch) => (dispatch, false),
+            Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => (*dispatch, true),
+            Err(error) => return Err(error),
+        };
+        // An existing cycle keeps its requester, owner and proof immutable.
+        // Matching proof may still acquire this assignee's close declaration.
+        let matching_proof = dispatch.owner_agent_id == owner_id
+            && dispatch.receipt_id == boundary.receipt_id
+            && dispatch.delivery_transaction_id == boundary.delivery_transaction_id
+            && dispatch.repository == boundary.repository;
+        if let Some((reason, expected_assignee)) = no_delivery_intent.filter(|_| matching_proof) {
             let (encoded, assignee): (String, Option<String>) = tx.query_row(
                 "SELECT deliverables, assignee FROM tasks WHERE id = ?1",
                 [task_id], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -127,13 +137,11 @@ fn request_close_verification_dispatch(
                 rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
         }
         tx.commit()?;
-        Ok(dispatch)
+        Ok(if already_active { CloseVerificationDispatch::AlreadyActive(dispatch) }
+            else { CloseVerificationDispatch::Requested(dispatch) })
     };
     match persist() {
-        Ok(dispatch) => Ok(CloseVerificationDispatch::Requested(dispatch)),
-        Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => {
-            Ok(CloseVerificationDispatch::AlreadyActive(*dispatch))
-        }
+        Ok(outcome) => Ok(outcome),
         Err(error) => Err(McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to persist verification dispatch: {error}")),
@@ -154,6 +162,10 @@ mod verification_dispatch_tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = Task::new("cas-racing-close".into(), "No delivery".into());
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
         let boundary = cas_types::VerificationProofBoundary::task();
         let original = cas_store::create_verification_dispatch_bound(
             &root,
@@ -189,6 +201,9 @@ mod verification_dispatch_tests {
                 ("supervisor", "other-owner", &boundary),
                 ("supervisor", "supervisor", &different_boundary),
             ] {
+                let mut current = tasks.get(&task.id).unwrap();
+                current.deliverables.no_delivery_close_intent = None;
+                tasks.update(&current).unwrap();
                 let outcome = request_close_verification_dispatch(
                     &root,
                     &original.task_id,
@@ -196,7 +211,7 @@ mod verification_dispatch_tests {
                     owner,
                     requested,
                     false,
-                    None,
+                    Some(("Measured no source delivery", Some("worker"))),
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
                 match outcome {
@@ -204,6 +219,14 @@ mod verification_dispatch_tests {
                     other => panic!(
                         "must return the exact active dispatch without reusing its authority: {other:?}"
                     ),
+                }
+                let intent = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent;
+                if requester == "worker" {
+                    let saved = intent.expect("matching active proof must retain the worker's no-delivery declaration");
+                    assert_eq!(saved.dispatch_id, original.id);
+                    assert_eq!(saved.assignee.as_deref(), Some("worker"));
+                } else {
+                    assert!(intent.is_none(), "different owner/proof must not acquire close intent");
                 }
                 assert_eq!(
                     cas_store::get_latest_verification_dispatch(&root, &original.task_id)
@@ -25197,6 +25220,8 @@ fn no_other_open_anchor_between(
 /// A parked delivery can import its target without acquiring new task work.
 /// Require the anchor on the first-parent chain and every later commit to be
 /// a merge whose other parents are already reachable on the declared target.
+/// This graph-only check also admits conflict-resolution content in those
+/// merges; the pre-merge review covers that content.
 pub(crate) fn target_sync_only_advance(
     repo: &std::path::Path,
     task: &Task,

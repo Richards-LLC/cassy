@@ -1714,10 +1714,10 @@ fn restore_refused_landing(
     operations: &crate::worktree::GitOperations,
     target: &str,
     base: Option<&str>,
-    attempted: &str,
+    attempted: Option<&str>,
     refusal: String,
 ) -> String {
-    let Some(base) = base else { return refusal };
+    let (Some(base), Some(attempted)) = (base, attempted) else { return refusal };
     match super::premerge_verification::restore_unpublished_merge(operations, target, base, attempted) {
         Ok(()) => format!("{refusal}. Unpublished local merge restored to {base}."),
         Err(error) => format!("{refusal}. Local rollback declined: {error}. Inspect the target before retrying."),
@@ -5877,7 +5877,7 @@ impl CasCore {
             if reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
                 approval.verify_landing(&target_tip)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
-                        manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), &target_tip, error,
+                        manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
                     )))?;
             }
             let push_outcome = if let Some((_, published)) = reconciled_publication.as_ref() {
@@ -6049,7 +6049,7 @@ impl CasCore {
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
             approval.verify_landing(&landed)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
-                    manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), &landed, error,
+                    manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
                 )))?;
             Some(landed)
         } else { None };

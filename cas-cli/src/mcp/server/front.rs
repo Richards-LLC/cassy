@@ -21,6 +21,7 @@ struct Backend {
     control_output: Reader,
     child: Option<tokio::process::Child>,
     image: Option<crate::mcp::socket::ExeIdentity>,
+    retry_after_drain: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[derive(Debug)]
@@ -71,7 +72,11 @@ where
             write(&mut output, &frame).await?;
         }
         if prepared.as_ref().is_some_and(|(_, deadline)| Instant::now() >= *deadline) {
-            prepared.take();
+            if let Some((mut candidate, _)) = prepared.take()
+                && let Some(retry) = candidate.retry_after_drain.take()
+            {
+                let _ = retry.send(());
+            }
             let _ = events.send(Event::Deferred("drain timed out; old backend is still serving".into())).await;
         }
         if initialized && prepared.is_some() && pending.is_empty() && input.bytes.is_empty() {
@@ -267,6 +272,7 @@ struct Connection {
     control_output: Frames<Reader>,
     child: Option<tokio::process::Child>,
     image: Option<crate::mcp::socket::ExeIdentity>,
+    retry_after_drain: Option<tokio::sync::oneshot::Sender<()>>,
     info: Value,
     tools: Vec<Value>,
     private: BTreeSet<String>,
@@ -277,7 +283,7 @@ impl Connection {
     async fn prepare(backend: Backend, initialize: &Value) -> Result<Self> {
         let mut connection = Self { input: backend.input, output: Frames::new(backend.output),
             control_input: backend.control_input, control_output: Frames::new(backend.control_output),
-            child: backend.child, image: backend.image, info: Value::Null, tools: Vec::new(), private: BTreeSet::new(),
+            child: backend.child, image: backend.image, retry_after_drain: backend.retry_after_drain, info: Value::Null, tools: Vec::new(), private: BTreeSet::new(),
             buffered: VecDeque::new() };
         connection.info = connection.rpc("initialize", initialize.get("params").cloned()).await?;
         write_json(&mut connection.input, &json!({"jsonrpc":"2.0", "method":"notifications/initialized"})).await?;
@@ -472,7 +478,7 @@ fn spawn_backend(program: &std::path::Path, standby: bool) -> Result<Backend> {
     Ok(Backend { input: Box::new(child.stdin.take().context("backend stdin")?),
         output: Box::new(child.stdout.take().context("backend stdout")?),
         control_input: Box::new(control_write), control_output: Box::new(control_read),
-        child: Some(child), image: Some(image) })
+        child: Some(child), image: Some(image), retry_after_drain: None })
 }
 
 #[cfg(unix)]
@@ -484,19 +490,28 @@ async fn watch_updates(
 ) {
     let mut ticks = tokio::time::interval(Duration::from_secs(30));
     let mut attempted = None;
+    let mut drain_retry: Option<tokio::sync::oneshot::Receiver<()>> = None;
     loop {
         ticks.tick().await;
+        if drain_retry.as_mut().is_some_and(|retry| retry.try_recv().is_ok()) {
+            attempted = None;
+            drain_retry = None;
+        }
         let stale = image.lock().map(|image| image.as_ref()
             .is_some_and(crate::mcp::socket::ExeIdentity::is_stale)).unwrap_or(false);
         if !stale || updates.capacity() == 0 { continue; }
         let installed = crate::mcp::socket::ExeIdentity::from_exe_path(program.clone());
         if attempted.as_ref() == Some(&installed) { continue; }
-        // Remember before spawning: failures, incompatibility and drain
-        // deferrals all keep the old backend, but must not retry this image.
-        // A later install changes the identity and permits another attempt.
+        // Failures and incompatibility suppress this image until the next
+        // install. A drain timeout alone permits another idle-boundary attempt.
         attempted = Some(installed);
         match spawn(&program, true) {
-            Ok(backend) => if updates.send(backend).await.is_err() { break; },
+            Ok(mut backend) => {
+                let (retry, deferred) = tokio::sync::oneshot::channel();
+                backend.retry_after_drain = Some(retry);
+                drain_retry = Some(deferred);
+                if updates.send(backend).await.is_err() { break; }
+            },
             Err(error) => eprintln!("[Cassy] MCP upgrade deferred; current backend remains serving: {error}"),
         }
     }

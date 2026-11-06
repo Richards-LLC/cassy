@@ -1336,9 +1336,14 @@ pub(crate) fn reconcile_blocked_task_alert(
             && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
                 + chrono::Duration::minutes(5)
         {
-            emit(true, Some(
-                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close.",
-            ))?;
+            let reason = if task.deliverables.no_delivery_close_intent.as_ref()
+                .is_some_and(|intent| intent.dispatch_id == dispatch.id)
+            {
+                "Verification was approved, but automatic no-delivery close is still held after five minutes; inspect the live assignment and holds, then finish its close."
+            } else {
+                "Verification was approved, but the worker has not retried close within five minutes; inspect the live task and finish its close."
+            };
+            emit(true, Some(reason))?;
         }
         if matches!(dispatch.state,
             cas_types::VerificationDispatchState::Pending
@@ -2252,6 +2257,47 @@ mod tests {
             .unwrap().unwrap();
         assert_eq!(queue.peek_for_targets(&["merge-worker"], Some("sess-merge-notices"), 10).unwrap()
             .iter().map(|row| row.id).collect::<Vec<_>>(), vec![rejected], "findings still wake the worker");
+    }
+
+    #[tokio::test]
+    async fn approved_no_delivery_alert_explains_held_auto_close_cas_26d0() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-held"), ("CAS_AGENT_ROLE", "supervisor")]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let agents = crate::store::open_agent_store(root).unwrap();
+        for (id, role) in [("sup", AgentRole::Supervisor), ("worker", AgentRole::Worker)] {
+            agents.register(&agent_in_session(id, id, role, "sess-held")).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        let mut task = Task::new("cas-held-842d".into(), "Held no-delivery close".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch(root, &task.id, "worker", "sup",
+            Utc::now() + chrono::Duration::minutes(10)).unwrap();
+        task.status = TaskStatus::Blocked;
+        task.pending_verification = true;
+        task.notes = format!("[{}] 🚫 BLOCKER {}", Utc::now().format("%Y-%m-%d %H:%M"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id));
+        task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
+            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()),
+        });
+        tasks.update(&task).unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        core.set_agent_id_for_testing("sup".into());
+        let response = core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(json!({"task_id":task.id, "dispatch_id":dispatch.id,
+                "status":"approved", "summary":"No delivery reviewed"})).unwrap())).await.unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked);
+        let current = cas_store::get_verification_dispatch(root, &dispatch.id).unwrap();
+        reconcile_blocked_task_alert(root, &task.id, current.resolved_at.unwrap() + chrono::Duration::minutes(5)).unwrap();
+        let rows = crate::store::open_prompt_queue_store(root).unwrap().peek_all(50).unwrap();
+        let alerts = rows.iter().filter(|row| row.source.starts_with(LIFECYCLE_WAKE_SOURCE_PREFIX)).collect::<Vec<_>>();
+        assert_eq!(alerts.len(), 1, "{rows:?}");
+        // pin: no-delivery approval finishes close automatically; a hold requires supervisor repair, never a worker retry.
+        assert!(alerts[0].prompt.contains("no-delivery") && !alerts[0].prompt.contains("worker has not retried close"),
+            "held auto-close must name the action its supervisor owns: {}", alerts[0].prompt);
     }
 
     #[test]

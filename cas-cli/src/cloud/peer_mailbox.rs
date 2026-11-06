@@ -1213,7 +1213,7 @@ fn deliver_claimed_with_history(
     factory_session: &str,
     consumer_id: &str,
     history: &RecipientHistory,
-    workers: Option<(&WorkerDirectory, &Path)>,
+    workers: Option<(&Path, &str)>,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
@@ -1312,12 +1312,11 @@ fn deliver_claimed_with_history(
     report.warnings.dedup();
     // No retired-worker redirects: only the current, locally live registration
     // in this daemon's factory may receive, and scope is checked again below.
-    if let Some((directory, _)) = workers {
+    if workers.is_some() {
         for worker in all.iter().filter(|agent| {
             agent.role == AgentRole::Worker
                 && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
                 && agent.factory_session.as_deref() == Some(factory_session)
-                && directory.matches_local(agent)
                 && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
                     agent, crate::mcp::tools::service::agent_liveness::agent_process_is_alive(agent),
                     crate::cloud::peers::PEER_LIVE_SECS,
@@ -1347,6 +1346,18 @@ fn deliver_claimed_with_history(
         }
     };
     report.claimed = claimed.len();
+    // Cloud authority and task ancestry are needed only for an actual local
+    // worker message, once per batch. Claiming an address grants no admission.
+    let directory = if claimed.iter().any(|message| routes.get(&message.recipient_agent_id)
+        .is_some_and(|recipient| recipient.role == AgentRole::Worker)) {
+        workers.and_then(|(root, owner)| match WorkerDirectory::load(root, owner) {
+            Ok(directory) => Some(directory),
+            Err(error) => {
+                report.warnings.push(format!("worker peer scope unavailable: {error}"));
+                None
+            }
+        })
+    } else { None };
     // cas-c7c7: show each sender under its machine label, not its id.
     // cas-2a5a: a sender in another project of this user is listed under
     // its own project, so its label is asked for there.
@@ -1403,9 +1414,13 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
+        // Missing directory authority, including a temporarily absent local
+        // registration, leaves the claim unacknowledged for a later poll.
+        if recipient.role == AgentRole::Worker && directory.as_ref()
+            .is_none_or(|directory| !directory.matches_local(recipient)) { continue; }
         if recipient.role == AgentRole::Worker
             && (message.scope != PeerScope::Project || !same_repo
-                || workers.is_none_or(|(directory, _)| directory.pair(&message.sender_agent_id, &recipient.id).is_err())
+                || directory.as_ref().is_none_or(|directory| directory.pair(&message.sender_agent_id, &recipient.id).is_err())
                 || !workers::allowed_intent(&message.body))
         {
             report.rejected += 1;
@@ -1441,8 +1456,8 @@ fn deliver_claimed_with_history(
         ) {
             Ok(admitted) => {
                 let recorded = if recipient.role == AgentRole::Worker {
-                    let (directory, root) = workers.expect("worker authorization was checked");
-                    directory.copy_to_supervisors(root, queue, message)
+                    let (root, _) = workers.expect("worker route was checked");
+                    directory.as_ref().expect("worker authorization was checked").copy_to_supervisors(root, queue, message)
                         .map(|()| PeerAckOutcome::Delivered)
                 } else { on_admitted(recipient, message) };
                 match recorded {

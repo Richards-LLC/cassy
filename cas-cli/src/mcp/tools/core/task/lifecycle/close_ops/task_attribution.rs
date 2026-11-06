@@ -304,14 +304,21 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
     // Conventional task scopes/prefixes and trailing task annotations claim
     // ownership; a task named in explanatory prose after ':' is context.
     let prefix = subject.split_once(':').map_or(subject, |(prefix, _)| prefix);
-    let annotation = subject.rsplit_once('(')
-        .and_then(|(_, suffix)| suffix.strip_suffix(')')).unwrap_or("");
+    let mut trailing = subject.trim_end();
+    let mut foreign_annotation = false;
+    while let Some((rest, annotation)) = trailing.strip_suffix(')')
+        .and_then(|text| text.rsplit_once('('))
+        .or_else(|| trailing.strip_suffix(']').and_then(|text| text.rsplit_once('[')))
+    {
+        foreign_annotation |= references_foreign_task(annotation, identity);
+        trailing = rest.trim_end();
+    }
     !identity
         .task_id
         .as_deref()
         .is_some_and(|id| message_references_task(subject, id))
         && (references_foreign_task(prefix, identity)
-            || references_foreign_task(annotation, identity))
+            || foreign_annotation)
 }
 
 /// GH #1151: whether `commit` is another task's work under the subject rule
@@ -3749,6 +3756,9 @@ mod tests {
             "fix cas-cli build and cas-core integration",
         );
         commit(p, "foreign.rs", "foreign\n", "cas-a1b2: unrelated task");
+        // cas-26d0: squash PR numbers must not hide earlier trailing task tags.
+        let squashed = commit(p, "squashed.rs", "foreign\n", "fix: unrelated delivery (cas-a1b2) (#123)");
+        let bracketed = commit(p, "bracketed.rs", "foreign\n", "fix: unrelated delivery [cas-a1b2] (#124)");
         commit(
             p,
             "explicit.rs",
@@ -3758,13 +3768,17 @@ mod tests {
         let known = commit(p, "recorded.rs", "known\n", "cas-cafe: recorded delivery");
         let mut scope = window();
         scope.identity.known_commits.push(known);
+        for sha in [squashed, bracketed] {
+            assert!(commit_claims_another_task(p, &sha, &scope.identity),
+                "trailing PR annotation must not hide task ownership: {sha}");
+        }
         let stat = diff_stat(p, "main", &scope, None).unwrap().stat;
         assert!(
             stat.contains("crate_change.rs"),
             "crate wording must remain attributed: {stat}"
         );
         assert!(
-            !stat.contains("foreign.rs"),
+            !stat.contains("foreign.rs") && !stat.contains("squashed.rs") && !stat.contains("bracketed.rs"),
             "other task IDs must remain excluded: {stat}"
         );
         assert!(

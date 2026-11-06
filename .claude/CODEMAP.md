@@ -79,7 +79,7 @@
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - no-progress watchdog: supervisor wake at 45 min, operator page at 90.
-- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches.
+- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches. Shared key-shape redaction lives in `hooks/handlers/handlers_events/message_display.rs`.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - prompt readiness, attributed director queue envelopes with immutable delivery-tip context, queued input and recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.
 - `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - durable reminder delivery and deadline/admission timer validation.
@@ -138,7 +138,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - registry validation and diff-scoped journey selection.
 - `cas-cli/src/builtins/skills/cas-qa-craft/scripts/model-boundary.py`, `scripts/test-model-boundary.py` - approved model-owned plan metadata and added-site signals for independent verifier judgment.
-- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs` - shared evidence grammar, scaffolds, validation and bundles; deployed-origin patterns.
+- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs` - shared evidence grammar, task-source-tip scaffolds, validation and bundles; deployed-origin patterns.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/fast_lane_gate.rs`, `docs/qa/fast-lane.md` - hotfix fast lane: eligibility, merge-check admission, post-merge receipt and revert PR.
 - `cas-cli/src/fast_lane_walk.rs` - durable failed-walk Commander choice, authenticated reply binding, fifteen-minute revert default and project runner.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` - independent QA, release verdicts and audited author overrides. Batch persistence marks its MCP response committed before continued delivery closes; `server_handler.rs` and `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs` retain bounded outcome summaries on each task, with complete long remedies in immutable receipt details. `qa_evidence.rs` excludes batch, post-commit and late-close system outcomes from producer citations, and formats restored/synced citations as separate timestamped notes. `qa_post_release.rs`'s runner also offers the supervisor, once per release SHA, the exact `batch_receipt` call for parked batch-deferred deliveries already on origin/<target> (it never records one); `qa_batch::shipped_anchor` lets close ignore a parked blocker whose active delivery anchor is already on target.
@@ -154,6 +154,7 @@
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversation and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, subscriptions and ordered status publication.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - history paging and bounded transcript windows.
+- `hub-web/src/epic-tabs.ts` - always-visible cross-machine epic tabs and selected task ledger; phone task sheet with keyboard focus return.
 - `hub-web/src/provider-mark.ts`, `hub-web/src/live-phase.ts`, `hub-web/src/team-view.ts`, `hub-web/src/progress-model.ts` - harness marks, live phase, attention-priority Team state and release/task projections.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity views.
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/code-frame.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` - safe Markdown, source controls and lazy evidence renderers.

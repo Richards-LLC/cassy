@@ -1945,7 +1945,11 @@ previous incidents or establish deployed Cloud instrumentation.
 
 `cas qa ledger init --task <id>` writes an honest scaffold in the project's task
 artifact directory, with predicted live journeys and no-code route exclusions.
-It preserves existing evidence. Edit rows after exercising the named build,
+The build is the recorded task source branch tip (start binding first, then a
+legacy parked branch); an unreadable source fails before creating evidence.
+Tasks without a recorded source use the resolved repository's HEAD. Journey
+selection still uses the target repository. It preserves existing evidence.
+Edit rows after exercising the named build,
 then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
 parser checks structure, counts, labels, defect ownership and readable PASS
 captures; it does not judge what a capture proves. Close applies its diagnostics
@@ -3899,6 +3903,8 @@ adopted by commit/tree. This adds no CI stage or duplicate gate.
 
 `python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only
 helpers for constant/literal equality and reads of Rust source as text.
+Rust assertion diagnostic and formatting arguments are excluded from prose-pin
+checks; literals in the assertion operands remain checked.
 `--changed-since <ref>` checks the merge-base diff, including working changes;
 files imported only by a released-trunk sync merge are excluded, while task
 edits before and after that merge remain checked. As with task attribution,

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -132,6 +133,68 @@ class CompletionTests(unittest.TestCase):
         evidence = json.loads((self.f.receipts / "delivery-completion.json").read_text())
         self.assertEqual(evidence["status"], "FAIL")
         self.assertIn(phrase, evidence["blocker"])
+
+    def test_declared_epic_advanced_after_merge_requires_delivery_or_deferral(self):
+        f = self.f
+        base = f.git("rev-parse", "HEAD")
+        f.git("checkout", "-b", "epic/included")
+        (f.worktree / "first.rs").write_text("first delivery\n")
+        first = f.commit("first epic delivery")
+        f.git("checkout", "-b", "release-source", base)
+        f.git("merge", "--no-ff", "epic/included", "-m", "declare constituent epic")
+        f.git("checkout", "epic/included")
+        (f.worktree / "late.rs").write_text("late delivery\n")
+        late = f.commit("late epic delivery")
+        f.git("push", "origin", "epic/included")
+        f.git("checkout", "-b", "epic/unrelated", base)
+        (f.worktree / "unrelated.rs").write_text("not in this release\n")
+        unrelated = f.commit("unrelated active epic")
+        f.git("checkout", "release-source")
+        (f.worktree / "main-late.rs").write_text("main delivery after freeze\n")
+        main_late = f.commit("main delivery included in candidate")
+        f.git("checkout", "main")
+        f.git("merge", "--no-ff", "release-source", "-m", "queue lands candidate after freeze")
+        f.git("tag", "v1.1.0")
+        f.git("checkout", "release-source")
+        store = f.root / "task-store"
+        store.mkdir()
+        with sqlite3.connect(store / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (id TEXT, task_type TEXT, deliverables TEXT)")
+            for task, anchor, branch in [("cas-a111", first, "epic/included"),
+                    ("cas-a222", late, "epic/included"),
+                    ("cas-a333", unrelated, "epic/unrelated"),
+                    ("cas-a444", main_late, "main")]:
+                db.execute("INSERT INTO tasks VALUES (?, 'task', ?)", (task, json.dumps({
+                    "work_target": {"target_branch": branch},
+                    "factory_branch_anchor": anchor,
+                    "factory_branch_start": {"base_sha": base},
+                })))
+        inputs = {"epic_refs": ["origin/epic/included"], "deferred_tasks": {}}
+        report = f.root / "inputs.json"
+        def audit(*extra):
+            return subprocess.run([sys.executable, str(ROOT / "release_changelog.py"),
+                "verify-deliveries", "main", *extra], cwd=f.worktree,
+                env={**f.env, "CAS_ROOT": str(store),
+                     "CAS_RELEASE_CONTEXT_JSON": json.dumps({"release_inputs": inputs})},
+                capture_output=True, text=True)
+        refused = audit()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("cas-a222", refused.stderr)
+        self.assertIn(late, refused.stderr)
+        inputs["deferred_tasks"] = {"cas-a222": " "}
+        self.assertNotEqual(audit().returncode, 0, "a deferral requires a reason")
+        inputs["deferred_tasks"] = {"cas-a222": "Intentionally ships in the next cut"}
+        deferred = audit("--report", str(report))
+        self.assertEqual(deferred.returncode, 0, deferred.stderr)
+        self.assertEqual(json.loads(report.read_text())["included_task_ids"], ["cas-a111", "cas-a444"])
+        f.git("merge", "--no-ff", "epic/included", "-m", "include late delivery")
+        inputs["deferred_tasks"] = {}
+        draft = f.root / "draft.md"
+        draft.write_text("<!-- CAS_RELEASE_INPUTS\n" + json.dumps(inputs) + "\n-->\n")
+        inputs = {}
+        included = audit("--notes", str(draft), "--report", str(report))
+        self.assertEqual(included.returncode, 0, included.stderr)
+        self.assertEqual(json.loads(included.stdout.split("=", 1)[1]), ["cas-a111", "cas-a222", "cas-a444"])
 
     def test_complete_contains_both_session_changes_and_clean_installed_build(self):
         result = self.f.gate()

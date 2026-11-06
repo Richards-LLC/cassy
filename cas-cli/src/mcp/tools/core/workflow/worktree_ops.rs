@@ -4222,6 +4222,20 @@ impl CasCore {
         }
     }
 
+    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>) -> Option<String> {
+        let caller = self.get_agent_id().ok()?;
+        let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
+        crate::peer_ask_gate::merge_refusal(
+            &self.cas_root,
+            &caller,
+            agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
+            agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
+            &crate::peer_ask_gate::MergeSubject {
+                task_id: task_id.map(str::to_string), pr, any_pr: false,
+            },
+        )
+    }
+
     /// Merge worktree back to parent
     ///
     /// Resolves `id` against System A first (the `WorktreeStore`-tracked,
@@ -4407,20 +4421,10 @@ impl CasCore {
             crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
             // cas-bddf9: the merging supervisor's own unanswered ask to a
-            // peer about this task holds the merge until answered or
+            // peer about this task or its PR holds the merge until answered or
             // visibly overridden.
-            if let Ok(caller) = self.get_agent_id()
-                && let Some(refusal) = {
-                    let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
-                    crate::peer_ask_gate::merge_refusal(
-                        &cas_root,
-                        &caller,
-                        agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
-                        agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
-                        &crate::peer_ask_gate::MergeSubject { task_id: Some(task_id.to_string()), pr: None, any_pr: false },
-                    )
-                }
-            {
+            let pr = scoped_task.as_deref().and_then(|task| task.deliverables.delivery_pr_number);
+            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
             }
         }
@@ -5584,7 +5588,7 @@ impl CasCore {
                         store.update_if_current(&next, &current)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
-                    super::protected_pr::arm(&cwd, &pr)
+                    super::protected_pr::arm(self, &cwd, &pr, task_id)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                     return Ok(Self::success(format!(
                         "{ci_prefix}PR queued: {} (source {} at {source}, target {}). Auto-merge enabled for this exact head; no local merge or default-branch push was attempted. Source worktree retained. The merge queue owns landing; Cassy reconciles the task after publication.",

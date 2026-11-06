@@ -24,6 +24,9 @@ pub struct TrackArgs {
     version: String,
     #[arg(long)]
     first_child: String,
+    /// Audited constituent refs, deferrals and included delivery IDs
+    #[arg(long)]
+    inputs: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
 pub struct InstalledArgs {
@@ -44,6 +47,8 @@ struct ReleaseContext {
     first_child_epoch: Option<i64>,
     landing_reminder: Option<i64>,
     publish_reminder: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_inputs: Option<serde_json::Value>,
 }
 
 fn version_ok(version: &str) -> bool {
@@ -142,6 +147,7 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         first_child_epoch: None,
         landing_reminder: None,
         publish_reminder: None,
+        release_inputs: None,
     })
 }
 
@@ -205,6 +211,14 @@ fn track_on_train(
             expected.train_id == train.id,
             "version already belongs to another train"
         );
+    }
+    if let Some(path) = &args.inputs {
+        let audit: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+        let checked = audit.get("checked_sha").and_then(|value| value.as_str())
+            .context("release input audit has no checked_sha")?;
+        ensure!(checked == args.commit || git(repo, &["rev-parse", &format!("{}^1", args.commit)])
+            .ok().as_deref() == Some(checked), "release input audit is stale; rerun release.sh");
+        expected.release_inputs = Some(audit);
     }
     let previous_commit = expected.release_commit.replace(args.commit.clone());
     if expected.first_child_commit.is_none() {
@@ -504,15 +518,21 @@ mod tests {
             commit: sha.clone(),
             first_child: sha.clone(),
             version: "9.99.2".into(),
+            inputs: None,
         };
         (temp, root, train, owner, args)
     }
 
     #[test]
     fn release_tracking_and_installed_notice_are_restart_safe() {
-        let (temp, root, mut train, owner, args) = fixture();
+        let (temp, root, mut train, owner, mut args) = fixture();
         let repo = temp.path();
         let sha = args.commit.clone();
+        let audit = serde_json::json!({"checked_sha": sha, "epic_refs": ["origin/epic/constituent"],
+            "deferred_tasks": {"cas-0002": "next release"}, "included_task_ids": ["cas-0001"]});
+        let audit_path = root.join("input-audit.json");
+        fs::write(&audit_path, serde_json::to_vec(&audit).unwrap()).unwrap();
+        args.inputs = Some(audit_path);
         track_on_train(&args, &root, repo, &train).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
         let reminders = open_reminder_store(&root).unwrap();
@@ -529,6 +549,7 @@ mod tests {
         let recorded: ReleaseContext =
             serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
                 .unwrap();
+        assert_eq!(recorded.release_inputs, Some(audit));
         assert_eq!(recorded.first_child_commit.as_deref(), Some(sha.as_str()));
         assert_eq!(
             recorded.first_child_epoch,

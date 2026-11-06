@@ -92,6 +92,7 @@ script_dir="$repo_root/scripts"
 remote="${RELEASE_REMOTE:-origin}"
 gh_bin="${GH_BIN:-gh}"
 cas_bin="${CAS_BIN:-cas}"
+release_input_report="$(git rev-parse --path-format=absolute --git-path cas/release-inputs.json)"
 release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
 release_manifests=(
@@ -289,6 +290,8 @@ lint_release_draft() {
     local draft="$1"
     python3 "$script_dir/release-train-announce.py" --lint "$draft" >&2 \
         || die "release-notes draft failed lint: $draft"
+    CAS_RELEASE_CONTEXT_JSON="$context" python3 "$script_dir/release_changelog.py" \
+        verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
 # Steps 1-3 plus the commit. Prints the version prepared.
@@ -296,7 +299,6 @@ prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
     fetch_base
     sync_with_base
-    python3 "$script_dir/release_changelog.py" verify-deliveries "$remote/$base"
     base_version="$(version_at "$remote/$base")"
     [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
     version="$(next_version "$base_version")"
@@ -455,6 +457,7 @@ if context="$("$cas_bin" release context --branch "$branch" 2>&1)" &&
     train_tracking=true
 else
     say "train tracking skipped; using --base $base (no matching train context)"
+    context='{}'
 fi
 # Refresh the canonical integration before timing: a stale origin ref can
 # otherwise make already-landed main work look like the train's first child.
@@ -469,7 +472,8 @@ fi
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" --first-child "$first_child" 2>&1)"; then
+    if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+        --inputs "$release_input_report" --first-child "$first_child" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi

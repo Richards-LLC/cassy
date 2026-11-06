@@ -135,7 +135,7 @@ check '! grep -q "release create" "$tmp/gh.log"' 'a refused tag publishes nothin
 run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-1 --prerelease >/dev/null
 check 'grep -q "release create dryrun-v9.99.2-1 .*--prerelease" "$tmp/gh.log"' 'a dry run creates a prerelease'
 check '[[ "$(git -C "$remote" rev-parse "refs/tags/dryrun-v9.99.2-1^{}")" == "$other" ]]' 'a dry-run tag peels to the dispatched commit'
-check 'grep -q "no merged PR found" <(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null)' 'a commit with no merged PR still publishes with a timer line'
+check 'grep -q "no merged PR found" <(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null) && grep -q "release create dryrun-v9.99.2-2" "$tmp/gh.log"' 'a commit with no merged PR finishes publishing with a timer line'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

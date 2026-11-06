@@ -11,7 +11,10 @@ interface Card { node: HTMLElement; heading: HTMLElement; toggle: HTMLButtonElem
 const COLLAPSED_KEY = "commander.collapsed-projects";
 const needsYou = (row: ConversationRow) => row.attention > 0 || row.needsYou === true;
 const projectName = (row: ConversationRow) => rowProjectName(row) || row.supervisor;
-const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle(row.projectDir) || row.key;
+/** The project a conversation belongs to, as the register groups it. Live
+ * epics use the same key, so they never show another project's work. */
+export const sessionProjectKey = (row: Pick<ConversationRow, "project" | "projectDir" | "key">): string => row.project?.trim() || projectTitle(row.projectDir) || row.key;
+const projectKey = sessionProjectKey;
 
 /**
  * cas-ade2: the register's order is alphabetical and never follows activity,

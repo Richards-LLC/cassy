@@ -428,6 +428,51 @@ async fn deferred_claim_refusal_stops_a_merged_delivery_close() {
 }
 
 #[tokio::test]
+async fn builtin_docs_rebind_rust_receipts_at_park_cas_23b1() {
+    for rust_edit in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env);
+        let doc = "cas-cli/src/builtins/skills/cas-worker/SKILL.md";
+        let history = "cas-cli/src/builtins/reference-history.json";
+        std::fs::create_dir_all(f.worker_path.join(doc).parent().unwrap()).unwrap();
+        std::fs::write(f.worker_path.join(doc), "worker instructions v1\n").unwrap();
+        std::fs::write(f.worker_path.join(history), "{}\n").unwrap();
+        std::fs::write(
+            f.worker_path.join("crates/widget/src/gear.rs"),
+            format!("pub const PROMPT: &str = include_str!(\"../../../{doc}\");\n"),
+        ).unwrap();
+        git(&f.worker_path, &["add", "."]);
+        git(&f.worker_path, &["commit", "-qm", "fix(cas-br01): embed worker instructions"]);
+        let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        crate::factory_worker_check::record_passing_test_for_tests(
+            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+        );
+
+        std::fs::write(f.worker_path.join(doc), "worker instructions v2\n").unwrap();
+        std::fs::write(f.worker_path.join(history), "{\"updated\":true}\n").unwrap();
+        if rust_edit {
+            std::fs::write(f.worker_path.join("crates/widget/src/embedded.md"), "other asset\n").unwrap();
+            std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
+        }
+        git(&f.worker_path, &["add", "."]);
+        git(&f.worker_path, &["commit", "-qm", "docs(cas-br01): correct worker instructions"]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+
+        let reply = call(&f.worker, serde_json::json!({
+            "action": "close", "id": ID, "reason": "worker instructions corrected",
+        })).await;
+        if rust_edit {
+            assert!(reply.contains("FOCUSED PROOF REQUIRED"), "{reply}");
+            assert_eq!(f.task().status, TaskStatus::InProgress, "{reply}");
+        } else {
+            assert!(reply.contains("MERGE REQUIRED"), "{reply}");
+            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
+            assert!(f.task().notes.contains(&format!("rebound from {tested_tip}")), "{}", f.task().notes);
+        }
+    }
+}
+
+#[tokio::test]
 async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);

@@ -342,6 +342,50 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let script = bin.join("codex");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" = login ]; then
+    [ -f "$CODEX_HOME/auth.json" ] || exit 1
+    echo 'Logged in using ChatGPT'
+    exit 0
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
+    echo 'old diagnostic excluded from bounded tail' >&2
+    i=0; while [ "$i" -lt 12 ]; do echo 'retrying transport' >&2; i=$((i+1)); done
+    echo '401 Unauthorized: Missing bearer or basic authentication in header' >&2
+    exit 1
+fi
+[ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
+[ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
+cat "$CAS_TEST_VERIFIER_RESPONSE"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Registry login probes use the CLI on PATH. Isolate that PATH in a
+        // child test process, never mutate the library test process's PATH.
+        if std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_none() {
+            let path =
+                std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
+            let module = module_path!().split_once("::").unwrap().1;
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("{module}::automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f"), "--nocapture"])
+                .env("PATH", path)
+                .env("CAS_TEST_PREMERGE_ACCOUNT_CHILD", "1")
+                .output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            eprintln!("{}", String::from_utf8_lossy(&result.stderr));
+            return;
+        }
         for status in [
             "harness_failed",
             "approved",
@@ -443,36 +487,21 @@ mod tests {
             let response_path = directory.join("provider-response.json");
             std::fs::write(&response_path, response).unwrap();
             env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
-            use std::os::unix::fs::PermissionsExt;
-            let script = bin.join("codex");
             env.set("CAS_TEST_VERIFIER_STATUS", status);
-            std::fs::write(
-                &script,
-                r#"#!/bin/sh
-if [ "$1" = login ]; then
-    [ -f "$CODEX_HOME/auth.json" ] || exit 1
-    echo 'Logged in using ChatGPT'
-    exit 0
-fi
-if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
-    echo 'old diagnostic excluded from bounded tail' >&2
-    i=0; while [ "$i" -lt 12 ]; do echo 'retrying transport' >&2; i=$((i+1)); done
-    echo '401 Unauthorized: Missing bearer or basic authentication in header' >&2
-    exit 1
-fi
-[ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
-[ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
-cat "$CAS_TEST_VERIFIER_RESPONSE"
-"#,
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
             // Exercise the dispatch handler used by worktree_merge, replacing
             // only the external provider executable in this isolated fixture.
             let handle = core
                 .emit_premerge_review_handoff(&task, &dispatch)
                 .unwrap()
-                .unwrap();
+                .unwrap_or_else(|| {
+                    panic!(
+                        "launch notice: {:?}",
+                        crate::store::open_prompt_queue_store(&root)
+                            .unwrap()
+                            .peek_all(10)
+                            .unwrap()
+                    )
+                });
             assert!(
                 core.emit_premerge_review_handoff(&task, &dispatch)
                     .unwrap()
